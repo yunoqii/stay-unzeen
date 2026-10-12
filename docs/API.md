@@ -13,7 +13,12 @@
 | GET | `/api/tokens/:mint` | `Token & { trades: FeedEvent[] }` |
 | POST | `/api/intents` | тело `IntentRequest` → `PaymentRequest` (UA, сумма, memo, ZIP-321 URI) |
 | GET | `/api/intents/:id` | `{ status: "awaiting_payment" \| "seen" \| "executed" \| "failed", tx?: string }` |
-| GET | `/api/portfolio/:anonPubkey` | `{ holdings: { mint, amount }[] }` (запрос подписывается anon-ключом) |
+| GET | `/api/portfolio/:anonPubkey` | `{ zecBalance: string, holdings: { mint, amount }[], claimable: { mint, solAmount }[] }` (подписанный запрос) |
+| POST | `/api/deposit` | `{ anonPubkey }` → `PaymentRequest` (memo `op:"deposit"`) |
+| POST | `/api/actions` | `SignedAction` → `{ id, status }` — мгновенные действия с баланса |
+| GET | `/api/actions/:id` | `{ status: "queued" \| "executed" \| "failed", solanaTx?: string, error?: string }` |
+
+Все запросы с баланса подписываются anon-ключом: заголовок `x-unzeen-sig` = ed25519(`method|path|body|nonce|ts`), `nonce` одноразовый, `ts` ±60 с.
 
 ## WebSocket
 `/ws/feed` → поток `FeedEvent`.
@@ -55,4 +60,18 @@ interface PaymentRequest {
   intentId: string; address: string; amountZec: string;
   memo: string; zip321Uri: string; expiresAt: number;
 }
+```
+
+```ts
+// Действие с баланса аккаунта (основной режим)
+type SignedAction = {
+  anonPubkey: string; nonce: string; ts: number; sig: string;
+} & (
+  | { op: "buy";  venue: Venue; mint: string; zecIn: string; minOut: string }
+  | { op: "sell"; venue: Venue; mint: string; amount: string; minZecOut: string }
+  | { op: "create"; venue: Venue; meta: { name: string; symbol: string; image?: string }; initialBuyZec?: string }
+  | { op: "claim"; mint?: string }                          // creator fees → баланс
+  | { op: "withdraw_zec"; to: string; amount: string }       // на любой shielded UA
+  | { op: "withdraw_token"; mint: string; amount: string; to: string } // на новый Solana-адрес
+);
 ```
