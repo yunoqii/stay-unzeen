@@ -43,8 +43,8 @@
 | 6–8 | backend: действия с баланса buy/sell/create/claim/withdraw, шардирование vault. frontend: страница токена, `/launch`, `/pay` |
 | 6–8 | + backend: **индексатор токенов** (Helius: authorities, холдеры, дев, снайперы/бандлы, кривая) и поиск по CA. frontend: **панель безопасности токена**, **быстрая торговля** (пресеты, PnL, маркеры, фильтры ленты), поиск по CA |
 | 9–10 | backend: адаптер Meteora DBC, **лимитки/TP/SL** (движок триггеров), **чат**, правила «rules enforced» в реестре (лок initial buy, кап доли создателя). frontend: ордера на странице токена, чат |
-| 11–12 | backend: fair-launch (tlock + одна атомарная tx create+buy, commitment root; спека `docs/analysis/fair-launch.md`), **умный вывод**, NEAR Intents ребаланс, `/api/creator`, `/api/stats`. frontend: fair-launch UI, **кабинет создателя**, **статистика**, `/verify` |
-| 13–14 | сквозной прогон, Jupiter если успеваем, analyst — полный аудит приватности и безопасности |
+| 11–12 | backend: fair-launch (tlock + одна атомарная tx create+buy, commitment root; спека `docs/analysis/fair-launch.md`), **Verify** (Merkle-sum, спека `docs/analysis/verify.md`), **умный вывод**, NEAR Intents ребаланс, `/api/creator`, `/api/stats`. frontend: fair-launch UI, **кабинет создателя**, **статистика**, `/verify` |
+| 13–14 | **лимитки/TP/SL** (спека `docs/analysis/orders.md`; минимум limit_buy + stop_loss), сквозной прогон, Jupiter если успеваем, analyst — полный аудит приватности и безопасности |
 | 15–16 | README (с моделью доверия и roadmap), видео-демо, открыть репо, сдача |
 
 Список функций: `docs/FEATURES.md`.

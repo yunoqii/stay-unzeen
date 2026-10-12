@@ -24,6 +24,8 @@
 - core (день 7): API v0.5 — /safety, 202 pending для неизвестных mint, правила создателя (лок 24 ч → 423, кап 5% → 422), `docs/INTEL.md`, миграция 0007, роль индексатора; 96/96 тестов (проверил лид)
 - Спека fair-launch: `docs/analysis/fair-launch.md` (бек ~2 дня, фронт ~1.5–2)
 - adapters (день 7): индексатор токенов (тик 45–75 с, пачка 8 с приманками, warm set, SSRF-safe метаданные, T1 без мастер-сида), Helius Sender с одинаковыми чаевыми; 228/228 тестов (проверил лид)
+- Спеки: Verify (`docs/analysis/verify.md`), лимитки/TP/SL (`docs/analysis/orders.md`)
+- web: стиль на всех страницах, интерактив, видео-обзор (локально, не в git)
 - Ревью кода дня 2: `docs/analysis/review-day3.md` (critical нет; N1–N11 розданы агентам)
 - Ревью безопасности/приватности дня 2: `docs/analysis/review-day2.md` (3 critical закрыты решениями владельца, high — в работе у backend/frontend)
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
@@ -33,6 +35,7 @@
 - —
 
 ## Решения
+- 12.10 (лид, по verify.md/orders.md): резерв ZEC — «attested by operator» (доказать без viewing key нельзя, ZIP 311 без Orchard/Ironwood; ZK proof of reserves — roadmap); корень Verify раз в сутки (devnet — вручную) + якорь memo-tx в Solana; один ключ аттестаций пула для memo Verify и fair-launch; ордера только по mint пула, TTL ≤ 72 ч, только delayed/max, цена с тика индексатора; bracket — вне MVP. План: Verify — дни 11–12 вместе с fair-launch; лимитки — дни 13–14 (вместо слота Jupiter)
 - 12.10 (владелец): commitment root fair-launch — в MVP; публикуется при закрытии окна до раунда drand; листья = хэши шифротекстов; корень записывается memo-tx на Solana
 - 12.10 (владелец): top-10 на mainnet — через Helius Free (только на тике с приманками); пробная отправка через Sender — вместе с первым mainnet-прогоном
 - 12.10 (владелец): fair-launch v1 без Jito (одна атомарная tx), commitment root в MVP, число заявок публично при ≥5. (лид): сетка номиналов hold 0.05–10 ZEC, лимит покупки 25% саплая, creator fee запуска — пулу, флаг fairLaunch=false на публичном деплое до 28.10
