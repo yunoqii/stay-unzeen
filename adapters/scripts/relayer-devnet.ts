@@ -10,7 +10,7 @@
  *   same pinned vault) -> sell everything left (one tx)
  *
  *   pnpm media:serve &          # serves the published metadata locally
- *   pnpm relayer:devnet [--keep]
+ *   pnpm relayer:devnet [--keep] [--venue meteora-dbc]   (default pumpfun)
  *
  * Needs DATABASE_URL (owner role: it creates the temp schema; devnet only).
  * Dev tool: prints signatures and addresses (public data); there are no users.
@@ -35,6 +35,12 @@ const MIN_VAULT_SOL = (SOL * 6n) / 100n; // create needs ~0.035 SOL headroom + f
 const FIRST_BUY = SOL / 100n; //            0.01 SOL
 const BUY = SOL / 200n; //                  0.005 SOL
 const PARTS = 3;
+const venueArg = process.argv.find((a) => a.startsWith("--venue="))?.slice(8) ?? (process.argv.includes("--venue") ? process.argv[process.argv.indexOf("--venue") + 1] : undefined);
+const VENUE = (venueArg ?? "pumpfun") as "pumpfun" | "meteora-dbc";
+if (VENUE !== "pumpfun" && VENUE !== "meteora-dbc") {
+  console.error(`--venue must be pumpfun or meteora-dbc, got ${venueArg}`);
+  process.exit(1);
+}
 
 loadRepoEnv();
 const cfg = loadConfig();
@@ -85,7 +91,7 @@ async function dirtyJpeg(): Promise<Buffer> {
 }
 
 async function main(): Promise<void> {
-  console.log(describeConfig(cfg));
+  console.log(`${describeConfig(cfg)} venue=${VENUE}`);
   const owner = process.env.DATABASE_URL?.trim();
   if (!owner) throw new Error("DATABASE_URL is required (temp schema)");
   const keys = await openKeys(cfg, process.env, warn, VAULTS);
@@ -128,6 +134,8 @@ async function main(): Promise<void> {
         console.log(`  [relayer] ${e.event} ${e.kind}${e.code ? ` ${e.code}` : ""}`);
       },
     });
+    const venue = VENUE === "meteora-dbc" ? rt.meteora : rt.adapter;
+    if (!venue) throw new Error("meteora-dbc: no config key for this network (METEORA_DBC_CONFIG_DEVNET)");
 
     const insert = async (cols: Record<string, unknown>): Promise<string> => {
       const k = Object.keys(cols);
@@ -161,8 +169,8 @@ async function main(): Promise<void> {
     console.log(`  source image: ${src.length} B, exif=${!!srcMeta.exif} xmp=${!!srcMeta.xmp} marker=${src.includes(MARK)}`);
     const createId = await insert({
       op: "create",
-      venue: "pumpfun",
-      meta: { name: "Unzeen Devnet", symbol: "UNZD", image: `data:image/jpeg;base64,${src.toString("base64")}` },
+      venue: VENUE,
+      meta: { name: VENUE === "meteora-dbc" ? "Unzeen DBC Devnet" : "Unzeen Devnet", symbol: VENUE === "meteora-dbc" ? "UNZM" : "UNZD", image: `data:image/jpeg;base64,${src.toString("base64")}` },
       lamports_in: FIRST_BUY.toString(),
       min_out: "1",
     });
@@ -179,13 +187,13 @@ async function main(): Promise<void> {
     const pubMeta = await sharp(published).metadata();
     console.log(`  published image: ${published.length} B ${pubMeta.width}x${pubMeta.height}, exif=${!!pubMeta.exif} xmp=${!!pubMeta.xmp} marker=${published.includes(MARK)} gps=${published.includes("GPS")}`);
     if (pubMeta.exif || pubMeta.xmp || published.includes(MARK)) throw new Error("published image still carries metadata");
-    const ce = await rt.adapter.createResult(created!.signature!, pinned);
+    const ce = await venue.createResult(created!.signature!, pinned);
     console.log(`  on-chain uri: ${ce?.uri}; creator ${ce?.creator} (fresh, not a vault: ${!names.has(ce?.creator ?? "")})`);
 
     // ---- [2] buy on the pinned vault
     console.log(`\n[2] buy ${sol(BUY)} (must use the pinned vault)`);
-    const q = await rt.adapter.quote(mint, "buy", BUY);
-    const [bought] = await runUntil([await insert({ op: "buy", venue: "pumpfun", mint, lamports_in: BUY.toString(), min_out: ((q.amountOut * 97n) / 100n).toString() })]);
+    const q = await venue.quote(mint, "buy", BUY);
+    const [bought] = await runUntil([await insert({ op: "buy", venue: VENUE, mint, lamports_in: BUY.toString(), min_out: ((q.amountOut * 97n) / 100n).toString() })]);
     console.log(`  buy: ${txUrl(bought!.signature!)}  ${vn(bought!.vault!)} tokens=${bought!.out_token_amount}`);
     if (bought!.vault !== pinned) throw new Error("buy did not use the pinned vault");
 
@@ -222,8 +230,8 @@ async function main(): Promise<void> {
     // ---- [4] sell everything the pool still holds of this mint: one tx
     const left = BigInt((await conn.getTokenAccountBalance(getAssociatedTokenAddressSync(new PublicKey(mint), new PublicKey(pinned), true, new PublicKey(ce!.tokenProgram)), "confirmed")).value.amount);
     console.log(`\n[4] sell all ${formatUnits(left, 6)} tokens left on the pinned vault (one tx)`);
-    const qs = await rt.adapter.quote(mint, "sell", left);
-    const [sold] = await runUntil([await insert({ op: "sell", venue: "pumpfun", mint, token_amount: left.toString(), min_out: ((qs.amountOut * 97n) / 100n).toString() })]);
+    const qs = await venue.quote(mint, "sell", left);
+    const [sold] = await runUntil([await insert({ op: "sell", venue: VENUE, mint, token_amount: left.toString(), min_out: ((qs.amountOut * 97n) / 100n).toString() })]);
     console.log(`  sell: ${txUrl(sold!.signature!)}  ${vn(sold!.vault!)} lamports=${sold!.out_lamports}`);
 
     console.log("\nsummary");

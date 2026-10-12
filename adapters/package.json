@@ -18,12 +18,14 @@
     "media:serve": "tsx scripts/media-serve.ts",
     "intel:run": "tsx scripts/intel-run.ts",
     "intel:probe": "tsx scripts/intel-probe.ts",
-    "keys:creators-pub": "tsx scripts/creators-pub.ts"
+    "keys:creators-pub": "tsx scripts/creators-pub.ts",
+    "meteora:config": "tsx scripts/meteora-config.ts"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
     "@pump-fun/pump-sdk": "4.0.0",
     "@solana/spl-token": "0.4.15",
     "@solana/web3.js": "1.99.0",

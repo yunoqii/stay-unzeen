@@ -40,7 +40,8 @@ export interface TokenSafety {
     unzeenLaunchBuy: boolean;
   };
   market: {
-    venue: "pumpfun" | null;
+    /** pump.fun curve / PumpSwap pool, or a Meteora DBC pool of Unzeen's config (docs/INTEL.md). */
+    venue: "pumpfun" | "meteora-dbc" | null;
     status: "curve" | "graduated" | "unknown";
     curveProgressPct?: string;
     lpBurnedPct?: string;

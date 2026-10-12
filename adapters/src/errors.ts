@@ -79,7 +79,7 @@ export function toApiCode(code: AdapterErrorCode): ApiErrorCode {
 }
 
 /** pump program error names -> adapter code. Numbers come from the SDK IDL. */
-const PUMP_ERROR_BY_NAME: Record<string, AdapterErrorCode> = {
+export const PUMP_ERROR_BY_NAME: Readonly<Record<string, AdapterErrorCode>> = {
   TooMuchSolRequired: "slippage",
   TooLittleSolReceived: "slippage",
   BuySlippageBelowMinTokensOut: "slippage",
@@ -100,14 +100,18 @@ export interface ProgramErrorInfo {
  * Turns whatever web3.js / the RPC threw (SendTransactionError, simulation
  * logs, InstructionError) into an AdapterError.
  *
- * @param pumpErrors IDL errors (`{code,name}[]`) of the pump program.
+ * @param pumpErrors IDL errors (`{code,name}[]`) of the venue program.
  * @param pumpProgramId base58 id, used to attribute `custom program error`.
+ * @param byName venue error name -> adapter code (default: pump.fun).
+ * @param venueName label for messages ("pump", "dbc").
  */
 export function classifyError(
   err: unknown,
   logs: readonly string[] | null | undefined,
   pumpErrors: readonly ProgramErrorInfo[],
   pumpProgramId: string,
+  byName: Readonly<Record<string, AdapterErrorCode>> = PUMP_ERROR_BY_NAME,
+  venueName = "pump",
 ): AdapterError {
   if (err instanceof AdapterError) return err;
   const message = err instanceof Error ? err.message : String(err);
@@ -127,8 +131,8 @@ export function classifyError(
   // 2. Program error raised by pump (Anchor log "Error Number: N").
   const pe = findPumpProgramError(text, allLogs, pumpErrors, pumpProgramId);
   if (pe) {
-    const code = (pe.name && PUMP_ERROR_BY_NAME[pe.name]) || "internal";
-    return new AdapterError(code, `pump program error ${pe.code}${pe.name ? ` ${pe.name}` : ""}`, {
+    const code = (pe.name && byName[pe.name]) || "internal";
+    return new AdapterError(code, `${venueName} program error ${pe.code}${pe.name ? ` ${pe.name}` : ""}`, {
       programError: pe,
       cause: err,
     });

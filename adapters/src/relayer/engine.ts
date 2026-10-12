@@ -182,7 +182,15 @@ export class Relayer {
   }
 
   private async process(job: ClaimedJob): Promise<JobResult> {
-    const ex = this.executor(job.spec);
+    let ex: JobExecutor;
+    try {
+      ex = this.executor(job.spec);
+    } catch (e) {
+      // Venue not served by this relayer (e.g. no Meteora config on this network):
+      // nothing was ever signed for it, so failing releases the hold safely.
+      if (e instanceof AdapterError && job.attempts.length === 0) return this.failed(e);
+      throw e;
+    }
 
     // 1. Resolve everything sent before (crash, lost lease, ambiguous error).
     for (const a of [...job.attempts].reverse()) {

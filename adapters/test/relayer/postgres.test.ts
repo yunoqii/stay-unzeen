@@ -388,5 +388,5 @@ describe.skipIf(!DB)("PostgresJobQueue (live Postgres, temp schema)", () => {
     expect(chi(firstPos)).toBeLessThan(23.5);
     expect(chi(posOfFirstInserted)).toBeLessThan(23.5);
     expect(fifo / TRIALS).toBeLessThan(0.05); // 1/120 expected
-  });
+  }, 30_000); // 150 trials against live Postgres: ~2.5 s alone, can exceed 5 s with all test files in parallel
 });

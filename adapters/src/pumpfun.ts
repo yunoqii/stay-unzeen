@@ -81,6 +81,11 @@ export interface PumpFunAdapterOptions {
   priorityMicroLamports?: number | PriorityPrice;
   /** Pool tip + broadcaster (src/sender.ts): the same tip on EVERY pool tx. Default plain RPC, no tip. */
   pipeline?: TxPipeline | null;
+  /**
+   * Shared per-vault lookup tables (one instance for every venue adapter, so
+   * pump.fun and Meteora never extend the same table from stale caches).
+   */
+  lookupTables?: LookupTables;
 }
 
 interface MintInfo {
@@ -151,7 +156,7 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     const p = o.priorityMicroLamports ?? 0;
     this.priority = typeof p === "number" ? fixedPrice(p) : p;
     this.pipeline = o.pipeline ?? null;
-    this.alts = new LookupTables(o.connection, o.stateDir, this.priority, this.pipeline);
+    this.alts = o.lookupTables ?? new LookupTables(o.connection, o.stateDir, this.priority, this.pipeline);
   }
 
   // -------------------------------------------------------------------------

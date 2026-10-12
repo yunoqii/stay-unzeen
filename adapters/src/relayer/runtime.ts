@@ -1,18 +1,20 @@
 import os from "node:os";
 import path from "node:path";
 import { PUMP_PROGRAM_ID } from "@pump-fun/pump-sdk";
-import type { Connection, Keypair } from "@solana/web3.js";
+import type { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import pg from "pg";
 import type { AdapterConfig } from "../config";
 import { CreatorKeyring, CreatorPubkeyFile, FileCreatorIndexCounter, type CreatorIndexCounter } from "../keys";
 import { priorityFeeCacheFromConfig, type PriorityFeeCache } from "../fees";
 import { KeyStore, ageCipher, resolveAgeIdentity } from "../keystore";
 import { metadataStoreFromEnv, type MetadataStore } from "../metadata";
+import { LookupTables } from "../alt";
+import { DBC_PROGRAM_ID, MeteoraDbcAdapter, dbcConfigAddress } from "../meteora";
 import { PumpFunAdapter } from "../pumpfun";
 import { txPipeline, type TxPipeline } from "../sender";
 import { TokenWithdrawer } from "../withdraw";
 import { Relayer, type RelayerEvent } from "./engine";
-import { PumpFunTradeExecutor, RpcChainProbe, WithdrawExecutor } from "./executors";
+import { RpcChainProbe, VenueTradeExecutor, WithdrawExecutor, type JobExecutor } from "./executors";
 import { FileMintVaults, PgMintVaults, type MintVaults } from "./mint-vaults";
 import { PostgresJobQueue, type SolanaNetwork } from "./postgres-queue";
 import { JobsVaultUsage, PgAdvisoryVaultLock, PgCreatorIndexCounter, PgVaultUsage } from "./postgres-vaults";
@@ -117,11 +119,18 @@ export interface RelayerRuntimeOptions {
   creatorRegistry?: CreatorPubkeyFile | null;
   /** Tip + broadcaster; default from cfg (mainnet: Helius Sender, same tip on every tx; devnet: RPC, no tip). */
   pipeline?: TxPipeline;
+  /**
+   * Meteora DBC config key; default METEORA_DBC_CONFIG_<NETWORK> / the
+   * built-in devnet config; null = venue "meteora-dbc" not served here.
+   */
+  meteoraConfig?: PublicKey | null;
 }
 
 export interface RelayerRuntime {
   relayer: Relayer;
   adapter: PumpFunAdapter;
+  /** Meteora DBC adapter; null when no config key is set for this network. */
+  meteora: MeteoraDbcAdapter | null;
   pool: VaultPool;
   queue: PostgresJobQueue;
   mintVaults: MintVaults;
@@ -135,8 +144,11 @@ export interface RelayerRuntime {
   pipeline: TxPipeline;
 }
 
-/** Venue programs the fee estimate is asked for (programs only: no vault, mint or user). */
-export const FEE_ESTIMATE_PROGRAMS: readonly string[] = [PUMP_PROGRAM_ID.toBase58()];
+/**
+ * Venue programs the fee estimate is asked for (programs only: no vault, mint
+ * or user). One estimate over all venues -> ONE price for every pool tx.
+ */
+export const FEE_ESTIMATE_PROGRAMS: readonly string[] = [PUMP_PROGRAM_ID.toBase58(), DBC_PROGRAM_ID.toBase58()];
 
 export function defaultMediaDir(cfg: Pick<AdapterConfig, "cluster">, env: NodeJS.ProcessEnv = process.env): string {
   const home = env.UNZEEN_HOME?.trim() || path.join(os.homedir(), ".unzeen");
@@ -163,16 +175,37 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   const fees = o.fees ?? priorityFeeCacheFromConfig(o.cfg, o.connection, FEE_ESTIMATE_PROGRAMS);
   // ONE pipeline for all builders: buy/sell/create (+ lookup tables) and withdraw get the same tip.
   const pipeline = o.pipeline ?? txPipeline(o.cfg, o.connection);
+  // ONE lookup-table registry for every venue (per-vault tables, no stale caches).
+  const lookupTables = new LookupTables(o.connection, o.cfg.keysDir, fees, pipeline);
+  // creator-pubkeys.json next to the keys: public creator list for the token indexer (T1 race).
+  const creators = new CreatorKeyring(o.keys.creatorSeed, counter, o.creatorRegistry !== undefined ? o.creatorRegistry : CreatorPubkeyFile.inDir(o.cfg.keysDir));
   const adapter = new PumpFunAdapter({
     connection: o.connection,
     defaultVault: vaults[0]!,
     vaults,
-    // creator-pubkeys.json next to the keys: public creator list for the token indexer (T1 race).
-    creators: new CreatorKeyring(o.keys.creatorSeed, counter, o.creatorRegistry !== undefined ? o.creatorRegistry : CreatorPubkeyFile.inDir(o.cfg.keysDir)),
+    creators,
     stateDir: o.cfg.keysDir,
     priorityMicroLamports: fees,
     pipeline,
+    lookupTables,
   });
+  const meteoraConfig = o.meteoraConfig !== undefined ? o.meteoraConfig : dbcConfigAddress(o.cfg.cluster, env);
+  const meteora = meteoraConfig
+    ? new MeteoraDbcAdapter({
+        connection: o.connection,
+        config: meteoraConfig,
+        defaultVault: vaults[0]!,
+        vaults,
+        // Same keyring and counter: creator indexes are never shared between venues.
+        creators,
+        stateDir: o.cfg.keysDir,
+        priorityMicroLamports: fees,
+        pipeline,
+        lookupTables,
+      })
+    : null;
+  const trade: Partial<Record<"pumpfun" | "meteora-dbc", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
+  if (meteora) trade["meteora-dbc"] = new VenueTradeExecutor(meteora, metadata);
   const probe = new RpcChainProbe(o.connection, pipeline.broadcaster);
   const queue = new PostgresJobQueue({ pool: o.db, network: o.network, probe });
   const pool = new VaultPool(vaults, new RpcVaultInventory(o.connection), cryptoRng, {
@@ -183,7 +216,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     queue,
     pool,
     executors: {
-      trade: { pumpfun: new PumpFunTradeExecutor(adapter, metadata) },
+      trade,
       withdraw: new WithdrawExecutor(
         new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: fees, pipeline }),
         cryptoRng,
@@ -194,7 +227,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     ...(o.leaseMs ? { leaseMs: o.leaseMs } : {}),
     ...(o.onEvent ? { onEvent: o.onEvent } : {}),
   });
-  return { relayer, adapter, pool, queue, mintVaults, metadata, fees, pipeline };
+  return { relayer, adapter, meteora, pool, queue, mintVaults, metadata, fees, pipeline };
 }
 
 export function makePools(url: string, vaultCount: number, schema?: string): { db: pg.Pool; lockDb: pg.Pool } {

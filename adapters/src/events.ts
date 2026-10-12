@@ -15,10 +15,15 @@ const TRADE_EVENT = eventDiscriminator("TradeEvent");
 const CREATE_EVENT = eventDiscriminator("CreateEvent");
 
 /**
- * Raw payloads of one pump event type from a confirmed transaction: from
- * self-CPI event instructions (emit_cpi) and, as a fallback, from
- * "Program data:" logs.
+ * Raw payloads (after the 8-byte event discriminator) of one Anchor event
+ * type of `programId` in a confirmed transaction: from self-CPI event
+ * instructions (emit_cpi) and, as a fallback, from "Program data:" logs.
+ * Used for pump.fun and Meteora DBC events.
  */
+export function anchorEventPayloads(tx: VersionedTransactionResponse, programId: PublicKey, disc: Buffer): Buffer[] {
+  return eventPayloads(tx, programId, disc);
+}
+
 function eventPayloads(tx: VersionedTransactionResponse, pumpProgramId: PublicKey, disc: Buffer): Buffer[] {
   const payloads: Buffer[] = [];
   const meta = tx.meta;

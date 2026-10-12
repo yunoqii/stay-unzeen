@@ -10,7 +10,9 @@ import {
   type BondingCurve,
   type Global,
 } from "@pump-fun/pump-sdk";
-import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { NATIVE_MINT, getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { deriveDbcPoolAddress, deriveDbcPoolAuthority, type PoolConfig, type VirtualPool } from "@meteora-ag/dynamic-bonding-curve-sdk";
+import { DBC_PROGRAM_ID, dbcCoder, dbcPoolVaults, dbcPriceAndCap, dbcProgressPct, dbcStatus } from "../meteora";
 import { PublicKey, type AccountInfo, type Connection } from "@solana/web3.js";
 import { priceAndCap } from "../pumpfun";
 import type { Rng } from "../relayer/random";
@@ -145,6 +147,12 @@ export interface IndexerOptions {
   decoyRefreshTicks?: number;
   /** Retry failed off-chain fetches (process memory) after this long. */
   offchainRetryMs?: number;
+  /**
+   * Unzeen's Meteora DBC config key (src/meteora.ts `dbcConfigAddress`). When
+   * set, every mint of a batch (decoys included) also gets its DBC pool PDA
+   * read in the same call: progress / graduated / locked LP for DBC launches.
+   */
+  dbcConfig?: PublicKey | null;
 }
 
 /** Counts only: nothing here tells a request from a decoy. */
@@ -162,6 +170,13 @@ export interface TickReport {
 }
 
 const WSOL = "So11111111111111111111111111111111111111112";
+const DBC_POOL_AUTHORITY = deriveDbcPoolAuthority().toBase58();
+
+/** Share of the graduated LP that is permanently locked (partner + creator), from the DBC config. */
+export function dbcLockedLpPct(cfg: Pick<PoolConfig, "partnerPermanentLockedLiquidityPercentage" | "creatorPermanentLockedLiquidityPercentage">): string {
+  const p = Math.min(100, Number(cfg.partnerPermanentLockedLiquidityPercentage) + Number(cfg.creatorPermanentLockedLiquidityPercentage));
+  return p.toFixed(2);
+}
 const RECENT_MAX = 50;
 
 interface MintState {
@@ -188,6 +203,7 @@ export class IntelIndexer {
   private readonly firstBlocksDone = new Map<string, NonNullable<TokenSafety["firstBlocks"]>>();
   private readonly createUser = new Map<string, string>();
   private global: Global | null = null;
+  private dbcConfigState: PoolConfig | null = null;
   private ticks = 0;
   private decoyCursor: string | null = null;
 
@@ -332,10 +348,22 @@ export class IntelIndexer {
     const vaults = ps.vaults;
     const failed = new Set<string>();
     const pks = mints.map((m) => new PublicKey(m));
-    const per = pks.map((mint) => ({ mint, curve: bondingCurvePda(mint), meta: metaplexMetadataPda(mint), pool: canonicalPumpPoolPda(mint) }));
-    const accs = await this.o.reader.getMultipleAccounts([GLOBAL_PDA, ...per.flatMap((p) => [p.mint, p.curve, p.meta, p.pool])]);
+    const dbcCfg = this.o.dbcConfig ?? null;
+    const per = pks.map((mint) => ({
+      mint,
+      curve: bondingCurvePda(mint),
+      meta: metaplexMetadataPda(mint),
+      pool: canonicalPumpPoolPda(mint),
+      dbc: dbcCfg ? deriveDbcPoolAddress(NATIVE_MINT, mint, dbcCfg) : null,
+    }));
+    // Same reads for every mint of the group (real or decoy): shared accounts, then a fixed stride per mint.
+    const shared = [GLOBAL_PDA, ...(dbcCfg ? [dbcCfg] : [])];
+    const stride = dbcCfg ? 5 : 4;
+    const accs = await this.o.reader.getMultipleAccounts([...shared, ...per.flatMap((p) => [p.mint, p.curve, p.meta, p.pool, ...(p.dbc ? [p.dbc] : [])])]);
     const g = accs[0];
     if (g && g.owner.equals(PUMP_PROGRAM_ID)) this.global = safe(() => PUMP_SDK.decodeGlobal(g)) ?? this.global;
+    const ca = dbcCfg ? accs[1] : null;
+    if (ca && ca.owner.equals(DBC_PROGRAM_ID)) this.dbcConfigState = safe(() => dbcCoder().accounts.decode("poolConfig", ca.data) as PoolConfig) ?? this.dbcConfigState;
 
     interface Work {
       mint: PublicKey;
@@ -345,6 +373,7 @@ export class IntelIndexer {
       curve: BondingCurve | null;
       poolPda: PublicKey;
       pool: ReturnType<typeof parsePumpPool>;
+      dbc: { address: PublicKey; state: VirtualPool["poolState"] } | null;
       meta: ReturnType<typeof parseMetaplexMetadata>;
       unzeen: boolean;
       devs: string[];
@@ -354,7 +383,7 @@ export class IntelIndexer {
     const work: Work[] = [];
     const missing: string[] = [];
     per.forEach((p, i) => {
-      const a = (k: number) => accs[1 + i * 4 + k] ?? null;
+      const a = (k: number) => accs[shared.length + i * stride + k] ?? null;
       const key = p.mint.toBase58();
       const facts = mintFacts(p.mint, a(0));
       if (!facts) {
@@ -365,12 +394,15 @@ export class IntelIndexer {
       const curve = ci && ci.owner.equals(PUMP_PROGRAM_ID) ? safe(() => PUMP_SDK.decodeBondingCurveNullable(ci as AccountInfo<Buffer>)) : null;
       const pi = a(3);
       const pool = pi && pi.owner.equals(PUMP_AMM_PROGRAM_ID) ? parsePumpPool(pi.data) : null;
+      const di = p.dbc ? a(4) : null;
+      const dbcState = di && di.owner.equals(DBC_PROGRAM_ID) ? safe(() => (dbcCoder().accounts.decode("virtualPool", di.data) as VirtualPool).poolState) : null;
+      const dbc = p.dbc && dbcState && dbcState.baseMint.equals(p.mint) ? { address: p.dbc, state: dbcState } : null;
       const mi = a(2);
       const meta = facts.tokenMetadata ?? (mi && mi.owner.equals(METAPLEX_METADATA_PROGRAM_ID) ? parseMetaplexMetadata(mi.data) : null);
       // Unzeen launch (T1): create recorded in trades, OR the curve's creator is one of our
       // derived creator addresses / a pool vault, OR the create was signed by a pool vault
       // (INTEL_FULL) — covers the window before the relayer writes `trades`.
-      const creator = curve?.creator.toBase58();
+      const creator = curve?.creator.toBase58() ?? dbc?.state.creator.toBase58();
       const signer = this.createUser.get(key);
       const unzeen =
         ps.launches.has(key) ||
@@ -379,9 +411,9 @@ export class IntelIndexer {
       // T1: no dev for Unzeen launches, not even computed. Dev = CreateEvent.user (INTEL_FULL) and BondingCurve.creator.
       const devs = unzeen
         ? []
-        : [...new Set([this.createUser.get(key), curve?.creator.toBase58()].filter((d): d is string => !!d && d !== PublicKey.default.toBase58()))];
+        : [...new Set([this.createUser.get(key), creator].filter((d): d is string => !!d && d !== PublicKey.default.toBase58()))];
       const devAtas = devs.map((d) => getAssociatedTokenAddressSync(p.mint, new PublicKey(d), true, facts.tokenProgram));
-      work.push({ mint: p.mint, key, facts, curvePda: p.curve, curve, poolPda: p.pool, pool, meta, unzeen, devs, devAtas, largest: null });
+      work.push({ mint: p.mint, key, facts, curvePda: p.curve, curve, poolPda: p.pool, pool, dbc, meta, unzeen, devs, devAtas, largest: null });
     });
 
     // Index provider: one getTokenLargestAccounts per mint, decoys included.
@@ -438,6 +470,7 @@ export class IntelIndexer {
       curve: BondingCurve | null;
       poolPda: PublicKey;
       pool: ReturnType<typeof parsePumpPool>;
+      dbc: { address: PublicKey; state: VirtualPool["poolState"] } | null;
       meta: ReturnType<typeof parseMetaplexMetadata>;
       unzeen: boolean;
       devs: string[];
@@ -448,11 +481,22 @@ export class IntelIndexer {
     vaults: ReadonlySet<string>,
     acc2: (k: PublicKey | string) => AccountInfo<Buffer> | null,
   ): Promise<{ row: TokenSafety; card: TokenCard }> {
-    const onCurve = !!w.curve && !(w.curve.complete || isBondingCurveMigrated(w.curve));
-    const status: TokenSafety["market"]["status"] = w.curve ? (onCurve ? "curve" : "graduated") : w.pool ? "graduated" : "unknown";
-    const market: TokenSafety["market"] = { venue: w.curve || w.pool ? "pumpfun" : null, status };
+    const dbcCfg = this.dbcConfigState;
+    const dbc = w.dbc && dbcCfg ? w.dbc : null;
+    const dbcOnCurve = !!dbc && dbcStatus(dbc.state, dbcCfg!) === "curve";
+    const pumpOnCurve = !!w.curve && !(w.curve.complete || isBondingCurveMigrated(w.curve));
+    const onCurve = pumpOnCurve || dbcOnCurve;
+    const status: TokenSafety["market"]["status"] = w.curve || dbc ? (onCurve ? "curve" : "graduated") : w.pool ? "graduated" : "unknown";
+    const venue: TokenSafety["market"]["venue"] = w.curve || w.pool ? "pumpfun" : dbc ? "meteora-dbc" : null;
+    const market: TokenSafety["market"] = { venue, status };
     if (w.curve && onCurve && this.global) market.curveProgressPct = curveProgress(w.curve, this.global).progressPct;
-    this.state.set(w.key, { decimals: w.facts.decimals, onCurve });
+    if (dbc && dbcCfg) {
+      if (dbcOnCurve) market.curveProgressPct = dbcProgressPct(dbc.state, dbcCfg);
+      // DAMM v2 LP is a position, not a mint: report the permanently locked share fixed by the config.
+      else market.lpBurnedPct = dbcLockedLpPct(dbcCfg);
+    }
+    // Live curve subscriptions are pump.fun only (DBC pools refresh with the snapshots).
+    this.state.set(w.key, { decimals: w.facts.decimals, onCurve: pumpOnCurve });
     if (w.pool) {
       const lpm = acc2(w.pool.lpMint);
       const lpSupply = lpm && lpm.data.length >= 44 ? lpm.data.readBigUInt64LE(36) : null;
@@ -492,8 +536,13 @@ export class IntelIndexer {
         largest: w.largest,
         owners,
         supply: w.facts.supply,
-        excludedOwners: new Set([w.curvePda.toBase58(), w.poolPda.toBase58()]),
-        excludedAccounts: new Set([curveAta, getTokenVaultPda(w.mint).toBase58(), ...(w.pool ? [w.pool.baseVault.toBase58()] : [])]),
+        excludedOwners: new Set([w.curvePda.toBase58(), w.poolPda.toBase58(), ...(w.dbc ? [DBC_POOL_AUTHORITY] : [])]),
+        excludedAccounts: new Set([
+          curveAta,
+          getTokenVaultPda(w.mint).toBase58(),
+          ...(w.pool ? [w.pool.baseVault.toBase58()] : []),
+          ...(w.dbc ? [dbcPoolVaults(w.dbc.address, w.mint).baseVault.toBase58()] : []),
+        ]),
         poolVaults: vaults,
         devOwners: new Set(w.devs),
         devBalance,
@@ -507,10 +556,15 @@ export class IntelIndexer {
 
     if (this.o.full && w.curve) await this.fullTier(w.mint, w.key, w.facts.supply, vaults, row, w.unzeen);
 
-    const pc = w.curve && onCurve ? priceAndCap(w.curve, w.facts.decimals) : { priceSol: "0", marketCapSol: "0" };
+    const pc =
+      w.curve && onCurve
+        ? priceAndCap(w.curve, w.facts.decimals)
+        : dbc && dbcOnCurve
+          ? dbcPriceAndCap(dbc.state.sqrtPrice, w.facts.supply, w.facts.decimals)
+          : { priceSol: "0", marketCapSol: "0" };
     const card: TokenCard = {
       mint: w.key,
-      venue: w.curve || w.pool ? "pumpfun" : "jupiter",
+      venue: venue ?? "jupiter",
       symbol: row.symbol ?? "",
       name: row.name ?? "",
       image: row.image ?? null,

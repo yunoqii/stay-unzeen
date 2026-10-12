@@ -23,6 +23,7 @@ import { MemoryIntelStore } from "../src/intel/memory-store";
 import { PgIntelStore } from "../src/intel/pg-store";
 import { CreatorPubkeyFile } from "../src/keys";
 import { solanaKeysDir } from "../src/config";
+import { dbcConfigAddress } from "../src/meteora";
 import pg from "pg";
 import { RpcChainReader } from "../src/intel/reader";
 
@@ -70,6 +71,8 @@ async function main(): Promise<void> {
           ? null
           : new PollingCurveWatcher(reader.read, cryptoRng),
     full: cfg.full ? new RpcFullIntel(reader.read) : null,
+    // Meteora DBC launches of Unzeen's config: progress / graduated / locked LP.
+    dbcConfig: dbcConfigAddress(cfg.cluster),
   });
   // INTEL.md rule 4: tick number, batch size, durations, error counts. Never mints or "real/decoy".
   const fmt = (r: Awaited<ReturnType<IntelIndexer["tick"]>>) =>

@@ -1,6 +1,7 @@
 import type { Connection, Signer } from "@solana/web3.js";
 import { AdapterError } from "../errors";
-import type { PumpFunAdapter } from "../pumpfun";
+import type { CreateResult, PreparedCreate, PreparedTrade } from "../pumpfun";
+import type { CurveStatus, TokenMeta, TradeOptions, TxResult } from "../types";
 import { fetchTx, signatureState, type Broadcaster, type SignatureState, type SignedTx } from "../tx";
 import type { MetadataStore } from "../metadata";
 import type { TokenWithdrawer } from "../withdraw";
@@ -57,15 +58,39 @@ export class RpcChainProbe implements ChainProbe {
   }
 }
 
-/** create_v2: mint + curve + vault ATA/accumulator + lookup table of a fresh vault. */
+/**
+ * create: mint + curve / virtual pool + vault ATA (+ pump accumulator) +
+ * lookup table of a fresh vault. pump.fun create_v2 ~0.02 SOL, Meteora DBC
+ * ~0.01 SOL of rent (devnet 12.10): one headroom for both venues.
+ */
 const CREATE_SOL_HEADROOM = 35_000_000n;
 
 type PumpSpec = Extract<JobSpec, { kind: "buy" | "sell" | "create" }>;
 
-/** buy / sell / create on pump.fun bonding curves. */
-export class PumpFunTradeExecutor implements JobExecutor<PumpSpec> {
+/**
+ * What the relayer needs from a bonding-curve venue adapter (PumpFunAdapter,
+ * MeteoraDbcAdapter): sign without sending, send, read executed amounts.
+ */
+export interface TradeVenue {
+  prepareBuy(mint: string, lamportsIn: bigint, minOut: bigint, opts?: TradeOptions): Promise<PreparedTrade>;
+  prepareSell(mint: string, amount: bigint, minLamports: bigint, opts?: TradeOptions): Promise<PreparedTrade>;
+  prepareCreate(meta: TokenMeta, lamportsIn: bigint, minOut: bigint, opts?: TradeOptions): Promise<PreparedCreate>;
+  submit(tx: SignedTx): Promise<unknown>;
+  createResult(signature: string, vault: string): Promise<CreateResult | null>;
+  tradeResult(kind: "buy" | "sell", signature: string, vault: string, mint: string): Promise<TxResult | null>;
+  market(mint: string): Promise<{ priceSol: string; marketCapSol: string; status: CurveStatus }>;
+  tokenSymbol(mint: string): Promise<string | null>;
+  classify(err: unknown, logs?: readonly string[] | null): AdapterError;
+}
+
+/**
+ * buy / sell / create on a bonding-curve venue (pump.fun, Meteora DBC). Same
+ * flow for every venue: one vault per mint (engine), sanitized image
+ * published before signing, fresh creator per launch (adapter).
+ */
+export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
   constructor(
-    private readonly adapter: PumpFunAdapter,
+    private readonly adapter: TradeVenue,
     /** Publishes create metadata (sanitized image + JSON). Without it, create jobs fail `venue_unavailable`. */
     private readonly metadata: MetadataStore | null = null,
   ) {}
@@ -148,6 +173,10 @@ export class PumpFunTradeExecutor implements JobExecutor<PumpSpec> {
     return this.adapter.classify(err, logs);
   }
 }
+
+/** pump.fun executor (historic name). */
+export const PumpFunTradeExecutor = VenueTradeExecutor;
+export type PumpFunTradeExecutor = VenueTradeExecutor;
 
 /** Token withdrawal: gas drop + transfer, from the vault the mint is pinned to (D4). */
 export class WithdrawExecutor implements JobExecutor<Extract<JobSpec, { kind: "withdraw" }>> {
