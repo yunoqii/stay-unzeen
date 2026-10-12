@@ -29,12 +29,14 @@ GRANT SELECT (id, part, op, venue, mint, lamports_in, token_amount, min_out, met
               settled_at, created_at, updated_at, exec_mode,
               mint_secret, out_memo,   -- 0008: fair_create / attest
               out_sig,                 -- 0009: operator signature of attest
-              out_block_time)          -- 0012: block time of attest
+              out_block_time,          -- 0012: block time of attest
+              out_creator_fee)         -- 0013: exact creator fee of a create / fair_create tx
     ON relayer_jobs TO unzeen_relayer;
 -- not_before: backoff only; a trigger (0003) refuses to move it earlier.
 GRANT UPDATE (status, attempts, claimed_by, claimed_at, lease_until, not_before, signature,
               last_valid_block_height, vault, slot, out_mint, out_token_amount,
-              out_lamports, network_fee, error_code, error_message, updated_at, out_memo, out_sig, out_block_time)
+              out_lamports, network_fee, error_code, error_message, updated_at, out_memo, out_sig, out_block_time,
+              out_creator_fee)
     ON relayer_jobs TO unzeen_relayer;
 
 -- mint -> vault pinning (0003): the relayer owns it (re-pin = UPDATE of vault only).

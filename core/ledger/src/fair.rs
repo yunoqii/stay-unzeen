@@ -1135,7 +1135,8 @@ impl Ledger {
                 .query_opt(
                     "SELECT l.id, l.creator_pubkey, l.create_action_id, l.rate_lamports_per_zec, l.total_e,
                             l.oversubscribed, l.valid_bids,
-                            j.id, j.status, j.out_mint, j.out_token_amount, j.out_lamports, j.signature, j.error_code
+                            j.id, j.status, j.out_mint, j.out_token_amount, j.out_lamports, j.signature, j.error_code,
+                            j.venue, j.out_creator_fee
                      FROM fl_launches l JOIN relayer_jobs j ON j.id = l.job_id
                      WHERE l.status = 'executing' AND j.status IN ('confirmed', 'failed') AND j.settled_at IS NULL
                      LIMIT 1 FOR UPDATE OF l SKIP LOCKED",
@@ -1239,12 +1240,21 @@ impl Ledger {
             } else {
                 (0, 0.0)
             };
+            // v0.9: the creator fee of the launch tx (all participants' money) is the pool's.
+            let launch_fee = crate::creator_fees::launch_creator_fee(
+                &self.rules,
+                r.get::<_, Option<&str>>(14),
+                to_i64(s)?,
+                r.get::<_, Option<i64>>(15),
+            );
             tx.execute(
-                "INSERT INTO creator_tokens (mint, anon_pubkey, locked_amount, locked_until)
+                "INSERT INTO creator_tokens (mint, anon_pubkey, locked_amount, locked_until,
+                                             launch_fee_lamports, launch_fee_left)
                  VALUES ($1, $2, $3::bigint, CASE WHEN $3::bigint > 0
-                     THEN date_trunc('hour', now() + make_interval(secs => $4::float8)) + interval '1 hour' END)
+                     THEN date_trunc('hour', now() + make_interval(secs => $4::float8)) + interval '1 hour' END,
+                     $5, $5)
                  ON CONFLICT (mint) DO NOTHING",
-                &[&mint, cpk, &locked, &lock_secs],
+                &[&mint, cpk, &locked, &lock_secs, &launch_fee],
             )
             .await?;
         }

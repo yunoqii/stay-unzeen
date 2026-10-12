@@ -40,6 +40,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0012_fair_review",
         include_str!("../../migrations/0012_fair_review.sql"),
     ),
+    (
+        13,
+        "0013_creator_stats",
+        include_str!("../../migrations/0013_creator_stats.sql"),
+    ),
 ];
 
 /// Arbitrary constant for `pg_advisory_xact_lock` so concurrent starters serialize.

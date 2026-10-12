@@ -2,7 +2,13 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.8** (12.10, приватные ордера; реализовано в `core/ledger::orders` + `core/api`). Изменения против v0.7:
+Статус: **v0.9** (13.10, кабинет создателя, статистика, creator fee запуска — пулу; реализовано в `core/ledger::{creator, stats, creator_fees}` + `core/api`, миграция `0013_creator_stats.sql`). Изменения против v0.8:
+- **`GET /api/creator` (подписанный)** → `CreatorCabinet` = `{ tokens: CreatorToken[], pad }` (было `CreatorToken[]`; **тип `CreatorToken` заменён**, поля `feesEarnedSol`/`feesClaimedSol`/`volumeSol` удалены). Ответ паддится до кратного 4096 байт; ключ без запусков получает `{ tokens: [] }` того же размера. Раздел «Кабинет создателя (v0.9)».
+- **`GET /api/stats` (публичный)** → `PlatformStats` (**тип заменён**): снимок раз в сутки (00:00 UTC; devnet — ручная команда), округление, k-анонимность: категория из < 5 событий → строка `"<5"`. До первого снимка — `404 not_found`. Раздел «Статистика (v0.9)».
+- **Creator fee от самой launch-tx (`create` и fair-launch) — пулу.** Комиссия создателя, набежавшая с первой покупки запуска (деньги создателя / участников fair-launch), не попадает в `claimable`: при settle core фиксирует её размер, первые сборы этого mint уменьшаются на неё. Создатель получает только комиссии с последующих сделок. См. «Правила исполнения действий → claim».
+- Обе ручки перенесены из «Дополнительных эндпоинтов» в основную таблицу REST.
+
+Изменения v0.8 против v0.7:
 - **Лимитки / TP / SL** (`docs/analysis/orders.md`): `order_create` / `order_cancel` поддерживаются; `Portfolio.orders`; `PoolInfo.orders`. **Отдельного `GET /api/orders` нет** (удалён из «Дополнительных эндпоинтов»): ордера только в портфеле. Раздел «Ордера (v0.8)».
 - Новые коды ошибок: `order_limit` (422), `order_not_open` (409), `order_unsupported_mint` (422).
 - **Fair-launch, исправления по ревью (`docs/analysis/review-fair-launch.md`):** раунд reveal `R = R(closeAt + 30 с) + 1` (между закрытием и раундом ≥ 30 с, корень успевает лечь в Solana); `commitment.attestation` += `blockTime`, `beforeRound`; дерево commitment фиксированной глубины 10 (1024 листа); не больше 1024 заявок на запуск → `409 launch_full`; `failure` += `"internal"` (набор заявок не совпал с корнем; всё возвращено); при выключенном флаге маршрутов `/api/launches*` нет вовсе (любой метод → как неизвестный путь); два одинаковых запроса `fl_*`/`order_*` одновременно → оба получают исходный ответ.
@@ -88,6 +94,8 @@
 | GET | `/api/verify/snapshots?before=<id>&limit=30` | `VerifySnapshotSummary[]` (v0.7), история корней |
 | GET | `/api/verify/:id` | `VerifySnapshot` \| 404 (v0.7) |
 | GET | `/api/verify/proof[?snapshot=<id>]` (подписанный) | `VerifyProof` (v0.7), только последний или предыдущий снимок |
+| GET | `/api/creator` (подписанный) | `CreatorCabinet` (v0.9), только токены, созданные этим ключом; ответ кратен 4096 байт |
+| GET | `/api/stats` | `PlatformStats` (v0.9) — последний суточный снимок \| `404` до первого снимка; `Cache-Control: public, max-age=3600` |
 
 Подписанные запросы — схема в разделе «Подпись запросов».
 
@@ -279,16 +287,53 @@ interface ChatMessage {
   text: string; isCreator: boolean; ts: number;
 }
 
-interface CreatorToken {
-  mint: string; symbol: string; venue: Venue; status: "curve" | "graduated";
-  feesEarnedSol: string; feesClaimedSol: string; volumeSol: string; holders: number;
+// v0.9: GET /api/creator (подписанный). Только владельцу ключа; публично ничего из этого нет (T1).
+interface CreatorCabinet {
+  tokens: CreatorToken[];   // токены, созданные этим ключом (create / fl_create), новые первыми, ≤ 50
+  pad: string;              // пробелы до кратного 4096 байт; игнорировать
 }
 
+interface CreatorToken {
+  mint: string; symbol: string; name: string; image?: string; decimals: number;
+  venue: "pumpfun" | "meteora-dbc";
+  status: "curve" | "graduated";   // из снимка индексатора (тик), иначе из Token
+  curveProgressPct?: string;       // только на кривой и при наличии снимка индексатора
+  createdAt: number | null;        // unix мс (= Token.createdAt, публичное время создания)
+  fees: {
+    claimableLamports: string;     // = Portfolio.claimable[mint].solAmount ("0", если нечего); claim → ZEC
+    claimedLamports: string;       // всего переведено claim по этому mint (с v0.9; более ранние claim не учтены)
+  };
+  volumeLamports: string;          // объём сделок пула по mint (buy+sell, как в ленте), всё время, лампорты
+  trades: number;                  // число этих сделок
+  holders: number | null;          // число холдеров из снимка индексатора; null — снимка/числа ещё нет
+  holdersAsOf?: number;            // unix мс тика снимка (вниз до минуты)
+  lock: {                          // лок токенов первой покупки (launchRules.lockSecs)
+    lockedAmount: string;          // базовые единицы; "0" — лока нет или он закончился
+    until: number | null;          // unix мс (вверх до часа), только пока лок действует
+  };
+  cap: {                           // кап позиции создателя через пул (launchRules.capBps)
+    capBps: number;                // 0 — выключен
+    capTokens: string;             // базовые единицы
+    positionTokens: string;        // доступно + в hold + оценка ещё не исполненных buy (как считает кап)
+  };
+}
+
+// v0.9: GET /api/stats (публичный). Суточный снимок, никаких realtime-агрегатов (H6).
+type KCount = number | "<5";      // "<5" — категория построена меньше чем из 5 событий
+type KAmount = string | "<5";     // десятичная строка (UI) или "<5"
+
 interface PlatformStats {
-  volumeSol: string; trades: number; launches: number;
-  zecShielded: string;   // обновляется раз в сутки, округлено до 1 ZEC (иначе приращение = сумма депозита)
-  byVenue: Record<Venue, { volumeSol: string; trades: number }>;
-  topTokens: Token[];
+  asOf: number;               // unix мс: 00:00 UTC дня снимка; все данные — строго ДО этого момента
+  volumeSol: KAmount;         // объём сделок пула (buy+sell), SOL, вниз до 0.1 SOL; "<5" при < 5 сделок
+  trades: KCount;             // число сделок пула (buy+sell)
+  launches: KCount;           // число запусков через пул (create и fair-launch)
+  zecShielded: KAmount;       // ZEC, зачисленные из shielded-депозитов (накопительно), вниз до 1 ZEC.
+                              // Меняется, только если с прошлого изменения зачислено ≥ 5 новых депозитов; до 5 депозитов — "<5"
+  byVenue: Record<Venue, { volumeSol: KAmount; trades: KCount; launches: KCount }>;  // всегда все три ключа
+  topTokens: (Token & { volumeSol: string; trades: number })[];
+                              // ≤ 10 по объёму пула за topWindowDays дней до asOf; только токены с ≥ 5 сделками пула в окне;
+                              // volumeSol вниз до 0.1 SOL; поля Token (цена, статус) — на момент расчёта снимка
+  topWindowDays: number;      // 7
 }
 ```
 
@@ -374,6 +419,7 @@ interface TokenTrade extends FeedEvent {
 - **withdraw_zec:** hold = `amount` + комиссия сети (`WITHDRAW_ZEC_FEE_ZAT`, 15 000 зат); выплата с задержкой 1–10 мин (`exec: "max"` — 10–60 мин), готовые выплаты объединяются в одну tx (до 5). `executed` после K подтверждений выплаты; если tx истекла не попав в блок — выплата переотправляется новой tx (двойной выплаты нет). Сумма выплаты ровно `amount`, комиссию сети платит пул из `WITHDRAW_ZEC_FEE_ZAT`.
 - **withdraw_token:** держит `amount` токенов; комиссия в ZEC = частей × (капля SOL получателю + рента ATA + fee) по курсу; без `smart` — `to` строка или массив из 1 адреса, задержка 30 с–5 мин (`exec: "max"` — 10–60 мин); со `smart` — длина `to` = `parts`, адреса разные, суммы частей неравные (±20 %), задержка каждой части до `maxDelayMin`.
 - **claim** (v0.7): весь `claimable` (или одного `mint`) → `zecBalance` по `lamportsPerZecSell` (`floor`), сразу, без tx в сети. Сбор комиссий в сети делает пул глобально по своему расписанию, не по запросу (запрос claim ничего не делает в Solana, поэтому не связывает токены одного создателя).
+- **Creator fee самой launch-tx — пулу** (v0.9, решение владельца 12.10). Комиссия создателя площадки с первой покупки запуска (`create.initialBuyZec`; у fair-launch — покупка всех участников) в `claimable` не попадает: при settle запуска core записывает её размер — точный из события сделки (`relayer_jobs.out_creator_fee`, пишет релейер) или, пока релейер его не пишет, верхнюю оценку `ceil(лампорты покупки × bps / 10 000)` (pump.fun 30 б.п., meteora-dbc 40 б.п.; env `UNZEEN_LAUNCH_CREATOR_FEE_BPS_*`). Первые сборы этого mint уменьшаются на эту сумму, остаток — создателю. Ошибка оценки — только в пользу пула (≤ 0,3 % первой покупки).
 - **Пока не поддерживаются** (→ `400 bad_request "op not supported yet"`): `chat`.
 - Новое действие при `frozen` → `423 balance_frozen` для **любой** операции (в т. ч. без ZEC-hold).
 - `withdraw_token` **всегда**: капля SOL на газ на каждый адрес получателя, случайная задержка, отправка с vault, где пул держит этот mint (общий инвентарь пула: все vault публичны и видны в Verify, «другой vault» приватности не добавлял — D4), каждая часть — отдельной tx. `smart` добавляет только разбиение на N адресов. Если сумма вывода совпадает с недавней покупкой, фронт предупреждает.
@@ -646,13 +692,35 @@ interface VerifyProof {                   // GET /api/verify/proof (подпис
 - **Хранение (D1):** открытый ордер — пока открыт (≤ 72 ч); через 24 ч после закрытия стираются сумма, цена, mint, slippage и связь с действием (ордер пропадает из `Portfolio.orders`); через 48 ч строка удаляется.
 - **Публично ничего:** ни счётчиков, ни стакана. UI: «Stop-loss checks the price about once a minute and executes in the next batch. It is not a guaranteed exit in a crash.»
 
+## Кабинет создателя (v0.9)
+
+`GET /api/creator` — подписанный (как `/api/portfolio`: pubkey только в заголовке, повтор nonce → `409 replay`, лимит по ключу). Ответ `CreatorCabinet`, `Cache-Control: no-store`, паддинг до кратного **4096** байт.
+
+- **Только свои токены.** Список строится по правам создателя в реестре (ключ, который сделал `create` / `fl_create`). Чужой ключ, ключ без запусков, несуществующий ключ — `{ tokens: [] }` того же размера (по размеру ответа не отличить «не создатель» от создателя нескольких токенов, пока их список укладывается в 4096 байт).
+- **T1.** Ничего из кабинета не публикуется нигде: публичные `Token`, `TokenSafety`, лента, `/api/stats` не содержат ни комиссий создателя, ни его позиции, ни лока, ни признака «этот токен — чей-то». Числа о создателе есть только в этом ответе и в `Portfolio.claimable`.
+- **Откуда числа:** `fees` — реестр (`claimable` за вычетом комиссии самой launch-tx, см. claim); `volumeLamports`/`trades` — сделки пула по mint (то же, что в публичной ленте); `holders`, `status`, `curveProgressPct` — последний снимок индексатора (тик, ≈ 60 с; запрос кабинета индексатор не дёргает); `lock`/`cap` — правила создателя в реестре (см. «Правила создателя»).
+- **Требование к индексатору (INTEL.md):** число холдеров кладётся в снимок как `holders.count` (целое: владельцы с ненулевым балансом, без аккаунтов bonding curve / пула AMM; vault пула считаются как обычные владельцы). Пока его нет, `holders = null`.
+- **UI:** кнопка «Claim» = `POST /api/actions {op:"claim", mint}` (активна при `claimableLamports` ≥ эквивалента `minActionZat` по `lamportsPerZecSell`). Подписи: «Fees from your launch buy stay with the pool», «Fees are collected by the pool every 6–12 h». Позиция и лок — только в кабинете; не показывать их на публичной странице токена даже владельцу (скриншоты).
+
+## Статистика (v0.9)
+
+`GET /api/stats` — публичный, без подписи и cookies, одинаков для всех, `Cache-Control: public, max-age=3600`.
+
+- **Раз в сутки.** Снимок строится один раз после 00:00 UTC (mainnet — автоматически, `UNZEEN_STATS_DAILY`; devnet — ручная команда `unzeen-api stats-snapshot`) и хранится; ручка отдаёт последний сохранённый. **Живых агрегатов нет** (H6): ни одно число не меняется в момент депозита или сделки. Все данные — строго до `asOf` (00:00 UTC дня снимка), повторный расчёт в тот же день даёт те же числа.
+- **Источники.** `volumeSol`, `trades`, `launches`, `byVenue`, `topTokens` — только сделки пула, уже публичные в Solana (лента). Единственное число из реестра — `zecShielded`.
+- **`zecShielded`.** Сумма зачисленных shielded-депозитов, вниз до 1 ZEC (`UNZEEN_STATS_ZEC_ROUND_ZAT`, не мельче 0.01 ZEC). Публикуемое значение меняется, только если с прошлого изменения зачислено **≥ 5 новых депозитов** — приращение никогда не равно одному депозиту. Пока депозитов < 5 — `"<5"`.
+- **k-анонимность (k = 5).** Любая категория, построенная меньше чем из 5 событий, отдаётся строкой `"<5"` (и счётчик, и сумма): `trades`, `launches`, `volumeSol` (по числу сделок), каждая площадка в `byVenue` (все три ключа есть всегда, отсутствующей площадки нет), `zecShielded` (по числу депозитов). В `topTokens` попадают только токены с ≥ 5 сделками пула в окне.
+- **Округление:** SOL-объёмы вниз до 0.1 SOL (`UNZEEN_STATS_SOL_ROUND_LAMPORTS`), ZEC вниз до 1 ZEC. Счётчики — точные (публичны в цепочке), но под порогом k.
+- **Ничего о создателях** (T1): ни комиссий, ни claim, ни числа запусков на ключ.
+- **UI:** строки `"<5"` показывать как «<5» / «fewer than 5»; подпись «Updated daily at 00:00 UTC» с датой из `asOf`; `404` → «Stats appear after the first daily snapshot».
+
 ## Дополнительные эндпоинты
 | Метод | Путь | Ответ |
 |---|---|---|
-| GET | `/api/creator` (подписанный) | `CreatorToken[]` |
 | GET | `/api/tokens/:mint/chat?before=` | `ChatMessage[]` |
 | WS | `/ws/chat/:mint` | поток `ChatMessage` |
-| GET | `/api/stats` | `PlatformStats` |
+
+`/api/creator` и `/api/stats` реализованы в v0.9 и перенесены в основную таблицу REST.
 
 
 ## Единицы сумм
@@ -667,7 +735,9 @@ interface VerifyProof {                   // GET /api/verify/proof (подпис
 | `minOut` (buy) | базовые единицы токена (целое) |
 | ZIP-321 `amount=` (строит фронт) | **десятичная** строка ZEC, например `0.05` |
 | `priceSol`, `marketCapSol`, `triggerPriceSol`, `Candle.open/high/low/close` | десятичная строка SOL (UI) |
-| `PlatformStats.*Sol`, `CreatorToken.*Sol`, `zecShielded` | десятичная строка SOL/ZEC (UI, только для отображения) |
+| `PlatformStats.*Sol`, `zecShielded`, `topTokens[].volumeSol` | десятичная строка SOL/ZEC (UI, только для отображения, округлено вниз) или `"<5"` |
+| `CreatorToken.fees.*Lamports`, `CreatorToken.volumeLamports` | лампорты (целое) |
+| `CreatorToken.lock.lockedAmount`, `cap.capTokens`, `cap.positionTokens` | базовые единицы токена (целое) |
 | `ts`, `createdAt` | unix **мс**; исключения — `Candle.time` и memo `expiry` в unix **секундах** |
 
 ## Свечи (OHLC)

@@ -1,6 +1,7 @@
 //! unzeen-api — HTTP/WS API server (docs/API.md).
 //!
 //!   unzeen-api serve                      run the server (API_BIND, default 127.0.0.1:8080)
+//!   unzeen-api stats-snapshot             devnet: build today's public stats snapshot
 //!   unzeen-api dev-request --anon-key F   DEV: send a signed request and print the response
 //!
 //! `.env` is loaded from the current directory or its parents (repo root).
@@ -29,6 +30,9 @@ enum Cmd {
     /// Request a Verify snapshot now (devnet only; mainnet runs daily at 00:00 UTC). The running
     /// API server performs it (freeze, relayer vault snapshot, trees, anchor).
     VerifySnapshot,
+    /// Build today's public stats snapshot now (devnet only; mainnet runs daily at 00:00 UTC).
+    /// Data cut-off is 00:00 UTC today, so a re-run the same day gives the same numbers.
+    StatsSnapshot,
     /// DEV: sign a request with an anon key file (hex secret, from `unzeen-scanner anon-key`)
     /// and print the response. Refused on mainnet unless UNZEEN_DEV_PRINT=1.
     DevRequest {
@@ -66,6 +70,7 @@ async fn run() -> anyhow::Result<()> {
     match cli.cmd.unwrap_or(Cmd::Serve) {
         Cmd::Serve => serve(cfg).await,
         Cmd::VerifySnapshot => verify_snapshot(&cfg).await,
+        Cmd::StatsSnapshot => stats_snapshot(&cfg).await,
         Cmd::DevRequest {
             anon_key,
             method,
@@ -123,6 +128,21 @@ async fn verify_snapshot(cfg: &Config) -> anyhow::Result<()> {
         Some(id) => println!("snapshot #{id} requested; the running API server builds it (watch GET /api/verify)"),
         None => println!("a snapshot is already in progress"),
     }
+    Ok(())
+}
+
+async fn stats_snapshot(cfg: &Config) -> anyhow::Result<()> {
+    if cfg.cluster != "devnet" {
+        bail!("manual stats snapshots are devnet-only (mainnet: daily at 00:00 UTC)");
+    }
+    let ledger = Ledger::connect(&cfg.database_url, cfg.policy)
+        .await
+        .map_err(|e| anyhow!("connecting to Postgres: {e}"))?;
+    let day = ledger
+        .stats_snapshot(cfg.cluster, &cfg.stats.params)
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    println!("stats snapshot for {day} stored (cut-off 00:00 UTC); GET /api/stats serves it");
     Ok(())
 }
 

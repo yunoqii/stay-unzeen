@@ -40,6 +40,17 @@ pub struct Config {
     pub fair: FairConfig,
     /// Verify snapshots (API v0.7).
     pub verify: VerifyConfig,
+    /// Daily public stats (API v0.9).
+    pub stats: StatsConfig,
+}
+
+/// `GET /api/stats` (API.md v0.9, H6).
+#[derive(Clone, Copy, Debug)]
+pub struct StatsConfig {
+    /// Snapshot at 00:00 UTC every day (UNZEEN_STATS_DAILY; default: on for mainnet, off for
+    /// devnet where the operator runs `unzeen-api stats-snapshot`).
+    pub daily: bool,
+    pub params: unzeen_ledger::stats::StatsParams,
 }
 
 /// Verify (API.md v0.7).
@@ -132,6 +143,11 @@ pub struct LaunchConfig {
     /// The UNZEEN_LAUNCH_VIRTUAL_* values were set explicitly (not defaults). Fair launch uses
     /// env curve values only then; otherwise it needs the network curve (`launch_curves`).
     pub curve_from_env: bool,
+    /// Upper bound of the creator fee on a launch buy, bps (API v0.9; used only when the
+    /// relayer did not report the exact fee). UNZEEN_LAUNCH_CREATOR_FEE_BPS_PUMPFUN (30),
+    /// UNZEEN_LAUNCH_CREATOR_FEE_BPS_DBC (40).
+    pub launch_fee_bps_pumpfun: u32,
+    pub launch_fee_bps_dbc: u32,
 }
 
 impl LaunchConfig {
@@ -143,6 +159,8 @@ impl LaunchConfig {
         unzeen_ledger::CreatorRules {
             lock_secs: self.lock_secs,
             cap_tokens: self.cap_tokens(),
+            launch_fee_bps_pumpfun: self.launch_fee_bps_pumpfun,
+            launch_fee_bps_dbc: self.launch_fee_bps_dbc,
         }
     }
 
@@ -332,6 +350,8 @@ impl Config {
             virtual_sol_lamports: num("UNZEEN_LAUNCH_VIRTUAL_SOL_LAMPORTS", 30_000_000_000)?,
             virtual_token_reserves: num("UNZEEN_LAUNCH_VIRTUAL_TOKEN_RESERVES", 1_073_000_000_000_000)?,
             curve_from_env: var("UNZEEN_LAUNCH_VIRTUAL_SOL_LAMPORTS").is_some(),
+            launch_fee_bps_pumpfun: num::<u32>("UNZEEN_LAUNCH_CREATOR_FEE_BPS_PUMPFUN", 30)?.min(10_000),
+            launch_fee_bps_dbc: num::<u32>("UNZEEN_LAUNCH_CREATOR_FEE_BPS_DBC", 40)?.min(10_000),
         };
         let mainnet = solana == SolanaCluster::MainnetBeta;
         let fair = FairConfig {
@@ -458,6 +478,19 @@ impl Config {
                 },
                 timing: unzeen_ledger::verify::VerifyTiming::default(),
                 proof_bucket: 65_536,
+            },
+            stats: StatsConfig {
+                daily: match var("UNZEEN_STATS_DAILY").as_deref() {
+                    Some("1") => true,
+                    Some("0") => false,
+                    _ => mainnet,
+                },
+                params: unzeen_ledger::stats::StatsParams {
+                    sol_round_lamports: num::<u64>("UNZEEN_STATS_SOL_ROUND_LAMPORTS", 100_000_000)?.max(1),
+                    // Never finer than 0.01 ZEC (H6: the total must not resolve single deposits).
+                    zec_round_zat: num::<u64>("UNZEEN_STATS_ZEC_ROUND_ZAT", 100_000_000)?.max(1_000_000),
+                    ..unzeen_ledger::stats::StatsParams::default()
+                },
             },
         };
         Ok(cfg)

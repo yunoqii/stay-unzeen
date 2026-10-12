@@ -10,12 +10,14 @@
 //! Privacy: nothing here logs keys, amounts or refs. Callers must not either.
 
 pub mod actions;
+pub mod creator;
 pub mod creator_fees;
 pub mod decide;
 pub mod fair;
 mod migrate;
 pub mod orders;
 pub mod payouts;
+pub mod stats;
 pub mod verify;
 
 use deadpool_postgres::{GenericClient, Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -207,6 +209,10 @@ pub struct CreatorRules {
     pub lock_secs: u64,
     /// Max position of the creator through the pool, token base units (0 = off).
     pub cap_tokens: u64,
+    /// Upper bound of the venue creator fee on the launch buy, bps of the lamports paid
+    /// (fees included), used when the relayer did not report the exact fee (API v0.9).
+    pub launch_fee_bps_pumpfun: u32,
+    pub launch_fee_bps_dbc: u32,
 }
 
 impl Default for CreatorRules {
@@ -215,6 +221,8 @@ impl Default for CreatorRules {
         Self {
             lock_secs: 86_400,
             cap_tokens: 50_000_000_000_000,
+            launch_fee_bps_pumpfun: 30,
+            launch_fee_bps_dbc: 40,
         }
     }
 }

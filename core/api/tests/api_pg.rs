@@ -100,6 +100,8 @@ fn config(url: &str) -> Config {
             virtual_sol_lamports: 30_000_000_000,
             virtual_token_reserves: 1_073_000_000_000_000,
             curve_from_env: false,
+            launch_fee_bps_pumpfun: 30,
+            launch_fee_bps_dbc: 40,
         },
         intel: IntelConfig {
             full_trades: false,
@@ -122,6 +124,10 @@ fn config(url: &str) -> Config {
             daily: false,
             timing: unzeen_ledger::verify::VerifyTiming::default(),
             proof_bucket: 65_536,
+        },
+        stats: unzeen_api::config::StatsConfig {
+            daily: false,
+            params: unzeen_ledger::stats::StatsParams::default(),
         },
     }
 }
@@ -1636,6 +1642,17 @@ mod fair {
             }
         }
         assert!(tok_sum <= t, "Σ t_i ≤ T");
+        // v0.9: the creator fee of the launch tx (all participants' buys) is the pool's:
+        // upper bound ceil(spent × 30 bps) without the relayer's exact figure.
+        let launch_fee = (spent as i64 * 30 + 9_999) / 10_000;
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.creator_tokens WHERE mint = '{mint}'
+                   AND launch_fee_lamports = {launch_fee} AND launch_fee_left = {launch_fee}"
+            ))
+            .await,
+            1
+        );
         // Owner view after settle; secret erased; launch visible as launched in the list.
         let pf = e.signed(&user(2), "GET", "/api/portfolio", "").await.body;
         let b = &pf["fairBids"][0];
@@ -2512,4 +2529,294 @@ mod orders_v08 {
         assert!(deleted >= 6);
         e.drop_schema().await;
     }
+}
+
+// ================================================================== API v0.9: launch fee, cabinet, stats
+
+/// Wait until the action `id` of `user(n)` is executed (settler runs every second).
+async fn wait_executed(e: &Env, n: u8, id: &str) -> Value {
+    let path = format!("/api/actions/{id}");
+    for _ in 0..60 {
+        let st = e.signed(&user(n), "GET", &path, "").await;
+        if st.body["status"] == "executed" {
+            return st.body;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("action {id} not executed");
+}
+
+#[tokio::test]
+async fn launch_fee_to_pool_and_creator_cabinet() {
+    let Some(e) = setup().await else { return };
+    let s = e.schema.clone();
+    let me = 8u8;
+    e.fund(me, 0, 100_000_000).await;
+
+    // Empty cabinet: same padded size as any other answer, nothing about anyone.
+    let empty = e.signed(&user(me), "GET", "/api/creator", "").await;
+    assert_eq!(empty.status, StatusCode::OK, "{:?}", empty.body);
+    assert_eq!(empty.body["tokens"], json!([]));
+    assert_eq!(empty.raw_len % 4096, 0);
+    assert_eq!(empty.headers["cache-control"], "no-store");
+    // Unsigned → 401.
+    assert_eq!(e.get("/api/creator").await.status, StatusCode::UNAUTHORIZED);
+
+    // create with a ~1 SOL initial buy; the relayer reports no exact creator fee.
+    let body = json!({"op":"create","venue":"pumpfun","meta":{"name":"Fee","symbol":"FEE"},"initialBuyZec":"10000000"})
+        .to_string();
+    let r = e.signed(&user(me), "POST", "/api/actions", &body).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let id = r.body["id"].as_str().unwrap().to_string();
+    let paid = e
+        .one_i64(&format!("SELECT lamports_in FROM {s}.relayer_jobs WHERE op = 'create'"))
+        .await;
+    e.sql(&format!(
+        "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, created_at)
+           VALUES ('{MINT}', 'pumpfun', 'FEE', 'Fee', 6, now() - interval '1 hour');
+         INSERT INTO {s}.trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, ts)
+           VALUES ('create', 'pumpfun', '{MINT}', 'FEE', 0, 0, 6, 'SIGCREATE', now()),
+                  ('buy', 'pumpfun', '{MINT}', 'FEE', 34000000000000, {paid}, 6, 'SIGCREATE', now()),
+                  ('sell', 'pumpfun', '{MINT}', 'FEE', 1000, 500000000, 6, 'SIGX', now());
+         UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGCREATE', out_mint = '{MINT}',
+                out_token_amount = 34000000000000, out_lamports = lamports_in WHERE op = 'create'"
+    ))
+    .await;
+    wait_executed(&e, me, &id).await;
+    // Upper bound: ceil(paid × 30 bps), all of it still to withhold.
+    let fee = (paid * 30 + 9_999) / 10_000;
+    assert!(fee > 0);
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.creator_tokens WHERE mint = '{MINT}'
+               AND launch_fee_lamports = {fee} AND launch_fee_left = {fee}"
+        ))
+        .await,
+        1
+    );
+
+    // First sweep smaller than the launch fee: all pool. Second: the rest of the fee to the
+    // pool, the remainder to the creator.
+    e.sql(&format!(
+        "INSERT INTO {s}.creator_fee_sweeps (network, venue, kind, mint, authority, signature,
+                                             last_valid_block_height, status, lamports, slot)
+         VALUES ('devnet', 'pumpfun', 'creator', '{MINT}', 'A', 'W1', 1, 'confirmed', {a}, 5);",
+        a = fee - 1_000
+    ))
+    .await;
+    let rep = e.ledger.credit_fee_sweeps("devnet").await.unwrap();
+    assert_eq!(
+        (rep.credited, rep.pool_revenue, rep.withheld_lamports),
+        (0, 1, (fee - 1_000) as u64)
+    );
+    e.sql(&format!(
+        "INSERT INTO {s}.creator_fee_sweeps (network, venue, kind, mint, authority, signature,
+                                             last_valid_block_height, status, lamports, slot)
+         VALUES ('devnet', 'pumpfun', 'creator', '{MINT}', 'A', 'W2', 1, 'confirmed', 20000000, 6);"
+    ))
+    .await;
+    let rep = e.ledger.credit_fee_sweeps("devnet").await.unwrap();
+    assert_eq!((rep.credited, rep.pool_revenue, rep.withheld_lamports), (1, 0, 1_000));
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT sum(pool_lamports)::bigint FROM {s}.creator_fee_sweeps WHERE mint = '{MINT}'"
+        ))
+        .await,
+        fee
+    );
+    assert_eq!(
+        e.one_i64(&format!("SELECT launch_fee_left FROM {s}.creator_tokens"))
+            .await,
+        0
+    );
+    let pf = e.signed(&user(me), "GET", "/api/portfolio", "").await.body;
+    assert_eq!(pf["claimable"], json!([{"mint": MINT, "solAmount": "19999000"}]));
+
+    // Cabinet: own token only, owner-only figures, padded.
+    let cab = e.signed(&user(me), "GET", "/api/creator", "").await;
+    assert_eq!(cab.status, StatusCode::OK);
+    assert_eq!(cab.raw_len % 4096, 0);
+    assert_eq!(cab.raw_len, empty.raw_len, "one token fits the same bucket");
+    let t = &cab.body["tokens"][0];
+    assert_eq!(cab.body["tokens"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        (t["mint"].as_str(), t["symbol"].as_str(), t["status"].as_str()),
+        (Some(MINT), Some("FEE"), Some("curve"))
+    );
+    assert_eq!(
+        t["fees"],
+        json!({"claimableLamports": "19999000", "claimedLamports": "0"})
+    );
+    assert_eq!(t["volumeLamports"], (paid + 500_000_000).to_string());
+    assert_eq!(t["trades"], 2);
+    assert_eq!(t["holders"], Value::Null, "no indexer snapshot yet");
+    assert_eq!(t["lock"]["lockedAmount"], "34000000000000");
+    assert!(t["lock"]["until"].as_i64().unwrap() > now_ms() as i64 + 23 * 3_600_000);
+    assert_eq!(
+        t["cap"],
+        json!({"capBps": 500, "capTokens": "50000000000000", "positionTokens": "34000000000000"})
+    );
+    // Indexer snapshot with a holder count (INTEL: holders.count) and curve progress.
+    e.sql(&format!(
+        "INSERT INTO {s}.token_safety (mint, as_of, data) VALUES ('{MINT}', date_trunc('minute', now()),
+           '{{\"market\": {{\"venue\": \"pumpfun\", \"status\": \"curve\", \"curveProgressPct\": \"3.2\"}},
+              \"holders\": {{\"top10Pct\": \"50\", \"devPct\": null, \"unzeenPoolPct\": \"40\", \"count\": 17}}}}')"
+    ))
+    .await;
+    let t = e.signed(&user(me), "GET", "/api/creator", "").await.body["tokens"][0].clone();
+    assert_eq!(
+        (t["holders"].clone(), t["curveProgressPct"].clone()),
+        (json!(17), json!("3.2"))
+    );
+    assert!(t["holdersAsOf"].as_i64().unwrap() % 60_000 == 0);
+
+    // Another key sees nothing of it (T1).
+    e.fund(9, 0, 1_000_000).await;
+    let other = e.signed(&user(9), "GET", "/api/creator", "").await;
+    assert_eq!(other.body["tokens"], json!([]));
+    assert_eq!(other.raw_len, empty.raw_len);
+    // Public token endpoints carry no creator numbers.
+    let pubtok = e.get(&format!("/api/tokens/{MINT}")).await.body.to_string();
+    for k in ["claim", "launch_fee", "fees", "positionTokens", "lockedAmount"] {
+        assert!(!pubtok.contains(k), "{k} in public token: {pubtok}");
+    }
+
+    // claim → claimed moves, claimable 0.
+    let r = e
+        .signed(&user(me), "POST", "/api/actions", &json!({"op":"claim"}).to_string())
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let t = e.signed(&user(me), "GET", "/api/creator", "").await.body["tokens"][0].clone();
+    assert_eq!(
+        t["fees"],
+        json!({"claimableLamports": "0", "claimedLamports": "19999000"})
+    );
+    e.drop_schema().await;
+}
+
+#[tokio::test]
+async fn launch_fee_exact_from_relayer() {
+    let Some(e) = setup().await else { return };
+    let s = e.schema.clone();
+    e.fund(10, 0, 100_000_000).await;
+    let body = json!({"op":"create","venue":"pumpfun","meta":{"name":"Ex","symbol":"EX"},"initialBuyZec":"10000000"})
+        .to_string();
+    let r = e.signed(&user(10), "POST", "/api/actions", &body).await;
+    let id = r.body["id"].as_str().unwrap().to_string();
+    // The relayer reports the exact creator fee of the launch buy (TradeEvent.creatorFee).
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGEX', out_mint = '{MINT2}',
+                out_token_amount = 1000, out_lamports = lamports_in, out_creator_fee = 123456 WHERE op = 'create'"
+    ))
+    .await;
+    wait_executed(&e, 10, &id).await;
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT launch_fee_left FROM {s}.creator_tokens WHERE mint = '{MINT2}'"
+        ))
+        .await,
+        123_456
+    );
+    e.drop_schema().await;
+}
+
+#[tokio::test]
+async fn stats_daily_snapshot_k_anonymity() {
+    let Some(e) = setup().await else { return };
+    let s = e.schema.clone();
+    // No snapshot yet → 404 (never a live aggregate).
+    let r = e.get("/api/stats").await;
+    assert_eq!((r.status, code(&r)), (StatusCode::NOT_FOUND, "not_found"));
+
+    // Before the cut-off (yesterday): 6 pumpfun trades on MINT (1.23456789 SOL), 2 DBC trades,
+    // 1 launch. Today: trades that must not count yet.
+    let mut q = format!(
+        "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol)
+           VALUES ('{MINT}', 'pumpfun', 'AAA', 'A', 6, 0.000000028, 28), ('{MINT2}', 'meteora-dbc', 'BBB', 'B', 6, 0, 0);
+         INSERT INTO {s}.trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, ts) VALUES
+           ('create', 'pumpfun', '{MINT}', 'AAA', 0, 0, 6, 'C1', now() - interval '1 day'),"
+    );
+    for i in 0..6 {
+        let sol = if i == 0 { 234_567_890 } else { 200_000_000 };
+        q += &format!("('buy', 'pumpfun', '{MINT}', 'AAA', 1, {sol}, 6, 'P{i}', now() - interval '1 day'),");
+    }
+    q += &format!(
+        "('buy', 'meteora-dbc', '{MINT2}', 'BBB', 1, 900000000, 6, 'D1', now() - interval '1 day'),
+         ('sell', 'meteora-dbc', '{MINT2}', 'BBB', 1, 900000000, 6, 'D2', now() - interval '1 day'),
+         ('buy', 'pumpfun', '{MINT}', 'AAA', 1, 5000000000, 6, 'T1', date_trunc('day', now(), 'UTC') + interval '1 second');"
+    );
+    e.sql(&q).await;
+    // 4 credited deposits before the cut-off (7.5 ZEC).
+    for i in 0..4 {
+        e.fund(20 + i as u8, i, 187_500_000).await;
+    }
+    e.sql(&format!(
+        "UPDATE {s}.deposits SET created_at = created_at - interval '1 day' WHERE status = 'credited'"
+    ))
+    .await;
+
+    let p = e.state.cfg.stats.params;
+    e.ledger.stats_snapshot("devnet", &p).await.unwrap();
+    let r = e.get("/api/stats").await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.headers["cache-control"], "public, max-age=3600");
+    let v = r.body;
+    let midnight = (now_ms() / 86_400_000 * 86_400_000) as i64;
+    assert_eq!(v["asOf"], midnight);
+    assert_eq!(v["trades"], 8, "today's trade is after the cut-off");
+    assert_eq!(v["volumeSol"], "3", "3.034567890 SOL rounded down to 0.1");
+    assert_eq!(v["launches"], "<5");
+    assert_eq!(v["zecShielded"], "<5", "fewer than 5 deposits");
+    assert_eq!(
+        v["byVenue"],
+        json!({
+            "pumpfun": {"volumeSol": "1.2", "trades": 6, "launches": "<5"},
+            "meteora-dbc": {"volumeSol": "<5", "trades": "<5", "launches": "<5"},
+            "jupiter": {"volumeSol": "<5", "trades": "<5", "launches": "<5"},
+        })
+    );
+    let top = v["topTokens"].as_array().unwrap();
+    assert_eq!(top.len(), 1, "MINT2 has < 5 trades: {top:?}");
+    assert_eq!(
+        (
+            top[0]["mint"].as_str(),
+            top[0]["volumeSol"].as_str(),
+            top[0]["trades"].as_u64()
+        ),
+        (Some(MINT), Some("1.2"), Some(6))
+    );
+    assert_eq!(top[0]["priceSol"], "0.000000028");
+    // No creator numbers anywhere in the public stats (T1).
+    let txt = v.to_string();
+    assert!(!txt.contains("claim") && !txt.contains("creator"), "{txt}");
+
+    // A 5th deposit (before the cut-off): the shielded total is published, rounded to 1 ZEC.
+    e.fund(30, 9, 100_000_000).await;
+    e.sql(&format!(
+        "UPDATE {s}.deposits SET created_at = created_at - interval '1 day' WHERE created_at >= date_trunc('day', now(), 'UTC')"
+    ))
+    .await;
+    e.ledger.stats_snapshot("devnet", &p).await.unwrap();
+    assert_eq!(
+        e.get("/api/stats").await.body["zecShielded"],
+        "8",
+        "8.5 ZEC rounded down"
+    );
+    // Previous day published 8 ZEC at 5 deposits: 4 more deposits do not move it.
+    e.sql(&format!(
+        "UPDATE {s}.stats_snapshots SET day = day - 1;
+         UPDATE {s}.deposits SET credited_zat = credited_zat * 3"
+    ))
+    .await;
+    for i in 0..4 {
+        e.fund(40 + i as u8, 10 + i, 100_000_000).await;
+    }
+    e.sql(&format!(
+        "UPDATE {s}.deposits SET created_at = created_at - interval '1 day' WHERE created_at >= date_trunc('day', now(), 'UTC')"
+    ))
+    .await;
+    e.ledger.stats_snapshot("devnet", &p).await.unwrap();
+    assert_eq!(e.get("/api/stats").await.body["zecShielded"], "8");
+    assert!(!e.ledger.stats_due("devnet").await.unwrap());
+    e.drop_schema().await;
 }

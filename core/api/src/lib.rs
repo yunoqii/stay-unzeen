@@ -10,6 +10,7 @@
 pub mod actions;
 pub mod auth;
 pub mod config;
+pub mod creator;
 pub mod creator_fees;
 pub mod error;
 pub mod fair;
@@ -19,6 +20,7 @@ pub mod limit;
 pub mod market;
 pub mod orders;
 pub mod rate;
+pub mod stats;
 pub mod verify;
 
 use std::net::SocketAddr;
@@ -108,6 +110,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/verify/snapshots", get(verify::history))
         .route("/api/verify/proof", get(verify::proof))
         .route("/api/verify/{id}", get(verify::one))
+        .route("/api/stats", get(stats::stats))
+        .route("/api/creator", get(creator::cabinet))
         .route("/ws/feed", get(market::ws_feed))
         .route("/media/{name}", get(media))
         .fallback(|| async { ApiError::not_found() })
@@ -213,7 +217,7 @@ async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response
 /// R-core-6: signed responses are padded with a `pad` string to the next multiple of
 /// `bucket` bytes, so their size does not tell an observer what happened (an action queued vs
 /// executed, how many holdings).
-fn padded(mut v: Value, bucket: usize) -> Response {
+pub(crate) fn padded(mut v: Value, bucket: usize) -> Response {
     let len = serde_json::to_vec(&v).map_or(0, |b| b.len());
     // `,"pad":""` adds 9 bytes (object is never empty here).
     let total = (len + 9).div_ceil(bucket).max(1) * bucket;
@@ -576,6 +580,7 @@ pub fn spawn_background(st: &AppState) {
     }
     tokio::spawn(verify::scheduler_loop(st.clone()));
     tokio::spawn(creator_fees::credit_loop(st.clone()));
+    tokio::spawn(stats::scheduler_loop(st.clone()));
     tokio::spawn(orders::evaluator_loop(st.clone()));
     // D14: ZEC/SOL quote on a timer, never on demand.
     tokio::spawn(st.rate.clone().refresh_loop());

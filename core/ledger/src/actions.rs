@@ -562,7 +562,7 @@ impl Ledger {
         let jobs = tx
             .query(
                 "SELECT id, op, mint, lamports_in, token_amount, status, out_mint, out_token_amount,
-                        out_lamports, error_code
+                        out_lamports, error_code, venue, out_creator_fee
                  FROM relayer_jobs WHERE action_id = $1 AND settled_at IS NULL ORDER BY part FOR UPDATE",
                 &[&action_id],
             )
@@ -631,13 +631,21 @@ impl Ledger {
                             } else {
                                 (0, 0.0)
                             };
+                            // v0.9: the creator fee of this very tx is the pool's.
+                            let launch_fee = crate::creator_fees::launch_creator_fee(
+                                &self.rules,
+                                j.get::<_, Option<&str>>(10),
+                                out_lamports,
+                                j.get::<_, Option<i64>>(11),
+                            );
                             tx.execute(
-                                "INSERT INTO creator_tokens (mint, anon_pubkey, locked_amount, locked_until)
+                                "INSERT INTO creator_tokens (mint, anon_pubkey, locked_amount, locked_until,
+                                                             launch_fee_lamports, launch_fee_left)
                                  VALUES ($1, $2, $3::bigint, CASE WHEN $3::bigint > 0
                                      THEN date_trunc('hour', now() + make_interval(secs => $4::float8))
-                                          + interval '1 hour' END)
+                                          + interval '1 hour' END, $5, $5)
                                  ON CONFLICT (mint) DO NOTHING",
-                                &[m, &pk, &locked, &lock_secs],
+                                &[m, &pk, &locked, &lock_secs, &launch_fee],
                             )
                             .await?;
                             fill.insert("mint".into(), json!(m));
