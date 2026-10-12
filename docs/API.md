@@ -2,7 +2,22 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.3** (12.10, ночь; реализовано в `core/api`). Изменения против v0.2:
+Статус: **v0.4** (12.10, дни 4–5; реализовано в `core/api` + `core/scanner`). Изменения против v0.3:
+- **Эпохи (D2).** buy/sell/create больше не получают независимую задержку 3–20 с: они копятся и исполняются пачкой на границе эпохи. Интервал между границами случайный **30–60 с** (одинаково на devnet и mainnet), расписание не зависит от прихода запросов, порядок внутри пачки случайный.
+- **`privacy?: "fast" | "max"`** (необязательное поле, по умолчанию `"fast"`) во всех действиях `buy`, `sell`, `create`, `withdraw_zec`, `withdraw_token`: `"max"` для buy/sell/create — эпоха **5–15 мин**; для выводов — задержка **10–60 мин**. Другие значения → 400.
+- **`PoolInfo.rate`** — публичный курс из фонового кэша (без запроса к 1Click): `lamportsPerZec` (mid), `lamportsPerZecBuy`/`lamportsPerZecSell` (со спредом, ровно те, что применит сервер сейчас), `spreadBps`, `source`, `ts`. Нет поля — курса нет (действия → 503). `Cache-Control: max-age=15`.
+- **`PoolInfo.fees`** (`createFeeZat`, `withdrawZecFeeZat`, `withdrawTokenGasLamports`, `withdrawTokenCostLamports`) и **`PoolInfo.createEnabled`**.
+- **`ActionStatus.status: "sent"`** — транзакция подписана и отправлена (релейер записал подпись / выплата ZEC в сети), ждём финальности. Дальше `executed` | `failed`. `ActionReceipt` из `POST` по-прежнему только `queued`.
+- **Округление суммы покупки (D10).** Для `buy` и первой покупки `create` SOL-сумма срезается на случайные 0–1 % и округляется **вниз до 0.001 SOL**; `minOut` уменьшается пропорционально (минимальная цена та же). Списывается только ZEC-эквивалент фактически отправленных лампортов (`≤ zecIn`), остаток остаётся в `zecBalance`. Фронт показывает «≈», а не точную сумму; для оценки `minOut` берёт `PoolInfo.rate.lamportsPerZecBuy` и закладывает −1 % срезки (сервер сам уменьшит `minOut` пропорционально). Слишком маленькая покупка, не дающая 0.001 SOL, → `below_minimum`.
+- **`create` → `503 venue_unavailable`**, пока исполнитель запуска в релейере не включён лидом (`UNZEEN_CREATE_ENABLED=1`). hold не ставится (D6). UI скрывает/дизейблит запуск по этому коду.
+- **`withdraw_zec` исполняется:** выплата shielded ZEC с пула (батчами до 5 выплат в одной tx, только на Orchard/Ironwood-получателя UA, `OvkPolicy::Discard`), `status` → `executed` после K подтверждений; `fill.zecSpent` = сумма + комиссия. UA получателя удаляется сразу после подтверждения.
+- **`DepositInfo.publicSource`** (D3): `true`, если tx депозита шла с прозрачных входов или выводила сумму из Sapling/старого Orchard (turnstile) — её сумма видна в цепочке. Фронт показывает владельцу предупреждение.
+- **`withdraw_token`** — с vault, на котором пул держит этот mint (общий инвентарь пула; правило «с другого vault» снято решением владельца, D4), всегда с каплей SOL на газ, отдельная tx на часть, задержка.
+- **Курс** запрашивается у 1Click фоном раз в 30–60 с, не в момент действия (D14). Если обновление не удалось и котировке > 45 с — спред ×2; > 120 с — `503 venue_unavailable`.
+- **`GET /media/<sha40>.<ext>`** — картинки и JSON-метаданные токенов (`tokens.image` указывает сюда).
+- **Хранение (D1):** суммы, курс и `fill` действия стираются через 24–48 ч после закрытия; журналы операций — через 48 ч. `GET /api/actions/:id` после этого отдаёт только `status`/`error`.
+
+Изменения v0.3 против v0.2:
 - **Подпись запросов привязана к сети:** вторая строка подписываемого сообщения — `chainId` hex (`0202` / `0101`). Векторы пересобраны.
 - **anon-ключ по сети:** путь `m/44'/133'/<net>'/0'`, `net` = 0 mainnet, 1 devnet/testnet. Одна фраза — разные ключи в разных сетях. Векторы: раздел `anonKey`.
 - Допустимы только два `chainId`: `0202` (Zcash testnet + Solana devnet) и `0101` (mainnet + mainnet-beta); сервер со смешанной конфигурацией не стартует.
@@ -27,6 +42,7 @@
 | GET | `/api/portfolio` (подписанный) | `Portfolio` — pubkey только в заголовке `x-unzeen-pubkey`, **не в пути** |
 | POST | `/api/actions` (подписанный) | `SignedAction` → `ActionReceipt` — все действия только с баланса |
 | GET | `/api/actions/:id` (подписанный) | `ActionStatus` — только владельцу (pubkey заголовка = автор действия), иначе 404 |
+| GET | `/media/<sha40>.<png\|jpeg\|jpg\|webp\|json>` | картинка/метаданные токена. Только точное имя (40 hex + расширение), без листинга, `Cache-Control: immutable`, `nosniff`, без логов. Остальное — 404 |
 
 Подписанные запросы — схема в разделе «Подпись запросов».
 
@@ -81,6 +97,21 @@ interface PoolInfo {
   minDepositZat: string;    // ниже — не зачисляется (остаётся пулу как пыль)
   minActionZat: string;     // минимальная сумма действия с баланса (zecIn / withdraw_zec)
   confirmations: number;    // K: через сколько блоков депозит зачисляется (по умолчанию 3)
+  fees: {                   // v0.4
+    createFeeZat: string;             // комиссия запуска, зат
+    withdrawZecFeeZat: string;        // комиссия вывода ZEC, зат
+    withdrawTokenGasLamports: string; // капля SOL получателю на каждую часть
+    withdrawTokenCostLamports: string;// рента ATA + fee на каждую часть; комиссия вывода токена = parts × (gas + cost) по курсу buy
+  };
+  createEnabled: boolean;   // v0.4: false → POST create вернёт 503 venue_unavailable
+  rate?: {                  // v0.4: из фонового кэша (обновление 30–60 с); нет поля → курса нет
+    lamportsPerZec: string;     // mid
+    lamportsPerZecBuy: string;  // для buy/create/комиссий (mid − спред)
+    lamportsPerZecSell: string; // для sell (mid + спред)
+    spreadBps: number;          // текущий спред (×2 при устаревшей котировке)
+    source: "near-1click" | "fixed";
+    ts: number;                 // время котировки, unix мс
+  };
 }
 
 interface Portfolio {
@@ -96,6 +127,7 @@ interface DepositInfo {
   id: string;               // 16 случайных байт, hex (32 символа); стабилен, виден только владельцу; НЕ связан с txid/note
   amountZat: string;
   status: "credited";       // "refund_pending" в v1 не возникает (refund не используется)
+  publicSource: boolean;    // v0.4: сумма депозита публична (tx с t-адреса / из Sapling / старого Orchard); показать предупреждение
   ts: number;               // время зачисления, unix мс, округлено ВНИЗ до начала суток UTC
 }
 
@@ -106,7 +138,7 @@ interface ActionReceipt {
 }
 
 interface ActionStatus {
-  status: "queued" | "executed" | "failed";
+  status: "queued" | "sent" | "executed" | "failed";   // sent (v0.4): tx отправлена, ждём финальности
   solanaTx?: string;        // первая подтверждённая подпись; через 24 ч после исполнения связь удаляется (поле пропадает)
   error?: ErrorCode;        // при failed: slippage | graduated | pool_liquidity | venue_unavailable | not_found | bad_request | internal
   rate?: RateUsed;
@@ -131,14 +163,14 @@ interface RateUsed {
 // anonPubkey/nonce/ts/sig передаются ЗАГОЛОВКАМИ (см. «Подпись запросов»), не в теле.
 // create: meta уходит в теле (подписано через sha256(body)), отдельный хеш/канонизация meta не нужны.
 type SignedAction = (
-  | { op: "buy";  venue: Venue; mint: string; zecIn: string; minOut: string }
-  | { op: "sell"; venue: Venue; mint: string; amount: string; minZecOut: string }
-  | { op: "create"; venue: Venue; meta: { name: string; symbol: string; image?: string }; initialBuyZec?: string }
+  | { op: "buy";  venue: Venue; mint: string; zecIn: string; minOut: string; privacy?: "fast" | "max" }
+  | { op: "sell"; venue: Venue; mint: string; amount: string; minZecOut: string; privacy?: "fast" | "max" }
+  | { op: "create"; venue: Venue; meta: { name: string; symbol: string; image?: string }; initialBuyZec?: string; privacy?: "fast" | "max" }  // 503 пока выключен
   | { op: "claim"; mint?: string }                          // creator fees → баланс; чисто реестровая операция,
                                                             // on-chain сбор fees — по глобальному расписанию пула
-  | { op: "withdraw_zec"; to: string; amount: string }       // UA с Orchard/Ironwood receiver; t-адрес и Sapling-only → 400
+  | { op: "withdraw_zec"; to: string; amount: string; privacy?: "fast" | "max" }  // UA с Orchard/Ironwood receiver; t-адрес и Sapling-only → 400
   | { op: "withdraw_token"; mint: string; amount: string; to: string | string[];   // на новый Solana-адрес
-      smart?: { parts: number; maxDelayMin: number } }  // умный вывод: parts 2..5 (длина `to` = parts)
+      smart?: { parts: number; maxDelayMin: number }; privacy?: "fast" | "max" }  // умный вывод: parts 2..5 (длина `to` = parts)
   | { op: "order_create"; venue: Venue; mint: string;
       kind: "limit_buy" | "limit_sell" | "take_profit" | "stop_loss";
       triggerPriceSol: string; amount: string }                                   // amount: ZEC для buy, токены для sell
@@ -171,16 +203,16 @@ interface PlatformStats {
 ```
 
 ### Правила исполнения действий
-- Действия исполняются **батчами** (эпоха 3–10 с плюс случайный джиттер; по умолчанию задержка 3–20 с на действие). `status` остаётся `queued` до исполнения.
-- **Курс.** Сумма в SOL считается при приёме по курсу ZEC→SOL (dry-котировка NEAR Intents 1Click на 1 ZEC, кэш ~45 с; на devnet — фиксированный) со спредом пула (по умолчанию 0,5 %). Курс фиксируется в действии и возвращается в `rate`. Нет курса → `503 venue_unavailable`.
-- **buy:** hold = `zecIn`; неистраченные лампорты (если площадка взяла меньше) возвращаются в ZEC по курсу действия.
+- buy/sell/create исполняются **эпохами**: граница каждые случайные 30–60 с (`privacy: "max"` — 5–15 мин), всё накопленное к границе исполняется пачкой в случайном порядке. `status` остаётся `queued` до исполнения.
+- **Курс.** Сумма в SOL считается при приёме по курсу ZEC→SOL (dry-котировка NEAR Intents 1Click на 1 ZEC, обновляется фоном раз в 30–60 с, не по запросу; на devnet — фиксированный) со спредом пула (по умолчанию 0,5 %, ×2 при устаревшей котировке). Курс фиксируется в действии и возвращается в `rate`. Нет курса (котировка старше 120 с) → `503 venue_unavailable`.
+- **buy:** SOL = `zecIn` × курс, срезка 0–1 % и округление вниз до 0.001 SOL; hold = ZEC-эквивалент этой SOL-суммы (≤ `zecIn`); неистраченные лампорты (если площадка взяла меньше) возвращаются в ZEC по курсу действия.
 - **sell:** держит `amount` токенов; выручка зачисляется в ZEC по курсу действия; непроданный остаток возвращается. Минимум: `minZecOut ≥ minActionZat` **или** оценка по текущей цене токена ≥ `minActionZat`, иначе `below_minimum`.
-- **create:** hold = `initialBuyZec` (если есть, ≥ `minActionZat`) + комиссия запуска (`CREATE_FEE_ZAT`, по умолчанию 100 000 зат). `meta.name` 1–32 символа, `meta.symbol` 1–10 ASCII букв/цифр, `meta.image` — только `data:image/(png|jpeg|webp);base64,…` до 512 КиБ (тело запроса ≤ 1 МиБ). `venue: "jupiter"` → 400.
-- **withdraw_zec:** hold = `amount` + комиссия сети (`WITHDRAW_ZEC_FEE_ZAT`, 15 000 зат); выплата с задержкой 1–10 мин. *Исполнитель выплат ещё не подключён — действие остаётся `queued`.*
-- **withdraw_token:** держит `amount` токенов; комиссия в ZEC = частей × (капля SOL получателю + рента ATA + fee) по курсу; без `smart` — `to` строка или массив из 1 адреса, задержка 30 с–5 мин; со `smart` — длина `to` = `parts`, адреса разные, суммы частей неравные (±20 %), задержка каждой части до `maxDelayMin`.
+- **create:** *(сейчас `503 venue_unavailable`, см. выше)* hold = `initialBuyZec` (округление как у buy, если есть, ≥ `minActionZat`) + комиссия запуска (`CREATE_FEE_ZAT`, по умолчанию 100 000 зат). `meta.name` 1–32 символа, `meta.symbol` 1–10 ASCII букв/цифр, `meta.image` — только `data:image/(png|jpeg|webp);base64,…` до 512 КиБ (тело запроса ≤ 1 МиБ). `venue: "jupiter"` → 400.
+- **withdraw_zec:** hold = `amount` + комиссия сети (`WITHDRAW_ZEC_FEE_ZAT`, 15 000 зат); выплата с задержкой 1–10 мин (`privacy: "max"` — 10–60 мин), готовые выплаты объединяются в одну tx (до 5). `executed` после K подтверждений выплаты; если tx истекла не попав в блок — выплата переотправляется новой tx (двойной выплаты нет). Сумма выплаты ровно `amount`, комиссию сети платит пул из `WITHDRAW_ZEC_FEE_ZAT`.
+- **withdraw_token:** держит `amount` токенов; комиссия в ZEC = частей × (капля SOL получателю + рента ATA + fee) по курсу; без `smart` — `to` строка или массив из 1 адреса, задержка 30 с–5 мин (`privacy: "max"` — 10–60 мин); со `smart` — длина `to` = `parts`, адреса разные, суммы частей неравные (±20 %), задержка каждой части до `maxDelayMin`.
 - **Пока не поддерживаются** (→ `400 bad_request "op not supported yet"`): `claim`, `order_create`, `order_cancel`, `chat`.
 - Новое действие при `frozen` → `423 balance_frozen` для **любой** операции (в т. ч. без ZEC-hold).
-- `withdraw_token` **всегда**: капля SOL на газ на каждый адрес получателя, случайная задержка, отправка с **другого** vault, чем покупка, каждая часть — отдельной tx. `smart` добавляет только разбиение на N адресов. Если сумма вывода совпадает с недавней покупкой, фронт предупреждает.
+- `withdraw_token` **всегда**: капля SOL на газ на каждый адрес получателя, случайная задержка, отправка с vault, где пул держит этот mint (общий инвентарь пула: все vault публичны и видны в Verify, «другой vault» приватности не добавлял — D4), каждая часть — отдельной tx. `smart` добавляет только разбиение на N адресов. Если сумма вывода совпадает с недавней покупкой, фронт предупреждает.
 - `withdraw_zec`: выплата shielded ZEC, с задержкой/батчингом; пул не хранит outgoing viewing data (OVK discard).
 - `create.meta.image`: файл идёт только на наш бэкенд; сервер удаляет метаданные (EXIF), перекодирует и заливает сам.
 - `id` действий/ордеров — 128 бит случайных, hex (32 символа).

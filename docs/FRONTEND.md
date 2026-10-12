@@ -32,6 +32,11 @@
 - На Devnet — заметный, но спокойный баннер “Devnet — test funds only” и вход по demo-ключу. На Mainnet — предупреждение “Real funds”.
 - Anon-ключ и сессия хранятся раздельно по сети.
 
+## Режим исполнения
+- У кнопки Buy/Sell — сегментированный переключатель “Now” / “Delayed”; внутри Delayed — пункт “Max privacy (5–15 min)”. Подписи: Now — “1–3 s · on-chain private, network-visible”; Delayed — “30–60 s batch · better privacy”.
+- Режим по умолчанию — настройка профиля (раздел Settings в `/portfolio` или `/key`), по умолчанию Delayed. Хранится локально по сети, на сервер не уходит (кроме поля `exec` в самом действии).
+- На Top up подсказка: “Top up in advance — faster trades and better privacy”.
+
 ## Страницы
 1. `/` — лента + горячие токены
 2. `/token/[mint]` — график, сделки, купить / продать

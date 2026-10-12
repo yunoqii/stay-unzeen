@@ -27,6 +27,7 @@
 - —
 
 ## Решения
+- 12.10 (владелец): режимы исполнения Now (1–3 с, priority fee/Jito tip) / Delayed (30–60 с) / Max privacy (5–15 мин); дефолт в профиле = Delayed; подсказка на Top up; в README — модель угроз для Now (сеть видна → Tor/VPN или Delayed); analyst проверяет Now на другие утечки
 - 12.10 (владелец, D4): один vault на mint (общий инвентарь по токену), правило «вывод с другого vault» снято; вывод с газом, задержкой, округлением, дроблением
 - 12.10 (лид, по review-day4): исполнение эпохами 30–60 с (max privacy 5–15 мин); суммы в actions обнулять через 24 ч, ops старше 48 ч удалять; курс 1Click по таймеру; релейер под своей ролью
 - 12.10 (владелец): данные пула на VPS — на зашифрованном томе с ручной разблокировкой (N2); мониторинг с алертом
@@ -72,7 +73,7 @@
 - ~0.1–0.2 ZEC и ~0.3 SOL для mainnet-демо (к дням 6–8)
 
 ## План сдачи (дни 15–16, от analyst)
-- LICENSE (MIT); README на английском: модель доверия, что приватно/что нет, real vs mock, «Built during ZECATHON», roadmap
+- LICENSE (MIT); README на английском: модель доверия, модель угроз режима Now (защищает от наблюдателей в блокчейне, не от сетевой слежки → Tor/VPN или Delayed), что приватно/что нет, real vs mock, «Built during ZECATHON», roadmap
 - Поиск секретов по всей истории (`gitleaks detect --log-opts="--all"` + grep mnemonic/uview/JWT) до открытия репо
 - VPS живой 29.10–22.11: мониторинг uptime, балансов TAZ/devnet-SOL/demo-ключей, запасной lightwalletd; логи по чек-листу H9
 - Description ≤2000 символов (what it does / why it doesn't leak / real vs mock) + demo-ключи
