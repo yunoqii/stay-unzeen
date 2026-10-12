@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useId, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowDown, Info, Key, LockKey, ShieldCheck, WarningCircle } from "@phosphor-icons/react";
+import { ArrowDown, CaretDown, Info, Key, LockKey, ShieldCheck, SlidersHorizontal, WarningCircle } from "@phosphor-icons/react";
 import { ApiError, errorText } from "@/lib/api/client";
 import type { SignedAction, Token, Venue } from "@/lib/api/types";
 import { lastRate, submitAction, useAction, useActivityVersion } from "@/lib/activity";
@@ -12,6 +12,7 @@ import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, unitsToNu
 import { useNetwork } from "@/lib/network";
 import { nowFee as poolNowFee, resolveExec, useDefaultExec, withExec, type ExecMode, type NowFee } from "@/lib/exec";
 import { lamportsToZatCeil, quoteBuy, quoteSell } from "@/lib/trade";
+import { isSlippageBps, MAX_SLIPPAGE_BPS, SELL_PRESETS, SLIPPAGE_CHOICES_BPS, updateTradeSettings, useTradeSettings } from "@/lib/trade-settings";
 import { cn } from "@/lib/utils";
 import { usePool } from "@/hooks/use-pool";
 import { usePortfolio } from "@/hooks/use-portfolio";
@@ -20,9 +21,6 @@ import { ActionStatusCard } from "./action-status";
 import { ExecSwitch } from "./exec-switch";
 
 type Side = "buy" | "sell";
-const SLIPPAGE_BPS = [50, 100, 300, 500];
-const BUY_PRESETS = ["0.01", "0.05", "0.1"];
-const SELL_PRESETS = [25, 50, 100];
 
 export function TradePanel({ token, priceSol }: { token: Token; priceSol: string }) {
   const key = useKeyState();
@@ -30,7 +28,7 @@ export function TradePanel({ token, priceSol }: { token: Token; priceSol: string
   const tabsId = useId();
 
   return (
-    <section aria-labelledby={`${tabsId}-title`} className="rounded-2xl border border-border bg-card/60 p-4 sm:p-5">
+    <section aria-labelledby={`${tabsId}-title`} className="p-4 sm:p-5">
       <h2 id={`${tabsId}-title`} className="sr-only">
         Trade ${token.symbol}
       </h2>
@@ -89,7 +87,9 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
   const { pool } = usePool();
   useActivityVersion(); // re-render when a new rate arrives
   const [amount, setAmount] = useState("");
-  const [slippage, setSlippage] = useState(100);
+  const settings = useTradeSettings(network);
+  const slippage = settings.slippageBps;
+  const setSlippage = (bps: number) => updateTradeSettings(network, { slippageBps: bps });
   const profileExec = useDefaultExec(network);
   const [execOverride, setExecOverride] = useState<ExecMode | null>(null);
   const exec = resolveExec(profileExec, execOverride);
@@ -111,28 +111,32 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
   const available = isBuy ? zecBalance : holding;
   const minAction = pool ? BigInt(pool.minActionZat) : null;
 
-  let parsed: bigint | null = null;
-  let inputError: string | null = null;
-  if (amount.trim() !== "") {
-    try {
-      parsed = BigInt(parseUnits(amount, decimals));
-      if (parsed === BigInt(0)) inputError = "Enter an amount above zero.";
-    } catch {
-      inputError = `Use a number with up to ${decimals} decimals.`;
+  /** Parse and quote an amount string: the form and one-tap presets use the same checks. */
+  const evaluate = (value: string) => {
+    let parsed: bigint | null = null;
+    let inputError: string | null = null;
+    if (value.trim() !== "") {
+      try {
+        parsed = BigInt(parseUnits(value, decimals));
+        if (parsed === BigInt(0)) inputError = "Enter an amount above zero.";
+      } catch {
+        inputError = `Use a number with up to ${decimals} decimals.`;
+      }
     }
-  }
-  if (parsed !== null && !inputError) {
-    if (available !== null && parsed > available)
-      inputError = isBuy ? "More than your ZEC balance." : `You hold ${formatCompact(unitsToNumber(available.toString(), decimals))} ${unit}.`;
-    else if (isBuy && minAction !== null && parsed < minAction) inputError = `The pool minimum is ${formatZec(minAction.toString())} ZEC.`;
-  }
-
-  const quote =
-    parsed === null || inputError
-      ? null
-      : isBuy
-        ? quoteBuy(parsed, rate, priceSol, token.decimals, slippage)
-        : quoteSell(parsed, rate, priceSol, token.decimals, slippage);
+    if (parsed !== null && !inputError) {
+      if (available !== null && parsed > available)
+        inputError = isBuy ? "More than your ZEC balance." : `You hold ${formatCompact(unitsToNumber(available.toString(), decimals))} ${unit}.`;
+      else if (isBuy && minAction !== null && parsed < minAction) inputError = `The pool minimum is ${formatZec(minAction.toString())} ZEC.`;
+    }
+    const quote =
+      parsed === null || inputError
+        ? null
+        : isBuy
+          ? quoteBuy(parsed, rate, priceSol, token.decimals, slippage)
+          : quoteSell(parsed, rate, priceSol, token.decimals, slippage);
+    return { parsed, inputError, quote };
+  };
+  const { parsed, inputError, quote } = evaluate(amount);
 
   const frozen = portfolio?.frozen ?? false;
   const canSubmit = !busy && parsed !== null && !inputError && !frozen && portfolio !== null;
@@ -140,15 +144,20 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
   const setPreset = (v: string) => {
     setError(null);
     setAmount(v);
+    if (settings.oneTap) void submit(v);
   };
   const setPercent = (pct: number) => {
     if (holding === null) return;
     setError(null);
-    setAmount(formatUnits(((holding * BigInt(pct)) / BigInt(100)).toString(), token.decimals));
+    const v = formatUnits(((holding * BigInt(pct)) / BigInt(100)).toString(), token.decimals);
+    setAmount(v);
+    if (settings.oneTap) void submit(v);
   };
 
-  const submit = async () => {
-    if (!canSubmit || parsed === null) return;
+  const submit = async (value: string = amount) => {
+    const { parsed, inputError, quote } = evaluate(value);
+    // Invalid input stays in the field with its hint; nothing is signed.
+    if (busy || parsed === null || inputError || frozen || portfolio === null) return;
     setBusy(true);
     setError(null);
     const action: SignedAction = withExec(
@@ -232,20 +241,28 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
 
       <div className="flex flex-wrap gap-1.5">
         {isBuy
-          ? BUY_PRESETS.map((v) => (
-              <Chip key={v} onClick={() => setPreset(v)} active={amount === v}>
-                {v}
+          ? settings.buyPresets.map((v) => (
+              <Chip key={v} onClick={() => setPreset(v)} active={amount === v} disabled={busy} aria-label={settings.oneTap ? `Buy ${v} ZEC now` : `${v} ZEC`}>
+                {settings.oneTap ? `Buy ${v}` : v}
               </Chip>
             ))
           : SELL_PRESETS.map((p) => (
-              <Chip key={p} onClick={() => setPercent(p)} disabled={!holding}>
-                {p === 100 ? "All" : `${p}%`}
+              <Chip key={p} onClick={() => setPercent(p)} disabled={!holding || busy} aria-label={settings.oneTap ? `Sell ${p}% now` : `${p}% of holding`}>
+                {settings.oneTap ? `Sell ${p}%` : `${p}%`}
               </Chip>
             ))}
-        {isBuy && zecBalance !== null && zecBalance > BigInt(0) && (
+        {isBuy && !settings.oneTap && zecBalance !== null && zecBalance > BigInt(0) && (
           <Chip onClick={() => setPreset(formatUnits(zecBalance.toString(), ZEC_DECIMALS))}>Max</Chip>
         )}
       </div>
+      {settings.oneTap && (
+        <p className="-mt-2 text-[11px] text-faint-foreground">
+          One-tap is on: a preset signs the order right away.{" "}
+          <Link href="/portfolio#settings" className="underline-offset-4 hover:text-muted-foreground hover:underline">
+            Change
+          </Link>
+        </p>
+      )}
 
       {(inputError || (isBuy && zecBalance === BigInt(0))) && (
         <p id={`${ids}-hint`} className={cn("text-xs", inputError ? "text-sell" : "text-faint-foreground")}>
@@ -263,16 +280,7 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
         nowFee={exec === "now" ? { fee: poolNowFee(pool) } : null}
       />
 
-      <fieldset>
-        <legend className="text-xs text-muted-foreground">Max slippage</legend>
-        <div className="mt-2 grid grid-cols-4 gap-1.5">
-          {SLIPPAGE_BPS.map((b) => (
-            <Chip key={b} onClick={() => setSlippage(b)} active={slippage === b} aria-pressed={slippage === b} className="w-full justify-center">
-              {b / 100}%
-            </Chip>
-          ))}
-        </div>
-      </fieldset>
+      <PanelSettings slippage={slippage} onSlippage={setSlippage} />
 
       <ExecSwitch value={exec} onChange={(m) => setExecOverride(m === profileExec ? null : m)} profileDefault={profileExec} />
 
@@ -305,7 +313,7 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
       </AnimatePresence>
 
       <Button
-        onClick={submit}
+        onClick={() => submit()}
         disabled={!canSubmit}
         className="h-12 w-full rounded-full text-[15px]"
       >
@@ -430,5 +438,77 @@ function Chip({
         className,
       )}
     />
+  );
+}
+
+/**
+ * Panel settings: max slippage (saved per network in this browser). Priority is the execution mode
+ * below (Now / Delayed): there is no separate priority fee to tune.
+ */
+function PanelSettings({ slippage, onSlippage }: { slippage: number; onSlippage: (bps: number) => void }) {
+  const [open, setOpen] = useState(false);
+  const [custom, setCustom] = useState("");
+  const id = useId();
+  const customBps = custom.trim() === "" ? null : Math.round(Number(custom) * 100);
+  const customOk = customBps !== null && isSlippageBps(customBps);
+  return (
+    <div className="rounded-xl border border-border">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={`${id}-p`}
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+      >
+        <SlidersHorizontal size={13} weight="light" aria-hidden />
+        <span className="flex-1 text-left">
+          Max slippage <span className="tabular text-foreground">{slippage / 100}%</span>
+        </span>
+        <CaretDown size={11} weight="light" className={cn("transition-transform duration-200", open && "rotate-180")} aria-hidden />
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            id={`${id}-p`}
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            style={{ overflow: "hidden" }}
+          >
+            <div className="space-y-3 border-t border-border/60 px-3 pt-3 pb-3">
+              <div role="radiogroup" aria-label="Max slippage" className="grid grid-cols-5 gap-1.5">
+                {SLIPPAGE_CHOICES_BPS.map((b) => (
+                  <Chip key={b} role="radio" aria-checked={slippage === b} onClick={() => onSlippage(b)} active={slippage === b} className="w-full justify-center px-0">
+                    {b / 100}%
+                  </Chip>
+                ))}
+                <input
+                  aria-label="Custom slippage, percent"
+                  inputMode="decimal"
+                  placeholder="%"
+                  value={custom}
+                  onChange={(e) => setCustom(e.target.value.replace(",", "."))}
+                  onBlur={() => customOk && onSlippage(customBps!)}
+                  onKeyDown={(e) => e.key === "Enter" && customOk && onSlippage(customBps!)}
+                  className={cn(
+                    "tabular h-9 w-full min-w-0 rounded-full border bg-transparent text-center text-xs outline-none sm:h-8 focus:border-ring",
+                    custom && !customOk ? "border-destructive/60" : "border-border",
+                  )}
+                />
+              </div>
+              {custom && !customOk && <p className="text-[11px] text-sell">Use 0.01–{MAX_SLIPPAGE_BPS / 100}%.</p>}
+              <p className="text-[11px] text-pretty text-faint-foreground">
+                Priority is the execution mode below: Now skips the batch. No separate priority fee. Buy presets live in{" "}
+                <Link href="/portfolio#settings" className="underline underline-offset-4 hover:text-muted-foreground">
+                  Settings
+                </Link>
+                .
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }

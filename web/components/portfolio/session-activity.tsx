@@ -11,6 +11,7 @@ import { ActionStatusCard } from "@/components/trade/action-status";
 
 const LABEL: Record<TrackedAction["status"]["status"], string> = {
   queued: "Queued",
+  sent: "Sent",
   executed: "Done",
   failed: "Failed",
 };
@@ -44,7 +45,7 @@ export function SessionActivity({ actions }: { actions: TrackedAction[] }) {
                   aria-hidden
                   className={cn(
                     "size-1.5 shrink-0 rounded-full",
-                    a.status.status === "queued" && "live-dot bg-zec",
+                    (a.status.status === "queued" || a.status.status === "sent") && "live-dot bg-zec",
                     a.status.status === "executed" && "bg-muted-foreground",
                     a.status.status === "failed" && "bg-sell",
                   )}

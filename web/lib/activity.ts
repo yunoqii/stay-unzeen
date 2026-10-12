@@ -11,6 +11,7 @@ import { api, ApiError, errorText } from "@/lib/api/client";
 import type { ActionReceipt, ActionStatus, ExecMode, RateUsed, SignedAction } from "@/lib/api/types";
 import { getSigner } from "@/lib/crypto/session";
 import type { Network } from "@/lib/network";
+import { recordSubmitted } from "@/lib/history/store";
 
 export type TrackedOp = "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token";
 
@@ -159,6 +160,10 @@ export async function submitAction(
   };
   items.set(it.id, it);
   emit();
+  if (meta.op !== "withdraw_zec") {
+    // Encrypted local history for PnL (T4): the id, kind and mint only; the fill arrives with the poll.
+    void recordSubmitted(network, signer.pubkey, { id: it.id, kind: meta.op, mint: meta.mint, symbol: meta.symbol, decimals: meta.decimals, submittedAt: it.submittedAt });
+  }
   acceptedListeners.forEach((l) => l());
   return it;
 }

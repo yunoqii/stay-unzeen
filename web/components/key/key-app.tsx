@@ -19,6 +19,7 @@ import {
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { keypairFromMnemonic, newMnemonic } from "@/lib/crypto/keys";
+import { forgetHistory } from "@/lib/history/store";
 import { forgetDevice, getVault, lock, storeAndUnlock, unlock, useKeyState } from "@/lib/crypto/session";
 import { decryptVault, encryptMnemonic, WrongPasswordError } from "@/lib/crypto/vault";
 import { shortAddr } from "@/lib/format";
@@ -608,6 +609,8 @@ function ForgetButton() {
         size="sm"
         className="rounded-full px-3"
         onClick={() => {
+          const v = getVault();
+          if (v) void forgetHistory(v.network, v.pubkey); // the encrypted trade history goes with the key
           forgetDevice();
           toast("Key removed from this device");
         }}

@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import type { CandlestickData, IChartApi, ISeriesApi, HistogramData, UTCTimestamp } from "lightweight-charts";
+import type { CandlestickData, IChartApi, ISeriesApi, ISeriesMarkersPluginApi, HistogramData, SeriesMarker, Time, UTCTimestamp } from "lightweight-charts";
 import { api, errorText } from "@/lib/api/client";
 import type { Candle, CandleTimeframe, FeedEvent } from "@/lib/api/types";
+import type { Fill } from "@/lib/pnl";
 import { formatPrice, lamportsToSol, unitsToNumber } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
 import { cn } from "@/lib/utils";
@@ -42,15 +43,17 @@ function cssVar(name: string, fallback: string) {
 
 /**
  * Candles from GET /api/tokens/:mint/candles, kept live by this token's trades from the socket.
- * lightweight-charts is loaded on demand (client only).
+ * lightweight-charts is loaded on demand (client only). `markers` are the user's own fills from the
+ * local encrypted history: drawn only while `showMarkers` (Peek), never sent anywhere.
  */
-export function PriceChart({ mint, trades }: { mint: string; trades: FeedEvent[] }) {
+export function PriceChart({ mint, trades, markers = [], showMarkers = false }: { mint: string; trades: FeedEvent[]; markers?: readonly Fill[]; showMarkers?: boolean }) {
   const [tf, setTf] = useState<CandleTimeframe>("5m");
   const [state, setState] = useState<"loading" | "ready" | "empty" | { error: string }>("loading");
   const box = useRef<HTMLDivElement>(null);
   const chart = useRef<IChartApi | null>(null);
   const candles = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volume = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const marks = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const last = useRef<Bar | null>(null);
   const applied = useRef<Set<string>>(new Set());
   const network = useNetwork();
@@ -109,6 +112,7 @@ export function PriceChart({ mint, trades }: { mint: string; trades: FeedEvent[]
         priceLineVisible: false,
       });
       volume.current.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+      marks.current = lc.createSeriesMarkers(candles.current, []);
       chart.current = c;
       setReadyTick((t) => t + 1);
     });
@@ -118,8 +122,35 @@ export function PriceChart({ mint, trades }: { mint: string; trades: FeedEvent[]
       chart.current = null;
       candles.current = null;
       volume.current = null;
+      marks.current = null;
     };
   }, []);
+
+  // Own trades as markers, snapped to the bar they fell into.
+  useEffect(() => {
+    if (!marks.current) return;
+    if (!showMarkers || (state !== "ready" && state !== "empty")) {
+      marks.current.setMarkers([]);
+      return;
+    }
+    const step = TF_SEC[tf];
+    const { up, down } = colors.current;
+    const list: SeriesMarker<Time>[] = markers
+      .filter((f) => f.kind !== "withdraw_token")
+      .map((f) => {
+        const buy = f.kind !== "sell";
+        return {
+          time: (Math.floor(f.ts / 1000 / step) * step) as UTCTimestamp,
+          position: buy ? "belowBar" : "aboveBar",
+          shape: buy ? "arrowUp" : "arrowDown",
+          color: buy ? up : down,
+          text: buy ? "You bought" : "You sold",
+          size: 0.8,
+        } satisfies SeriesMarker<Time>;
+      })
+      .sort((a, b) => (a.time as number) - (b.time as number));
+    marks.current.setMarkers(list);
+  }, [markers, showMarkers, tf, state, readyTick]);
 
   // History for the selected timeframe.
   useEffect(() => {
@@ -172,7 +203,7 @@ export function PriceChart({ mint, trades }: { mint: string; trades: FeedEvent[]
   }, [trades, tf, state]);
 
   return (
-    <section aria-labelledby="chart-title" className="rounded-2xl border border-border">
+    <section aria-labelledby="chart-title">
       <header className="flex items-center justify-between gap-3 border-b border-border/60 px-4 py-2.5">
         <h2 id="chart-title" className="text-sm font-medium">
           Price <span className="font-normal text-faint-foreground">· SOL</span>

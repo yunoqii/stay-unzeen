@@ -16,12 +16,16 @@ import type {
   CreatorToken,
   FeedEvent,
   Order,
+  PendingResponse,
   PlatformStats,
   PoolInfo,
   Portfolio,
   SignedAction,
   Token,
+  TokenSafety,
+  TokenTrade,
   TokenWithTrades,
+  TradeFilter,
 } from "./types";
 
 export { ApiError, errorText } from "./errors";
@@ -53,6 +57,10 @@ export interface TradesQuery {
   limit?: number; // <= 200
 }
 
+export interface TokenTradesQuery extends TradesQuery {
+  filter?: TradeFilter;
+}
+
 export interface CandlesQuery {
   tf?: CandleTimeframe; // default 5m
   from?: number; // unix seconds
@@ -68,9 +76,16 @@ export interface FeedSubscription {
 export interface Api {
   getFeed(limit?: number): Promise<FeedEvent[]>;
   getTokens(): Promise<Token[]>;
-  /** null when the backend does not track this mint (404 not_found). */
-  getToken(mint: string): Promise<TokenWithTrades | null>;
+  /**
+   * null when the mint does not exist (404 not_found). A cold mint (first CA search) answers 202
+   * pending: it is queued for the next fixed tick (token-intel DRAFT).
+   */
+  getToken(mint: string): Promise<TokenWithTrades | PendingResponse | null>;
   getTrades(mint: string, q?: TradesQuery): Promise<FeedEvent[]>;
+  /** DRAFT: all on-chain trades of a mint with tags; filters whales / dev need the full feed flag. */
+  getTokenTrades(mint: string, q?: TokenTradesQuery): Promise<TokenTrade[]>;
+  /** DRAFT: GET /api/tokens/:mint/safety. 202 pending until the next tick; null on 404. */
+  getSafety(mint: string): Promise<TokenSafety | PendingResponse | null>;
   getCandles(mint: string, q?: CandlesQuery): Promise<Candle[]>;
   /** Public pool info: UA, chain id, minimums, K. No pubkey, no cookies. */
   getPool(): Promise<PoolInfo>;
@@ -148,13 +163,23 @@ function makeApi(send: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscr
     getTokens: () => get("/api/tokens"),
     getToken: async (mint) => {
       try {
-        return await get<TokenWithTrades>(`/api/tokens/${enc(mint)}`);
+        return await get<TokenWithTrades | PendingResponse>(`/api/tokens/${enc(mint)}`);
       } catch (e) {
         if (e instanceof ApiError && e.code === "not_found") return null;
         throw e;
       }
     },
     getTrades: (mint, q = {}) => get(`/api/tokens/${enc(mint)}/trades${qs({ before: q.before, limit: q.limit })}`),
+    getTokenTrades: (mint, q = {}) =>
+      get(`/api/tokens/${enc(mint)}/trades${qs({ filter: q.filter, before: q.before, limit: q.limit })}`),
+    getSafety: async (mint) => {
+      try {
+        return await get<TokenSafety | PendingResponse>(`/api/tokens/${enc(mint)}/safety`);
+      } catch (e) {
+        if (e instanceof ApiError && e.code === "not_found") return null;
+        throw e;
+      }
+    },
     getCandles: (mint, q = {}) => get(`/api/tokens/${enc(mint)}/candles${qs({ tf: q.tf, from: q.from, to: q.to })}`),
     getPool: () => get("/api/pool"),
     // The anon pubkey never goes into a URL path or query (access logs = IP <-> key). Header only.

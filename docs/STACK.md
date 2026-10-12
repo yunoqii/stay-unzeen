@@ -25,7 +25,8 @@
 | `@meteora-ag/dynamic-bonding-curve-sdk` | Адаптер Meteora DBC |
 | Jupiter Swap API | Вторичка ⚠ маршрутизация токенов на кривой |
 | Jito block engine | Атомарный create+buy (fair-launch) |
-| Helius RPC + webhooks | RPC и события для ленты |
+| **Helius Free** | только оценка priority fee (фоново) и отправка tx через Helius Sender (SWQOS-only, одинаковые чаевые ~0.000005 SOL на ВСЕХ tx пула) |
+| **Shyft Free** | все чтения: warm set, top-10, приманки, подписки на кривые (accountSubscribe). Решение 12.10: чтение и отправка у разных провайдеров |
 
 ## Криптография
 - drand **tlock** (`tlock-js` на фронте) — заявки fair-launch.

@@ -6,6 +6,7 @@
 
 import { useSyncExternalStore } from "react";
 import { getNetwork, subscribeNetwork, type Network } from "@/lib/network";
+import { deriveHistoryKey } from "@/lib/history/crypto";
 import { signerFromSecret, type Signer } from "./sign";
 import { MEMO_ALLOWED_OPS, unz1MemoString, type ChainId, type Unz1Fields } from "./unz1";
 import { deleteVault, loadVault, saveVault, vaultStorageKey, type EncryptedVault } from "./vault";
@@ -22,6 +23,8 @@ interface Slot {
   vault: EncryptedVault | null | undefined; // undefined = not read yet
   secret: Uint8Array | null;
   pubkey: string | null;
+  /** AES key of the local trade history, derived lazily from the secret; dropped with it. */
+  historyKey?: Promise<CryptoKey>;
   autoLock?: ReturnType<typeof setTimeout>;
 }
 
@@ -88,6 +91,7 @@ function wipe(n: Network) {
   s.secret?.fill(0);
   s.secret = null;
   s.pubkey = null;
+  s.historyKey = undefined;
   clearTimeout(s.autoLock);
 }
 
@@ -144,4 +148,15 @@ export function signMemo(fields: Unz1Fields, chainId: ChainId, n: Network = getN
   if (!MEMO_ALLOWED_OPS.includes(fields.op)) throw new Error(`unz1 memo op "${fields.op}" is not accepted by the backend`);
   const s = slots[n].secret;
   return s ? unz1MemoString(fields, s, chainId) : null;
+}
+
+/**
+ * Key of the encrypted local trade history for the unlocked anon key of this network (lib/history).
+ * Null when locked: without the password there is no history, no PnL and no markers.
+ */
+export function getHistoryKey(n: Network = getNetwork()): { pubkey: string; key: Promise<CryptoKey> } | null {
+  const s = slots[n];
+  if (!s.secret || !s.pubkey) return null;
+  s.historyKey ??= deriveHistoryKey(s.secret, n);
+  return { pubkey: s.pubkey, key: s.historyKey };
 }

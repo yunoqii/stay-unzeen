@@ -231,3 +231,128 @@
     opacity: 0.4;
   }
 }
+
+/* ---- Ledger + redaction hatch (idea of a hairline-framed grid with hatch bands; our own build) ----
+   A ledger is one frame whose cells are separated by 1px gutters: the frame's background shows
+   through `gap`. Hatch bands read as redaction tape: the part of the record you cannot see. */
+.ledger {
+  display: grid;
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+}
+.ledger > * {
+  background: var(--background);
+  min-width: 0;
+}
+.hatch {
+  background-image: repeating-linear-gradient(
+    135deg,
+    var(--uz-white-a4) 0 1px,
+    transparent 1px 9px
+  );
+}
+.hatch-zec {
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgb(244 183 40 / 0.28) 0 1px,
+    transparent 1px 9px
+  );
+}
+
+/* Ambient glow behind the eclipse: mood only, no video, no external request. */
+@keyframes uz-glow {
+  0%, 100% { opacity: 0.55; transform: translate3d(0, 0, 0) scale(1); }
+  50% { opacity: 0.9; transform: translate3d(-2%, 1.5%, 0) scale(1.06); }
+}
+.uz-glow {
+  animation: uz-glow 9s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .uz-glow {
+    animation: none;
+  }
+}
+
+/*
+MIT License
+
+Copyright (c) 2023 Uiverse.io
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+Component by ZacharyCrespin: https://uiverse.io/ZacharyCrespin/soft-bear-48
+Adapted for unzeen: recoloured to Zcash yellow + fog, thinner strokes, reduced-motion fallback.
+*/
+.uz-loader-ring {
+  animation: uz-ringA 2s linear infinite;
+  stroke: var(--uz-zec);
+}
+.uz-loader-ring-b {
+  animation-name: uz-ringB;
+  stroke: var(--uz-fog-3);
+}
+.uz-loader-ring-c {
+  animation-name: uz-ringC;
+}
+.uz-loader-ring-d {
+  animation-name: uz-ringD;
+  stroke: var(--uz-fog-3);
+}
+@keyframes uz-ringA {
+  from, 4% { stroke-dasharray: 0 660; stroke-width: 16; stroke-dashoffset: -330; }
+  12% { stroke-dasharray: 60 600; stroke-width: 24; stroke-dashoffset: -335; }
+  32% { stroke-dasharray: 60 600; stroke-width: 24; stroke-dashoffset: -595; }
+  40%, 54% { stroke-dasharray: 0 660; stroke-width: 16; stroke-dashoffset: -660; }
+  62% { stroke-dasharray: 60 600; stroke-width: 24; stroke-dashoffset: -665; }
+  82% { stroke-dasharray: 60 600; stroke-width: 24; stroke-dashoffset: -925; }
+  90%, to { stroke-dasharray: 0 660; stroke-width: 16; stroke-dashoffset: -990; }
+}
+@keyframes uz-ringB {
+  from, 12% { stroke-dasharray: 0 220; stroke-width: 16; stroke-dashoffset: -110; }
+  20% { stroke-dasharray: 20 200; stroke-width: 24; stroke-dashoffset: -115; }
+  40% { stroke-dasharray: 20 200; stroke-width: 24; stroke-dashoffset: -195; }
+  48%, 62% { stroke-dasharray: 0 220; stroke-width: 16; stroke-dashoffset: -220; }
+  70% { stroke-dasharray: 20 200; stroke-width: 24; stroke-dashoffset: -225; }
+  90% { stroke-dasharray: 20 200; stroke-width: 24; stroke-dashoffset: -305; }
+  98%, to { stroke-dasharray: 0 220; stroke-width: 16; stroke-dashoffset: -330; }
+}
+@keyframes uz-ringC {
+  from { stroke-dasharray: 0 440; stroke-width: 16; stroke-dashoffset: 0; }
+  8% { stroke-dasharray: 40 400; stroke-width: 24; stroke-dashoffset: -5; }
+  28% { stroke-dasharray: 40 400; stroke-width: 24; stroke-dashoffset: -175; }
+  36%, 58% { stroke-dasharray: 0 440; stroke-width: 16; stroke-dashoffset: -220; }
+  66% { stroke-dasharray: 40 400; stroke-width: 24; stroke-dashoffset: -225; }
+  86% { stroke-dasharray: 40 400; stroke-width: 24; stroke-dashoffset: -395; }
+  94%, to { stroke-dasharray: 0 440; stroke-width: 16; stroke-dashoffset: -440; }
+}
+@keyframes uz-ringD {
+  from, 8% { stroke-dasharray: 0 440; stroke-width: 16; stroke-dashoffset: 0; }
+  16% { stroke-dasharray: 40 400; stroke-width: 24; stroke-dashoffset: -5; }
+  36% { stroke-dasharray: 40 400; stroke-width: 24; stroke-dashoffset: -175; }
+  44%, 50% { stroke-dasharray: 0 440; stroke-width: 16; stroke-dashoffset: -220; }
+  58% { stroke-dasharray: 40 400; stroke-width: 24; stroke-dashoffset: -225; }
+  78% { stroke-dasharray: 40 400; stroke-width: 24; stroke-dashoffset: -395; }
+  86%, to { stroke-dasharray: 0 440; stroke-width: 16; stroke-dashoffset: -440; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .uz-loader-ring {
+    animation: none;
+    stroke-dasharray: 40 400;
+  }
+}

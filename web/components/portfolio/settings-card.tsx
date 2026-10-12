@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { GearSix, Lightning, ShieldCheck, Timer } from "@phosphor-icons/react";
 import { EXEC_COPY, EXEC_MODES, NOW_WARNING, setDefaultExec, useDefaultExec, type ExecMode } from "@/lib/exec";
-import { NETWORK_CONFIG, useNetwork } from "@/lib/network";
+import { NETWORK_CONFIG, useNetwork, type Network } from "@/lib/network";
+import { DEFAULT_BUY_PRESETS, normalizePreset, updateTradeSettings, useTradeSettings } from "@/lib/trade-settings";
 import { cn } from "@/lib/utils";
 
 const ICON: Record<ExecMode, typeof Lightning> = { now: Lightning, delayed: Timer, max: ShieldCheck };
@@ -71,10 +72,93 @@ export function SettingsCard() {
             );
           })}
         </div>
-        <p className="mt-3 text-[11px] text-pretty text-faint-foreground">
-          Saved in this browser for {NETWORK_CONFIG[network].label} only. Never sent to the server — the pool only sees the mode of each order you sign.
-        </p>
       </div>
+
+      <QuickTrade network={network} />
+
+      <p className="mt-5 text-[11px] text-pretty text-faint-foreground">
+        Saved in this browser for {NETWORK_CONFIG[network].label} only. Never sent to the server — the pool only sees the orders you sign.
+      </p>
     </section>
+  );
+}
+
+/** Buy presets (ZEC) and one-tap mode for the trade panel. Sell presets are fixed: 25 / 50 / 100%. */
+function QuickTrade({ network }: { network: Network }) {
+  const settings = useTradeSettings(network);
+  const id = useId();
+  return (
+    <div className="mt-5 border-t border-border/60 pt-5">
+      <p id={`${id}-p`} className="text-sm">
+        Buy presets
+      </p>
+      <p className="mt-0.5 text-xs text-faint-foreground">ZEC amounts on the quick buttons. Sell presets are 25%, 50% and 100%.</p>
+      <div role="group" aria-labelledby={`${id}-p`} className="mt-3 grid grid-cols-3 gap-2">
+        {settings.buyPresets.map((v, i) => (
+          <PresetInput
+            key={`${network}:${i}:${v}`}
+            index={i}
+            value={v}
+            onCommit={(next) => {
+              const list = [...settings.buyPresets] as [string, string, string];
+              list[i] = next;
+              updateTradeSettings(network, { buyPresets: list });
+            }}
+          />
+        ))}
+      </div>
+      {settings.buyPresets.join() !== DEFAULT_BUY_PRESETS.join() && (
+        <button
+          type="button"
+          onClick={() => updateTradeSettings(network, { buyPresets: DEFAULT_BUY_PRESETS })}
+          className="mt-2 rounded text-[11px] text-faint-foreground underline-offset-4 hover:text-muted-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        >
+          Reset to 0.1 / 0.5 / 1
+        </button>
+      )}
+
+      <label className="mt-4 flex cursor-pointer items-start gap-3">
+        <input
+          type="checkbox"
+          role="switch"
+          checked={settings.oneTap}
+          onChange={(e) => updateTradeSettings(network, { oneTap: e.target.checked })}
+          className="peer sr-only"
+        />
+        <span
+          aria-hidden
+          className="relative mt-0.5 h-5 w-9 shrink-0 rounded-full border border-border-strong bg-surface-2 transition-colors peer-checked:bg-zec/30 peer-focus-visible:ring-2 peer-focus-visible:ring-ring"
+        >
+          <span className={cn("absolute top-0.5 left-0.5 size-3.5 rounded-full bg-muted-foreground transition-transform duration-200", settings.oneTap && "translate-x-4 bg-zec")} />
+        </span>
+        <span className="text-sm">
+          One-tap presets
+          <span className="mt-0.5 block text-xs text-faint-foreground">A preset signs the order right away, with your slippage and execution mode. Off: a preset only fills the amount.</span>
+        </span>
+      </label>
+    </div>
+  );
+}
+
+function PresetInput({ index, value, onCommit }: { index: number; value: string; onCommit: (v: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  const norm = normalizePreset(draft);
+  const commit = () => {
+    if (norm && norm !== value) onCommit(norm);
+    else setDraft(value);
+  };
+  return (
+    <span className={cn("flex h-10 items-center rounded-xl border bg-surface-1 px-3 focus-within:border-ring", draft && !norm ? "border-destructive/60" : "border-border")}>
+      <input
+        aria-label={`Buy preset ${index + 1}, ZEC`}
+        inputMode="decimal"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value.replace(",", "."))}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+        className="tabular w-full min-w-0 bg-transparent text-sm outline-none"
+      />
+      <span className="ml-1 text-xs text-faint-foreground">ZEC</span>
+    </span>
   );
 }

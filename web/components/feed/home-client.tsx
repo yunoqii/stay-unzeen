@@ -57,15 +57,14 @@ export function HomeClient() {
           ))}
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-8">
-          <section
-            id="panel-feed"
-            aria-labelledby="feed-title"
-            className={cn("min-w-0 border-border/60 sm:rounded-2xl sm:border", tab !== "feed" && "max-lg:hidden")}
-          >
+        {/* The ledger: feed and hot tokens are cells of one hairline frame, with redaction hatch above and below. */}
+        <div aria-hidden className="hatch mx-4 h-3 sm:mx-0" />
+        <div className="ledger mx-4 sm:mx-0 lg:grid-cols-[minmax(0,1fr)_340px]">
+          <section id="panel-feed" aria-labelledby="feed-title" className={cn("min-w-0", tab !== "feed" && "max-lg:hidden")}>
             <header className="flex items-center justify-between border-b border-border/60 px-4 py-3 sm:px-5">
-              <h2 id="feed-title" className="text-sm font-medium">
+              <h2 id="feed-title" className="flex items-baseline gap-2 text-sm font-medium">
                 What unzeen is doing
+                <span className="font-mono text-[10px] font-normal tracking-wider text-faint-foreground uppercase">public · on-chain</span>
               </h2>
               <FeedStatusDot status={feed.status} />
             </header>
@@ -76,9 +75,9 @@ export function HomeClient() {
             id="panel-hot"
             ref={hotRef}
             aria-labelledby="hot-title"
-            className={cn("min-w-0 scroll-mt-20 lg:sticky lg:top-[calc(var(--header-h)+var(--banner-h)+1.5rem)] lg:self-start", tab !== "hot" && "max-lg:hidden")}
+            className={cn("min-w-0 scroll-mt-20", tab !== "hot" && "max-lg:hidden")}
           >
-            <div className="border-border/60 sm:rounded-2xl sm:border">
+            <div className="lg:sticky lg:top-[calc(var(--header-h)+var(--banner-h))]">
               <header className="flex items-center justify-between border-b border-border/60 px-4 py-3">
                 <h2 id="hot-title" className="text-sm font-medium">
                   Hot tokens
@@ -89,6 +88,7 @@ export function HomeClient() {
             </div>
           </aside>
         </div>
+        <div aria-hidden className="hatch mx-4 h-3 sm:mx-0" />
       </div>
     </>
   );

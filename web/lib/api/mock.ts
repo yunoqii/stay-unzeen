@@ -26,10 +26,15 @@ import type {
   PlatformStats,
   PoolInfo,
   Portfolio,
+  PendingResponse,
   RateUsed,
   SignedAction,
   Token,
+  TokenSafety,
+  TokenTrade,
   TokenWithTrades,
+  TradeFilter,
+  TradeTag,
   Venue,
 } from "./types";
 
@@ -328,9 +333,10 @@ function poolAddress(network: Network): string {
 const NOW_FEE_ZAT = "5000";
 
 export function mockPool(network: Network): PoolInfo {
+  const rate = { lamportsPerZec: MID_LAMPORTS_PER_ZEC.toString(), lamportsPerZecBuy: mockRate(true).lamportsPerZec, lamportsPerZecSell: mockRate(false).lamportsPerZec, spreadBps: Number(SPREAD_BPS), source: "fixed" as const, ts: Math.floor(Date.now() / 60_000) * 60_000 };
   return network === "mainnet"
-    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT } }
-    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT } };
+    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT }, rate }
+    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT }, rate };
 }
 
 interface MockAccount {
@@ -479,7 +485,7 @@ function stats(): PlatformStats {
     trades: history.length,
     launches: history.filter((e) => e.kind === "create").length,
     byVenue,
-    topTokens: [...state!].sort((a, b) => b.price * b.supply - a.price * a.supply).slice(0, 5).map((s) => ({ ...s.token })),
+    topTokens: state!.filter((s) => s.heat > 0).sort((a, b) => b.price * b.supply - a.price * a.supply).slice(0, 5).map((s) => ({ ...s.token })),
   };
 }
 
@@ -709,6 +715,7 @@ function execute(act: MockAction) {
     releaseZat(a, act, act.holdZat);
     const h = holdingOf(a, x.mint);
     h.amount = (BigInt(h.amount) + out).toString();
+    s.heat = Math.max(s.heat, 1);
     s.price *= 1 + sol / Math.max(30, s.price * s.supply) / 2;
     syncTokenFields();
     publish({ id: b58(16), kind: "buy", venue: s.token.venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
@@ -738,6 +745,7 @@ function execute(act: MockAction) {
       heat: 3,
     };
     state!.push(s);
+    unzeenLaunches.add(s.token.mint);
     syncTokenFields();
     const out = lamports > N0 ? BigInt(toBaseUnits(Number(lamports) / 1e9 / price, s.token.decimals)) : N0;
     releaseZat(a, act, act.holdZat);
@@ -807,13 +815,25 @@ export async function handle(
 
   if (method === "GET") {
     if (p === "/api/feed") return history.slice(0, Math.min(Number(q.get("limit") ?? 50), 200));
-    if (p === "/api/tokens") return state!.map((s) => ({ ...s.token }));
+    // Cold mints from CA searches stay out of the public list until unzeen trades them: listing them
+    // would tell everyone what someone searched for.
+    if (p === "/api/tokens") return state!.filter((s) => s.heat > 0).map((s) => ({ ...s.token }));
     if (p === "/api/stats") return stats();
 
     if ((m = p.match(/^\/api\/tokens\/([^/]+)$/))) {
-      const s = findToken(decodeURIComponent(m[1]));
+      const s = resolveMint(decodeURIComponent(m[1]));
+      if ("status" in s) return s;
       const out: TokenWithTrades = { ...s.token, trades: history.filter((e) => e.mint === s.token.mint).slice(0, 50) };
       return out;
+    }
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)\/safety$/))) {
+      const s = resolveMint(decodeURIComponent(m[1]));
+      if ("status" in s) return s;
+      return safetyOf(s);
+    }
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)\/trades$/)) && q.has("filter")) {
+      const s = findToken(decodeURIComponent(m[1]));
+      return tokenTrades(s, q.get("filter") ?? "all", q.get("before"), Number(q.get("limit") ?? 50));
     }
     if ((m = p.match(/^\/api\/tokens\/([^/]+)\/trades$/))) {
       const s = findToken(decodeURIComponent(m[1]));
@@ -857,6 +877,165 @@ export async function handle(
   }
 
   throw new ApiError("not_found", `${method} ${p}`, 404);
+}
+
+// ---- token intel (DRAFT, docs/analysis/token-intel.md §5) ----
+
+/** Mock twin of the backend flag: dev history, first blocks and the full trade feed after the Helius upgrade. */
+const FULL_FEED = process.env.NEXT_PUBLIC_FEATURE_FULL_TRADES === "1";
+/** Tokens launched through Unzeen ("rules enforced"). GHOST is one from the start. */
+const unzeenLaunches = new Set<string>();
+/** Cold mints from CA searches, waiting for the next tick. mint -> tick it resolves at. */
+const coldQueue = new Map<string, number>();
+/** Tick of the cold queue: fixed schedule, independent of requests (compressed from 60 s for the demo). */
+export const MOCK_TICK_MS = 12_000;
+
+/** Next tick boundary after `now`, with a per-tick jitter (0-3 s) that does not depend on who asks. */
+export function nextTick(now: number): number {
+  let i = Math.floor(now / MOCK_TICK_MS);
+  for (;;) {
+    const at = i * MOCK_TICK_MS + Math.floor(seeded(`tick:${i}`)() * 3_000);
+    if (at > now) return at;
+    i++;
+  }
+}
+
+const COLD_NAMES: Array<[string, string]> = [
+  ["DRIFT", "Driftwood"],
+  ["MOON", "Moonless"],
+  ["BONKY", "Bonky"],
+  ["FOG", "Fog Machine"],
+  ["KOI", "Night Koi"],
+  ["RAVEN", "Raven"],
+];
+
+/** Known token, or the shared 202 pending of a cold mint until its tick (same answer for everyone). */
+function resolveMint(mint: string): MockTokenState | PendingResponse {
+  if (!isSolanaAddress(mint)) throw new ApiError("bad_request", "mint: not base58 of 32 bytes", 400);
+  const known = state!.find((x) => x.token.mint === mint);
+  if (known) return known;
+  const now = Date.now();
+  let at = coldQueue.get(mint);
+  if (at === undefined) {
+    at = nextTick(now);
+    coldQueue.set(mint, at);
+  }
+  if (now < at) return { status: "pending", retryAfterMs: at - now };
+  coldQueue.delete(mint);
+  const rnd = seeded("cold:" + mint);
+  const [symbol, name] = COLD_NAMES[Math.floor(rnd() * COLD_NAMES.length)];
+  const s: MockTokenState = {
+    token: { mint, symbol, name, venue: "pumpfun", status: "curve", decimals: 6, priceSol: "0", marketCapSol: "0", createdAt: at - Math.floor(rnd() * 6 * 3_600_000) },
+    price: logRand(2e-8, 4e-7),
+    supply: SUPPLY,
+    heat: 0, // no unzeen trades until someone buys through the pool
+  };
+  state!.push(s);
+  syncTokenFields();
+  return s;
+}
+
+const pct = (n: number) => trimDecimals(n, n < 10 ? 2 : 1);
+
+function safetyOf(s: MockTokenState): TokenSafety {
+  const t = s.token;
+  const rnd = seeded("safety:" + t.mint);
+  const unzeen = unzeenLaunches.has(t.mint) || t.symbol === "GHOST";
+  const risky = t.symbol === "VEIL";
+  const now = Date.now();
+  const asOf = Math.floor(now / 60_000) * 60_000; // tick boundary, not the time of the first request
+  const out: TokenSafety = {
+    mint: t.mint,
+    asOf,
+    program: t.venue === "pumpfun" || risky ? "token-2022" : "spl-token",
+    authorities: {
+      mintRevoked: !risky,
+      freezeRevoked: !risky && rnd() > 0.05,
+      metadataImmutable: risky ? false : true,
+      riskyExtensions: risky ? ["transferFee", "permanentDelegate"] : [],
+    },
+    holders: {
+      top10Pct: pct(unzeen ? 8 + rnd() * 10 : 12 + rnd() * 38),
+      devPct: unzeen ? null : pct(rnd() * (risky ? 18 : 6)),
+      unzeenPoolPct: pct(0.4 + rnd() * 6),
+      asOf: asOf - 4 * 60_000,
+    },
+    market: {
+      venue: t.venue,
+      status: t.status,
+      ...(t.status === "curve" ? { curveProgressPct: pct(4 + rnd() * 90) } : { lpBurnedPct: t.venue === "pumpfun" ? "100" : pct(40 + rnd() * 60) }),
+    },
+  };
+  const handle = t.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (rnd() < 0.8 || unzeen) {
+    out.socials = { twitter: `https://x.com/${handle}` };
+    if (rnd() < 0.6) out.socials.telegram = `https://t.me/${handle}`;
+    if (rnd() < 0.5) out.socials.website = `https://${handle}.xyz`;
+  }
+  if (unzeen) out.unzeen = { launch: true, rules: ["creator_initial_buy_locked_24h", "initial_buy_cap_5pct", "authorities_revoked"] };
+  if (FULL_FEED) {
+    if (!unzeen) out.dev = { address: mintFor(t.venue, "dev:" + t.symbol), launchesSeen: 1 + Math.floor(rnd() * 9), rugsSeen: Math.floor(rnd() * 3), since: Date.UTC(2026, 9, 10) };
+    const snipers = unzeen ? 0 : Math.floor(rnd() * 7);
+    const same = unzeen ? 0 : Math.floor(rnd() * 3);
+    out.firstBlocks = { snipers, sniperPct: pct(snipers * rnd() * 1.5), sameSlotBuyers: same, sameSlotPct: pct(same * rnd() * 2), unzeenLaunchBuy: unzeen };
+  }
+  return out;
+}
+
+const WHALE_LAMPORTS = BigInt(1_000_000_000); // >= 1 SOL (the draft's floor)
+
+/** Public (non-unzeen) trades of a mint, deterministic per mint and minute. Only with the full feed. */
+function publicTrades(s: MockTokenState): TokenTrade[] {
+  const t = s.token;
+  const rnd = seeded("public:" + t.mint);
+  const dev = unzeenLaunches.has(t.mint) || t.symbol === "GHOST" ? null : mintFor(t.venue, "dev:" + t.symbol);
+  const traders = Array.from({ length: 9 }, (_, i) => mintFor(t.venue, `trader:${t.symbol}:${i}`));
+  const out: TokenTrade[] = [];
+  let ts = Date.now() - 45 * 60_000;
+  for (let i = 0; i < 40; i++) {
+    ts += 20_000 + rnd() * 60_000;
+    const isDev = dev !== null && rnd() < 0.12;
+    const sol = Number(trimDecimals(logRand(0.03, 9) * (rnd() < 0.1 ? 3 : 1), 2));
+    const kind: FeedEvent["kind"] = rnd() < (isDev ? 0.4 : 0.65) ? "buy" : "sell";
+    const lamports = toLamports(sol);
+    const tags: TradeTag[] = [];
+    if (BigInt(lamports) >= WHALE_LAMPORTS) tags.push("whale");
+    if (isDev) tags.push("dev");
+    out.push({
+      id: `pub-${t.mint.slice(0, 6)}-${i}`,
+      kind,
+      venue: t.venue,
+      mint: t.mint,
+      symbol: t.symbol,
+      tokenAmount: toBaseUnits(sol / s.price, t.decimals),
+      solAmount: lamports,
+      decimals: t.decimals,
+      solanaTx: mintFor(t.venue, `tx:${t.mint}:${i}`) + mintFor(t.venue, `tx2:${i}`).slice(0, 44),
+      ts: Math.min(ts, Date.now() - 1_000),
+      trader: isDev && dev ? dev : traders[Math.floor(rnd() * traders.length)],
+      tags,
+    });
+  }
+  return out;
+}
+
+function tokenTrades(s: MockTokenState, filter: string, before: string | null, limit: number): TokenTrade[] {
+  if (!["all", "unzeen", "whales", "dev"].includes(filter)) throw new ApiError("bad_request", "filter: all | unzeen | whales | dev", 400);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new ApiError("bad_request", "limit must be 1..200", 400);
+  const f = filter as TradeFilter;
+  if (!FULL_FEED && (f === "whales" || f === "dev")) throw new ApiError("bad_request", "filter needs the full trade feed", 400);
+  const ours: TokenTrade[] = history
+    .filter((e) => e.mint === s.token.mint)
+    .map((e) => ({ ...e, trader: "unzeen", tags: BigInt(e.solAmount) >= WHALE_LAMPORTS ? (["whale"] as TradeTag[]) : [] }));
+  let list = f === "unzeen" || !FULL_FEED ? ours : [...ours, ...publicTrades(s)].sort((a, b) => b.ts - a.ts);
+  if (f === "whales") list = list.filter((x) => x.tags.includes("whale"));
+  if (f === "dev") list = list.filter((x) => x.tags.includes("dev"));
+  if (before) {
+    const i = list.findIndex((x) => x.id === before);
+    if (i < 0) throw new ApiError("not_found", "unknown trade id", 404);
+    list = list.slice(i + 1);
+  }
+  return list.slice(0, limit);
 }
 
 // ---- WS /ws/feed[?mint=] (simulated) ----

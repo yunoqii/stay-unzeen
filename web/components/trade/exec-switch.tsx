@@ -6,6 +6,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { Eye, Lightning, Timer } from "@phosphor-icons/react";
 import { EXEC_COPY, NOW_WARNING, type ExecMode } from "@/lib/exec";
 import { cn } from "@/lib/utils";
+import { ExecLane } from "./exec-lane";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 
@@ -80,6 +81,7 @@ export function ExecSwitch({
         })}
       </div>
 
+      <ExecLane mode={value} />
       <p className="mt-2 text-[11px] text-faint-foreground tabular">{copy[value === "max" ? "delayed" : value].hint}</p>
 
       <AnimatePresence initial={false} mode="popLayout">

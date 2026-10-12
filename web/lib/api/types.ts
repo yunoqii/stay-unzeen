@@ -1,4 +1,4 @@
-// Mirrors docs/API.md v0.3. Do not diverge: change the contract first.
+// Mirrors docs/API.md v0.4 (plus the token-intel DRAFT at the bottom). Do not diverge: change the contract first.
 //
 // Units (docs/API.md "Единицы сумм"):
 //   - spendable amounts: integer strings in BASE units (token base units, lamports, zatoshis)
@@ -85,6 +85,15 @@ export interface PoolInfo {
     withdrawTokenCostLamports?: Lamports;
     nowFeeLamports?: Lamports;
   };
+  /** v0.4: public rate from the background cache. Absent = no rate (actions -> 503). */
+  rate?: {
+    lamportsPerZec: Lamports; // mid
+    lamportsPerZecBuy: Lamports;
+    lamportsPerZecSell: Lamports;
+    spreadBps: number;
+    source: "near-1click" | "fixed";
+    ts: number;
+  };
 }
 
 export interface DepositInfo {
@@ -116,7 +125,7 @@ export interface Portfolio {
    * every fixed-interval portfolio poll, so the client never polls a single action and never reveals
    * when it settled.
    */
-  actions?: (ActionStatus & { id: string })[];
+  actions?: (ActionStatus & { id: string; kind?: ActionKind })[];
 }
 
 /** Body of POST /api/actions. anonPubkey/nonce/ts/sig go in x-unzeen-* headers, not here. */
@@ -158,7 +167,10 @@ export type SignedAction =
  */
 export type PaddedAction = SignedAction & { pad?: string };
 
-export type ActionState = "queued" | "executed" | "failed";
+/** v0.4: "sent" = tx signed and sent, waiting for finality. ActionReceipt is only ever "queued". */
+export type ActionState = "queued" | "sent" | "executed" | "failed";
+
+export type ActionKind = "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token";
 
 /** Rate fixed when the action was accepted. */
 export interface RateUsed {
@@ -254,4 +266,85 @@ export type ErrorCode =
 
 export interface ApiErrorBody {
   error: { code: ErrorCode; message: string; details?: unknown };
+}
+
+// ---- token intel: DRAFT (docs/analysis/token-intel.md §5), not in docs/API.md yet ----
+// Everything the safety panel, the trade filters and the CA search need from the backend lives here,
+// so the final contract can be applied in one place.
+
+/** 202 body of GET /api/tokens/:mint/safety and of GET /api/tokens/:mint for a cold (unknown) mint. */
+export interface PendingResponse {
+  status: "pending";
+  /** Until the next fixed tick; the same for everyone asking in this window. */
+  retryAfterMs: number;
+}
+
+export const isPending = (x: unknown): x is PendingResponse =>
+  !!x && typeof x === "object" && (x as { status?: unknown }).status === "pending";
+
+export type RiskyExtension = "permanentDelegate" | "transferHook" | "transferFee" | "defaultFrozen" | "mintClose" | "pausable";
+
+/** Rules the pool enforces in its ledger for tokens launched through Unzeen. */
+export type UnzeenRule = "creator_initial_buy_locked_24h" | "initial_buy_cap_5pct" | "authorities_revoked" | (string & {});
+
+/** GET /api/tokens/:mint/safety (200). Public, no signature, identical for every caller. */
+export interface TokenSafety {
+  mint: string;
+  /** unix ms, rounded to the tick boundary (never the time of the first request). */
+  asOf: number;
+  program: "spl-token" | "token-2022";
+  authorities: {
+    mintRevoked: boolean;
+    freezeRevoked: boolean;
+    /** updateAuthority == null; null = unknown. */
+    metadataImmutable: boolean | null;
+    riskyExtensions: RiskyExtension[];
+  };
+  /** Absent = no snapshot yet. */
+  holders?: {
+    /** Decimal string, %. Excludes the curve, the AMM pool and Unzeen vaults. */
+    top10Pct: DecimalString;
+    /** null for Unzeen launches (dev is anonymous) and when the dev is unknown. */
+    devPct: DecimalString | null;
+    /** Share of all pool vaults (shared inventory of every unzeen holder). */
+    unzeenPoolPct: DecimalString;
+    asOf: number;
+  };
+  /** Behind the Helius upgrade flag; never present for Unzeen launches. */
+  dev?: {
+    address: string;
+    launchesSeen: number;
+    rugsSeen: number;
+    since: number;
+  };
+  /** Behind the Helius upgrade flag. */
+  firstBlocks?: {
+    snipers: number;
+    sniperPct: DecimalString;
+    sameSlotBuyers: number;
+    sameSlotPct: DecimalString;
+    unzeenLaunchBuy: boolean;
+  };
+  market: {
+    venue: Venue;
+    status: "curve" | "graduated";
+    curveProgressPct?: DecimalString;
+    lpBurnedPct?: DecimalString;
+  };
+  /** Normalized https links. */
+  socials?: { twitter?: string; telegram?: string; website?: string };
+  /** Only our /media/<sha40>.<ext>, never an external URL. */
+  image?: string;
+  unzeen?: { launch: true; rules: UnzeenRule[] };
+}
+
+export type TradeFilter = "all" | "unzeen" | "whales" | "dev";
+export type TradeTag = "whale" | "dev" | "sniper";
+
+/** GET /api/tokens/:mint/trades?filter=... */
+export interface TokenTrade extends FeedEvent {
+  /** Public address for other traders, "unzeen" for pool vaults. */
+  trader: string;
+  /** "dev" is never set on vault trades. */
+  tags: TradeTag[];
 }

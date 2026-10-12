@@ -1,10 +1,15 @@
+import { safeImageSrc } from "@/lib/media";
 import { cn } from "@/lib/utils";
 
-/** Placeholder token mark: monogram on a shadowed tile. Real images come from `Token.image`. */
+/**
+ * Token mark. The image is shown only when it comes from our own /media (T2): an IPFS / Arweave / author
+ * URL would leak the viewer's IP and the mint, so it falls back to the monogram.
+ */
 export function TokenGlyph({ symbol, image, className }: { symbol: string; image?: string; className?: string }) {
-  if (image) {
+  const src = safeImageSrc(image);
+  if (src) {
     // eslint-disable-next-line @next/next/no-img-element
-    return <img src={image} alt="" className={cn("size-9 rounded-lg object-cover", className)} />;
+    return <img src={src} alt="" referrerPolicy="no-referrer" className={cn("size-9 rounded-lg object-cover", className)} />;
   }
   return (
     <span

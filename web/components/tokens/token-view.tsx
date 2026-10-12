@@ -1,64 +1,97 @@
 "use client";
 
 import Link from "next/link";
-import { use, useEffect, useState } from "react";
+import { use, useMemo } from "react";
 import { ArrowLeft, Copy } from "@phosphor-icons/react";
 import { toast } from "sonner";
-import { api, errorText } from "@/lib/api/client";
-import { useNetwork } from "@/lib/network";
+import { api } from "@/lib/api/client";
+import { fillsOf } from "@/lib/history/reduce";
+import { useHistory } from "@/lib/history/store";
+import { isSolanaAddress } from "@/lib/trade";
 import type { FeedEvent, TokenWithTrades } from "@/lib/api/types";
 import { formatCompact, formatPrice, shortAddr, timeAgo } from "@/lib/format";
 import { useLiveFeed } from "@/hooks/use-live-feed";
 import { useNow } from "@/hooks/use-now";
+import { usePending } from "@/hooks/use-pending";
+import { PeekProvider, usePeek } from "@/components/portfolio/peek";
+import { PositionCard } from "@/components/trade/position-card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/layout/page-shell";
-import { FeedStatusDot, LiveFeed } from "@/components/feed/live-feed";
 import { SharedTarget } from "@/components/motion/shared-element";
 import { TradePanel } from "@/components/trade/trade-panel";
+import { Analyzing } from "./analyzing";
 import { PriceChart } from "./price-chart";
+import { SafetyPanel, useSafety } from "./safety-panel";
+import { ProgressRing } from "@/components/motion/progress-ring";
+import { TokenTrades } from "./token-trades";
 import { TokenGlyph } from "./token-glyph";
 import { VenueTag } from "./venue-tag";
 
 export function TokenView({ params }: { params: Promise<{ mint: string }> }) {
-  const { mint } = use(params);
-  const [token, setToken] = useState<TokenWithTrades | null | undefined>(undefined);
-  const [error, setError] = useState<string | null>(null);
-
-  const network = useNetwork(); // refetch / resubscribe on Devnet <-> Mainnet
-  useEffect(() => {
-    let alive = true;
-    api
-      .getToken(mint)
-      .then((t) => alive && setToken(t))
-      .catch((e: unknown) => alive && setError(errorText(e)));
-    return () => {
-      alive = false;
-    };
-  }, [mint, network]);
-
-  if (error)
+  const { mint: raw } = use(params);
+  let mint = raw;
+  try {
+    mint = decodeURIComponent(raw);
+  } catch {
+    /* keep raw: fails validation below */
+  }
+  if (!isSolanaAddress(mint))
     return (
       <Frame>
-        <EmptyState title="Could not load this token">{error}</EmptyState>
+        <EmptyState title="Not a Solana address">
+          <span className="font-mono break-all">{shortAddr(mint, 8, 8)}</span> is not base58 of 32 bytes. Check the contract address and try again.
+        </EmptyState>
       </Frame>
     );
-  if (token === undefined) return <TokenViewSkeleton />;
-  if (token === null)
+  return <TokenByMint key={mint} mint={mint} />;
+}
+
+function TokenByMint({ mint }: { mint: string }) {
+  // A cold mint (first CA search) answers 202 pending until the backend's next tick: retry when told.
+  const s = usePending(`token:${mint}`, () => api.getToken(mint));
+
+  if (s.state === "error")
+    return (
+      <Frame>
+        <EmptyState title="Could not load this token">{s.error}</EmptyState>
+      </Frame>
+    );
+  if (s.state === "loading") return <TokenViewSkeleton />;
+  if (s.state === "pending")
+    return (
+      <Frame>
+        <div className="rounded-2xl border border-border p-5 sm:p-6">
+          <p className="font-mono text-xs break-all text-faint-foreground">{mint}</p>
+          <Analyzing retryAt={s.retryAt} className="mt-4" />
+        </div>
+      </Frame>
+    );
+  if (s.state === "missing")
     return (
       <Frame>
         <EmptyState title="Unknown token">
-          No unzeen activity for <span className="font-mono">{shortAddr(mint, 6, 6)}</span>.
+          No token at <span className="font-mono">{shortAddr(mint, 6, 6)}</span> on this network.
         </EmptyState>
       </Frame>
     );
 
-  return <TokenLoaded key={token.mint} token={token} />;
+  return (
+    <PeekProvider>
+      <TokenLoaded key={s.data.mint} token={s.data} />
+    </PeekProvider>
+  );
 }
 
 function TokenLoaded({ token }: { token: TokenWithTrades }) {
   const feed = useLiveFeed({ mint: token.mint, initial: token.trades, limit: 100 });
   const now = useNow(1000);
   const priceSol = useLivePrice(token, feed.events);
+  const history = useHistory();
+  const { shown } = usePeek();
+  const safety = useSafety(token.mint);
+  const curve =
+    safety.state !== "ready" ? null : safety.data.market.status === "graduated" ? 100 : safety.data.market.curveProgressPct ? Number(safety.data.market.curveProgressPct) : null;
+  const ownFills = useMemo(() => fillsOf(history.entries, token.mint), [history.entries, token.mint]);
 
   const copyMint = async () => {
     try {
@@ -73,7 +106,13 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
     <Frame>
       <header className="flex flex-wrap items-start gap-4">
         <SharedTarget id={`glyph-${token.mint}`} className="shrink-0">
-          <TokenGlyph symbol={token.symbol} image={token.image} className="size-14 rounded-xl text-sm" />
+          {curve === null ? (
+            <TokenGlyph symbol={token.symbol} image={token.image} className="size-14 rounded-xl text-sm" />
+          ) : (
+            <ProgressRing value={curve} size={68} stroke={2} label={curve >= 100 ? "Graduated from the bonding curve" : `Bonding curve ${curve}% filled`}>
+              <TokenGlyph symbol={token.symbol} image={token.image} className="size-14 rounded-full text-sm" />
+            </ProgressRing>
+          )}
         </SharedTarget>
         <div className="min-w-0 flex-1">
           <h1 className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -84,7 +123,9 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
           </h1>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
             <VenueTag venue={token.venue} />
-            <span className="text-faint-foreground">{token.status === "graduated" ? "graduated" : "on bonding curve"}</span>
+            <span className="text-faint-foreground">
+              {token.status === "graduated" ? "graduated" : curve === null ? "on bonding curve" : <span className="tabular">curve {curve}%</span>}
+            </span>
             <button
               onClick={copyMint}
               className="inline-flex items-center gap-1 font-mono text-faint-foreground transition-colors hover:text-muted-foreground"
@@ -97,38 +138,28 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
         </div>
       </header>
 
-      <dl className="mt-8 grid grid-cols-3 gap-px overflow-hidden rounded-2xl border border-border bg-border">
+      <dl className="ledger mt-8 grid-cols-3">
         <Stat label="Price" value={formatPrice(priceSol)} unit="SOL" />
         <Stat label="Market cap" value={formatCompact(Number(token.marketCapSol))} unit="SOL" />
         <Stat label="Created" value={now === null ? "" : timeAgo(token.createdAt, now)} unit="ago" />
       </dl>
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:grid-rows-[auto_1fr]">
+      <div aria-hidden className="hatch mt-6 h-3" />
+      <div className="ledger grid lg:grid-cols-[minmax(0,1fr)_360px] lg:grid-rows-[auto_1fr]">
         <div className="min-w-0">
-          <PriceChart mint={token.mint} trades={feed.events} />
+          <PriceChart mint={token.mint} trades={feed.events} markers={ownFills} showMarkers={shown} />
         </div>
 
-        <aside className="lg:col-start-2 lg:row-span-2 lg:row-start-1">
+        <aside className="flex flex-col gap-px bg-border lg:col-start-2 lg:row-span-2 lg:row-start-1 [&>*]:bg-background">
           <TradePanel token={token} priceSol={priceSol} />
+          <PositionCard token={token} priceSol={priceSol} />
+          <SafetyPanel state={safety} />
+          <div className="hatch hidden min-h-6 flex-1 opacity-50 lg:block" aria-hidden />
         </aside>
 
-        <section aria-labelledby="trades-title" className="min-w-0 rounded-2xl border border-border">
-          <header className="flex items-center justify-between border-b border-border/60 px-4 py-3">
-            <h2 id="trades-title" className="text-sm font-medium">
-              unzeen trades
-            </h2>
-            <FeedStatusDot status={feed.status} />
-          </header>
-          <LiveFeed
-            events={feed.events}
-            fresh={feed.fresh}
-            loading={feed.loading}
-            error={feed.error}
-            dense
-            emptyText="No unzeen trades on this token yet."
-          />
-        </section>
+        <TokenTrades mint={token.mint} feed={feed} />
       </div>
+      <div aria-hidden className="hatch h-3" />
     </Frame>
   );
 }

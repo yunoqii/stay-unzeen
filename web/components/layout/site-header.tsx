@@ -6,6 +6,8 @@ import { usePathname } from "next/navigation";
 import { motion } from "motion/react";
 import { API_MODE } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
+import { DockItem, ProximityDock } from "@/components/motion/proximity-dock";
+import { CaSearch } from "./ca-search";
 import { KeyStatus } from "./key-status";
 import { NetworkBanner } from "./network-banner";
 import { NetworkSwitch } from "./network-switch";
@@ -36,6 +38,7 @@ export function SiteHeader() {
               mock
             </span>
           )}
+          <CaSearch />
           <NetworkSwitch />
           <KeyStatus />
           <PortfolioSync />
@@ -52,11 +55,12 @@ function DesktopNavActive() {
 
 function DesktopNavList({ pathname }: { pathname: string | null }) {
   return (
-          <ul className="flex items-center gap-1">
+          // New style (owner review): the proximity dock runs on the feed and token pages only for now.
+          <ProximityDock enabled={pathname === "/" || !!pathname?.startsWith("/token/")} className="flex items-center gap-1">
             {NAV.map((item) => {
               const active = pathname !== null && isActive(pathname, item.href);
               return (
-                <li key={item.href} className="relative">
+                <DockItem key={item.href} className="relative">
                   <Link
                     href={item.href}
                     aria-current={active ? "page" : undefined}
@@ -74,9 +78,9 @@ function DesktopNavList({ pathname }: { pathname: string | null }) {
                       transition={{ type: "spring", bounce: 0, duration: 0.35 }}
                     />
                   )}
-                </li>
+                </DockItem>
               );
             })}
-          </ul>
+          </ProximityDock>
   );
 }
