@@ -11,7 +11,7 @@ Zcash shielded-пул — приватный вход и выход. Solana — 
         │ shielded ZEC + зашифрованное memo
         ▼
  ┌──────────────────────────┐
- │ core/ (Rust)             │  сканер Orchard (lightwalletd, testnet)
+ │ core/ (Rust)             │  сканер Ironwood (lightwalletd)  
  │  - scanner               │  парсинг memo → команда
  │  - ledger                │  балансы по anon-ключу (приватный реестр)
  │  - payouts               │  возвраты / продажи → shielded ZEC

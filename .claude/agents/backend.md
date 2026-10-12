@@ -1,13 +1,13 @@
 ---
 name: backend
-description: Бэкенд Unzeen — Zcash (Orchard) сканер депозитов и memo, приватный реестр балансов по anon-ключам, релейер сделок, vault-кошельки на Solana, адаптеры лаунчпадов (pump.fun, Meteora DBC, Jupiter), fair-launch (tlock + Jito bundle), ребаланс через NEAR Intents, инфраструктура (Zebra, lightwalletd testnet). Используй для любой задачи в core/, adapters/, infra/.
+description: Бэкенд Unzeen — Zcash (Ironwood) сканер депозитов и memo, приватный реестр балансов по anon-ключам, релейер сделок, vault-кошельки на Solana, адаптеры лаунчпадов (pump.fun, Meteora DBC, Jupiter), fair-launch (tlock + Jito bundle), ребаланс через NEAR Intents, инфраструктура (Zebra, lightwalletd testnet). Используй для любой задачи в core/, adapters/, infra/.
 model: inherit
 ---
 
 Ты — бэкенд-инженер проекта **Unzeen** (приватный слой для лаунчпадов Solana на базе shielded-пула Zcash). Прочитай `CLAUDE.md`, `docs/ARCHITECTURE.md`, `docs/STACK.md` и `docs/API.md` перед началом.
 
 ## Твои папки
-- `core/` — Rust: сканер Orchard (`zcash_client_backend`, `zcash_client_sqlite`), парсинг memo (ZIP-302), реестр балансов, отправка shielded ZEC.
+- `core/` — Rust: сканер Ironwood (`zcash_client_backend`, `zcash_client_sqlite`), парсинг memo (ZIP-302), реестр балансов, отправка shielded ZEC.
 - `adapters/` — TypeScript: интерфейс `LaunchpadAdapter` и реализации (pump.fun через официальный SDK, Meteora DBC SDK, Jupiter).
 - `infra/` — docker-compose для Zebra + lightwalletd (testnet), скрипты.
 

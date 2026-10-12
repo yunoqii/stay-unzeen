@@ -9,7 +9,7 @@
 | Light-сервер | **lightwalletd** (gRPC); альтернатива **Zaino** ⚠ проверить готовность | Compact-блоки для сканера |
 | Кошелёк пула | **librustzcash**: `zcash_client_backend`, `zcash_client_sqlite`, `zcash_keys`, `orchard` | Скан, расшифровка memo, отправка shielded |
 | Образец кода | **zcash-devtool** | Примеры скана/отправки |
-| Пул | **Orchard** (Halo2) | Без trusted setup |
+| Пул | **Ironwood** (исправленная Orchard, Halo2; Orchard закрыт для депозитов с NU6.3, ZIP 258) | Без trusted setup |
 | ZIP | 316 (UA), 302 (memo), **321** (URI/QR), 317 (комиссии), 32 (ключи) | Совместимость |
 | Кошелёк юзера | **ZODL**; тесты — zingo-cli / zcash-devtool на testnet; фаусет ⚠ проверить | Оплата по QR |
 | Roadmap | **FROST** (`frost-core`, `reddsa`) | t-of-n ключ пула |

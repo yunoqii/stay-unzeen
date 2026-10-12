@@ -5,7 +5,7 @@
 Общайся с пользователем на русском.
 
 ## Проект
-**Unzeen** — слой приватности для лаунчпадов Solana. Пользователь платит shielded ZEC (Zcash Orchard), vault-кошельки пула торгуют на pump.fun / Meteora DBC от его имени, в ленте видно «unzeen купил 1.2M $PEPE», но не кто. Полная архитектура: `docs/ARCHITECTURE.md`. Решения по фронту: `docs/FRONTEND.md`. Стек: `docs/STACK.md`. Контракт API между беком и фронтом: `docs/API.md`.
+**Unzeen** — слой приватности для лаунчпадов Solana. Пользователь платит shielded ZEC (Zcash, пул Ironwood — Orchard закрыт для депозитов с NU6.3), vault-кошельки пула торгуют на pump.fun / Meteora DBC от его имени, в ленте видно «unzeen купил 1.2M $PEPE», но не кто. Полная архитектура: `docs/ARCHITECTURE.md`. Решения по фронту: `docs/FRONTEND.md`. Стек: `docs/STACK.md`. Контракт API между беком и фронтом: `docs/API.md`.
 
 Слоган: *Launch anywhere. Stay unzeen.* Twitter: «stay unzeen».
 
@@ -14,6 +14,7 @@
 - Весь код пишется в окне хакатона; библиотеки можно, готовые продукты — нельзя.
 - Репозиторий: https://github.com/yunoqii/stay-unzeen — **PRIVATE**. Сделать публичным 28.10 перед сдачей (`gh repo edit --visibility public --accept-visibility-change-consequences`), не раньше.
 - Коммить и пушить после каждой завершённой задачи; ветка `main`.
+- Сети: Zcash **mainnet** для демо (суммы 0.01–0.05 ZEC, ZODL из стора), testnet — для CI/автотестов (pre-release крейты librustzcash из-за NU7). Solana: devnet для разработки, mainnet в демо. Сеть — только через env.
 - Не публиковать детали архитектуры (tlock fair-launch, Jito-бандл) до дедлайна.
 
 ## Команда (субагенты в `.claude/agents/`)
@@ -44,4 +45,4 @@
 
 Список функций: `docs/FEATURES.md`.
 
-**Порядок урезания, если не успеваем:** Jupiter → чат → статистика → кабинет создателя → умный вывод → Meteora → NEAR Intents (ручной ребаланс) → лимитки/TP/SL → fair-launch. Ядро (депозит ZEC → баланс → покупка/продажа на pump.fun → лента → вывод) трогать нельзя.
+**Порядок урезания, если не успеваем:** чат → статистика → кабинет создателя → умный вывод → Meteora → Jito с несколькими vault → автоматизация NEAR Intents (ребаланс вручную) → лимитки/TP/SL → полный fair-launch (остаётся tlock + одна tx create+buy) → Jupiter. Ядро (депозит ZEC → баланс → покупка/продажа на pump.fun → лента → вывод) трогать нельзя.
