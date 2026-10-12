@@ -53,6 +53,16 @@ impl ApiError {
     pub fn venue_unavailable(m: impl Into<String>) -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "venue_unavailable", m)
     }
+    pub fn feature_disabled(m: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "feature_disabled", m)
+    }
+    pub fn creator_cap() -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "creator_cap",
+            "creator position through the pool would exceed PoolInfo.launchRules.capBps",
+        )
+    }
     pub fn internal() -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
     }
@@ -77,6 +87,12 @@ impl From<LedgerError> for ApiError {
             LedgerError::Replay => Self::replay(),
             LedgerError::Range => Self::bad_request("amount out of range"),
             LedgerError::NotFound => Self::not_found(),
+            LedgerError::CreatorLocked => Self::new(
+                StatusCode::LOCKED,
+                "creator_locked",
+                "the creator's initial-buy tokens are locked (PoolInfo.launchRules.lockSecs)",
+            ),
+            LedgerError::CreatorCap => Self::creator_cap(),
             LedgerError::Db(_) | LedgerError::Pool(_) => {
                 // Display of LedgerError carries only SQLSTATE / a coarse kind (N3).
                 tracing::error!(error = %e, "ledger failure");

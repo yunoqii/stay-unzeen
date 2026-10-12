@@ -32,6 +32,53 @@ pub struct Config {
     pub actions_enabled: bool,
     pub limits: Limits,
     pub cors_origins: Vec<String>,
+    /// Creator rules of Unzeen launches (API v0.5).
+    pub launch: LaunchConfig,
+    /// Token intel (docs/INTEL.md).
+    pub intel: IntelConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LaunchConfig {
+    /// Lock of the creator's initial-buy tokens, seconds (0 = off). UNZEEN_CREATOR_LOCK_SECS.
+    pub lock_secs: u64,
+    /// Cap of the creator's position through the pool, basis points of the supply (0 = off).
+    pub cap_bps: u64,
+    /// Total supply of a launch, base units (pump.fun: 1e9 tokens x 1e6).
+    pub total_supply: u64,
+    /// Initial virtual reserves of the launch curve (pump.fun Global: 30 SOL / 1.073e15).
+    pub virtual_sol_lamports: u64,
+    pub virtual_token_reserves: u64,
+}
+
+impl LaunchConfig {
+    pub fn cap_tokens(&self) -> u64 {
+        ((self.total_supply as u128) * (self.cap_bps as u128) / 10_000) as u64
+    }
+
+    pub fn rules(&self) -> unzeen_ledger::CreatorRules {
+        unzeen_ledger::CreatorRules {
+            lock_secs: self.lock_secs,
+            cap_tokens: self.cap_tokens(),
+        }
+    }
+
+    pub fn curve(&self) -> crate::launch::Curve {
+        crate::launch::Curve {
+            virtual_sol: self.virtual_sol_lamports,
+            virtual_tokens: self.virtual_token_reserves,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct IntelConfig {
+    /// Full per-mint trade feed is on (UNZEEN_INTEL_FULL_TRADES=1): filters whales / dev.
+    pub full_trades: bool,
+    /// Max pending CA requests (UNZEEN_INTEL_QUEUE_MAX).
+    pub queue_max: i64,
+    /// `whale` tag threshold, lamports (UNZEEN_WHALE_LAMPORTS).
+    pub whale_lamports: i64,
 }
 
 #[derive(Clone)]
@@ -195,6 +242,22 @@ impl Config {
             "UNZEEN_MAX_PRIVACY_EPOCH_MAX_SECS",
             900.0,
         )?;
+        let launch = LaunchConfig {
+            lock_secs: num("UNZEEN_CREATOR_LOCK_SECS", 86_400)?,
+            cap_bps: num("UNZEEN_CREATOR_CAP_BPS", 500)?,
+            total_supply: num("UNZEEN_LAUNCH_TOTAL_SUPPLY", 1_000_000_000_000_000)?,
+            virtual_sol_lamports: num("UNZEEN_LAUNCH_VIRTUAL_SOL_LAMPORTS", 30_000_000_000)?,
+            virtual_token_reserves: num("UNZEEN_LAUNCH_VIRTUAL_TOKEN_RESERVES", 1_073_000_000_000_000)?,
+        };
+        if launch.cap_bps > 10_000 {
+            bail!("UNZEEN_CREATOR_CAP_BPS must be 0..10000");
+        }
+        if launch.virtual_sol_lamports == 0
+            || launch.total_supply == 0
+            || launch.virtual_token_reserves <= launch.cap_tokens()
+        {
+            bail!("UNZEEN_LAUNCH_*: need virtual reserves > 0 and > the creator cap");
+        }
         let cfg = Config {
             bind: var("API_BIND")
                 .unwrap_or_else(|| "127.0.0.1:8080".into())
@@ -264,6 +327,12 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+            launch,
+            intel: IntelConfig {
+                full_trades: var("UNZEEN_INTEL_FULL_TRADES").as_deref() == Some("1"),
+                queue_max: num::<i64>("UNZEEN_INTEL_QUEUE_MAX", 256)?.clamp(1, 100_000),
+                whale_lamports: num::<i64>("UNZEEN_WHALE_LAMPORTS", 1_000_000_000)?.max(1),
+            },
         };
         Ok(cfg)
     }

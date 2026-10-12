@@ -149,7 +149,8 @@ pub(crate) async fn close_in<C: GenericClient>(tx: &C, id: &[u8], ok: bool, erro
     let Some(r) = tx
         .query_opt(
             "UPDATE actions SET status = $2, error = $3, updated_at = now(),
-                    fill = CASE WHEN $4 THEN jsonb_build_object('zecSpent', hold_zat::text) END
+                    fill = CASE WHEN $4 THEN jsonb_build_object('zecSpent', hold_zat::text,
+                        'executedAt', (floor(extract(epoch FROM now()) / 60) * 60000)::bigint) END
              WHERE id = $1 AND status = 'queued' RETURNING anon_pubkey, hold_zat",
             &[&id, &status, &error, &ok],
         )

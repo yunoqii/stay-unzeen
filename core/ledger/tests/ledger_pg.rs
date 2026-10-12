@@ -367,6 +367,7 @@ fn action(kind: &str, amount: u64, fee: u64, token: Option<(&str, u64)>, jobs: V
         network: "devnet".into(),
         jobs,
         payout: None,
+        gain: None,
     }
 }
 

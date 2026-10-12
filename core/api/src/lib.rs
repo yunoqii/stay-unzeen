@@ -1,4 +1,4 @@
-//! Unzeen API server (docs/API.md v0.3).
+//! Unzeen API server (docs/API.md v0.5).
 //!
 //! Privacy rules enforced here:
 //! - no request logging with IPs, paths with parameters, headers or bodies (only the matched
@@ -11,6 +11,8 @@ pub mod actions;
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod intel;
+pub mod launch;
 pub mod limit;
 pub mod market;
 pub mod rate;
@@ -72,8 +74,8 @@ impl AppState {
             ws_slots: Arc::new(Semaphore::new(l.max_ws)),
             epochs: actions::Epochs::new(&cfg.exec),
             feed_tx,
+            ledger: ledger.with_creator_rules(cfg.launch.rules()),
             cfg,
-            ledger,
         }))
     }
 }
@@ -92,6 +94,7 @@ pub fn router(st: AppState) -> Router {
         .route("/api/tokens/{mint}", get(market::token))
         .route("/api/tokens/{mint}/trades", get(market::trades))
         .route("/api/tokens/{mint}/candles", get(market::candles))
+        .route("/api/tokens/{mint}/safety", get(intel::safety))
         .route("/ws/feed", get(market::ws_feed))
         .route("/media/{name}", get(media))
         .fallback(|| async { ApiError::not_found() })
@@ -238,6 +241,12 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
             "nowFeeZat": st.cfg.fees.now_fee_zat.to_string(),
         },
         "createEnabled": st.cfg.create_enabled,
+        "features": { "fullTrades": st.cfg.intel.full_trades },
+        "launchRules": {
+            "lockSecs": st.cfg.launch.lock_secs,
+            "capBps": st.cfg.launch.cap_bps,
+            "maxInitialBuyLamports": max_initial_buy_lamports(&st.cfg.launch).to_string(),
+        },
     }))
     .into_response();
     // Public rate from the timer cache (D14): never triggers a 1Click request.
@@ -265,6 +274,14 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
     r.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=15"));
     Ok(r)
+}
+
+/// Largest `create` initial buy (lamports, after D10 rounding) within the creator cap.
+pub fn max_initial_buy_lamports(l: &config::LaunchConfig) -> u64 {
+    if l.cap_bps == 0 {
+        return 0;
+    }
+    l.curve().max_lamports_within(l.cap_tokens())
 }
 
 // ------------------------------------------------------------------ GET /api/portfolio
@@ -318,7 +335,15 @@ fn action_json(v: &unzeen_ledger::ActionView) -> Value {
         out["rate"] = rate_json(&v.rate);
     }
     if let Some(f) = &v.fill {
-        out["fill"] = f.clone();
+        // v0.5: the execution minute is stored with the fill (erased with it after 24–48 h)
+        // and shown at the top level.
+        let mut f = f.clone();
+        if let Some(t) = f.as_object_mut().and_then(|o| o.remove("executedAt"))
+            && v.status == "executed"
+        {
+            out["executedAt"] = t;
+        }
+        out["fill"] = f;
     }
     out
 }
@@ -413,6 +438,7 @@ pub fn spawn_background(st: &AppState) {
             match s.ledger.janitor().await {
                 Ok(r) => tracing::debug!(
                     detached = r.detached,
+                    unlocked = r.unlocked,
                     scrubbed = r.scrubbed,
                     journal_deleted = r.journal_deleted,
                     payouts_deleted = r.payouts_deleted,
@@ -424,6 +450,7 @@ pub fn spawn_background(st: &AppState) {
     });
     let s = st.clone();
     tokio::spawn(market::poll_trades(s));
+    tokio::spawn(intel::warm_sync_loop(st.clone()));
     // D14: ZEC/SOL quote on a timer, never on demand.
     tokio::spawn(st.rate.clone().refresh_loop());
 }

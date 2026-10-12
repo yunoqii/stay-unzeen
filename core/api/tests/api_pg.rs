@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 use unzeen_api::{
     AppState,
-    config::{Config, ExecConfig, Fees, Limits, RateConfig},
+    config::{Config, ExecConfig, Fees, IntelConfig, LaunchConfig, Limits, RateConfig},
     rate::now_ms,
     router,
 };
@@ -39,6 +39,7 @@ struct Env {
     ledger: Ledger,
     admin: tokio_postgres::Client,
     schema: String,
+    state: AppState,
 }
 
 fn config(url: &str) -> Config {
@@ -92,6 +93,18 @@ fn config(url: &str) -> Config {
             max_ws: 10,
         },
         cors_origins: vec![],
+        launch: LaunchConfig {
+            lock_secs: 86_400,
+            cap_bps: 500,
+            total_supply: 1_000_000_000_000_000,
+            virtual_sol_lamports: 30_000_000_000,
+            virtual_token_reserves: 1_073_000_000_000_000,
+        },
+        intel: IntelConfig {
+            full_trades: false,
+            queue_max: 256,
+            whale_lamports: 1_000_000_000,
+        },
     }
 }
 
@@ -125,6 +138,7 @@ async fn setup_with(tweak: impl FnOnce(&mut Config)) -> Option<Env> {
     let ledger = Ledger::connect_with(pg, cfg.policy).await.unwrap();
     let st = AppState::new(cfg, ledger.clone());
     unzeen_api::spawn_background(&st);
+    let state = st.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -138,6 +152,7 @@ async fn setup_with(tweak: impl FnOnce(&mut Config)) -> Option<Env> {
         ledger,
         admin,
         schema,
+        state,
     })
 }
 
@@ -270,6 +285,8 @@ async fn pool_info() {
         json!({"address":"utest1example","network":"test","chainId":"0202",
                "minDepositZat":"100000","minActionZat":"100000","confirmations":3,
                "createEnabled":true,
+               "features":{"fullTrades":false},
+               "launchRules":{"lockSecs":86400,"capBps":500,"maxInitialBuyLamports":"1466000000"},
                "fees":{"createFeeZat":"100000","withdrawZecFeeZat":"15000",
                        "withdrawTokenGasLamports":"2000000","withdrawTokenCostLamports":"2100000",
                        "nowFeeZat":"500"}})
@@ -619,10 +636,8 @@ async fn market_endpoints_and_ws() {
     let Some(e) = setup().await else { return };
     assert_eq!(e.get("/api/feed").await.body, json!([]));
     assert_eq!(e.get("/api/tokens").await.body, json!([]));
-    assert_eq!(
-        e.get(&format!("/api/tokens/{MINT}")).await.status,
-        StatusCode::NOT_FOUND
-    );
+    // v0.5: an unknown mint is queued for the indexer (202), not 404.
+    assert_eq!(e.get(&format!("/api/tokens/{MINT}")).await.status, StatusCode::ACCEPTED);
     assert_eq!(e.get("/api/tokens/notamint").await.status, StatusCode::NOT_FOUND);
     assert_eq!(e.get("/api/nope").await.status, StatusCode::NOT_FOUND);
 
@@ -830,5 +845,334 @@ async fn exec_now_runs_at_once_and_charges_the_fee() {
         .await,
         1
     );
+    e.drop_schema().await;
+}
+
+// ------------------------------------------------------------------ v0.5: token intel
+
+const MINT3: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+
+/// Indexer snapshot as docs/INTEL.md describes it.
+fn snapshot() -> Value {
+    json!({
+        "program": "token-2022",
+        "authorities": {"mintRevoked": true, "freezeRevoked": true, "metadataImmutable": true, "riskyExtensions": []},
+        "holders": {"top10Pct": "21.5", "devPct": "4.2", "unzeenPoolPct": "1.1"},
+        "dev": {"address": MINT3, "launchesSeen": 2, "rugsSeen": 1, "since": 1_760_000_000_000u64},
+        "market": {"venue": "pumpfun", "status": "curve", "curveProgressPct": "12.5"},
+        "socials": {"twitter": "https://x.com/pepe"},
+        "image": "https://api.example/media/0123456789abcdef0123456789abcdef01234567.png"
+    })
+}
+
+impl Env {
+    async fn put_snapshot(&self, mint: &str, data: &Value) {
+        self.admin
+            .execute(
+                &format!(
+                    "INSERT INTO {}.token_safety (mint, as_of, data)
+                     VALUES ($1, date_trunc('minute', now()), $2)",
+                    self.schema
+                ),
+                &[&mint, data],
+            )
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn token_safety_pending_and_snapshots() {
+    let Some(e) = setup().await else { return };
+    let s = &e.schema;
+
+    // Malformed mint -> 400 (safety), 404 (token, as before).
+    assert_eq!(code(&e.get("/api/tokens/not-a-mint/safety").await), "bad_request");
+
+    // Cold mint: 202 pending for everyone, queued once, no indexer schedule yet -> 60 s.
+    for _ in 0..2 {
+        let r = e.get(&format!("/api/tokens/{MINT2}/safety")).await;
+        assert_eq!(r.status, StatusCode::ACCEPTED);
+        assert_eq!(r.body, json!({"status": "pending", "retryAfterMs": 60_000}));
+        assert_eq!(r.headers["cache-control"], "public, max-age=60");
+        assert!(r.headers.get("set-cookie").is_none());
+    }
+    assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.intel_requests")).await, 1);
+    // GET /api/tokens/:mint of a cold mint: also 202 + queue; never listed in /api/tokens.
+    let r = e.get(&format!("/api/tokens/{MINT3}")).await;
+    assert_eq!(r.status, StatusCode::ACCEPTED);
+    assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.intel_requests")).await, 2);
+    // The queue time is minute-rounded.
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.intel_requests WHERE queued_at <> date_trunc('minute', queued_at)"
+        ))
+        .await,
+        0
+    );
+
+    // Indexer publishes its schedule: retryAfterMs follows it (+10 s margin).
+    e.sql(&format!(
+        "INSERT INTO {s}.intel_meta (key, value) VALUES ('next_tick_at', '{}')",
+        now_ms() + 20_000
+    ))
+    .await;
+    let r = e.get(&format!("/api/tokens/{MINT2}/safety")).await;
+    let ms = r.body["retryAfterMs"].as_i64().unwrap();
+    assert!((25_000..=30_000).contains(&ms), "{ms}");
+
+    // Tick: the indexer writes the snapshot + token card and drains the request.
+    e.put_snapshot(MINT2, &snapshot()).await;
+    e.sql(&format!(
+        "INSERT INTO {s}.intel_tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol, created_at, as_of)
+         VALUES ('{MINT2}', 'pumpfun', 'FOO', 'Foo', 6, 0.0000001, 100, now(), date_trunc('minute', now()));
+         INSERT INTO {s}.intel_warm (mint, expires_at) VALUES ('{MINT2}', now() + interval '7 days');
+         DELETE FROM {s}.intel_requests WHERE mint = '{MINT2}';"
+    ))
+    .await;
+    let r = e.get(&format!("/api/tokens/{MINT2}/safety")).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(r.headers["cache-control"], "public, max-age=60");
+    let b = &r.body;
+    assert_eq!(b["mint"], MINT2);
+    assert_eq!(b["asOf"].as_i64().unwrap() % 60_000, 0);
+    assert_eq!(b["holders"]["devPct"], "4.2");
+    assert_eq!(b["dev"]["launchesSeen"], 2);
+    assert!(b.get("unzeen").is_none());
+    // Token card from the snapshot; trades/candles empty; still not in the public list.
+    let t = e.get(&format!("/api/tokens/{MINT2}")).await;
+    assert_eq!(t.status, StatusCode::OK);
+    assert_eq!(
+        (t.body["symbol"].as_str(), &t.body["trades"]),
+        (Some("FOO"), &json!([]))
+    );
+    assert_eq!(e.get("/api/tokens").await.body, json!([]));
+    assert_eq!(e.get(&format!("/api/tokens/{MINT2}/candles")).await.body, json!([]));
+    assert_eq!(e.get(&format!("/api/tokens/{MINT2}/trades")).await.body, json!([]));
+
+    // The indexer found no such mint -> 404 on both.
+    e.sql(&format!(
+        "INSERT INTO {s}.token_safety (mint, as_of, missing) VALUES ('{MINT3}', date_trunc('minute', now()), TRUE)"
+    ))
+    .await;
+    assert_eq!(
+        e.get(&format!("/api/tokens/{MINT3}/safety")).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        e.get(&format!("/api/tokens/{MINT3}")).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // T1: an Unzeen launch never shows the creator's share or history.
+    e.sql(&format!(
+        "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals) VALUES ('{MINT}', 'pumpfun', 'UNZ', 'Unz', 6);
+         INSERT INTO {s}.trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, ts)
+         VALUES ('create', 'pumpfun', '{MINT}', 'UNZ', 0, 0, 6, 'SIGC', now()),
+                ('buy', 'pumpfun', '{MINT}', 'UNZ', 1000, 2000000000, 6, 'SIGC', now()),
+                ('buy', 'pumpfun', '{MINT}', 'UNZ', 10, 1000000, 6, 'SIGB', now());"
+    ))
+    .await;
+    // Pool token without a snapshot yet: 202, but nothing is queued (it is pinned instead).
+    let before = e.one_i64(&format!("SELECT count(*) FROM {s}.intel_requests")).await;
+    assert_eq!(
+        e.get(&format!("/api/tokens/{MINT}/safety")).await.status,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        e.one_i64(&format!("SELECT count(*) FROM {s}.intel_requests")).await,
+        before
+    );
+    e.put_snapshot(MINT, &snapshot()).await;
+    let b = e.get(&format!("/api/tokens/{MINT}/safety")).await.body;
+    assert!(b.get("dev").is_none(), "{b}");
+    assert_eq!(b["holders"]["devPct"], Value::Null);
+    assert_eq!(b["holders"]["unzeenPoolPct"], "1.1");
+    assert_eq!(
+        b["unzeen"],
+        json!({"launch": true, "rules": ["creator_initial_buy_locked_24h", "initial_buy_cap_5pct", "authorities_revoked"]})
+    );
+
+    // Trade filters without the full feed.
+    let r = e.get(&format!("/api/tokens/{MINT}/trades?filter=whales")).await;
+    assert_eq!((r.status, code(&r)), (StatusCode::BAD_REQUEST, "feature_disabled"));
+    assert_eq!(
+        code(&e.get(&format!("/api/tokens/{MINT}/trades?filter=dev")).await),
+        "feature_disabled"
+    );
+    assert_eq!(
+        code(&e.get(&format!("/api/tokens/{MINT}/trades?filter=nope")).await),
+        "bad_request"
+    );
+    let all = e.get(&format!("/api/tokens/{MINT}/trades?filter=all")).await;
+    assert_eq!(all.headers["cache-control"], "public, max-age=60");
+    let all = all.body;
+    assert_eq!(all.as_array().unwrap().len(), 3);
+    assert!(all.as_array().unwrap().iter().all(|t| t["trader"] == "unzeen"));
+    assert_eq!(all[0]["tags"], json!([]));
+    assert_eq!(all[1]["tags"], json!(["whale"]));
+    assert_eq!(
+        e.get(&format!("/api/tokens/{MINT}/trades?filter=unzeen")).await.body,
+        all
+    );
+    let page = e
+        .get(&format!(
+            "/api/tokens/{MINT}/trades?filter=all&limit=1&before={}",
+            all[0]["id"].as_str().unwrap()
+        ))
+        .await
+        .body;
+    assert_eq!(page, json!([all[1]]));
+    // No filter: plain FeedEvent[].
+    let plain = e.get(&format!("/api/tokens/{MINT}/trades")).await.body;
+    assert!(plain[0].get("trader").is_none());
+
+    // Warm-set sync: pool tokens pinned (hot after a trade), expired searched mints dropped
+    // with their snapshots; a searched mint never enters `tokens`.
+    e.sql(&format!(
+        "INSERT INTO {s}.intel_warm (mint, expires_at) VALUES ('{MINT3}', now() - interval '1 minute')
+         ON CONFLICT (mint) DO UPDATE SET expires_at = EXCLUDED.expires_at;
+         UPDATE {s}.token_safety SET as_of = date_trunc('minute', now() - interval '2 hours') WHERE mint = '{MINT3}';"
+    ))
+    .await;
+    unzeen_api::intel::warm_sync(&e.state).await.unwrap();
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.intel_warm WHERE mint = '{MINT}' AND pinned AND hot"
+        ))
+        .await,
+        1
+    );
+    assert_eq!(
+        e.one_i64(&format!("SELECT count(*) FROM {s}.intel_warm WHERE mint = '{MINT3}'"))
+            .await,
+        0
+    );
+    assert_eq!(
+        e.one_i64(&format!("SELECT count(*) FROM {s}.token_safety WHERE mint = '{MINT3}'"))
+            .await,
+        0
+    );
+    assert_eq!(
+        e.one_i64(&format!("SELECT count(*) FROM {s}.token_safety WHERE mint = '{MINT2}'"))
+            .await,
+        1
+    );
+    assert_eq!(
+        e.one_i64(&format!("SELECT count(*) FROM {s}.tokens WHERE mint <> '{MINT}'"))
+            .await,
+        0
+    );
+    e.drop_schema().await;
+}
+
+#[tokio::test]
+async fn creator_rules_lock_and_cap() {
+    let Some(e) = setup().await else { return };
+    let s = &e.schema;
+    let me = user(6);
+    e.fund(6, 0, 100_000_000).await;
+
+    // Initial buy above the cap (2 SOL > 1.466 SOL at 10 SOL/ZEC) -> 422, nothing held.
+    let create = |zec: &str| {
+        json!({"op":"create","venue":"pumpfun","meta":{"name":"Rules","symbol":"RULE"},"initialBuyZec":zec}).to_string()
+    };
+    let r = e.signed(&me, "POST", "/api/actions", &create("20000000")).await;
+    assert_eq!(
+        (r.status, code(&r)),
+        (StatusCode::UNPROCESSABLE_ENTITY, "creator_cap"),
+        "{:?}",
+        r.body
+    );
+    assert_eq!(e.one_i64(&format!("SELECT held_zat FROM {s}.balances")).await, 0);
+
+    // 1 SOL initial buy: accepted; the relayer creates MINT and buys 34e12 base units.
+    let r = e.signed(&me, "POST", "/api/actions", &create("10000000")).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let id = r.body["id"].as_str().unwrap().to_string();
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGCREATE', out_mint = '{MINT}',
+                out_token_amount = 34000000000000, out_lamports = lamports_in WHERE op = 'create'"
+    ))
+    .await;
+    let path = format!("/api/actions/{id}");
+    let mut done = Value::Null;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let st = e.signed(&me, "GET", &path, "").await;
+        if st.body["status"] == "executed" {
+            done = st.body;
+            break;
+        }
+    }
+    // executedAt: top level, minute-rounded, not inside fill.
+    let at = done["executedAt"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("executedAt: {done:?}"));
+    assert_eq!(at % 60_000, 0);
+    assert!(at <= now_ms() && now_ms() - at < 120_000);
+    assert!(done["fill"].get("executedAt").is_none());
+    assert_eq!(done["fill"]["mint"], MINT);
+    // Lock: the initial-buy amount until >= 24 h from now, rounded up to the hour.
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.creator_tokens WHERE mint = '{MINT}' AND locked_amount = 34000000000000
+               AND locked_until >= now() + interval '24 hours' AND locked_until <= now() + interval '25 hours'
+               AND locked_until = date_trunc('hour', locked_until)"
+        ))
+        .await,
+        1
+    );
+
+    // Locked: selling or withdrawing any of the initial buy -> 423.
+    let sell =
+        |amt: &str| json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":amt,"minZecOut":"100000"}).to_string();
+    for body in [
+        sell("34000000000000"),
+        sell("1"),
+        json!({"op":"withdraw_token","mint":MINT,"amount":"5","to":MINT2}).to_string(),
+    ] {
+        let r = e.signed(&me, "POST", "/api/actions", &body).await;
+        assert_eq!((r.status, code(&r)), (StatusCode::LOCKED, "creator_locked"), "{body}");
+    }
+    // More than the balance at all -> still insufficient_balance.
+    let r = e.signed(&me, "POST", "/api/actions", &sell("99000000000000")).await;
+    assert_eq!(code(&r), "insufficient_balance");
+    // Tokens bought later are free to sell.
+    e.sql(&format!(
+        "UPDATE {s}.token_balances SET available = available + 1000000000 WHERE mint = '{MINT}'"
+    ))
+    .await;
+    let r = e.signed(&me, "POST", "/api/actions", &sell("1000000000")).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+
+    // Cap: position 34e12 (+1e9 held). A 0.5 SOL buy may reach ~17.6e12 -> over 50e12.
+    let buy = |zec: &str| json!({"op":"buy","venue":"pumpfun","mint":MINT,"zecIn":zec,"minOut":"1"}).to_string();
+    let r = e.signed(&me, "POST", "/api/actions", &buy("5000000")).await;
+    assert_eq!((r.status, code(&r)), (StatusCode::UNPROCESSABLE_ENTITY, "creator_cap"));
+    // 0.1 SOL fits; its estimate counts while queued, so another 0.4 SOL does not.
+    let r = e.signed(&me, "POST", "/api/actions", &buy("1000000")).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let r = e.signed(&me, "POST", "/api/actions", &buy("4000000")).await;
+    assert_eq!(code(&r), "creator_cap");
+    // Other keys are not creators: no cap for them.
+    e.fund(7, 0, 100_000_000).await;
+    let r = e.signed(&user(7), "POST", "/api/actions", &buy("20000000")).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(
+        e.one_i64(&format!("SELECT count(*) FROM {s}.actions WHERE gain_mint IS NOT NULL"))
+            .await,
+        1,
+        "only the creator's buy keeps an estimate"
+    );
+
+    // Lock over: the janitor clears it, selling works.
+    e.sql(&format!(
+        "UPDATE {s}.creator_tokens SET locked_until = now() - interval '1 second'"
+    ))
+    .await;
+    assert_eq!(e.state.ledger.janitor().await.unwrap().unlocked, 1);
+    let r = e.signed(&me, "POST", "/api/actions", &sell("1000")).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
     e.drop_schema().await;
 }

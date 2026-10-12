@@ -85,7 +85,7 @@ pub struct RateUsed {
     pub ts_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct NewAction {
     /// API op (`buy`, `sell`, `create`, `withdraw_zec`, `withdraw_token`).
     pub kind: String,
@@ -99,6 +99,9 @@ pub struct NewAction {
     pub network: String,
     pub jobs: Vec<NewJob>,
     pub payout: Option<NewPayout>,
+    /// buy: `(mint, upper-bound estimate of tokens received)`. Checked against the creator
+    /// cap only when the key created that mint (API v0.5); ignored otherwise.
+    pub gain: Option<(String, u64)>,
 }
 
 /// What the owner sees in `GET /api/actions/:id`.
@@ -115,6 +118,8 @@ pub struct ActionView {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JanitorReport {
     pub detached: u64,
+    /// Creator locks that expired and were cleared.
+    pub unlocked: u64,
     pub scrubbed: u64,
     pub journal_deleted: u64,
     pub payouts_deleted: u64,
@@ -276,16 +281,40 @@ impl Ledger {
             }
             journal(&tx, pk_s, "hold", -hold, hold, None, Some(id_s)).await?;
         }
+        if let Some((m, est)) = &a.gain {
+            self.check_creator_cap(&tx, pk_s, id_s, m, *est).await?;
+        }
         if let Some(m) = tmint {
+            // Creator rule: the initial-buy tokens stay on the balance until the lock ends.
+            let locked: i64 = tx
+                .query_opt(
+                    "SELECT locked_amount FROM creator_tokens
+                     WHERE mint = $1 AND anon_pubkey = $2 AND locked_until > now()",
+                    &[&m, &pk_s],
+                )
+                .await?
+                .map_or(0, |r| r.get(0));
             let ok = tx
                 .execute(
                     "UPDATE token_balances SET available = available - $3, held = held + $3, updated_at = now()
-                     WHERE anon_pubkey = $1 AND mint = $2 AND available >= $3",
-                    &[&pk_s, &m, &thold],
+                     WHERE anon_pubkey = $1 AND mint = $2 AND available >= $3 AND available - $3 >= $4",
+                    &[&pk_s, &m, &thold, &locked],
                 )
                 .await?
                 == 1;
             if !ok {
+                if locked > 0 {
+                    let available: i64 = tx
+                        .query_opt(
+                            "SELECT available FROM token_balances WHERE anon_pubkey = $1 AND mint = $2",
+                            &[&pk_s, &m],
+                        )
+                        .await?
+                        .map_or(0, |r| r.get(0));
+                    if available >= thold {
+                        return Err(LedgerError::CreatorLocked);
+                    }
+                }
                 return Err(LedgerError::InsufficientBalance);
             }
             token_journal(&tx, pk_s, m, "hold", -thold, thold, id_s).await?;
@@ -331,6 +360,52 @@ impl Ledger {
             replayed: false,
             rate: a.rate.clone(),
         })
+    }
+
+    /// Creator cap (API v0.5): a buy of the mint's creator must keep its position through the
+    /// pool (available + held + estimates of its queued buys + this estimate) within the cap.
+    /// The estimate is remembered on the action until settlement.
+    async fn check_creator_cap<C: GenericClient>(
+        &self,
+        tx: &C,
+        pk: &[u8],
+        action_id: &[u8],
+        mint: &str,
+        est: u64,
+    ) -> Result<()> {
+        if self.rules.cap_tokens == 0 {
+            return Ok(());
+        }
+        let creator = tx
+            .query_opt(
+                "SELECT 1 FROM creator_tokens WHERE mint = $1 AND anon_pubkey = $2",
+                &[&mint, &pk],
+            )
+            .await?
+            .is_some();
+        if !creator {
+            return Ok(());
+        }
+        let est = to_i64(est)?;
+        let position: i64 = tx
+            .query_one(
+                "SELECT (COALESCE((SELECT available + held FROM token_balances
+                                    WHERE anon_pubkey = $1 AND mint = $2), 0)
+                       + COALESCE((SELECT sum(gain_est) FROM actions
+                                    WHERE anon_pubkey = $1 AND gain_mint = $2 AND status = 'queued'), 0))::bigint",
+                &[&pk, &mint],
+            )
+            .await?
+            .get(0);
+        if i128::from(position) + i128::from(est) > i128::from(self.rules.cap_tokens) {
+            return Err(LedgerError::CreatorCap);
+        }
+        tx.execute(
+            "UPDATE actions SET gain_mint = $2, gain_est = $3 WHERE id = $1",
+            &[&action_id, &mint, &est],
+        )
+        .await?;
+        Ok(())
     }
 
     /// Last `limit` actions of a key with their owner view (R-core-6: the client polls the
@@ -535,10 +610,20 @@ impl Ledger {
                             credit_tokens(&tx, &pk, m, out_tokens, action_id).await?;
                         }
                         if op == "create" {
+                            // Creator rule: the initial-buy tokens are locked; the end is rounded
+                            // up to the hour (never earlier than lock_secs).
+                            let (locked, lock_secs) = if self.rules.lock_secs > 0 && out_tokens > 0 {
+                                (out_tokens, self.rules.lock_secs as f64)
+                            } else {
+                                (0, 0.0)
+                            };
                             tx.execute(
-                                "INSERT INTO creator_tokens (mint, anon_pubkey) VALUES ($1, $2)
+                                "INSERT INTO creator_tokens (mint, anon_pubkey, locked_amount, locked_until)
+                                 VALUES ($1, $2, $3::bigint, CASE WHEN $3::bigint > 0
+                                     THEN date_trunc('hour', now() + make_interval(secs => $4::float8))
+                                          + interval '1 hour' END)
                                  ON CONFLICT (mint) DO NOTHING",
-                                &[m, &pk],
+                                &[m, &pk, &locked, &lock_secs],
                             )
                             .await?;
                             fill.insert("mint".into(), json!(m));
@@ -622,12 +707,14 @@ impl Ledger {
                 fill.insert("solAmount".into(), json!(sol_total.to_string()));
             }
             fill.insert("tokenAmount".into(), json!(tok_total.to_string()));
+            fill.insert("executedAt".into(), json!(minute_now_ms()));
             Some(Value::Object(fill))
         } else {
             None
         };
         tx.execute(
-            "UPDATE actions SET status = $2, error = $3, fill = $4, updated_at = now() WHERE id = $1",
+            "UPDATE actions SET status = $2, error = $3, fill = $4, gain_mint = NULL, gain_est = NULL,
+                    updated_at = now() WHERE id = $1",
             &[&action_id, &new_status, &err, &fill_v],
         )
         .await?;
@@ -662,10 +749,12 @@ impl Ledger {
         let scrubbed = c
             .execute(
                 "UPDATE actions SET amount_zat = 0, fee_zat = 0, hold_zat = 0, rate_lamports_per_zec = NULL,
-                        rate_source = NULL, rate_ts = NULL, token_mint = NULL, token_hold = 0, fill = NULL
+                        rate_source = NULL, rate_ts = NULL, token_mint = NULL, token_hold = 0, fill = NULL,
+                        gain_mint = NULL, gain_est = NULL
                  WHERE status <> 'queued' AND updated_at < now() - interval '48 hours'
                    AND (amount_zat <> 0 OR fee_zat <> 0 OR hold_zat <> 0 OR rate_lamports_per_zec IS NOT NULL
-                        OR token_mint IS NOT NULL OR fill IS NOT NULL OR rate_ts IS NOT NULL)",
+                        OR token_mint IS NOT NULL OR fill IS NOT NULL OR rate_ts IS NOT NULL
+                        OR gain_mint IS NOT NULL)",
                 &[],
             )
             .await?;
@@ -680,6 +769,13 @@ impl Ledger {
                 &[],
             )
             .await?;
+        let unlocked = c
+            .execute(
+                "UPDATE creator_tokens SET locked_amount = 0, locked_until = NULL
+                 WHERE locked_until IS NOT NULL AND locked_until <= now()",
+                &[],
+            )
+            .await?;
         let payouts_deleted = c
             .execute(
                 "DELETE FROM zec_payouts WHERE status IN ('confirmed', 'failed')
@@ -689,6 +785,7 @@ impl Ledger {
             .await?;
         Ok(JanitorReport {
             detached,
+            unlocked,
             scrubbed,
             journal_deleted,
             payouts_deleted,
@@ -713,6 +810,14 @@ impl Ledger {
         .await?;
         Ok(())
     }
+}
+
+/// Now as unix ms, rounded down to the minute (`ActionStatus.executedAt`, API v0.5).
+pub fn minute_now_ms() -> u64 {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    ms - ms % 60_000
 }
 
 /// D1: once settled, a job keeps only hour-precision times (the relayer no longer needs

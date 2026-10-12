@@ -69,15 +69,15 @@ fn token_json(r: &Row) -> Value {
     v
 }
 
-async fn client(st: &AppState) -> ApiResult<unzeen_ledger::deadpool_postgres::Object> {
+pub(crate) async fn client(st: &AppState) -> ApiResult<unzeen_ledger::deadpool_postgres::Object> {
     Ok(st.ledger.pg().get().await.map_err(LedgerError::from)?)
 }
 
-fn db(e: unzeen_ledger::tokio_postgres::Error) -> ApiError {
+pub(crate) fn db(e: unzeen_ledger::tokio_postgres::Error) -> ApiError {
     LedgerError::from(e).into()
 }
 
-fn public(v: Value, max_age: u32) -> Response {
+pub(crate) fn public(v: Value, max_age: u32) -> Response {
     let mut r = Json(v).into_response();
     if let Ok(h) = HeaderValue::from_str(&format!("public, max-age={max_age}")) {
         r.headers_mut().insert(header::CACHE_CONTROL, h);
@@ -126,14 +126,19 @@ pub async fn tokens(State(st): State<AppState>) -> ApiResult<Response> {
     Ok(public(Value::Array(rows.iter().map(token_json).collect()), 5))
 }
 
+/// `Token & { trades }`. v0.5: a mint the pool never traded comes from the indexer snapshot
+/// (`trades: []`), or answers 202 pending and is queued for the next tick; it is never listed
+/// by `GET /api/tokens`.
 pub async fn token(State(st): State<AppState>, Path(mint): Path<String>) -> ApiResult<Response> {
     let mint = mint_param(&mint)?;
     let c = client(&st).await?;
-    let t = c
+    let Some(t) = c
         .query_opt(&format!("SELECT {TOKEN_COLS} FROM tokens WHERE mint = $1"), &[&mint])
         .await
         .map_err(db)?
-        .ok_or_else(ApiError::not_found)?;
+    else {
+        return cold_token(&st, &c, &mint).await;
+    };
     let trades = c
         .query(
             &format!("SELECT {TRADE_COLS} FROM trades WHERE mint = $1 ORDER BY id DESC LIMIT 50"),
@@ -146,12 +151,50 @@ pub async fn token(State(st): State<AppState>, Path(mint): Path<String>) -> ApiR
     Ok(public(v, 2))
 }
 
-async fn ensure_token(c: &unzeen_ledger::deadpool_postgres::Object, mint: &str) -> ApiResult<()> {
-    c.query_opt("SELECT 1 FROM tokens WHERE mint = $1", &[&mint])
+async fn cold_token(st: &AppState, c: &unzeen_ledger::deadpool_postgres::Object, mint: &str) -> ApiResult<Response> {
+    if let Some(t) = c
+        .query_opt(
+            &format!("SELECT {TOKEN_COLS} FROM intel_tokens WHERE mint = $1"),
+            &[&mint],
+        )
         .await
         .map_err(db)?
-        .map(|_| ())
-        .ok_or_else(ApiError::not_found)
+    {
+        let mut v = token_json(&t);
+        v["trades"] = json!([]);
+        return Ok(public(v, 60));
+    }
+    let missing = c
+        .query_opt("SELECT missing FROM token_safety WHERE mint = $1", &[&mint])
+        .await
+        .map_err(db)?
+        .map(|r| r.get::<_, bool>(0));
+    match missing {
+        Some(true) => {
+            let mut r = ApiError::not_found().into_response();
+            r.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=60"));
+            Ok(r)
+        }
+        // A safety snapshot without a token card (indexer still writing): wait for the tick.
+        Some(false) => crate::intel::pending(c).await,
+        None => {
+            crate::intel::enqueue(st, c, mint).await?;
+            crate::intel::pending(c).await
+        }
+    }
+}
+
+/// Known mint: traded by the pool (`tokens`) or snapshotted by the indexer (`intel_tokens`).
+async fn ensure_token(c: &unzeen_ledger::deadpool_postgres::Object, mint: &str) -> ApiResult<()> {
+    c.query_opt(
+        "SELECT 1 FROM tokens WHERE mint = $1 UNION ALL SELECT 1 FROM intel_tokens WHERE mint = $1 LIMIT 1",
+        &[&mint],
+    )
+    .await
+    .map_err(db)?
+    .map(|_| ())
+    .ok_or_else(ApiError::not_found)
 }
 
 pub async fn trades(
@@ -169,16 +212,97 @@ pub async fn trades(
             .filter(|v| *v > 0)
             .ok_or_else(|| ApiError::bad_request("before: trade id"))?,
     };
+    let filter = match q.get("filter").map(String::as_str) {
+        None => None,
+        Some(f @ ("all" | "unzeen" | "whales" | "dev")) => Some(f),
+        Some(_) => return Err(ApiError::bad_request("filter: all | unzeen | whales | dev")),
+    };
+    let full = st.cfg.intel.full_trades;
+    if matches!(filter, Some("whales" | "dev")) && !full {
+        return Err(ApiError::feature_disabled(
+            "filter whales/dev needs the full trade feed (PoolInfo.features.fullTrades)",
+        ));
+    }
     let c = client(&st).await?;
     ensure_token(&c, &mint).await?;
+    let Some(filter) = filter else {
+        let rows = c
+            .query(
+                &format!("SELECT {TRADE_COLS} FROM trades WHERE mint = $1 AND id < $2 ORDER BY id DESC LIMIT $3"),
+                &[&mint, &before, &n],
+            )
+            .await
+            .map_err(db)?;
+        return Ok(public(Value::Array(rows.iter().map(trade_json).collect()), 2));
+    };
+    let whale = st.cfg.intel.whale_lamports;
+    if !full {
+        // Only the pool's own trades exist: `all` = `unzeen`.
+        let rows = c
+            .query(
+                &format!("SELECT {TRADE_COLS} FROM trades WHERE mint = $1 AND id < $2 ORDER BY id DESC LIMIT $3"),
+                &[&mint, &before, &n],
+            )
+            .await
+            .map_err(db)?;
+        let out = rows
+            .iter()
+            .map(|r| {
+                let mut v = trade_json(r);
+                let tags: Vec<&str> = if r.get::<_, i64>(6) >= whale {
+                    vec!["whale"]
+                } else {
+                    vec![]
+                };
+                v["trader"] = json!("unzeen");
+                v["tags"] = json!(tags);
+                v
+            })
+            .collect();
+        return Ok(public(Value::Array(out), 60));
+    }
+    // Full feed (indexer, market_trades). T1: no `dev` for Unzeen launches or vault trades.
+    let launch = crate::intel::is_unzeen_launch(&c, &mint).await?;
+    if filter == "dev" && launch {
+        return Ok(public(json!([]), 60));
+    }
+    let cond = match filter {
+        "unzeen" => "AND unzeen",
+        "whales" => "AND 'whale' = ANY (tags)",
+        "dev" => "AND 'dev' = ANY (tags) AND NOT unzeen",
+        _ => "",
+    };
     let rows = c
         .query(
-            &format!("SELECT {TRADE_COLS} FROM trades WHERE mint = $1 AND id < $2 ORDER BY id DESC LIMIT $3"),
+            &format!(
+                "SELECT id, kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature,
+                        (extract(epoch FROM ts) * 1000)::bigint, trader, unzeen, tags
+                 FROM market_trades WHERE mint = $1 AND id < $2 {cond} ORDER BY id DESC LIMIT $3"
+            ),
             &[&mint, &before, &n],
         )
         .await
         .map_err(db)?;
-    Ok(public(Value::Array(rows.iter().map(trade_json).collect()), 2))
+    let out = rows
+        .iter()
+        .map(|r| {
+            let mut v = trade_json(r);
+            let unzeen: bool = r.get(11);
+            let tags: Vec<String> = r
+                .get::<_, Vec<String>>(12)
+                .into_iter()
+                .filter(|t| t != "dev" || !(unzeen || launch))
+                .collect();
+            v["trader"] = if unzeen {
+                json!("unzeen")
+            } else {
+                json!(r.get::<_, String>(10))
+            };
+            v["tags"] = json!(tags);
+            v
+        })
+        .collect();
+    Ok(public(Value::Array(out), 60))
 }
 
 pub fn tf_secs(tf: &str) -> Option<i64> {

@@ -421,6 +421,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
         network: st.cfg.cluster.into(),
         jobs: vec![],
         payout: None,
+        gain: None,
     };
     Ok(match a {
         SignedAction::Buy {
@@ -437,11 +438,19 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             if zec_in < min_action {
                 return Err(ApiError::below_minimum("zecIn below PoolInfo.minActionZat"));
             }
-            check_venue_status(st, &mint, &v).await?;
+            let known = check_venue_status(st, &mint, &v).await?;
             let r = rate(st).await?;
             let applied = apply_spread(r.lamports_per_zec, spread(&r), true);
             let (amount_zat, lamports, min_out) = fuzzed_buy(zec_in, min_out, applied, min_action)?;
+            // Creator cap (v0.5): upper-bound token estimate; the ledger applies it only if
+            // this key created the mint.
+            let spot = known.and_then(|(p, d)| {
+                let lpw = crate::config::sol_to_lamports(&truncate_decimals(&p, 9))?;
+                crate::launch::tokens_at_spot(lamports, lpw, d)
+            });
+            let gain = crate::launch::buy_gain_estimate(&st.cfg.launch.curve(), lamports, spot, min_out);
             NewAction {
+                gain: Some((mint.clone(), gain)),
                 amount_zat,
                 fee_zat: now_fee(mode),
                 rate: Some(used(&r, applied)),
@@ -517,6 +526,14 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             }
             let r = rate(st).await?;
             let applied = apply_spread(r.lamports_per_zec, spread(&r), true);
+            // Creator cap (v0.5), checked on the requested amount before the random shave so
+            // the answer is deterministic: initial buy within PoolInfo.launchRules.
+            if initial > 0 && st.cfg.launch.cap_bps > 0 {
+                let full = zat_to_lamports(initial, applied);
+                if full - full % rate::LAMPORTS_STEP > crate::max_initial_buy_lamports(&st.cfg.launch) {
+                    return Err(ApiError::creator_cap());
+                }
+            }
             let (amount_zat, lamports, _) = if initial > 0 {
                 fuzzed_buy(initial, 0, applied, min_action)?
             } else {

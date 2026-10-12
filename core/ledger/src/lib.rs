@@ -48,6 +48,12 @@ pub enum LedgerError {
     Range,
     #[error("not found")]
     NotFound,
+    /// The action would touch the creator's locked initial-buy tokens (API 423 creator_locked).
+    #[error("creator tokens locked")]
+    CreatorLocked,
+    /// The creator's position through the pool would exceed the cap (API 422 creator_cap).
+    #[error("creator position cap")]
+    CreatorCap,
 }
 
 /// SQLSTATE of a Postgres error, or a coarse kind for client-side errors. Safe to log.
@@ -89,6 +95,8 @@ impl LedgerError {
             LedgerError::Replay => "replay",
             LedgerError::Range => "range",
             LedgerError::NotFound => "not_found",
+            LedgerError::CreatorLocked => "creator_locked",
+            LedgerError::CreatorCap => "creator_cap",
         }
     }
 }
@@ -164,10 +172,30 @@ pub struct ActionReceipt {
     pub rate: Option<actions::RateUsed>,
 }
 
+/// Rules the ledger enforces on creators of tokens launched through Unzeen (API v0.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CreatorRules {
+    /// Lock of the initial-buy tokens, seconds (0 = off). The end is rounded UP to the hour.
+    pub lock_secs: u64,
+    /// Max position of the creator through the pool, token base units (0 = off).
+    pub cap_tokens: u64,
+}
+
+impl Default for CreatorRules {
+    /// 24 h lock; 5 % of a pump.fun supply (1e9 tokens, 6 decimals).
+    fn default() -> Self {
+        Self {
+            lock_secs: 86_400,
+            cap_tokens: 50_000_000_000_000,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Ledger {
     pool: Pool,
     policy: Policy,
+    rules: CreatorRules,
 }
 
 fn to_i64(v: u64) -> Result<i64> {
@@ -203,11 +231,25 @@ impl Ledger {
         let mut c = pool.get().await?;
         migrate::run(&mut c).await?;
         drop(c);
-        Ok(Self { pool, policy })
+        Ok(Self {
+            pool,
+            policy,
+            rules: CreatorRules::default(),
+        })
     }
 
     pub fn policy(&self) -> &Policy {
         &self.policy
+    }
+
+    /// Same ledger with other creator rules (API config).
+    pub fn with_creator_rules(mut self, rules: CreatorRules) -> Self {
+        self.rules = rules;
+        self
+    }
+
+    pub fn creator_rules(&self) -> CreatorRules {
+        self.rules
     }
 
     /// The connection pool, for read-only public queries (feed, tokens) of the API server.
@@ -374,6 +416,7 @@ impl Ledger {
             network: String::new(),
             jobs: vec![],
             payout: None,
+            gain: None,
         };
         self.submit(pk, nonce, request_hash, &a).await
     }

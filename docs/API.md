@@ -2,7 +2,18 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.4** (12.10, дни 4–5; реализовано в `core/api` + `core/scanner`). Изменения против v0.3:
+Статус: **v0.5** (12.10, дни 6–7; реализовано в `core/api` + `core/ledger`). Изменения против v0.4:
+- **`GET /api/tokens/:mint/safety`** → `200 TokenSafety` | `202 PendingResponse` | `400 bad_request` (не base58 32 байта) | `404 not_found` (аккаунта mint нет в сети / это не mint). Публичный, без подписи и cookies, ответ одинаков для всех. Данные — снимки индексатора по фиксированному тику (`docs/INTEL.md`), запрос сам ничего не ускоряет.
+- **`GET /api/tokens/:mint` для неизвестного mint** → `202 PendingResponse` + mint ставится в очередь CA-запросов (вместо 404). После тика — `200` `Token & { trades: [] }` из снимка индексатора. **Найденный так mint в публичный `GET /api/tokens` НЕ попадает** (иначе видно, что кто-то искал): список строится только из токенов, которыми торговал пул. `404` — если индексатор выяснил, что такого mint нет.
+- **`GET /api/tokens/:mint/trades?filter=all|unzeen|whales|dev`.** Без `filter` — как раньше, `FeedEvent[]`. С `filter` — `TokenTrade[]`. Пока полной ленты нет (`PoolInfo.features.fullTrades = false`): `all` = `unzeen` (только сделки пула), `whales` и `dev` → `400 feature_disabled`.
+- Свечи и `/trades` для mint, известного только по снимку индексатора, отдают `[]` (а не 404).
+- **Правила создателя Unzeen-запуска (в реестре, принудительно):** токены первой покупки создателя (`create.initialBuyZec`) залочены на 24 ч — `sell`/`withdraw_token`, затрагивающие их, → `423 creator_locked`; кап позиции создателя через пул — 5 % саплая: `create` с первой покупкой > 5 % и любая `buy` создателя, которая может довести его позицию в пуле выше 5 %, → `422 creator_cap`. Параметры — `PoolInfo.launchRules`.
+- **T1.** Для Unzeen-запусков доля и продажи создателя **не считаются из реестра и не публикуются**: в `TokenSafety` нет `dev`, `holders.devPct = null`, есть `unzeen: { launch: true, rules }`. Фильтр `dev` для них всегда пуст.
+- **`ActionStatus.executedAt`** — время исполнения, unix мс, **округлено вниз до минуты**; есть, пока хранится `fill` (24–48 ч).
+- **`PoolInfo.features`** (`fullTrades`) и **`PoolInfo.launchRules`** (`lockSecs`, `capBps`, `maxInitialBuyLamports`).
+- Новые коды ошибок: `feature_disabled` (400), `creator_locked` (423), `creator_cap` (422).
+
+Изменения v0.4 против v0.3:
 - **Эпохи (D2).** buy/sell/create больше не получают независимую задержку 3–20 с: они копятся и исполняются пачкой на границе эпохи. Интервал между границами случайный **30–60 с** (одинаково на devnet и mainnet), расписание не зависит от прихода запросов, порядок внутри пачки случайный.
 - **`exec?: "now" | "delayed" | "max"`** — режим исполнения (по умолчанию `"delayed"`; неизвестное значение → 400). См. «Режимы исполнения».
   - buy/sell/create: `now` — без эпохи, исполнение за секунды, плоская комиссия `PoolInfo.fees.nowFeeZat` (входит в hold); `delayed` — эпоха 30–60 с; `max` — эпоха 5–15 мин.
@@ -40,8 +51,10 @@
 |---|---|---|
 | GET | `/api/feed?limit=50` | `FeedEvent[]` |
 | GET | `/api/tokens` | `Token[]` |
-| GET | `/api/tokens/:mint` | `Token & { trades: FeedEvent[] }` — последние **50** сделок по mint, новые первыми |
+| GET | `/api/tokens/:mint` | `Token & { trades: FeedEvent[] }` — последние **50** сделок по mint, новые первыми. Неизвестный mint → `202 PendingResponse` + очередь (v0.5) |
 | GET | `/api/tokens/:mint/trades?before=<id>&limit=50` | `FeedEvent[]` — пагинация истории, `limit` ≤ 200 |
+| GET | `/api/tokens/:mint/trades?filter=all\|unzeen\|whales\|dev&before=<id>&limit=50` | `TokenTrade[]` (v0.5). `whales`/`dev` без полной ленты → `400 feature_disabled` |
+| GET | `/api/tokens/:mint/safety` | `TokenSafety` \| `202 PendingResponse` (v0.5), см. «Безопасность токена» |
 | GET | `/api/tokens/:mint/candles?tf=1m&from=&to=` | `Candle[]` — OHLC для lightweight-charts (см. ниже) |
 | GET | `/api/pool` | `PoolInfo` — публичный: UA пула, `chainId`, минимумы, K подтверждений. Без pubkey и без cookies |
 | GET | `/api/portfolio` (подписанный) | `Portfolio` — pubkey только в заголовке `x-unzeen-pubkey`, **не в пути** |
@@ -110,6 +123,14 @@ interface PoolInfo {
     nowFeeZat: string;                // плоская комиссия режима exec "now" (приоритетная полоса пула), зат; входит в hold
   };
   createEnabled: boolean;   // v0.4: false → POST create вернёт 503 venue_unavailable
+  features: {               // v0.5: что включено на сервере (не build-time флаг фронта)
+    fullTrades: boolean;    // полная лента сделок по mint (чужие сделки, теги whale/dev/sniper); false → filter whales|dev = 400
+  };
+  launchRules: {            // v0.5: правила создателя Unzeen-запуска, которые реестр применяет принудительно
+    lockSecs: number;       // лок токенов первой покупки создателя (86400 = 24 ч); 0 — правило выключено
+    capBps: number;         // кап позиции создателя через пул, б.п. саплая (500 = 5 %); 0 — выключено
+    maxInitialBuyLamports: string; // максимум первой покупки create в лампортах (после округления D10), из кривой площадки
+  };
   rate?: {                  // v0.4: из фонового кэша (обновление 30–60 с); нет поля → курса нет
     lamportsPerZec: string;     // mid
     lamportsPerZecBuy: string;  // для buy/create/комиссий (mid − спред)
@@ -151,6 +172,7 @@ interface ActionReceipt {
 
 interface ActionStatus {
   status: "queued" | "sent" | "executed" | "failed";   // sent (v0.4): tx отправлена, ждём финальности
+  executedAt?: number;      // v0.5: unix мс, округлено ВНИЗ до минуты; только при executed, пока хранится fill (24–48 ч)
   solanaTx?: string;        // первая подтверждённая подпись; через 24 ч после исполнения связь удаляется (поле пропадает)
   error?: ErrorCode;        // при failed: slippage | graduated | pool_liquidity | venue_unavailable | not_found | bad_request | internal
   rate?: RateUsed;
@@ -213,6 +235,72 @@ interface PlatformStats {
   topTokens: Token[];
 }
 ```
+
+### Безопасность токена и лента сделок (v0.5)
+
+Все эндпоинты раздела публичные: **без подписи, без cookies, без `x-unzeen-*`**, ответ одинаков для всех, ничего персонального (в т. ч. «you hold»), сервер не пишет логов с mint. `Cache-Control: public, max-age=60` (для `202` — `max-age` = до следующего тика, ≥ 1 с).
+
+```ts
+// 202 у /safety и у /api/tokens/:mint для холодного mint
+interface PendingResponse {
+  status: "pending";
+  retryAfterMs: number;     // до ближайшего тика индексатора + запас; одинаково для всех спрашивающих в этом окне
+}
+
+type RiskyExtension = "permanentDelegate" | "transferHook" | "transferFee" | "defaultFrozen" | "mintClose" | "pausable";
+type UnzeenRule = "creator_initial_buy_locked_24h" | "initial_buy_cap_5pct" | "authorities_revoked" | string;
+
+interface TokenSafety {
+  mint: string;
+  asOf: number;             // unix мс, округлено вниз до минуты тика, в котором сделан снимок (не момент чьего-то запроса)
+  program: "spl-token" | "token-2022";
+  authorities: {
+    mintRevoked: boolean;
+    freezeRevoked: boolean;
+    metadataImmutable: boolean | null;   // updateAuthority == null; null — неизвестно
+    riskyExtensions: RiskyExtension[];
+  };
+  holders?: {               // нет поля — снимка холдеров ещё нет
+    top10Pct: string;       // десятичная строка, %; без кривой, пула AMM и vault'ов Unzeen
+    devPct: string | null;  // null для Unzeen-запусков (T1) и если дев неизвестен
+    unzeenPoolPct: string;  // доля всех vault пула (общий инвентарь всех держателей unzeen)
+    asOf: number;           // как asOf выше
+  };
+  dev?: {                   // только при включённой истории дева; НИКОГДА для Unzeen-запусков (T1)
+    address: string; launchesSeen: number; rugsSeen: number; since: number;
+  };
+  firstBlocks?: {           // только при включённой полной ленте
+    snipers: number; sniperPct: string;
+    sameSlotBuyers: number; sameSlotPct: string;   // без нашей launch-покупки
+    unzeenLaunchBuy: boolean;                      // атомарный create+buy Unzeen (by design, не бандл)
+  };
+  market: {
+    venue: Venue; status: "curve" | "graduated";
+    curveProgressPct?: string;   // только на кривой
+    lpBurnedPct?: string;        // после миграции
+  };
+  socials?: { twitter?: string; telegram?: string; website?: string };  // только https
+  image?: string;           // только наш URL `…/media/<sha40>.<ext>`, никогда внешний
+  unzeen?: { launch: true; rules: UnzeenRule[] };   // только для запусков через Unzeen
+}
+
+interface TokenTrade extends FeedEvent {
+  trader: string;           // публичный адрес для чужих сделок; "unzeen" для vault пула
+  tags: ("whale" | "dev" | "sniper")[];   // "dev" никогда не ставится на сделки vault и на Unzeen-запуски
+}
+```
+
+- **Холодный mint.** `/safety` или `/api/tokens/:mint` для mint без снимка ставит его в очередь и отвечает `202`. Очередь разбирается индексатором **пачкой на фиксированном тике** (≈ 60 с ± джиттер, тик не зависит от запросов), пачка добивается приманками до фиксированного размера — сторонний RPC не видит, какой mint искали. До тика `pending` видят **все** (нельзя отличить «я первый» от «кто-то искал минуту назад»). После тика mint 7 дней обновляется по расписанию вместе с приманками того же тика. Повторять запрос через `retryAfterMs`; если снова `202` — mint ждёт следующего тика (очередь ограничена, на тик берётся не больше 4 настоящих mint).
+- **`/safety` для известного mint**: `200` со снимком; пока индексатор не сделал первый снимок (новый токен ленты) — тоже `202`.
+- **Публичный `GET /api/tokens`** строится только из `tokens` (токены, которыми торговал пул). Mint, найденные поиском, и приманки туда не попадают никогда.
+- **Unzeen-запуск** (токен создан через пул): `dev` отсутствует, `holders.devPct = null`, `unzeen.rules` — правила, которые реестр применяет принудительно: `creator_initial_buy_locked_<N>h` (лок первой покупки, по умолчанию `_24h`), `initial_buy_cap_<P>pct` (кап позиции, по умолчанию `_5pct`; дробный — `initial_buy_cap_<B>bps`), `authorities_revoked` (если снимок подтверждает: mint и freeze authority отозваны). Доля и продажи анонимного создателя из реестра **не считаются и не публикуются** (T1). Vault пула в топе — отдельной строкой `unzeenPoolPct`.
+- **`/trades?filter=`**: `unzeen` — сделки пула (`trader: "unzeen"`, тег `whale` при `solAmount ≥ 1 SOL`); `all` — все сделки mint (пока полной ленты нет — то же, что `unzeen`); `whales` — сделки с тегом `whale`; `dev` — сделки дева (для Unzeen-запусков всегда `[]`). `whales`/`dev` при `PoolInfo.features.fullTrades = false` → `400 feature_disabled`. Пагинация `before=<id>` по `id` из ответа с тем же `filter`; `limit` ≤ 200. Неизвестный mint → `404`.
+
+### Правила создателя (v0.5, реестр)
+- Применяются к anon-ключу, который создал токен через `create` (запись прав создателя в реестре; наружу не отдаётся).
+- **Лок первой покупки.** Токены, полученные первой покупкой `create`, залочены на `PoolInfo.launchRules.lockSecs` (по умолчанию 24 ч, конец лока округлён вверх до часа). Пока лок действует, `sell` и `withdraw_token` этого mint принимаются, только если после них на балансе остаётся не меньше залоченного количества; иначе → `423 creator_locked`. Докупленные позже токены не залочены.
+- **Кап позиции.** Позиция создателя через пул (доступно + в hold + оценка ещё не исполненных buy) не может превысить `capBps` саплая (по умолчанию 5 %). `create` с первой покупкой больше `launchRules.maxInitialBuyLamports` → `422 creator_cap`. `buy` создателя: оценка токенов — верхняя граница (по начальной кривой площадки и по текущей цене, берётся меньшая, но не меньше `minOut`); если позиция с ней > капа → `422 creator_cap`. Выведенные из пула токены (`withdraw_token`) в позицию не входят.
+- Ответы `423`/`422` получает только сам создатель (подписанный запрос), публично ничего не раскрывается.
 
 ### Правила исполнения действий
 - **Режимы исполнения (`exec`)** для buy/sell/create:
@@ -313,9 +401,12 @@ type ErrorCode =
   | "slippage"             // 422: minOut/minZecOut не выполним по текущей котировке
   | "rate_limited"         // 429: есть заголовок Retry-After (сек)
   | "venue_unavailable"    // 503: площадка/RPC недоступны, площадка не включена, нет курса ZEC/SOL, действия на mainnet выключены
+  | "feature_disabled"     // 400 (v0.5): функция выключена на сервере (filter=whales|dev без полной ленты)
+  | "creator_locked"       // 423 (v0.5): sell/withdraw_token затрагивает залоченные токены первой покупки создателя
+  | "creator_cap"          // 422 (v0.5): create/buy создателя превышает кап позиции (launchRules.capBps)
   | "internal";            // 500
 ```
-404 отдаётся и для mint, который сервис не отслеживает (даже если токен существует на Solana). `message` — для разработчика, текст UI фронт берёт по `code`.
+404 отдаётся и для mint, который сервис не отслеживает (даже если токен существует на Solana); исключения v0.5 — `GET /api/tokens/:mint` и `/safety`, они отвечают `202` и ставят mint в очередь индексатора. `message` — для разработчика, текст UI фронт берёт по `code`.
 
 ## Формат memo `unz1` (shielded-депозит)
 
