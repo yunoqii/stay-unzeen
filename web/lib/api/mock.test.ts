@@ -11,7 +11,7 @@ const signer = signerFromSecret(SK);
 
 async function portfolio(): Promise<Portfolio> {
   const path = "/api/portfolio";
-  const p = handle("devnet", "GET", path, undefined, signRequest(signer, { method: "GET", pathWithQuery: path }));
+  const p = handle("devnet", "GET", path, undefined, signRequest(signer, { chainId: "0202", method: "GET", pathWithQuery: path }));
   await vi.advanceTimersByTimeAsync(500);
   return (await p) as Portfolio;
 }

@@ -1,10 +1,14 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { mnemonicToSeed } from "@scure/bip39";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import {
-  ANON_KEY_PATH,
+  anonKeyPath,
   isValidMnemonic,
+  keypairAtPath,
+  LEGACY_ANON_KEY_PATH,
   keypairFromMnemonic,
   newMnemonic,
   normalizeMnemonic,
@@ -67,23 +71,56 @@ describe("SLIP-0010 ed25519", () => {
 
 describe("anon key from mnemonic", () => {
   it("is deterministic and independent of formatting", async () => {
-    const a = await keypairFromMnemonic(ABANDON);
-    const b = await keypairFromMnemonic(`  ${ABANDON.toUpperCase()}  `);
+    const a = await keypairFromMnemonic(ABANDON, "devnet");
+    const b = await keypairFromMnemonic(`  ${ABANDON.toUpperCase()}  `, "devnet");
     expect(a.pubkey).toBe(b.pubkey);
     expect(a.secretKey).toHaveLength(32);
     expect(a.publicKey).toHaveLength(32);
   });
 
-  it("pins the anon key for the 'abandon … about' phrase on " + ANON_KEY_PATH, async () => {
-    const seed = await mnemonicToSeed(ABANDON, "");
-    const { key } = slip10Ed25519(seed, ANON_KEY_PATH);
-    const kp = await keypairFromMnemonic(ABANDON);
-    expect(bytesToHex(kp.secretKey)).toBe(bytesToHex(key));
-    // Golden value: fails if the derivation (path, curve, normalization) ever changes.
-    expect(kp.pubkey).toMatchInlineSnapshot(`"3aY2SvoAGX6pYdFfUwqaj8LVn499hDrrQ1w8bJVWbN1E"`);
+  it("uses m/44'/133'/<net>'/0': one phrase, a different key per network", async () => {
+    expect(anonKeyPath("mainnet")).toBe("m/44'/133'/0'/0'");
+    expect(anonKeyPath("devnet")).toBe("m/44'/133'/1'/0'");
+    const main = await keypairFromMnemonic(ABANDON, "mainnet");
+    const dev = await keypairFromMnemonic(ABANDON, "devnet");
+    expect(main.pubkey).not.toBe(dev.pubkey);
+    // Golden values: fail if the derivation (path, curve, normalization) ever changes.
+    expect(main.pubkey).toBe("3aY2SvoAGX6pYdFfUwqaj8LVn499hDrrQ1w8bJVWbN1E");
+    expect(dev.pubkey).toBe("BvSbw1qy4VG3xgvss1kERnc6tY2cAEmouMiBUDhhU8j7");
+    // The v0.2 shared path equals today's mainnet path.
+    expect((await keypairAtPath(ABANDON, LEGACY_ANON_KEY_PATH)).pubkey).toBe(main.pubkey);
   });
 
   it("throws on an invalid phrase", async () => {
-    await expect(keypairFromMnemonic("not a real phrase")).rejects.toThrow();
+    await expect(keypairFromMnemonic("not a real phrase", "devnet")).rejects.toThrow();
   });
+});
+
+// Backend vectors: core/testdata/unz1-vectors.json, section "anonKey".
+const BACKEND = path.resolve(import.meta.dirname, "../../../core/testdata/unz1-vectors.json");
+
+interface AnonKeyCase {
+  chainIdHex: string;
+  mnemonic: string;
+  path: string;
+  pubkey: string;
+  secretKeyHex: string;
+  seedHex: string;
+}
+
+const anonCases: AnonKeyCase[] = existsSync(BACKEND)
+  ? (JSON.parse(readFileSync(BACKEND, "utf8")) as { anonKey?: { cases?: AnonKeyCase[] } }).anonKey?.cases ?? []
+  : [];
+
+describe.skipIf(anonCases.length === 0)("anon key: backend vectors (core/testdata/unz1-vectors.json)", () => {
+  for (const c of anonCases) {
+    it(`${c.chainIdHex} ${c.path} ${c.mnemonic.split(" ").slice(0, 2).join(" ")}…`, async () => {
+      const network = c.chainIdHex === "0101" ? "mainnet" : "devnet";
+      expect(anonKeyPath(network)).toBe(c.path);
+      expect(bytesToHex(await mnemonicToSeed(c.mnemonic, ""))).toBe(c.seedHex);
+      const kp = await keypairFromMnemonic(c.mnemonic, network);
+      expect(bytesToHex(kp.secretKey)).toBe(c.secretKeyHex);
+      expect(kp.pubkey).toBe(c.pubkey);
+    });
+  }
 });

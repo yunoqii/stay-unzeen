@@ -109,9 +109,10 @@ describe("deposit: pool checks", () => {
     expect(poolChainId(ok, "devnet")).toEqual([2, 2]);
     expect(poolChainId(mockPool("mainnet"), "mainnet")).toEqual([1, 1]);
   });
-  it("accepts Zcash mainnet behind Solana devnet", () => {
+  it("refuses mixed chain ids (v0.3 allows only 0202 and 0101)", () => {
     const p: PoolInfo = { ...ok, network: "main", chainId: "0102", address: mockPool("mainnet").address };
-    expect(poolChainId(p, "devnet")).toEqual([1, 2]);
+    expect(() => poolChainId(p, "devnet")).toThrow(PoolMismatchError);
+    expect(() => poolChainId({ ...ok, chainId: "0201" }, "devnet")).toThrow(PoolMismatchError);
   });
   it("refuses a pool for another network", () => {
     expect(() => poolChainId(ok, "mainnet")).toThrow(PoolMismatchError);

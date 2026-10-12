@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatUnits, formatZec, lamportsToSol, parseUnits, unitsToNumber, zatToZec } from "./format";
+import { formatDay, formatUnits, formatZec, lamportsToSol, parseUnits, unitsToNumber, zatToZec } from "./format";
 
 describe("base units", () => {
   it("formats exactly", () => {
@@ -33,5 +33,14 @@ describe("formatZec", () => {
     expect(formatZec("10000000")).toBe("0.1");
     expect(formatZec("0")).toBe("0");
     expect(formatZec("100000000000000")).toBe("1,000,000");
+  });
+});
+
+describe("formatDay", () => {
+  const day = Date.UTC(2026, 9, 12);
+  it("labels UTC days", () => {
+    expect(formatDay(day, day + 5 * 3600_000)).toBe("Today");
+    expect(formatDay(day - 86_400_000, day + 1)).toBe("Yesterday");
+    expect(formatDay(Date.UTC(2026, 9, 3), day)).toBe("Oct 3");
   });
 });

@@ -7,15 +7,24 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha512 } from "@noble/hashes/sha2.js";
 import { base58 } from "@scure/base";
+import type { Network } from "@/lib/network";
 
 export { wordlist };
 
 /**
- * SLIP-0010 path for the Unzeen anon key. All levels hardened (ed25519 has no
- * non-hardened derivation). Coin type 133 = Zcash. Changing this changes every
- * user's key: treat as part of the protocol.
+ * SLIP-0010 path for the Unzeen anon key (docs/API.md v0.3): m/44'/133'/<net>'/0', net = 0 mainnet
+ * (chainId 0101), 1 devnet/testnet (0202). One phrase gives a different key per network. All levels
+ * hardened (ed25519 has no non-hardened derivation). Coin type 133 = Zcash. Changing this changes
+ * every user's key: treat as part of the protocol.
  */
-export const ANON_KEY_PATH = "m/44'/133'/0'/0'";
+export const ANON_KEY_NET_INDEX: Record<Network, number> = { mainnet: 0, devnet: 1 };
+
+export function anonKeyPath(network: Network): string {
+  return `m/44'/133'/${ANON_KEY_NET_INDEX[network]}'/0'`;
+}
+
+/** v0.2 path, same for every network. Only for upgrading v1 vaults (lib/crypto/vault.ts). */
+export const LEGACY_ANON_KEY_PATH = "m/44'/133'/0'/0'";
 
 const HARDENED = 0x80000000;
 
@@ -80,11 +89,15 @@ export function keypairFromSecret(secretKey: Uint8Array): AnonKeypair {
   return { secretKey, publicKey, pubkey: base58.encode(publicKey) };
 }
 
-export async function keypairFromMnemonic(mnemonic: string): Promise<AnonKeypair> {
+export async function keypairFromMnemonic(mnemonic: string, network: Network): Promise<AnonKeypair> {
+  return keypairAtPath(mnemonic, anonKeyPath(network));
+}
+
+export async function keypairAtPath(mnemonic: string, path: string): Promise<AnonKeypair> {
   const m = normalizeMnemonic(mnemonic);
   if (!isValidMnemonic(m)) throw new Error("Invalid recovery phrase");
   const seed = await mnemonicToSeed(m, "");
-  const { key } = slip10Ed25519(seed, ANON_KEY_PATH);
+  const { key } = slip10Ed25519(seed, path);
   seed.fill(0);
   return keypairFromSecret(key);
 }

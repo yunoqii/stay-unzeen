@@ -12,8 +12,8 @@ import type { Network } from "@/lib/network";
 import { memoText, parseZip321 } from "@/lib/zip321";
 import { ApiError } from "./errors";
 import type {
-  ActionAccepted,
-  ActionStatusResponse,
+  ActionReceipt,
+  ActionStatus,
   Candle,
   CandleTimeframe,
   DepositInfo,
@@ -274,9 +274,15 @@ function candles(s: MockTokenState, tf: CandleTimeframe, from: number | undefine
 
 // ---- auth (same checks as core/) ----
 
-function authorize(method: string, path: string, body: string | undefined, headers: Partial<SignedHeaders>): string {
+function authorize(
+  network: Network,
+  method: string,
+  path: string,
+  body: string | undefined,
+  headers: Partial<SignedHeaders>,
+): string {
   const now = Date.now();
-  const res = verifyRequest(headers, { method, pathWithQuery: path, body }, now);
+  const res = verifyRequest(headers, { chainId: mockPool(network).chainId, method, pathWithQuery: path, body }, now);
   if (!res.ok) throw new ApiError("unauthorized", `signature ${res.reason}`, 401);
   for (const [k, exp] of seenNonces) if (exp < now) seenNonces.delete(k);
   const key = `${res.pubkey}:${headers[HEADER_NONCE]}`;
@@ -286,6 +292,10 @@ function authorize(method: string, path: string, body: string | undefined, heade
 }
 
 // ---- pool and accounts (per network) ----
+
+const hex16 = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (x) => x.toString(16).padStart(2, "0")).join("");
+const MOCK_RATE = () => ({ lamportsPerZec: "248000000000", source: "fixed" as const, ts: Date.now() });
+const UNSUPPORTED_OPS = new Set(["claim", "order_create", "order_cancel", "chat"]);
 
 function poolAddress(network: Network): string {
   // Looks like a UA (bech32 charset); not a real address.
@@ -306,7 +316,7 @@ interface MockAccount {
   zecBalance: bigint;
   zecHeld: bigint;
   frozen: boolean;
-  holdings: { mint: string; amount: string }[];
+  holdings: { mint: string; amount: string; held: string }[];
   deposits: DepositInfo[];
 }
 
@@ -323,7 +333,7 @@ function account(network: Network, pubkey: string): MockAccount {
       zecBalance: BigInt(0),
       zecHeld: BigInt(0),
       frozen: false,
-      holdings: picks.map((s) => ({ mint: s.token.mint, amount: toBaseUnits((rnd() * 4 + 0.2) / s.price, s.token.decimals) })),
+      holdings: picks.map((s) => ({ mint: s.token.mint, amount: toBaseUnits((rnd() * 4 + 0.2) / s.price, s.token.decimals), held: "0" })),
       deposits: [],
     };
     accounts.set(key, a);
@@ -391,7 +401,7 @@ function scan(now: number) {
     const pub = decodeUnz1(n.memo!, chainIdOf(pool)).anonPubkey;
     const a = account(n.network, pub);
     a.zecBalance += n.amountZat;
-    a.deposits.unshift({ amountZat: n.amountZat.toString(), status: "credited", ts: Math.floor(now / 60_000) * 60_000 });
+    a.deposits.unshift({ id: hex16(), amountZat: n.amountZat.toString(), status: "credited", ts: Math.floor(now / 86_400_000) * 86_400_000 });
     n.outcome = "credited";
   }
 }
@@ -501,33 +511,33 @@ export async function handle(
     }
     if (p === "/api/pool") return mockPool(network);
     if ((m = p.match(/^\/api\/actions\/([^/]+)$/))) {
-      const pub = authorize(method, pathWithQuery, body, headers);
+      const pub = authorize(network, method, pathWithQuery, body, headers);
       const a = actions.get(decodeURIComponent(m[1]));
       if (!a || a.pubkey !== pub) throw new ApiError("not_found", "unknown action", 404);
-      const res: ActionStatusResponse =
+      const res: ActionStatus =
         Date.now() - a.createdAt < 4_000 ? { status: "queued" } : { status: "executed", solanaTx: b58(88) };
       return res;
     }
     if (p === "/api/portfolio") {
       // pubkey comes only from the signed header, never from the path.
-      return portfolioOf(network, authorize(method, pathWithQuery, body, headers));
+      return portfolioOf(network, authorize(network, method, pathWithQuery, body, headers));
     }
     if (p === "/api/orders" || p === "/api/creator") {
-      authorize(method, pathWithQuery, body, headers);
+      authorize(network, method, pathWithQuery, body, headers);
       return [];
     }
   }
 
   if (method === "POST") {
     if (p === "/api/actions") {
-      const pub = authorize(method, pathWithQuery, body, headers);
+      const pub = authorize(network, method, pathWithQuery, body, headers);
       const action = json() as SignedAction | null;
       if (!action?.op) throw new ApiError("bad_request", "op required", 400);
+      if (UNSUPPORTED_OPS.has(action.op)) throw new ApiError("bad_request", "op not supported yet", 400);
       if (account(network, pub).frozen) throw new ApiError("balance_frozen", "balance frozen", 423);
-      const hex = Array.from(crypto.getRandomValues(new Uint8Array(16)), (x) => x.toString(16).padStart(2, "0")).join("");
-      const id = hex; // 128 random bits, hex (docs/API.md)
+      const id = hex16(); // 128 random bits, hex (docs/API.md)
       actions.set(id, { createdAt: Date.now(), action, pubkey: pub });
-      const res: ActionAccepted = { id, status: "queued" };
+      const res: ActionReceipt = { id, status: "queued", rate: MOCK_RATE() };
       return res;
     }
   }

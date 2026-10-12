@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { ArrowRight, ArrowSquareOut, CaretDown, Copy, ShieldCheck, Warning, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, ArrowSquareOut, CaretDown, Copy, ShieldCheck, WarningCircle } from "@phosphor-icons/react";
 import { AnimatePresence, motion } from "motion/react";
 import { toast } from "sonner";
 import { API_MODE } from "@/lib/api/client";
@@ -12,7 +12,7 @@ import { signMemo, useKeyState } from "@/lib/crypto/session";
 import type { ChainId } from "@/lib/crypto/unz1";
 import { depositFields, depositUri, poolChainId, PoolMismatchError } from "@/lib/deposit";
 import { formatZec, shortAddr } from "@/lib/format";
-import { NETWORK_CONFIG, type Network } from "@/lib/network";
+import type { Network } from "@/lib/network";
 import { zecToZat } from "@/lib/zip321";
 import { cn } from "@/lib/utils";
 import { useDepositTracker } from "@/hooks/use-deposit-tracker";
@@ -179,12 +179,6 @@ function DepositRequest({
 
       {/* Controls side */}
       <div className="order-1 space-y-5 lg:order-2">
-        {pool.network === "main" && !NETWORK_CONFIG[network].realFunds && (
-          <Notice icon={<Warning size={16} weight="duotone" />} tone="zec">
-            This pool takes real ZEC on Zcash mainnet, even on Devnet.
-          </Notice>
-        )}
-
         <div>
           <label htmlFor="topup-amount" className="text-sm text-muted-foreground">
             Amount

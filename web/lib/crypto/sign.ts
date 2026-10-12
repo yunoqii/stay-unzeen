@@ -1,6 +1,9 @@
 // HTTP request signing with the anon key, exactly as in docs/API.md "Подпись запросов anon-ключом":
 //
-//   unzeen/api/v1\n<METHOD>\n<path?query>\n<hex(sha256(body))>\n<nonce>\n<ts>
+//   unzeen/api/v1\n<chainId>\n<METHOD>\n<path?query>\n<hex(sha256(body))>\n<nonce>\n<ts>
+//
+// chainId (v0.3) = PoolInfo.chainId, lower-case hex: "0202" devnet, "0101" mainnet. A devnet
+// signature never verifies on the mainnet API.
 //
 // Headers: x-unzeen-pubkey (base58), x-unzeen-nonce (16 bytes hex), x-unzeen-ts (unix ms), x-unzeen-sig (base58, 64 bytes).
 
@@ -30,6 +33,8 @@ export interface Signer {
 }
 
 export interface RequestToSign {
+  /** Network the request is for: "0202" | "0101" (lib/network.ts NETWORK_CONFIG[n].chainIdHex). */
+  chainId: string;
   method: string;
   /** Path plus query exactly as sent, e.g. "/api/orders?status=open". No origin. */
   pathWithQuery: string;
@@ -52,7 +57,8 @@ export function bodyHash(body?: string | Uint8Array): string {
 export function signingString(req: RequestToSign, nonce: string, ts: number | string): string {
   if (!req.pathWithQuery.startsWith("/")) throw new Error("pathWithQuery must start with '/'");
   if (!/^[0-9a-f]{32}$/.test(nonce)) throw new Error("nonce must be 16 bytes lower-case hex");
-  return [SIGN_DOMAIN, req.method.toUpperCase(), req.pathWithQuery, bodyHash(req.body), nonce, String(ts)].join("\n");
+  if (!/^[0-9a-f]{4}$/.test(req.chainId)) throw new Error("chainId must be 2 bytes lower-case hex");
+  return [SIGN_DOMAIN, req.chainId, req.method.toUpperCase(), req.pathWithQuery, bodyHash(req.body), nonce, String(ts)].join("\n");
 }
 
 export function newNonce(): string {

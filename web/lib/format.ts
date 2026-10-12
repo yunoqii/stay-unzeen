@@ -109,12 +109,13 @@ export function formatZec(zat: string): string {
   return (neg ? "-" : "") + grouped + (frac ? "." + frac : "");
 }
 
-/** Coarse age for minute-rounded timestamps. */
-export function minutesAgo(ts: number, now: number): string {
-  const m = Math.floor((now - ts) / 60_000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m} min ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h} h ago`;
-  return `${Math.floor(h / 24)} d ago`;
+const DAY_MS = 86_400_000;
+const dayFmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+
+/** Day label for a timestamp rounded to the UTC day: "Today", "Yesterday", "Oct 12". */
+export function formatDay(ts: number, now: number): string {
+  const d = Math.floor(now / DAY_MS) - Math.floor(ts / DAY_MS);
+  if (d <= 0) return "Today";
+  if (d === 1) return "Yesterday";
+  return dayFmt.format(ts);
 }

@@ -14,11 +14,8 @@ export interface NetworkConfig {
   apiUrl: string;
   /** WS base, empty = derived from apiUrl / page origin. */
   wsUrl: string;
-  /**
-   * Second byte of the unz1 chain_id (1 mainnet-beta, 2 devnet). The full chain_id comes from
-   * GET /api/pool and must agree with this (see lib/deposit.ts).
-   */
-  solanaCluster: 1 | 2;
+  /** unz1 / HTTP-signature chain_id, lower-case hex. v0.3 allows only these two. */
+  chainIdHex: "0202" | "0101";
   /** Solscan query suffix. */
   explorerQuery: string;
   realFunds: boolean;
@@ -33,7 +30,7 @@ export const NETWORK_CONFIG: Record<Network, NetworkConfig> = {
     label: "Devnet",
     apiUrl: strip(process.env.NEXT_PUBLIC_API_URL_DEVNET ?? process.env.NEXT_PUBLIC_API_URL),
     wsUrl: strip(process.env.NEXT_PUBLIC_WS_URL_DEVNET),
-    solanaCluster: 2,
+    chainIdHex: "0202",
     explorerQuery: "?cluster=devnet",
     realFunds: false,
   },
@@ -42,7 +39,7 @@ export const NETWORK_CONFIG: Record<Network, NetworkConfig> = {
     label: "Mainnet",
     apiUrl: strip(process.env.NEXT_PUBLIC_API_URL_MAINNET),
     wsUrl: strip(process.env.NEXT_PUBLIC_WS_URL_MAINNET),
-    solanaCluster: 1,
+    chainIdHex: "0101",
     explorerQuery: "",
     realFunds: true,
   },

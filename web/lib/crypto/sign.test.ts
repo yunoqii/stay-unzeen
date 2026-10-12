@@ -25,26 +25,30 @@ describe("request signing: web vectors (generated independently with node:crypto
 
   for (const v of own.vectors) {
     it(v.name, () => {
-      const req = { method: v.method, pathWithQuery: v.pathWithQuery, body: v.body || undefined };
+      const req = { chainId: v.chainId, method: v.method, pathWithQuery: v.pathWithQuery, body: v.body || undefined };
       expect(signingString(req, v.nonce, v.ts)).toBe(v.message);
       const headers = signRequest(signer, req, { nonce: v.nonce, ts: v.ts });
       expect(headers).toEqual(v.headers);
       expect(verifyRequest(v.headers, req, v.ts + 1_000)).toEqual({ ok: true, pubkey: own.pubkey });
+      // Bound to the network: the same headers fail for the other chain.
+      const other = v.chainId === "0202" ? "0101" : "0202";
+      expect(verifyRequest(v.headers, { ...req, chainId: other }, v.ts + 1_000)).toEqual({ ok: false, reason: "bad_sig" });
     });
   }
 });
 
 describe("request signing: rules from docs/API.md", () => {
-  const req = { method: "post", pathWithQuery: "/api/actions", body: '{"op":"claim"}' };
+  const req = { chainId: "0202", method: "post", pathWithQuery: "/api/actions", body: '{"op":"claim"}' };
 
-  it("upper-cases the method and puts the domain first", () => {
+  it("upper-cases the method, puts the domain then the chain id first", () => {
     const s = signingString(req, "00".repeat(16), 1);
-    expect(s.split("\n")).toHaveLength(6);
-    expect(s.startsWith("unzeen/api/v1\nPOST\n/api/actions\n")).toBe(true);
+    expect(s.split("\n")).toHaveLength(7);
+    expect(s.startsWith("unzeen/api/v1\n0202\nPOST\n/api/actions\n")).toBe(true);
+    expect(() => signingString({ ...req, chainId: "0A0A" }, "00".repeat(16), 1)).toThrow();
   });
 
   it("hashes an empty body as sha256 of the empty string", () => {
-    expect(signingString({ method: "GET", pathWithQuery: "/x" }, "00".repeat(16), 1).split("\n")[3]).toBe(
+    expect(signingString({ chainId: "0101", method: "GET", pathWithQuery: "/x" }, "00".repeat(16), 1).split("\n")[4]).toBe(
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     );
   });
@@ -72,6 +76,7 @@ describe("request signing: rules from docs/API.md", () => {
   it("signs with the key derived from the phrase", async () => {
     const kp = await keypairFromMnemonic(
       "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "devnet",
     );
     const h = signRequest(signerFromSecret(kp.secretKey), req);
     expect(verifyRequest(h, req)).toEqual({ ok: true, pubkey: kp.pubkey });
@@ -93,8 +98,8 @@ interface BackendApiCase {
   message: string;
   now: number;
   headers: SignedHeaders;
-  /** Present once the backend binds chain_id into the signing string (pending web migration). */
-  chainIdHex?: string;
+  chainIdHex: string;
+  verifyChainIdHex: string;
 }
 
 const backendApi: BackendApiCase[] = existsSync(BACKEND)
@@ -105,14 +110,9 @@ const VERDICT = { ok: "ok", stale: "stale", bad_signature: "bad_sig" } as const;
 
 describe.skipIf(backendApi.length === 0)("request signing: backend vectors (core/testdata/unz1-vectors.json)", () => {
   for (const c of backendApi) {
-    // The lead holds the chain_id-in-signature migration until core/ settles; listed, not hidden.
-    if (c.chainIdHex) {
-      it.todo(`${c.name} -> ${c.expect} (chain_id ${c.chainIdHex} in signing string: pending web migration)`);
-      continue;
-    }
     it(`${c.name} -> ${c.expect}`, () => {
-      const signed = { method: c.method, pathWithQuery: c.pathQuery, body: c.signedBody || undefined };
-      const sent = { method: c.method, pathWithQuery: c.pathQuery, body: c.sentBody || undefined };
+      const signed = { chainId: c.chainIdHex, method: c.method, pathWithQuery: c.pathQuery, body: c.signedBody || undefined };
+      const sent = { chainId: c.verifyChainIdHex, method: c.method, pathWithQuery: c.pathQuery, body: c.sentBody || undefined };
       const ts = Number(c.headers[HEADER_TS]);
 
       // Same signing string and the same headers from our signer.

@@ -1,5 +1,5 @@
 {
-  "description": "Unzeen HTTP request signing vectors (docs/API.md v0.1). Generated with node:crypto, independent of the web implementation.",
+  "description": "Unzeen HTTP request signing vectors (docs/API.md v0.3: chainId on line 2). Generated with node:crypto, independent of the web implementation.",
   "secretKeyHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
   "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
   "pubkey": "FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z",
@@ -12,14 +12,15 @@
       "nonce": "000102030405060708090a0b0c0d0e0f",
       "ts": 1760000000000,
       "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "message": "unzeen/api/v1\nGET\n/api/portfolio\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n000102030405060708090a0b0c0d0e0f\n1760000000000",
+      "message": "unzeen/api/v1\n0202\nGET\n/api/portfolio\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n000102030405060708090a0b0c0d0e0f\n1760000000000",
       "headers": {
         "x-unzeen-pubkey": "FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z",
         "x-unzeen-nonce": "000102030405060708090a0b0c0d0e0f",
         "x-unzeen-ts": "1760000000000",
-        "x-unzeen-sig": "63SWcUtYYksBrADz7CridAJ3hRWVokLBr32qdjMo5NTKkDUZFz7qUvgk1JsmHhfnpjxqKbjqGtsdc4H4mfX7Fmgw"
+        "x-unzeen-sig": "56yN4ekKMibK99dD6EVk7v5CxHD8YKJzhbMZVHwgtDUNCUgJ44JNriks7xvU1ktnt7JiFpR4vpa3eMe1qAHKBvoz"
       },
-      "sigHex": "fc30634551894c0613ca639d96a6fa2bf7e972e5447310ffa4117638d2fab4f9a9ec1283be40189cf9ac0a841b568bd2984fc2c59e79c9e07ec7cdea7353f30c"
+      "sigHex": "cd37c39e4c70eb1763bffafc94f1ed685a62477f46ecef868a8ea69627788c75ef7474ad9640869a10383a1b174b042418c4681aae35858b1a3c85dfb65f9809",
+      "chainId": "0202"
     },
     {
       "name": "get-with-query",
@@ -29,14 +30,15 @@
       "nonce": "ffeeddccbbaa99887766554433221100",
       "ts": 1760000012345,
       "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "message": "unzeen/api/v1\nGET\n/api/orders?status=open&limit=20\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nffeeddccbbaa99887766554433221100\n1760000012345",
+      "message": "unzeen/api/v1\n0202\nGET\n/api/orders?status=open&limit=20\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nffeeddccbbaa99887766554433221100\n1760000012345",
       "headers": {
         "x-unzeen-pubkey": "FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z",
         "x-unzeen-nonce": "ffeeddccbbaa99887766554433221100",
         "x-unzeen-ts": "1760000012345",
-        "x-unzeen-sig": "5W9QRjN6K4UCLg1vq5o9kr7bitWh4NS784ZnXLMbmAYoYgLtV4Wm4wnEAXHSMthHqZbaPNXwzqepr4fUtYRoXatB"
+        "x-unzeen-sig": "4SqXhawMsn1oVUm8URine1PTr4vZJUhmkVPCYRycjATxX6QmEq9jKk13zm6zW5TptUYhcvkiUPfT8jJT3anxD5pY"
       },
-      "sigHex": "e13391df1fbc0b219ae05de4efb842c2b5220f0183d0fd7dc94d8ba237d1631ae8f3fd645bae2c7135192a8bf8294c739b4243e71f6e9898e8cd841e746b020c"
+      "sigHex": "ac54e368d794ce81ec5c0a0db3ecaf656416fa49914d2b173ea11c917a46fcf6e08d826b73706c6f892bbdc0afaa9afec903ee85ab0934457afc0b47e4faac05",
+      "chainId": "0202"
     },
     {
       "name": "post-action-buy",
@@ -46,14 +48,15 @@
       "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
       "ts": 1760000099999,
       "bodySha256": "d9d74f926885588bce940ba50ab85a87cc0535d7aa939cac4f89b40260bc0f5b",
-      "message": "unzeen/api/v1\nPOST\n/api/actions\nd9d74f926885588bce940ba50ab85a87cc0535d7aa939cac4f89b40260bc0f5b\na1b2c3d4e5f60718293a4b5c6d7e8f90\n1760000099999",
+      "message": "unzeen/api/v1\n0202\nPOST\n/api/actions\nd9d74f926885588bce940ba50ab85a87cc0535d7aa939cac4f89b40260bc0f5b\na1b2c3d4e5f60718293a4b5c6d7e8f90\n1760000099999",
       "headers": {
         "x-unzeen-pubkey": "FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z",
         "x-unzeen-nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
         "x-unzeen-ts": "1760000099999",
-        "x-unzeen-sig": "3YhxftASH3HPVrnszd8n3zKCLDxt8D4RqNFcraZhZu5td6EbpE3rw2hEP883eV7bfnPhCZMbqL7yFVqFLxnWD7KK"
+        "x-unzeen-sig": "LjyiGrX5PWqiuoUNC7EqzW4KX3HVnkpCdwPqbcobGzbnB2g1okQAQHcWyDwPvtKTUcSkG1fKq2w5w6RC9vHv1Er"
       },
-      "sigHex": "7f6050308a95fd51b34937cb1caaba6d6a8da271f15f689ba5691a4e7610ed7a6901da92ed5c434d7580e861b357cdd04b038d548a04adc9a0be6d38ea3ac20e"
+      "sigHex": "11061d628467ab5391ec52202592ef9fe379e405015715914673b06916cfe35a6956c22c2d48ffc5f9fc1d208963d00bb5ff0de9e3261423eafcd4b275a7f00b",
+      "chainId": "0202"
     },
     {
       "name": "post-utf8-body",
@@ -63,14 +66,15 @@
       "nonce": "0f0e0d0c0b0a09080706050403020100",
       "ts": 1760000100000,
       "bodySha256": "d1b3d02a30d8c98712b6dcc120a86a0935d476cb30ce161de53eb43239787593",
-      "message": "unzeen/api/v1\nPOST\n/api/actions\nd1b3d02a30d8c98712b6dcc120a86a0935d476cb30ce161de53eb43239787593\n0f0e0d0c0b0a09080706050403020100\n1760000100000",
+      "message": "unzeen/api/v1\n0101\nPOST\n/api/actions\nd1b3d02a30d8c98712b6dcc120a86a0935d476cb30ce161de53eb43239787593\n0f0e0d0c0b0a09080706050403020100\n1760000100000",
       "headers": {
         "x-unzeen-pubkey": "FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z",
         "x-unzeen-nonce": "0f0e0d0c0b0a09080706050403020100",
         "x-unzeen-ts": "1760000100000",
-        "x-unzeen-sig": "EMggzcxiQncw6fBbyoAn5xmMzSk62V9Ki79LABfjo9PzKbdftJf1Q4EAH4qWz8cmE2SxYkmzi63jDQQx5BwMAee"
+        "x-unzeen-sig": "2syqr81JB2bDi2L4wRkZrXUScbsWs7GUp2wNMeoh3qXQHijE95GPp5xb3qYH49qPcK2QzyYedDAbR49EuuCuLiYa"
       },
-      "sigHex": "0b84abd8d4b1726aa0aee6eaa047349bf5402a4a02d6b1a617499610235347db2d90bd988b6d576e526936b1f6b0001bb93d3de8c3c63155855a320005488b0b"
+      "sigHex": "5dfaf1849bdb1453108d8dd1d53641755138c51a122e6ad03406720b13bbadc9a7a95a80f1fa12496204fd2a46752afd190bb1e582541c1c3f277978d396f803",
+      "chainId": "0101"
     }
   ]
 }

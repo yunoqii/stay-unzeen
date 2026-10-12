@@ -311,7 +311,7 @@ function CreateFlow({ onCancel, onDone }: { onCancel: () => void; onDone: () => 
             submitLabel="Encrypt and save"
             onSubmit={async (pw) => {
               const vault = await encryptMnemonic(mnemonic, pw, getNetwork());
-              const kp = await keypairFromMnemonic(mnemonic);
+              const kp = await keypairFromMnemonic(mnemonic, vault.network);
               storeAndUnlock(vault, kp.secretKey);
               toast("Anon key created");
               onDone();
@@ -361,7 +361,7 @@ function RestoreFlow({
             submitLabel="Encrypt and save"
             onSubmit={async (pw) => {
               const vault = await encryptMnemonic(mnemonic!, pw, getNetwork());
-              const kp = await keypairFromMnemonic(mnemonic!);
+              const kp = await keypairFromMnemonic(mnemonic!, vault.network);
               storeAndUnlock(vault, kp.secretKey);
               toast("Anon key restored");
               onDone();
@@ -398,8 +398,12 @@ function UnlockCard({ pubkey, onRestore }: { pubkey: string; onRestore: () => vo
           setBusy(true);
           setError(null);
           try {
-            const { keypair } = await decryptVault(vault, pw);
-            unlock(vault.network, keypair.pubkey, keypair.secretKey);
+            const { keypair, upgraded } = await decryptVault(vault, pw);
+            if (upgraded) {
+              // v0.3 derives a separate key per network: same phrase and password, new anon ID.
+              storeAndUnlock(upgraded, keypair.secretKey);
+              toast("Anon key upgraded", { description: "Keys are now separate per network, so your anon ID changed." });
+            } else unlock(vault.network, keypair.pubkey, keypair.secretKey);
           } catch (err) {
             setError(err instanceof WrongPasswordError ? "Wrong password." : "Could not unlock. Try again.");
             setBusy(false);

@@ -8,8 +8,8 @@ import { networkConfig } from "@/lib/network";
 import { ApiError, errorFromResponse } from "./errors";
 import * as mock from "./mock";
 import type {
-  ActionAccepted,
-  ActionStatusResponse,
+  ActionReceipt,
+  ActionStatus,
   Candle,
   CandleTimeframe,
   CreatorToken,
@@ -74,9 +74,9 @@ export interface Api {
   /** Public pool info: UA, chain id, minimums, K. No pubkey, no cookies. */
   getPool(): Promise<PoolInfo>;
   getPortfolio(signer: Signer): Promise<Portfolio>;
-  postAction(signer: Signer, action: SignedAction): Promise<ActionAccepted>;
+  postAction(signer: Signer, action: SignedAction): Promise<ActionReceipt>;
   /** Owner only (header pubkey = action author), otherwise 404. */
-  getAction(signer: Signer, id: string): Promise<ActionStatusResponse>;
+  getAction(signer: Signer, id: string): Promise<ActionStatus>;
   getOrders(signer: Signer): Promise<Order[]>;
   getCreator(signer: Signer): Promise<CreatorToken[]>;
   getStats(): Promise<PlatformStats>;
@@ -97,7 +97,7 @@ function prepare(call: Call): { body: string | undefined; headers: Record<string
   const body = call.body === undefined ? undefined : JSON.stringify(call.body);
   const headers: Record<string, string> = { Accept: "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (call.signer) Object.assign(headers, signRequest(call.signer, { method: call.method, pathWithQuery: call.path, body }));
+  if (call.signer) Object.assign(headers, signRequest(call.signer, { chainId: networkConfig().chainIdHex, method: call.method, pathWithQuery: call.path, body }));
   return { body, headers };
 }
 

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { API_MODE } from "@/lib/api/client";
 import { mockDepositPhase } from "@/lib/api/mock";
-import type { DepositInfo, Portfolio } from "@/lib/api/types";
+import type { DepositInfo } from "@/lib/api/types";
 import type { Network } from "@/lib/network";
 import { usePortfolio } from "./use-portfolio";
 
@@ -15,28 +15,27 @@ export type DepositPhase =
   | { step: "dust" }
   | { step: "rejected" };
 
-const signature = (p: Portfolio) => `${p.deposits.length}|${JSON.stringify(p.deposits.slice(0, 3))}`;
-
 /**
  * Follows a Top up through Waiting -> Seen -> Credited. "Credited" comes only from the signed
- * portfolio: a new entry at the head of `deposits` since this request was opened.
+ * portfolio: a deposit id that was not there when this request was opened. There is no public
+ * "seen" endpoint by design (docs/API.md v0.3), so on the real API "seen" is the user's own tap.
  */
 export function useDepositTracker(network: Network, memo: string) {
   const { portfolio, refresh } = usePortfolio(4_000);
-  const baseline = useRef<string | null>(null);
+  const known = useRef<Set<string> | null>(null);
   const [phase, setPhase] = useState<DepositPhase>({ step: "waiting" });
 
   // Credited: the deposit list changed since the baseline.
   useEffect(() => {
     if (!portfolio) return;
-    const sig = signature(portfolio);
-    if (baseline.current === null) {
-      baseline.current = sig;
+    if (known.current === null) {
+      known.current = new Set(portfolio.deposits.map((d) => d.id));
       return;
     }
-    if (sig !== baseline.current && portfolio.deposits[0]) {
-      baseline.current = sig;
-      setPhase({ step: "credited", deposit: portfolio.deposits[0], balanceZat: portfolio.zecBalance });
+    const fresh = portfolio.deposits.find((d) => !known.current!.has(d.id));
+    if (fresh) {
+      for (const d of portfolio.deposits) known.current.add(d.id);
+      setPhase({ step: "credited", deposit: fresh, balanceZat: portfolio.zecBalance });
     }
   }, [portfolio]);
 

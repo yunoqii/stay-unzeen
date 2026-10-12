@@ -47,6 +47,7 @@ export function HoldingsList({ holdings, tokens }: { holdings: Portfolio["holdin
             const t = bySymbol.get(h.mint);
             const amount = t ? unitsToNumber(h.amount, t.decimals) : null;
             const valueSol = t && amount !== null ? amount * Number(t.priceSol) : null;
+            const held = t && /^[1-9]\d*$/.test(h.held) ? unitsToNumber(h.held, t.decimals) : null;
             return (
               <li key={h.mint}>
                 <Link
@@ -65,6 +66,11 @@ export function HoldingsList({ holdings, tokens }: { holdings: Portfolio["holdin
                     <p className="text-xs text-muted-foreground">
                       ≈ <Veiled>{valueSol === null ? "—" : formatSol(valueSol)}</Veiled> SOL
                     </p>
+                    {held !== null && (
+                      <p className="text-xs text-faint-foreground">
+                        + <Veiled>{formatCompact(held)}</Veiled> held
+                      </p>
+                    )}
                   </div>
                 </Link>
               </li>

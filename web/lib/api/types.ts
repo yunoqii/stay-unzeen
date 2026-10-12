@@ -1,4 +1,4 @@
-// Mirrors docs/API.md v0.2. Do not diverge: change the contract first.
+// Mirrors docs/API.md v0.3. Do not diverge: change the contract first.
 //
 // Units (docs/API.md "Единицы сумм"):
 //   - spendable amounts: integer strings in BASE units (token base units, lamports, zatoshis)
@@ -62,7 +62,7 @@ export interface PoolInfo {
   /** Pool Unified Address (Orchard/Ironwood receiver only). */
   address: string;
   network: "main" | "test";
-  /** 2 bytes hex for the unz1 memo signature: [Zcash 1 main | 2 test][Solana 1 mainnet-beta | 2 devnet], e.g. "0202". */
+  /** 2 bytes hex for the unz1 memo and HTTP signatures: only "0202" (testnet + devnet) or "0101" (mainnet + mainnet-beta). */
   chainId: string;
   /** Below this a deposit is not credited (stays with the pool as dust). */
   minDepositZat: Zatoshis;
@@ -73,9 +73,12 @@ export interface PoolInfo {
 }
 
 export interface DepositInfo {
+  /** 16 random bytes hex; stable, owner-only, not linked to txid/note. */
+  id: string;
   amountZat: Zatoshis;
-  status: "credited" | "refund_pending";
-  /** Credit time, unix ms rounded to the minute. */
+  /** refund is not used in v1, so only "credited". */
+  status: "credited";
+  /** Credit time, unix ms rounded DOWN to the start of the UTC day. */
   ts: number;
 }
 
@@ -87,7 +90,9 @@ export interface Portfolio {
   zecHeld: Zatoshis;
   /** true: frozen pending manual review (reorg); new actions -> balance_frozen. */
   frozen: boolean;
-  holdings: { mint: string; amount: TokenBaseUnits }[];
+  /** amount: available; held: reserved by queued sell / withdraw_token. */
+  holdings: { mint: string; amount: TokenBaseUnits; held: TokenBaseUnits }[];
+  /** Always [] for now. */
   claimable: { mint: string; solAmount: Lamports }[];
   /** Last 20, newest first. */
   deposits: DepositInfo[];
@@ -97,7 +102,14 @@ export interface Portfolio {
 export type SignedAction =
   | { op: "buy"; venue: Venue; mint: string; zecIn: Zatoshis; minOut: TokenBaseUnits }
   | { op: "sell"; venue: Venue; mint: string; amount: TokenBaseUnits; minZecOut: Zatoshis }
-  | { op: "create"; venue: Venue; meta: { name: string; symbol: string; image?: string }; initialBuyZec?: Zatoshis }
+  | {
+      op: "create";
+      venue: Venue; // "jupiter" -> 400
+      // name 1..32 chars, symbol 1..10 ASCII alnum, image: data:image/(png|jpeg|webp);base64,... up to 512 KiB
+      meta: { name: string; symbol: string; image?: string };
+      initialBuyZec?: Zatoshis;
+    }
+  // Not supported yet (400 "op not supported yet"): claim, order_create, order_cancel, chat. UI shows "soon".
   | { op: "claim"; mint?: string }
   | { op: "withdraw_zec"; to: string; amount: Zatoshis }
   | {
@@ -118,17 +130,38 @@ export type SignedAction =
   | { op: "order_cancel"; orderId: string }
   | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean };
 
-export interface ActionAccepted {
-  id: string;
-  status: ActionStatus;
+export type ActionState = "queued" | "executed" | "failed";
+
+/** Rate fixed when the action was accepted. */
+export interface RateUsed {
+  /** Lamports per 1 ZEC, pool spread included. */
+  lamportsPerZec: Lamports;
+  source: "near-1click" | "fixed"; // fixed: devnet only
+  ts: number;
 }
 
-export type ActionStatus = "queued" | "executed" | "failed";
+/** POST /api/actions. */
+export interface ActionReceipt {
+  id: string; // 32 hex
+  status: ActionState;
+  rate?: RateUsed; // buy / sell / create / withdraw_token
+}
 
-export interface ActionStatusResponse {
-  status: ActionStatus;
+/** GET /api/actions/:id (owner only). */
+export interface ActionStatus {
+  status: ActionState;
+  /** First confirmed signature; dropped 24 h after execution. */
   solanaTx?: string;
   error?: ErrorCode;
+  rate?: RateUsed;
+  /** After execution, kept 24-48 h. */
+  fill?: {
+    tokenAmount: TokenBaseUnits;
+    solAmount?: Lamports;
+    zecSpent?: Zatoshis;
+    zecCredited?: Zatoshis;
+    mint?: string; // create: new mint
+  };
 }
 
 export type OrderKind = "limit_buy" | "limit_sell" | "take_profit" | "stop_loss";
