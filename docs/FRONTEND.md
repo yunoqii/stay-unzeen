@@ -33,7 +33,7 @@
 - Anon-ключ и сессия хранятся раздельно по сети.
 
 ## Токен: безопасность и быстрая торговля (решение 12.10)
-- На `/token/[mint]` — панель “Token safety”: authorities (mint/freeze revoked ✓/✗), top-10 holders %, dev share, dev history (“launched N · rugged M”), snipers/bundles in first blocks, curve progress / graduated / LP burned-locked, socials. Для Unzeen-запусков — бейдж “Unzeen launch: dev anonymous, rules enforced” и, если создатель включил, “Anon creator: N launches · M rugs”.
+- На `/token/[mint]` — панель “Token safety”: authorities (mint/freeze revoked ✓/✗), top-10 holders %, dev share, dev history (“launched N · rugged M”), snipers/bundles in first blocks, curve progress / graduated / LP burned-locked, socials. Для Unzeen-запусков — бейдж “Unzeen launch: dev anonymous, rules enforced” с раскрывашкой правил: “Creator's initial buy locked for 24h”, “Creator capped at 5% of supply”, “Mint & freeze authority revoked”. Без чисел о создателе. Картинки и uri чужих токенов — только через наш `/media`, никогда напрямую с IPFS/Arweave. PnL-история — в IndexedDB, зашифрованно ключом от пароля.
 - Быстрая торговля: пресеты Buy 0.1 / 0.5 / 1 ZEC (настраиваются в Settings), Sell 25 / 50 / 100%; slippage и priority в настройках панели; позиция — PnL, avg entry, свои сделки маркерами на графике (только в браузере, из локальной истории своих действий); фильтры ленты сделок токена: “Whales” / “Dev” / “unzeen”.
 - Поиск по CA в шапке: вставка адреса → `/token/<mint>` (данные через наш бек). Фронт никогда не ходит к Helius/Solscan/и т.п. напрямую.
 
