@@ -121,7 +121,7 @@ fn config(url: &str) -> Config {
         verify: unzeen_api::config::VerifyConfig {
             daily: false,
             timing: unzeen_ledger::verify::VerifyTiming::default(),
-            proof_bucket: 16_384,
+            proof_bucket: 65_536,
         },
     }
 }
@@ -303,6 +303,7 @@ async fn pool_info() {
         json!({"address":"utest1example","network":"test","chainId":"0202",
                "minDepositZat":"100000","minActionZat":"100000","confirmations":3,
                "createEnabled":true,
+               "orders": unzeen_api::orders::pool_block(),
                "features":{"fullTrades":false},
                "launchRules":{"lockSecs":86400,"capBps":500,"maxInitialBuyLamports":"1466000000",
                               "maxInitialBuyLamportsByVenue":{"pumpfun":"1466000000"}},
@@ -405,7 +406,7 @@ async fn buy_flow_hold_retry_settle() {
         "not json",
         r#"{"op":"buy","venue":"pumpfun","mint":"x","zecIn":"200000","minOut":"1","exec":"delayed"}"#,
         r#"{"op":"buy","venue":"pumpfun","mint":"So11111111111111111111111111111111111111112","zecIn":"0200000","minOut":"1","exec":"delayed"}"#,
-        r#"{"op":"claim"}"#,
+        r#"{"op":"claim","extra":1}"#,
     ] {
         let r = e.signed(&me, "POST", "/api/actions", bad).await;
         assert_eq!((r.status, code(&r)), (StatusCode::BAD_REQUEST, "bad_request"), "{bad}");
@@ -1323,7 +1324,7 @@ mod fair {
             );
         }
 
-        async fn avail(&self, n: u8) -> (i64, i64) {
+        pub(super) async fn avail(&self, n: u8) -> (i64, i64) {
             let pk = user(n).verifying_key().to_bytes();
             let r = self
                 .admin
@@ -1489,7 +1490,7 @@ mod fair {
             .iter()
             .map(|h| hex::decode(h.as_str().unwrap()).unwrap().try_into().unwrap())
             .collect();
-        assert_eq!(path.len(), 3, "padded to 8 leaves");
+        assert_eq!(path.len(), 10, "fixed depth 10 whatever the bid count (F7)");
         let root_b: [u8; 32] = hex::decode(&root).unwrap().try_into().unwrap();
         assert!(merkle::verify(&leaf, &path, &root_b));
 
@@ -1571,7 +1572,8 @@ mod fair {
             "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGFAIR', out_mint = '{mint}',
                     out_token_amount = {t}, out_lamports = {spent} WHERE op = 'fair_create';
              UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGATTEST', slot = 77,
-                    vault = 'AttestKey111', out_memo = '{root}' WHERE op = 'attest';"
+                    vault = 'AttestKey111', out_memo = '{root}', out_block_time = 1692806300
+              WHERE op = 'attest' AND meta->>'purpose' = 'fair';"
         ))
         .await;
         let l = e.wait_status(&id, "launched").await;
@@ -1584,6 +1586,9 @@ mod fair {
         assert_eq!(l["commitment"]["attestation"]["solanaTx"], "SIGATTEST");
         assert_eq!(l["commitment"]["attestation"]["slot"], 77);
         assert_eq!(l["commitment"]["attestation"]["matches"], true);
+        // F2: block time 1692806300 s vs t(1000) = 1692806364 s → anchored before the round.
+        assert_eq!(l["commitment"]["attestation"]["blockTime"], 1_692_806_300);
+        assert_eq!(l["commitment"]["attestation"]["beforeRound"], true);
 
         let mut tok_sum = 0u64;
         for (i, (n, amount)) in [(1u8, 500_000u64), (2, 1_000_000), (3, 2_000_000)]
@@ -1671,6 +1676,20 @@ mod fair {
             e.get(&format!("/api/launches/{}", "00".repeat(16))).await.status,
             StatusCode::NOT_FOUND
         );
+        // F1: no route at all — every method / malformed query / bad encoding = unknown path.
+        let nope = e.raw("GET", "/api/nope", "", None).await;
+        for (m, path) in [
+            ("GET", "/api/launches"),
+            ("POST", "/api/launches"),
+            ("DELETE", "/api/launches/00"),
+            ("GET", "/api/launches?status=a&status=b"),
+            ("GET", "/api/launches/%FF"),
+            ("PUT", "/api/launches/0000"),
+        ] {
+            let r = e.raw(m, path, "", None).await;
+            assert_eq!((r.status, &r.body), (nope.status, &nope.body), "{m} {path}");
+            assert!(r.headers.get("allow").is_none(), "{m} {path}: no Allow header");
+        }
         let unknown = e.signed(&user(1), "POST", "/api/actions", r#"{"op":"nope"}"#).await;
         let fl = e.signed(&user(1), "POST", "/api/actions", &create_body()).await;
         assert_eq!(fl.status, StatusCode::BAD_REQUEST);
@@ -1734,6 +1753,53 @@ mod fair {
         assert!(l["commitment"]["root"].as_str().is_some());
         assert_eq!(e.avail(1).await, (100_000_000, 0));
 
+        // F15: two identical fl_bid requests in flight → the same receipt, one bid.
+        let d = e.open_launch(1).await;
+        let body =
+            json!({"op":"fl_bid","launchId":d,"holdZat":"1000000","ciphertext":sealed(2, &d, 1_000_000)}).to_string();
+        let h = e.sign(&user(2), "POST", "/api/actions", &body);
+        let (r1, r2) = tokio::join!(
+            e.raw("POST", "/api/actions", &body, Some(&h)),
+            e.raw("POST", "/api/actions", &body, Some(&h))
+        );
+        assert_eq!(
+            (r1.status, r2.status),
+            (StatusCode::OK, StatusCode::OK),
+            "{:?} {:?}",
+            r1.body,
+            r2.body
+        );
+        assert_eq!(r1.body["id"], r2.body["id"]);
+        assert_eq!(e.avail(2).await, (99_000_000, 1_000_000), "held once");
+        // F6: bid cap per launch (1024 sealed) → launch_full.
+        e.sql(&format!(
+            "INSERT INTO {s}.fl_bids (launch_id, anon_pubkey, hold_zat, ciphertext)
+             SELECT '\\x{d}', decode(lpad(to_hex(g), 64, '0'), 'hex'), 100000, 'x' FROM generate_series(1, 1023) g"
+        ))
+        .await;
+        assert_eq!(
+            code(&e.bid(3, &d, 1_000_000, &sealed(3, &d, 1_000_000)).await),
+            "launch_full"
+        );
+        e.sql(&format!("DELETE FROM {s}.fl_bids WHERE ciphertext = 'x'")).await;
+        // F13: the bid set no longer matches the committed root → failed (internal), released.
+        e.sql(&format!(
+            "UPDATE {s}.fl_launches SET round_time = now() + interval '1 hour' WHERE id = '\\x{d}'"
+        ))
+        .await;
+        e.close(&d).await;
+        e.wait_status(&d, "closed").await;
+        e.sql(&format!(
+            "UPDATE {s}.fl_bids SET ciphertext = ciphertext || ' ' WHERE launch_id = '\\x{d}' AND status = 'sealed';
+             UPDATE {s}.fl_launches SET round_time = to_timestamp({}) WHERE id = '\\x{d}';",
+            drand::QUICKNET_GENESIS + 999 * 3
+        ))
+        .await;
+        let l = e.wait_status(&d, "failed").await;
+        assert_eq!(l["failure"], "internal");
+        assert_eq!(e.avail(2).await, (100_000_000, 0));
+        assert_eq!(e.avail(1).await, (100_000_000, 0));
+
         // Relayer failure → failed (tx_failed), every hold released.
         let c = e.open_launch(1).await;
         assert_eq!(
@@ -1753,6 +1819,19 @@ mod fair {
         let pf = e.signed(&user(3), "GET", "/api/portfolio", "").await.body;
         assert_eq!(pf["fairBids"][0]["status"], "released");
         assert_eq!(pf["fairBids"][0]["releasedZat"], "1000000");
+        // F9: 48 h later the fl_* action rows (and launches' bids) are gone entirely.
+        e.sql(&format!(
+            "UPDATE {s}.actions SET updated_at = now() - interval '3 days' WHERE kind LIKE 'fl\\_%' AND status <> 'queued';
+             UPDATE {s}.fl_launches SET finished_at = now() - interval '3 days' WHERE finished_at IS NOT NULL;"
+        ))
+        .await;
+        assert!(e.ledger.fl_janitor().await.unwrap() > 0);
+        assert_eq!(
+            e.one_i64(&format!("SELECT count(*) FROM {s}.actions WHERE kind LIKE 'fl\\_%'"))
+                .await,
+            0
+        );
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.fl_bids")).await, 0);
         e.drop_schema().await;
     }
 }
@@ -1961,19 +2040,57 @@ mod verify_pl {
         let memo: String = e
             .admin
             .query_one(
-                &format!("SELECT meta->>'memo' FROM {s}.relayer_jobs WHERE op = 'attest' AND action_id IS NULL"),
+                &format!(
+                    "SELECT meta->>'memo' FROM {s}.relayer_jobs WHERE op = 'attest' AND meta->>'purpose' = 'verify'"
+                ),
                 &[],
             )
             .await
             .unwrap()
             .get(0);
         assert_eq!(memo, hex::encode(digest));
+        // The first attest fails (no SOL on the key): it is re-queued with the same memo.
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'attest' AND meta->>'purpose' = 'verify'"
+            ))
+            .await,
+            1
+        );
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'failed', error_code = 'pool_liquidity' WHERE op = 'attest'"
+        ))
+        .await;
+        for _ in 0..50 {
+            if e.one_i64(&format!("SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'attest'"))
+                .await
+                == 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'attest' AND status = 'queued' AND meta->>'memo' = '{memo}'"
+            ))
+            .await,
+            1,
+            "re-anchored"
+        );
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT anchor_attempts::bigint FROM {s}.verify_snapshots WHERE id = {id}"
+            ))
+            .await,
+            2
+        );
         let op = SigningKey::from_bytes(&[9; 32]);
         let opk = bs58::encode(op.verifying_key().to_bytes()).into_string();
         let osig = bs58::encode(op.sign(&digest).to_bytes()).into_string();
         e.sql(&format!(
             "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGV', slot = 901, vault = '{opk}',
-                    out_memo = '{memo}', out_sig = '{osig}' WHERE op = 'attest'"
+                    out_memo = '{memo}', out_sig = '{osig}' WHERE op = 'attest' AND status = 'queued'"
         ))
         .await;
         let mut v = Value::Null;
@@ -1995,7 +2112,7 @@ mod verify_pl {
         // Owner proof: pieces sum to the committed value, paths reach the published roots.
         let r = e.signed(&user(1), "GET", "/api/verify/proof", "").await;
         assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
-        assert_eq!(r.raw_len % 16_384, 0, "padded to 16 KiB");
+        assert_eq!(r.raw_len, 65_536, "constant 64 KiB bucket");
         assert_eq!(r.headers["cache-control"], "no-store");
         let p = &r.body;
         assert_eq!(p["snapshotId"], id);
@@ -2071,6 +2188,328 @@ mod verify_pl {
             StatusCode::NOT_FOUND
         );
         assert_eq!(e.get("/api/verify").await.status, StatusCode::OK);
+        e.drop_schema().await;
+    }
+}
+
+#[tokio::test]
+async fn creator_fee_sweeps_credit_and_claim() {
+    let Some(e) = setup().await else { return };
+    let s = e.schema.clone();
+    let pk = user(4).verifying_key().to_bytes();
+    e.sql(&format!(
+        "INSERT INTO {s}.creator_tokens (mint, anon_pubkey) VALUES ('{MINT}', '\\x{pk}');
+         INSERT INTO {s}.creator_fee_sweeps (network, venue, kind, mint, authority, signature, last_valid_block_height,
+                                             status, lamports, slot)
+         VALUES ('devnet', 'pumpfun', 'creator', '{MINT}', 'A', 'S1', 1, 'confirmed', 30000000, 5),
+                ('devnet', 'pumpfun', 'creator', '{MINT}', 'A', 'S2', 1, 'confirmed', 20000000, 6),
+                ('devnet', 'pumpfun', 'creator', '{MINT}', 'A', 'S3', 1, 'sent', NULL, NULL),
+                ('devnet', 'meteora-dbc', 'partner', '{MINT}', 'P', 'S4', 1, 'confirmed', 7000000, 7),
+                ('devnet', 'pumpfun', 'creator', '{MINT2}', 'A', 'S5', 1, 'confirmed', 9000000, 8);",
+        pk = hex::encode(pk)
+    ))
+    .await;
+    // Nothing yet → claim refused, nothing changes.
+    let claim = json!({"op":"claim"}).to_string();
+    assert_eq!(
+        code(&e.signed(&user(4), "POST", "/api/actions", &claim).await),
+        "below_minimum"
+    );
+    let r = e.ledger.credit_fee_sweeps("devnet").await.unwrap();
+    assert_eq!(
+        (r.credited, r.pool_revenue),
+        (2, 1),
+        "MINT2 has no Unzeen creator → pool"
+    );
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.creator_fee_sweeps WHERE credited_at IS NOT NULL
+               AND credited_at = date_trunc('hour', credited_at)"
+        ))
+        .await,
+        3,
+        "partner untouched, credited_at hour-coarse"
+    );
+    assert_eq!(
+        e.ledger.credit_fee_sweeps("devnet").await.unwrap().credited,
+        0,
+        "idempotent"
+    );
+    let pf = e.signed(&user(4), "GET", "/api/portfolio", "").await.body;
+    assert_eq!(pf["claimable"], json!([{"mint": MINT, "solAmount": "50000000"}]));
+    // claim: 0.05 SOL at 10 SOL/ZEC (spread 0) = 0.005 ZEC.
+    let r = e.signed(&user(4), "POST", "/api/actions", &claim).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(r.body["status"], "executed");
+    let pf = e.signed(&user(4), "GET", "/api/portfolio", "").await.body;
+    assert_eq!(pf["zecBalance"], "500000");
+    assert_eq!(pf["claimable"], json!([]));
+    assert_eq!(pf["actions"][0]["kind"], "claim");
+    assert_eq!(pf["actions"][0]["fill"]["zecCredited"], "500000");
+    assert_eq!(
+        code(&e.signed(&user(4), "POST", "/api/actions", &claim).await),
+        "below_minimum"
+    );
+    e.drop_schema().await;
+}
+
+// ================================================================== orders (API v0.8)
+
+mod orders_v08 {
+    use unzeen_ledger::orders::{buy_min_out, parse_e18, sell_min_out};
+
+    use super::*;
+
+    impl Env {
+        /// The indexer's price pass (INTEL.md v2) for MINT.
+        async fn tick(&self, n: i64, price: &str, status: &str) {
+            self.sql(&format!(
+                "INSERT INTO {s}.intel_prices (mint, price_sol, status, tick_at) VALUES ('{MINT}', {price}, '{status}', {n})
+                 ON CONFLICT (mint) DO UPDATE SET prev_price_sol = intel_prices.price_sol,
+                   prev_tick_at = intel_prices.tick_at, price_sol = EXCLUDED.price_sol, status = EXCLUDED.status,
+                   tick_at = EXCLUDED.tick_at WHERE intel_prices.tick_at < EXCLUDED.tick_at",
+                s = self.schema
+            ))
+            .await;
+        }
+
+        async fn order(&self, n: u8, id: &str) -> Value {
+            for _ in 0..3 {
+                let pf = self.signed(&user(n), "GET", "/api/portfolio", "").await.body;
+                if let Some(o) = pf["orders"].as_array().unwrap().iter().find(|o| o["id"] == id) {
+                    return o.clone();
+                }
+            }
+            Value::Null
+        }
+
+        async fn wait_order(&self, n: u8, id: &str, f: impl Fn(&Value) -> bool) -> Value {
+            for _ in 0..60 {
+                let o = self.order(n, id).await;
+                if f(&o) {
+                    return o;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("order {id} condition not reached: {:?}", self.order(n, id).await);
+        }
+    }
+
+    fn create(kind: &str, amount: u64, trigger: &str) -> Value {
+        json!({"op":"order_create","venue":"pumpfun","mint":MINT,"kind":kind,"triggerPriceSol":trigger,
+               "amount":amount.to_string()})
+    }
+
+    #[tokio::test]
+    async fn orders_trigger_cancel_expire_retention() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.fund(1, 0, 100_000_000).await;
+        e.fund(2, 0, 10_000_000).await;
+        let pk2 = hex::encode(user(2).verifying_key().to_bytes());
+        e.sql(&format!(
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals) VALUES ('{MINT}', 'pumpfun', 'T', 'T', 6);
+             INSERT INTO {s}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{pk2}', '{MINT}', 1000000000000);"
+        ))
+        .await;
+        e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+        let pool = e.get("/api/pool").await.body;
+        assert_eq!(pool["orders"]["maxOpenPerKey"], 10);
+        assert_eq!(pool["orders"]["defaultSlippageBps"]["stop_loss"], 1500);
+
+        // Validation.
+        let post = |n: u8, v: Value| {
+            let body = v.to_string();
+            let e = &e;
+            async move { e.signed(&user(n), "POST", "/api/actions", &body).await }
+        };
+        let mut bad = create("limit_buy", 10_000_000, "0.000001");
+        bad["mint"] = json!(MINT2);
+        assert_eq!(code(&post(1, bad).await), "order_unsupported_mint");
+        let mut bad = create("limit_buy", 10_000_000, "0.000001");
+        bad["exec"] = json!("now");
+        assert_eq!(code(&post(1, bad).await), "bad_request");
+        let mut bad = create("limit_buy", 10_000_000, "0.000001");
+        bad["ttlSecs"] = json!(60);
+        assert_eq!(code(&post(1, bad).await), "bad_request");
+        assert_eq!(
+            code(&post(1, create("limit_buy", 10_000_000, "0")).await),
+            "bad_request"
+        );
+        assert_eq!(
+            code(&post(2, create("limit_sell", 1_000, "0.000001")).await),
+            "below_minimum"
+        );
+
+        // limit_buy: 0.1 ZEC when the price drops to 1e-6 SOL.
+        e.tick(1, "0.000002", "curve").await;
+        let r = post(1, create("limit_buy", 10_000_000, "0.000001")).await;
+        assert_eq!(
+            (r.status, r.body["status"].as_str()),
+            (StatusCode::OK, Some("open")),
+            "{:?}",
+            r.body
+        );
+        let buy_id = r.body["id"].as_str().unwrap().to_string();
+        assert_eq!(e.avail(1).await, (90_000_000, 10_000_000));
+        let o = e.order(1, &buy_id).await;
+        assert_eq!(
+            (o["status"].as_str(), o["triggerPriceSol"].as_str()),
+            (Some("open"), Some("0.000001"))
+        );
+        assert_eq!(o["expiresAt"].as_u64().unwrap() % 3_600_000, 0);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(e.order(1, &buy_id).await["status"], "open", "price above the trigger");
+        e.tick(2, "0.0000009", "curve").await;
+        let o = e.wait_order(1, &buy_id, |o| o["status"] == "triggered").await;
+        let aid = o["actionId"].as_str().unwrap().to_string();
+        let job = e
+            .admin
+            .query_one(
+                &format!(
+                    "SELECT j.op, j.lamports_in, j.min_out, j.exec_mode, j.not_before > now(), a.hold_zat
+                     FROM {s}.relayer_jobs j JOIN {s}.actions a ON a.id = j.action_id WHERE a.id = '\\x{aid}'"
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        let lamports = job.get::<_, i64>(1) as u64;
+        assert_eq!(job.get::<_, String>(0), "buy");
+        assert!((990_000_000..=1_000_000_000).contains(&lamports) && lamports.is_multiple_of(1_000_000));
+        assert_eq!(
+            job.get::<_, i64>(2) as u64,
+            buy_min_out(lamports, parse_e18("0.000001").unwrap(), 6, 500).unwrap()
+        );
+        assert_eq!(
+            (job.get::<_, String>(3), job.get::<_, bool>(4)),
+            ("delayed".into(), true),
+            "next epoch"
+        );
+        let held = job.get::<_, i64>(5);
+        assert_eq!(
+            e.avail(1).await,
+            (100_000_000 - held, held),
+            "hold moved, D10 remainder released"
+        );
+        // The trade is an ordinary buy in actions; settle → order filled.
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGO', out_token_amount = 1000,
+                    out_lamports = lamports_in WHERE action_id = '\\x{aid}'"
+        ))
+        .await;
+        e.wait_order(1, &buy_id, |o| o["status"] == "filled").await;
+        let pf = e.signed(&user(1), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(pf["actions"].as_array().unwrap().len(), 1);
+        assert_eq!(pf["actions"][0]["kind"], "buy");
+
+        // stop_loss: two consecutive ticks at or below the trigger.
+        let r = post(2, create("stop_loss", 500_000_000_000, "0.000001")).await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        let sl = r.body["id"].as_str().unwrap().to_string();
+        e.wait_order(2, &sl, |o| o["armed"] == true).await; // tick 2 (below) arms it
+        e.tick(3, "0.0000011", "curve").await; // recovered: disarmed
+        e.wait_order(2, &sl, |o| o.get("armed").is_none()).await;
+        e.tick(4, "0.000001", "curve").await; // armed again
+        e.wait_order(2, &sl, |o| o["armed"] == true).await;
+        assert_eq!(e.order(2, &sl).await["status"], "open");
+        e.tick(5, "0.00000095", "curve").await; // second consecutive tick → sell
+        let o = e.wait_order(2, &sl, |o| o["status"] == "triggered").await;
+        let said = o["actionId"].as_str().unwrap();
+        let min_out = e
+            .one_i64(&format!(
+                "SELECT min_out FROM {s}.relayer_jobs WHERE action_id = '\\x{said}' AND op = 'sell'
+                   AND token_amount = 500000000000"
+            ))
+            .await as u64;
+        assert_eq!(
+            min_out,
+            sell_min_out(500_000_000_000, parse_e18("0.000001").unwrap(), 6, 1_500).unwrap()
+        );
+
+        // Cancel: only from open; tokens come back.
+        let r = post(2, create("limit_sell", 100_000_000_000, "0.01")).await;
+        let ls = r.body["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT held FROM {s}.token_balances WHERE anon_pubkey = '\\x{pk2}'"
+            ))
+            .await,
+            600_000_000_000
+        );
+        let cancel = json!({"op":"order_cancel","orderId":ls});
+        let r = post(2, cancel.clone()).await;
+        assert_eq!(r.body["status"], "cancelled", "{:?}", r.body);
+        assert_eq!(code(&post(2, cancel).await), "order_not_open");
+        assert_eq!(
+            code(&post(2, json!({"op":"order_cancel","orderId":sl})).await),
+            "order_not_open"
+        );
+        assert_eq!(
+            post(1, json!({"op":"order_cancel","orderId":ls})).await.status,
+            StatusCode::NOT_FOUND,
+            "someone else's order"
+        );
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT held FROM {s}.token_balances WHERE anon_pubkey = '\\x{pk2}'"
+            ))
+            .await,
+            500_000_000_000
+        );
+
+        // Limits: 4 open per key and mint.
+        let mut ids = vec![];
+        for _ in 0..4 {
+            let r = post(1, create("limit_buy", 1_000_000, "0.0000001")).await;
+            assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+            ids.push(r.body["id"].as_str().unwrap().to_string());
+        }
+        assert_eq!(
+            code(&post(1, create("limit_buy", 1_000_000, "0.0000001")).await),
+            "order_limit"
+        );
+        // Expiry releases the hold.
+        e.sql(&format!(
+            "UPDATE {s}.orders SET expires_at = date_trunc('hour', now()) WHERE id = '\\x{}'",
+            ids[0]
+        ))
+        .await;
+        e.wait_order(1, &ids[0], |o| o["status"] == "expired").await;
+        // Graduated: the rest fail, holds released.
+        e.tick(6, "0.000003", "graduated").await;
+        for id in &ids[1..] {
+            let o = e.wait_order(1, id, |o| o["status"] == "failed").await;
+            assert_eq!(o["error"], "graduated");
+        }
+        assert_eq!(
+            e.avail(1).await,
+            (100_000_000 - held, 0),
+            "only the filled buy is spent"
+        );
+
+        // D1: closed + 24 h → gone from the portfolio (scrubbed); + 48 h → deleted.
+        e.sql(&format!(
+            "UPDATE {s}.orders SET closed_at = now() - interval '25 hours' WHERE status <> 'triggered'"
+        ))
+        .await;
+        let (scrubbed, _) = e.ledger.orders_janitor().await.unwrap();
+        assert!(scrubbed >= 6);
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.orders WHERE closed_at IS NOT NULL AND mint IS NOT NULL"
+            ))
+            .await,
+            0
+        );
+        let pf = e.signed(&user(1), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(pf["orders"].as_array().unwrap().len(), 0);
+        e.sql(&format!(
+            "UPDATE {s}.orders SET closed_at = now() - interval '49 hours' WHERE closed_at IS NOT NULL"
+        ))
+        .await;
+        let (_, deleted) = e.ledger.orders_janitor().await.unwrap();
+        assert!(deleted >= 6);
         e.drop_schema().await;
     }
 }

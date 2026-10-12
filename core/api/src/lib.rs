@@ -10,12 +10,14 @@
 pub mod actions;
 pub mod auth;
 pub mod config;
+pub mod creator_fees;
 pub mod error;
 pub mod fair;
 pub mod intel;
 pub mod launch;
 pub mod limit;
 pub mod market;
+pub mod orders;
 pub mod rate;
 pub mod verify;
 
@@ -106,13 +108,22 @@ pub fn router(st: AppState) -> Router {
         .route("/api/verify/snapshots", get(verify::history))
         .route("/api/verify/proof", get(verify::proof))
         .route("/api/verify/{id}", get(verify::one))
-        .route("/api/launches", get(fair::list))
-        .route("/api/launches/{id}", get(fair::one))
         .route("/ws/feed", get(market::ws_feed))
         .route("/media/{name}", get(media))
         .fallback(|| async { ApiError::not_found() })
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(st.clone(), guard));
+    // F1: fair-launch routes exist only with the flag on; otherwise every method/encoding of
+    // /api/launches* answers exactly like an unknown path.
+    if st.cfg.fair.enabled {
+        r = r.merge(
+            Router::new()
+                .route("/api/launches", get(fair::list))
+                .route("/api/launches/{id}", get(fair::one))
+                .layer(DefaultBodyLimit::max(BODY_LIMIT))
+                .layer(middleware::from_fn_with_state(st.clone(), guard)),
+        );
+    }
     if !st.cfg.cors_origins.is_empty() {
         use tower_http::cors::{AllowOrigin, CorsLayer};
         let origins: Vec<HeaderValue> = st
@@ -258,6 +269,7 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
             "nowFeeZat": st.cfg.fees.now_fee_zat.to_string(),
         },
         "createEnabled": st.cfg.create_enabled,
+        "orders": orders::pool_block(),
         "features": { "fullTrades": st.cfg.intel.full_trades },
         "launchRules": {
             "lockSecs": st.cfg.launch.lock_secs,
@@ -367,6 +379,8 @@ async fn portfolio(State(st): State<AppState>, method: Method, uri: Uri, headers
     let deposits = st.ledger.recent_deposits(&a.pubkey, 20).await?;
     let actions = st.ledger.recent_actions(&a.pubkey, 20).await?;
     let fl = fair::portfolio(&st, &a.pubkey).await?;
+    let claimable = st.ledger.claimable(&a.pubkey).await?;
+    let own_orders = st.ledger.owner_orders(&a.pubkey).await?;
     let (avail, held, frozen) = b.map_or((0, 0, false), |b| (b.available_zat, b.held_zat, b.frozen));
     let v = json!({
         "zecBalance": avail.to_string(),
@@ -377,7 +391,8 @@ async fn portfolio(State(st): State<AppState>, method: Method, uri: Uri, headers
             "amount": h.available.to_string(),
             "held": h.held.to_string(),
         })).collect::<Vec<_>>(),
-        "claimable": [],
+        "orders": own_orders.iter().map(orders::order_json).collect::<Vec<_>>(),
+        "claimable": claimable.iter().map(|(m, l)| json!({ "mint": m, "solAmount": l.to_string() })).collect::<Vec<_>>(),
         "deposits": deposits.iter().map(|d| json!({
             "id": hex::encode(d.id),
             "amountZat": d.amount_zat.to_string(),
@@ -460,6 +475,14 @@ async fn submit_action(
         return Err(ApiError::bad_request("pad: string up to 8192 bytes"));
     }
     let request_hash: [u8; 32] = Sha256::digest(&body).into();
+    if raw.get("op").and_then(Value::as_str) == Some("claim") {
+        let v = creator_fees::claim(&st, raw, &a.pubkey, &a.nonce, &request_hash).await?;
+        return Ok(padded(v, 1024));
+    }
+    if orders::is_order_op(&raw) {
+        let v = orders::submit(&st, raw, &a.pubkey, &a.nonce, &request_hash).await?;
+        return Ok(padded(v, 1024));
+    }
     if fair::is_fl_op(&raw) {
         // Flag off: exactly what an unknown op gets.
         if !st.cfg.fair.enabled {
@@ -523,6 +546,9 @@ pub fn spawn_background(st: &AppState) {
             if let Err(e) = s.ledger.purge_api_nonces().await {
                 tracing::warn!(error = %e, "nonce purge failed");
             }
+            if let Err(e) = s.ledger.orders_janitor().await {
+                tracing::warn!(error = %e, "orders janitor failed");
+            }
             if let Err(e) = s.ledger.verify_janitor().await {
                 tracing::warn!(error = %e, "verify janitor failed");
             }
@@ -549,6 +575,8 @@ pub fn spawn_background(st: &AppState) {
         tokio::spawn(fair::scheduler_loop(st.clone()));
     }
     tokio::spawn(verify::scheduler_loop(st.clone()));
+    tokio::spawn(creator_fees::credit_loop(st.clone()));
+    tokio::spawn(orders::evaluator_loop(st.clone()));
     // D14: ZEC/SOL quote on a timer, never on demand.
     tokio::spawn(st.rate.clone().refresh_loop());
 }

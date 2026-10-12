@@ -29,6 +29,17 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("../../migrations/0008_fair_launch.sql"),
     ),
     (9, "0009_verify", include_str!("../../migrations/0009_verify.sql")),
+    (
+        10,
+        "0010_creator_fees",
+        include_str!("../../migrations/0010_creator_fees.sql"),
+    ),
+    (11, "0011_orders", include_str!("../../migrations/0011_orders.sql")),
+    (
+        12,
+        "0012_fair_review",
+        include_str!("../../migrations/0012_fair_review.sql"),
+    ),
 ];
 
 /// Arbitrary constant for `pg_advisory_xact_lock` so concurrent starters serialize.

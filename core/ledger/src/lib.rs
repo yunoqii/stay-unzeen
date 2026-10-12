@@ -10,9 +10,11 @@
 //! Privacy: nothing here logs keys, amounts or refs. Callers must not either.
 
 pub mod actions;
+pub mod creator_fees;
 pub mod decide;
 pub mod fair;
 mod migrate;
+pub mod orders;
 pub mod payouts;
 pub mod verify;
 
@@ -62,6 +64,18 @@ pub enum LedgerError {
     /// Fair launch: the key already has a sealed bid on this launch (API 409 already_bid).
     #[error("already bid")]
     AlreadyBid,
+    /// Fair launch: the launch reached its bid cap (API 409 launch_full).
+    #[error("launch full")]
+    LaunchFull,
+    /// Orders: too many open orders for the key / key+mint (API 422 order_limit).
+    #[error("order limit")]
+    OrderLimit,
+    /// Orders: cancel of an order that is not open (API 409 order_not_open).
+    #[error("order not open")]
+    OrderNotOpen,
+    /// Orders: the pool-wide open order limit (API 503 venue_unavailable).
+    #[error("orders full")]
+    OrdersFull,
 }
 
 /// SQLSTATE of a Postgres error, or a coarse kind for client-side errors. Safe to log.
@@ -107,6 +121,10 @@ impl LedgerError {
             LedgerError::CreatorCap => "creator_cap",
             LedgerError::LaunchClosed => "launch_closed",
             LedgerError::AlreadyBid => "already_bid",
+            LedgerError::LaunchFull => "launch_full",
+            LedgerError::OrderLimit => "order_limit",
+            LedgerError::OrderNotOpen => "order_not_open",
+            LedgerError::OrdersFull => "orders_full",
         }
     }
 }

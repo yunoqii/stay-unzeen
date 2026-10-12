@@ -198,6 +198,11 @@ pub async fn tick(st: &AppState) -> ApiResult<Option<Step>> {
         _ => {}
     }
     st.ledger.settle_attestations().await?;
+    // Failed anchors (e.g. the attestation key had no SOL): retry every 10 min, ≤ 12 jobs.
+    let n = st.ledger.verify_reanchor(net, 600.0, 12).await?;
+    if n > 0 {
+        tracing::warn!(n, "verify anchor re-queued after a failed attest");
+    }
     Ok(Some(step))
 }
 

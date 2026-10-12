@@ -431,7 +431,7 @@ impl Ledger {
             .query(
                 &format!(
                     "SELECT {VIEW_COLS}, a.id, a.kind FROM actions a
-                     WHERE a.anon_pubkey = $1 AND a.kind NOT LIKE 'fl\\_%'
+                     WHERE a.anon_pubkey = $1 AND a.kind NOT LIKE 'fl\\_%' AND a.kind NOT LIKE 'order\\_%'
                      ORDER BY (a.status = 'queued') DESC, a.created_at DESC, a.id LIMIT $2"
                 ),
                 &[&pk_s, &limit],

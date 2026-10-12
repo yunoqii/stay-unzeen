@@ -1,8 +1,9 @@
 //! Commitment tree over sealed bids (API.md v0.6, «Commitment»).
 //!
 //! - `leaf = sha256(0x00 ‖ utf8(ciphertext))`
-//! - leaves sorted ascending, padded with random leaves to `max(8, 2^ceil(log2 N))`, so the
-//!   tree size does not reveal a bid count below 8 and the order does not reveal arrival order;
+//! - leaves sorted ascending, padded with random leaves to a FIXED 1024 (depth 10; a launch
+//!   takes at most 1024 bids), so the proof length reveals nothing about the bid count
+//!   (review F7) and the order does not reveal arrival order;
 //! - `node = sha256(0x01 ‖ min(a, b) ‖ max(a, b))` (sorted pair: the proof needs no directions);
 //! - verify: `h = leaf; for s in path { h = node(h, s) }; h == root`.
 
@@ -10,7 +11,8 @@ use sha2::{Digest, Sha256};
 
 pub type Hash = [u8; 32];
 
-pub const MIN_LEAVES: usize = 8;
+/// Fixed tree size (= the bid cap of a launch).
+pub const MIN_LEAVES: usize = 1024;
 
 pub fn leaf(ciphertext: &str) -> Hash {
     let mut h = Sha256::new();
@@ -71,11 +73,11 @@ mod tests {
 
     #[test]
     fn proofs_verify_for_every_size() {
-        for n in [0usize, 1, 2, 5, 8, 9, 31, 64] {
+        for n in [0usize, 1, 2, 9, 1000, 1024] {
             let leaves: Vec<Hash> = (0..n).map(|i| leaf(&format!("ct-{i}"))).collect();
             let (root, proofs) = build(&leaves);
             assert_eq!(proofs.len(), n);
-            let depth = n.next_power_of_two().max(MIN_LEAVES).trailing_zeros() as usize;
+            let depth = 10; // fixed, whatever the bid count
             for (l, p) in leaves.iter().zip(&proofs) {
                 assert_eq!(p.len(), depth, "n={n}");
                 assert!(verify(l, p, &root), "n={n}");
@@ -89,17 +91,17 @@ mod tests {
     #[test]
     fn deterministic_with_fixed_padding() {
         let leaves = vec![leaf("b"), leaf("a")];
-        let mut k = 0u8;
-        let (r1, _) = build_with(&leaves, || {
-            k += 1;
-            [k; 32]
-        });
-        let mut k = 0u8;
+        let pad = |k: &mut u32| {
+            *k += 1;
+            let mut h = [0u8; 32];
+            h[..4].copy_from_slice(&k.to_be_bytes());
+            h
+        };
+        let mut k = 0u32;
+        let (r1, _) = build_with(&leaves, || pad(&mut k));
+        let mut k = 0u32;
         let rev: Vec<Hash> = leaves.iter().rev().copied().collect();
-        let (r2, _) = build_with(&rev, || {
-            k += 1;
-            [k; 32]
-        });
+        let (r2, _) = build_with(&rev, || pad(&mut k));
         // Order of submission does not matter.
         assert_eq!(r1, r2);
         // Known vector: hex is pinned so the frontend can check its verifier.

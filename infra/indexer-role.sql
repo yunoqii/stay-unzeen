@@ -32,6 +32,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON token_safety, intel_tokens, intel_subscr
     TO unzeen_indexer;
 -- Full trade feed (written only with UNZEEN_INTEL_FULL_TRADES=1).
 GRANT SELECT, INSERT, UPDATE (tags) ON market_trades TO unzeen_indexer;
+-- Price pass (INTEL.md v2, 0011): every pinned mint on every tick.
+GRANT SELECT, INSERT, UPDATE ON intel_prices TO unzeen_indexer;
 GRANT USAGE ON SEQUENCE market_trades_id_seq TO unzeen_indexer;
 
 -- Public market data and the public vault list: read-only.

@@ -1,0 +1,619 @@
+//! Private orders (API.md v0.8, spec docs/analysis/orders.md): limit_buy, limit_sell,
+//! take_profit (= limit_sell on the server), stop_loss (two consecutive ticks).
+//!
+//! - Create: one transaction = nonce + hold (on the `order_create` action row, whose id is the
+//!   order id) + `orders` row. Creator lock / cap / frozen / minimums come from `submit_in`.
+//! - Evaluate (after each indexer tick, price from `intel_prices` only): a firing order becomes
+//!   an ordinary `buy`/`sell` action + relayer job on the next epoch; the hold moves from the
+//!   order to that action without touching the balance (buy: the D10 remainder is released).
+//! - Close: cancel / expire / graduated / below minimum release the hold; the action's
+//!   settlement decides `filled` / `failed`.
+//! - D1: 24 h after closing amount/price/mint/slippage/action are erased, 48 h → deleted.
+//!
+//! Privacy: nothing here logs; callers log counts only.
+
+use deadpool_postgres::GenericClient;
+
+use crate::{
+    ActionReceipt, Ledger, LedgerError, Result,
+    actions::{NewAction, RateUsed, ZAT_PER_ZEC, token_journal},
+    fair::is_replay,
+    journal, to_i64, to_u64,
+};
+
+pub const MAX_OPEN_PER_KEY: i64 = 10;
+pub const MAX_OPEN_PER_MINT: i64 = 4;
+pub const MAX_OPEN_GLOBAL: i64 = 1_000;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewOrder {
+    pub kind: String,
+    pub venue: String,
+    pub mint: String,
+    /// Canonical decimal string (validated by the API: > 0, ≤ 18 fractional digits).
+    pub trigger: String,
+    pub amount: u64,
+    pub slippage_bps: u32,
+    pub exec_mode: String,
+    pub ttl_secs: u64,
+    /// limit_buy: upper-bound token estimate for the creator cap (ignored for non-creators).
+    pub gain: Option<u64>,
+}
+
+impl NewOrder {
+    pub fn is_buy(&self) -> bool {
+        self.kind == "limit_buy"
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrderRow {
+    pub id: [u8; 16],
+    pub venue: String,
+    pub mint: String,
+    pub kind: String,
+    pub trigger: String,
+    pub amount: u64,
+    pub slippage_bps: i32,
+    pub exec_mode: String,
+    pub status: String,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub armed: bool,
+    pub action_id: Option<[u8; 16]>,
+    pub error: Option<String>,
+}
+
+/// Inputs of one evaluation pass, computed by the API.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvalParams {
+    pub rate_buy: Option<RateUsed>,
+    pub rate_sell: Option<RateUsed>,
+    /// Seconds to the next epoch boundary: (`delayed`, `max`).
+    pub delay_delayed: f64,
+    pub delay_max: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EvalReport {
+    pub triggered: u64,
+    pub armed: u64,
+    pub failed: u64,
+    pub expired: u64,
+    pub closed: u64,
+}
+
+/// Decimal string → value × 1e18 (exact for ≤ 18 fractional digits).
+pub fn parse_e18(s: &str) -> Option<u128> {
+    let (int, frac) = s.trim().split_once('.').unwrap_or((s.trim(), ""));
+    if int.is_empty() && frac.is_empty() || frac.len() > 18 {
+        return None;
+    }
+    if !int.bytes().all(|b| b.is_ascii_digit()) || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let i: u128 = if int.is_empty() { 0 } else { int.parse().ok()? };
+    let f: u128 = if frac.is_empty() {
+        0
+    } else {
+        format!("{frac:0<18}").parse().ok()?
+    };
+    i.checked_mul(10u128.pow(18))?.checked_add(f)
+}
+
+/// buy: min tokens (base units) for `lamports` at `trigger × (1 + slippage)`.
+pub fn buy_min_out(lamports: u64, trigger_e18: u128, decimals: u32, slippage_bps: u32) -> Option<u64> {
+    // tokens_whole = lamports / (trigger · 1e9 · (1 + s)); base = · 10^dec
+    let num = (lamports as u128)
+        .checked_mul(10u128.checked_pow(decimals)?)?
+        .checked_mul(1_000_000_000)?
+        .checked_mul(10_000)?;
+    let den = trigger_e18.checked_mul(10_000 + slippage_bps as u128)?;
+    if den == 0 {
+        return None;
+    }
+    Some((num / den).min(u64::MAX as u128) as u64)
+}
+
+/// sell: min lamports for `amount` base units at `trigger × (1 − slippage)`.
+pub fn sell_min_out(amount: u64, trigger_e18: u128, decimals: u32, slippage_bps: u32) -> Option<u64> {
+    // lamports = amount / 10^dec · trigger · 1e9 = amount · trigger_e18 / (10^dec · 1e9)
+    let num = (amount as u128)
+        .checked_mul(trigger_e18)?
+        .checked_mul(10_000 - slippage_bps.min(10_000) as u128)?;
+    let den = 10u128
+        .checked_pow(decimals)?
+        .checked_mul(1_000_000_000)?
+        .checked_mul(10_000)?;
+    Some((num / den).min(u64::MAX as u128) as u64)
+}
+
+fn id16(v: Vec<u8>) -> [u8; 16] {
+    v.try_into().unwrap_or([0; 16])
+}
+
+/// Release the hold of an order (held on its `order_create` action) and close it.
+async fn close_order<C: GenericClient>(tx: &C, order_id: &[u8], status: &str, error: Option<&str>) -> Result<()> {
+    if let Some(a) = tx
+        .query_opt(
+            "SELECT anon_pubkey, hold_zat, token_mint, token_hold FROM actions
+             WHERE id = $1 AND status = 'queued' FOR UPDATE",
+            &[&order_id],
+        )
+        .await?
+    {
+        let (pk, hold, tmint, thold): (Vec<u8>, i64, Option<String>, i64) = (a.get(0), a.get(1), a.get(2), a.get(3));
+        if hold > 0 {
+            tx.execute(
+                "UPDATE balances SET held_zat = held_zat - $2, available_zat = available_zat + $2, updated_at = now()
+                 WHERE anon_pubkey = $1",
+                &[&pk, &hold],
+            )
+            .await?;
+            journal(tx, &pk, "release", hold, -hold, None, Some(order_id)).await?;
+        }
+        if let (Some(m), true) = (&tmint, thold > 0) {
+            tx.execute(
+                "UPDATE token_balances SET held = held - $3, available = available + $3, updated_at = now()
+                 WHERE anon_pubkey = $1 AND mint = $2",
+                &[&pk, m, &thold],
+            )
+            .await?;
+            token_journal(tx, &pk, m, "release", thold, -thold, order_id).await?;
+        }
+        tx.execute(
+            "UPDATE actions SET status = 'failed', error = $2, gain_mint = NULL, gain_est = NULL, updated_at = now()
+             WHERE id = $1",
+            &[&order_id, &error.unwrap_or(status)],
+        )
+        .await?;
+    }
+    tx.execute(
+        "UPDATE orders SET status = $2, error = $3, sl_armed_tick = NULL, closed_at = now() WHERE id = $1",
+        &[&order_id, &status, &error],
+    )
+    .await?;
+    Ok(())
+}
+
+impl Ledger {
+    /// `order_create`. Receipt id = order id; status `open`.
+    pub async fn order_create(
+        &self,
+        pk: &[u8; 32],
+        nonce: &[u8; 16],
+        request_hash: &[u8; 32],
+        o: &NewOrder,
+    ) -> Result<ActionReceipt> {
+        let (pk_s, nonce_s): (&[u8], &[u8]) = (pk, nonce);
+        let mut c = self.pool.get().await?;
+        let tx = c.transaction().await?;
+        let a = NewAction {
+            kind: "order_create".into(),
+            amount_zat: if o.is_buy() { o.amount } else { 0 },
+            token_hold: (!o.is_buy()).then(|| (o.mint.clone(), o.amount)),
+            gain: o.gain.map(|g| (o.mint.clone(), g)),
+            ..NewAction::default()
+        };
+        if is_replay(&tx, pk_s, nonce_s).await? {
+            let mut r = self.submit_in(&tx, pk, nonce, request_hash, &a).await?;
+            let rid: &[u8] = &r.id;
+            if let Some(row) = tx.query_opt("SELECT status FROM orders WHERE id = $1", &[&rid]).await? {
+                r.status = row.get(0);
+            }
+            return Ok(r);
+        }
+        tx.execute("SELECT pg_advisory_xact_lock(7566726966790002)", &[])
+            .await?;
+        let counts = tx
+            .query_one(
+                "SELECT count(*) FILTER (WHERE anon_pubkey = $1),
+                        count(*) FILTER (WHERE anon_pubkey = $1 AND mint = $2),
+                        count(*)
+                 FROM orders WHERE status IN ('open', 'triggered')",
+                &[&pk_s, &o.mint],
+            )
+            .await?;
+        let (per_key, per_mint, global): (i64, i64, i64) = (counts.get(0), counts.get(1), counts.get(2));
+        if global >= MAX_OPEN_GLOBAL {
+            return Err(LedgerError::OrdersFull);
+        }
+        if per_key >= MAX_OPEN_PER_KEY || per_mint >= MAX_OPEN_PER_MINT {
+            return Err(LedgerError::OrderLimit);
+        }
+        let mut r = self.submit_in(&tx, pk, nonce, request_hash, &a).await?;
+        let id: &[u8] = &r.id;
+        tx.execute(
+            "INSERT INTO orders (id, anon_pubkey, venue, mint, kind, trigger_price_sol, amount, slippage_bps, exec_mode,
+                                 expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7, $8, $9,
+                     date_trunc('hour', now() + make_interval(secs => $10) + interval '1 hour' - interval '1 microsecond'))",
+            &[
+                &id,
+                &pk_s,
+                &o.venue,
+                &o.mint,
+                &o.kind,
+                &o.trigger,
+                &to_i64(o.amount)?,
+                &(o.slippage_bps as i32),
+                &o.exec_mode,
+                &(o.ttl_secs as f64),
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        r.status = "open".into();
+        Ok(r)
+    }
+
+    /// `order_cancel`: only from `open`. Receipt = the cancel action, status `cancelled`.
+    pub async fn order_cancel(
+        &self,
+        pk: &[u8; 32],
+        nonce: &[u8; 16],
+        request_hash: &[u8; 32],
+        order_id: &[u8; 16],
+    ) -> Result<ActionReceipt> {
+        let (pk_s, nonce_s, oid): (&[u8], &[u8], &[u8]) = (pk, nonce, order_id);
+        let mut c = self.pool.get().await?;
+        let tx = c.transaction().await?;
+        let cancel = NewAction {
+            kind: "order_cancel".into(),
+            ..NewAction::default()
+        };
+        if is_replay(&tx, pk_s, nonce_s).await? {
+            let mut r = self.submit_in(&tx, pk, nonce, request_hash, &cancel).await?;
+            r.status = "cancelled".into();
+            return Ok(r);
+        }
+        let Some(o) = tx
+            .query_opt(
+                "SELECT status FROM orders WHERE id = $1 AND anon_pubkey = $2 AND mint IS NOT NULL FOR UPDATE",
+                &[&oid, &pk_s],
+            )
+            .await?
+        else {
+            return Err(LedgerError::NotFound);
+        };
+        if o.get::<_, String>(0) != "open" {
+            return Err(LedgerError::OrderNotOpen);
+        }
+        let mut r = self.submit_in(&tx, pk, nonce, request_hash, &cancel).await?;
+        close_order(&tx, oid, "cancelled", None).await?;
+        let rid: &[u8] = &r.id;
+        tx.execute(
+            "UPDATE actions SET status = 'executed', updated_at = now() WHERE id = $1",
+            &[&rid],
+        )
+        .await?;
+        tx.commit().await?;
+        r.status = "cancelled".into();
+        Ok(r)
+    }
+
+    /// `Portfolio.orders`: open/triggered first, then closed ones not yet scrubbed; ≤ 20.
+    pub async fn owner_orders(&self, pk: &[u8; 32]) -> Result<Vec<OrderRow>> {
+        let pk_s: &[u8] = pk;
+        let c = self.pool.get().await?;
+        let rows = c
+            .query(
+                "SELECT id, venue, mint, kind, trigger_price_sol::text, amount, slippage_bps, exec_mode, status,
+                        (extract(epoch FROM created_at) * 1000)::bigint, (extract(epoch FROM expires_at) * 1000)::bigint,
+                        sl_armed_tick IS NOT NULL, action_id, error
+                 FROM orders WHERE anon_pubkey = $1 AND mint IS NOT NULL
+                 ORDER BY (status IN ('open', 'triggered')) DESC, created_at DESC, id LIMIT 20",
+                &[&pk_s],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| OrderRow {
+                id: id16(r.get(0)),
+                venue: r.get(1),
+                mint: r.get(2),
+                kind: r.get(3),
+                trigger: r.get::<_, Option<String>>(4).unwrap_or_default(),
+                amount: to_u64(r.get(5)),
+                slippage_bps: r.get::<_, Option<i32>>(6).unwrap_or(0),
+                exec_mode: r.get(7),
+                status: r.get(8),
+                created_at_ms: to_u64(r.get(9)),
+                expires_at_ms: to_u64(r.get(10)),
+                armed: r.get(11),
+                action_id: r.get::<_, Option<Vec<u8>>>(12).map(id16),
+                error: r.get(13),
+            })
+            .collect())
+    }
+
+    /// One pass: expire, close triggered orders whose action settled, evaluate new ticks.
+    pub async fn orders_tick(&self, network: &str, p: &EvalParams) -> Result<EvalReport> {
+        let mut rep = EvalReport::default();
+        let mut c = self.pool.get().await?;
+        let tx = c.transaction().await?;
+        // Expired.
+        for r in tx
+            .query(
+                "SELECT id FROM orders WHERE status = 'open' AND expires_at <= now() FOR UPDATE SKIP LOCKED",
+                &[],
+            )
+            .await?
+        {
+            let id: Vec<u8> = r.get(0);
+            close_order(&tx, &id, "expired", None).await?;
+            rep.expired += 1;
+        }
+        // Triggered orders whose action is closed.
+        for r in tx
+            .query(
+                "SELECT o.id, a.status, a.error FROM orders o JOIN actions a ON a.id = o.action_id
+                 WHERE o.status = 'triggered' AND a.status <> 'queued' FOR UPDATE OF o SKIP LOCKED",
+                &[],
+            )
+            .await?
+        {
+            let (id, st, err): (Vec<u8>, String, Option<String>) = (r.get(0), r.get(1), r.get(2));
+            let (ns, e) = if st == "executed" {
+                ("filled", None)
+            } else {
+                ("failed", err)
+            };
+            tx.execute(
+                "UPDATE orders SET status = $2, error = $3, closed_at = now() WHERE id = $1",
+                &[&id, &ns, &e],
+            )
+            .await?;
+            rep.closed += 1;
+        }
+        // New ticks.
+        let mut rows = tx
+            .query(
+                "SELECT o.id, o.anon_pubkey, o.kind, o.mint, o.amount, o.slippage_bps, o.exec_mode, o.sl_armed_tick,
+                        p.tick_at, p.prev_tick_at, p.status,
+                        p.price_sol <= o.trigger_price_sol, p.price_sol >= o.trigger_price_sol,
+                        o.trigger_price_sol::text, COALESCE(t.decimals, 6::smallint), COALESCE(b.frozen, FALSE)
+                 FROM orders o JOIN intel_prices p ON p.mint = o.mint
+                 LEFT JOIN tokens t ON t.mint = o.mint LEFT JOIN balances b ON b.anon_pubkey = o.anon_pubkey
+                 WHERE o.status = 'open' AND p.tick_at > COALESCE(o.last_tick, 0)
+                 FOR UPDATE OF o SKIP LOCKED",
+                &[],
+            )
+            .await?;
+        // Random order inside the pass (no arrival order).
+        for i in (1..rows.len()).rev() {
+            rows.swap(i, (rand::random::<u64>() % (i as u64 + 1)) as usize);
+        }
+        for r in rows {
+            let id: Vec<u8> = r.get(0);
+            let pk: Vec<u8> = r.get(1);
+            let kind: String = r.get(2);
+            let mint: String = r.get(3);
+            let amount = to_u64(r.get(4));
+            let slip = r.get::<_, Option<i32>>(5).unwrap_or(500).max(0) as u32;
+            let exec: String = r.get(6);
+            let armed: Option<i64> = r.get(7);
+            let (tick, prev_tick): (i64, Option<i64>) = (r.get(8), r.get(9));
+            let graduated = r.get::<_, String>(10) == "graduated";
+            let (le, ge): (bool, bool) = (r.get(11), r.get(12));
+            let trigger: String = r.get(13);
+            let dec = r.get::<_, i16>(14).clamp(0, 18) as u32;
+            let frozen: bool = r.get(15);
+            if graduated {
+                close_order(&tx, &id, "failed", Some("graduated")).await?;
+                rep.failed += 1;
+                continue;
+            }
+            let cond = if matches!(kind.as_str(), "limit_buy" | "stop_loss") {
+                le
+            } else {
+                ge
+            };
+            let fire = match (kind.as_str(), cond) {
+                (_, false) => false,
+                ("stop_loss", true) => armed.is_some() && armed == prev_tick,
+                _ => true,
+            };
+            let set_tick = |armed_next: Option<i64>| {
+                let id = id.clone();
+                let tx = &tx;
+                async move {
+                    tx.execute(
+                        "UPDATE orders SET last_tick = $2, sl_armed_tick = $3 WHERE id = $1",
+                        &[&id, &tick, &armed_next],
+                    )
+                    .await
+                }
+            };
+            if !fire {
+                let next = (kind == "stop_loss" && cond).then_some(tick);
+                set_tick(next).await?;
+                if next.is_some() {
+                    rep.armed += 1;
+                }
+                continue;
+            }
+            let buy = kind == "limit_buy";
+            let rate = if buy { p.rate_buy.as_ref() } else { p.rate_sell.as_ref() };
+            let (Some(rate), false) = (rate, frozen) else {
+                // No rate / frozen balance: wait for the next tick (SL stays armed).
+                set_tick(armed.filter(|_| kind == "stop_loss").map(|_| tick)).await?;
+                continue;
+            };
+            let Some(trigger_e18) = parse_e18(&trigger) else {
+                close_order(&tx, &id, "failed", Some("bad_request")).await?;
+                rep.failed += 1;
+                continue;
+            };
+            let a = tx
+                .query_one(
+                    "SELECT hold_zat, gain_mint, gain_est FROM actions WHERE id = $1 FOR UPDATE",
+                    &[&id],
+                )
+                .await?;
+            let (hold, gain_mint, gain_est): (i64, Option<String>, Option<i64>) = (a.get(0), a.get(1), a.get(2));
+            let (lamports, zat, min_out) = if buy {
+                let full = ((hold.max(0) as u128) * (rate.lamports_per_zec as u128) / ZAT_PER_ZEC) as u64;
+                let shave = (rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64;
+                let lamports = unzeen_fair::alloc::fuzz_lamports(full, shave);
+                let zat = ((lamports as u128) * ZAT_PER_ZEC)
+                    .div_ceil(rate.lamports_per_zec.max(1) as u128)
+                    .min(hold.max(0) as u128) as u64;
+                match buy_min_out(lamports, trigger_e18, dec, slip) {
+                    Some(m) if lamports > 0 && zat >= self.policy.min_action_zat => (lamports, zat, m),
+                    _ => {
+                        close_order(&tx, &id, "failed", Some("below_minimum")).await?;
+                        rep.failed += 1;
+                        continue;
+                    }
+                }
+            } else {
+                match sell_min_out(amount, trigger_e18, dec, slip) {
+                    Some(m) => (0, 0, m),
+                    None => {
+                        close_order(&tx, &id, "failed", Some("bad_request")).await?;
+                        rep.failed += 1;
+                        continue;
+                    }
+                }
+            };
+            // The trade: an ordinary buy/sell action + relayer job on the next epoch.
+            let aid: [u8; 16] = rand::random();
+            let nonce: [u8; 16] = rand::random();
+            let (aid_s, nonce_s): (&[u8], &[u8]) = (&aid, &nonce);
+            let zero = [0u8; 32];
+            let zero_s: &[u8] = &zero;
+            let zat_i = to_i64(zat)?;
+            let (tmint, thold): (Option<&str>, i64) = if buy {
+                (None, 0)
+            } else {
+                (Some(mint.as_str()), to_i64(amount)?)
+            };
+            tx.execute(
+                "INSERT INTO actions (id, anon_pubkey, nonce, request_hash, kind, hold_zat, status, amount_zat, fee_zat,
+                                      rate_lamports_per_zec, rate_source, rate_ts, token_mint, token_hold,
+                                      gain_mint, gain_est)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $6, 0, $7, $8, to_timestamp($9), $10, $11, $12, $13)",
+                &[
+                    &aid_s,
+                    &pk,
+                    &nonce_s,
+                    &zero_s,
+                    &(if buy { "buy" } else { "sell" }),
+                    &zat_i,
+                    &to_i64(rate.lamports_per_zec)?,
+                    &rate.source,
+                    &(to_i64(rate.ts_ms)? as f64 / 1000.0),
+                    &tmint,
+                    &thold,
+                    &gain_mint,
+                    &gain_est,
+                ],
+            )
+            .await?;
+            let delay = if exec == "max" { p.delay_max } else { p.delay_delayed };
+            tx.execute(
+                "INSERT INTO relayer_jobs (action_id, part, op, venue, mint, lamports_in, token_amount, min_out,
+                                           network, not_before, exec_mode)
+                 VALUES ($1, 0, $2, 'pumpfun', $3, $4, $5, $6, $7, now() + make_interval(secs => $8), $9)",
+                &[
+                    &aid_s,
+                    &(if buy { "buy" } else { "sell" }),
+                    &mint,
+                    &(if buy { Some(to_i64(lamports)?) } else { None }),
+                    &(if buy { None } else { Some(to_i64(amount)?) }),
+                    &to_i64(min_out)?,
+                    &network,
+                    &delay.max(0.0),
+                    &exec,
+                ],
+            )
+            .await?;
+            // Move the hold: the order action keeps nothing; a buy's D10 remainder is released.
+            let back = hold - zat_i;
+            if buy && back > 0 {
+                tx.execute(
+                    "UPDATE balances SET held_zat = held_zat - $2, available_zat = available_zat + $2,
+                            updated_at = now() WHERE anon_pubkey = $1",
+                    &[&pk, &back],
+                )
+                .await?;
+                journal(&tx, &pk, "release", back, -back, None, Some(&id)).await?;
+            }
+            tx.execute(
+                "UPDATE actions SET status = 'executed', hold_zat = 0, token_hold = 0, gain_mint = NULL, gain_est = NULL,
+                        updated_at = now() WHERE id = $1",
+                &[&id],
+            )
+            .await?;
+            tx.execute(
+                "UPDATE orders SET status = 'triggered', action_id = $2, last_tick = $3, sl_armed_tick = NULL
+                 WHERE id = $1",
+                &[&id, &aid_s, &tick],
+            )
+            .await?;
+            rep.triggered += 1;
+        }
+        tx.commit().await?;
+        Ok(rep)
+    }
+
+    /// D1 for orders: closed + 24 h → amounts, price, mint, slippage, action link erased;
+    /// closed + 48 h → deleted.
+    pub async fn orders_janitor(&self) -> Result<(u64, u64)> {
+        let c = self.pool.get().await?;
+        let scrubbed = c
+            .execute(
+                "UPDATE orders SET mint = NULL, trigger_price_sol = NULL, amount = 0, slippage_bps = NULL,
+                        action_id = NULL, sl_armed_tick = NULL, last_tick = NULL
+                 WHERE closed_at < now() - interval '24 hours' AND mint IS NOT NULL",
+                &[],
+            )
+            .await?;
+        let deleted = c
+            .execute("DELETE FROM orders WHERE closed_at < now() - interval '48 hours'", &[])
+            .await?;
+        Ok((scrubbed, deleted))
+    }
+
+    /// Facts for validating an order mint: (venue, status, decimals) from `tokens`, and the
+    /// last tick price (decimal string) if any.
+    pub async fn order_mint_info(&self, mint: &str) -> Result<Option<(String, String, i16, Option<String>)>> {
+        let c = self.pool.get().await?;
+        let r = c
+            .query_opt(
+                "SELECT t.venue, t.status, t.decimals, p.price_sol::text FROM tokens t
+                 LEFT JOIN intel_prices p ON p.mint = t.mint WHERE t.mint = $1",
+                &[&mint],
+            )
+            .await?;
+        Ok(r.map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decimals() {
+        assert_eq!(parse_e18("1"), Some(10u128.pow(18)));
+        assert_eq!(parse_e18("0.000000028"), Some(28_000_000_000));
+        assert_eq!(parse_e18(".5"), Some(5 * 10u128.pow(17)));
+        assert_eq!(parse_e18("0.0000000000000000001"), None);
+        assert_eq!(parse_e18("-1"), None);
+        assert_eq!(parse_e18("1e5"), None);
+    }
+
+    #[test]
+    fn min_outs_follow_the_trigger() {
+        // 1e-6 SOL per whole token (6 decimals), 1 SOL → 1e6 whole tokens = 1e12 base units.
+        let t = parse_e18("0.000001").unwrap();
+        assert_eq!(buy_min_out(1_000_000_000, t, 6, 0), Some(1_000_000_000_000));
+        // 5 % slippage: 1/1.05 of that.
+        assert_eq!(buy_min_out(1_000_000_000, t, 6, 500), Some(952_380_952_380));
+        // sell 1e12 base units at 1e-6 → 1 SOL; 15 % slippage → 0.85 SOL.
+        assert_eq!(sell_min_out(1_000_000_000_000, t, 6, 0), Some(1_000_000_000));
+        assert_eq!(sell_min_out(1_000_000_000_000, t, 6, 1_500), Some(850_000_000));
+    }
+}

@@ -634,6 +634,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                 ..base("withdraw_token")
             }
         }
+        // `claim` is handled before `build` (crate::creator_fees); unreachable here.
         SignedAction::Claim { .. }
         | SignedAction::OrderCreate {}
         | SignedAction::OrderCancel {}

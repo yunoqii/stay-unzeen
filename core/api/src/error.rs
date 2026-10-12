@@ -98,6 +98,18 @@ impl From<LedgerError> for ApiError {
                 "launch_closed",
                 "the bid window of this launch is closed",
             ),
+            LedgerError::OrderLimit => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "order_limit",
+                "too many open orders (PoolInfo.orders.maxOpenPerKey / maxOpenPerMint)",
+            ),
+            LedgerError::LaunchFull => Self::new(
+                StatusCode::CONFLICT,
+                "launch_full",
+                "this launch has reached its bid cap",
+            ),
+            LedgerError::OrderNotOpen => Self::new(StatusCode::CONFLICT, "order_not_open", "the order is not open"),
+            LedgerError::OrdersFull => Self::venue_unavailable("orders are not available right now"),
             LedgerError::AlreadyBid => Self::new(
                 StatusCode::CONFLICT,
                 "already_bid",

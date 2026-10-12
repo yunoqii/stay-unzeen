@@ -2,8 +2,16 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.7** (12.10, Verify; реализовано в `core/protocol::verify` + `core/ledger` + `core/api`). Изменения против v0.6:
-- **Verify (proof of liabilities):** `GET /api/verify`, `GET /api/verify/snapshots`, `GET /api/verify/:id` (публичные), `GET /api/verify/proof` (подписанный, ответ выровнен до 16 КиБ). Раздел «Verify (v0.7)». Векторы: `core/testdata/verify-vectors.json`.
+Статус: **v0.8** (12.10, приватные ордера; реализовано в `core/ledger::orders` + `core/api`). Изменения против v0.7:
+- **Лимитки / TP / SL** (`docs/analysis/orders.md`): `order_create` / `order_cancel` поддерживаются; `Portfolio.orders`; `PoolInfo.orders`. **Отдельного `GET /api/orders` нет** (удалён из «Дополнительных эндпоинтов»): ордера только в портфеле. Раздел «Ордера (v0.8)».
+- Новые коды ошибок: `order_limit` (422), `order_not_open` (409), `order_unsupported_mint` (422).
+- **Fair-launch, исправления по ревью (`docs/analysis/review-fair-launch.md`):** раунд reveal `R = R(closeAt + 30 с) + 1` (между закрытием и раундом ≥ 30 с, корень успевает лечь в Solana); `commitment.attestation` += `blockTime`, `beforeRound`; дерево commitment фиксированной глубины 10 (1024 листа); не больше 1024 заявок на запуск → `409 launch_full`; `failure` += `"internal"` (набор заявок не совпал с корнем; всё возвращено); при выключенном флаге маршрутов `/api/launches*` нет вовсе (любой метод → как неизвестный путь); два одинаковых запроса `fl_*`/`order_*` одновременно → оба получают исходный ответ.
+- `Portfolio.actions` не содержит `order_*` (ордер виден в `orders`; сработавший ордер порождает обычное действие `buy`/`sell`, связь — `Order.actionId`). `zecHeld` и `holdings[].held` включают hold ордеров.
+
+Изменения v0.7 против v0.6 (Verify; `core/protocol::verify` + `core/ledger` + `core/api`):
+- **Verify (proof of liabilities):** `GET /api/verify`, `GET /api/verify/snapshots`, `GET /api/verify/:id` (публичные), `GET /api/verify/proof` (подписанный, ответ всегда ровно 64 КиБ). Раздел «Verify (v0.7)». Векторы: `core/testdata/verify-vectors.json`.
+- **Creator fees:** `claim` поддерживается (`{op:"claim", mint?}` → `{id, status:"executed", rate}`): накопленные комиссии создателя (`Portfolio.claimable`, лампорты) переводятся в ZEC по курсу sell, только операция реестра. `claimable` наполняется из глобального сборщика пула (раз в 6–12 ч) на ближайшей границе эпохи Delayed. Нечего забирать или меньше `minActionZat` → `422 below_minimum`. `Portfolio.actions[].kind` += `"claim"`.
+- Verify: дерево `SOL` (комиссии создателей к выплате, гранула 0.001 SOL) при наличии `claimable`; ответ `/api/verify/proof` — ровно 64 КиБ.
 - **Флаг fair-launch:** при выключенном флаге ключа `fairLaunch` в `PoolInfo` нет **совсем** (ни в `features`, ни отдельно). Отсутствие = выключено. При включённом: `features.fairLaunch = true` и блок `fairLaunch`.
 
 Изменения v0.6 против v0.5 (fair-launch; **внутреннее до 28.10 23:59 UTC**, детали не публиковать, CLAUDE.md):
@@ -147,6 +155,17 @@ interface PoolInfo {
     fairLaunch?: true;      // v0.6/v0.7: есть только при включённом fair-launch; нет ключа → выключено (UI не показывать)
   };
   fairLaunch?: FairLaunchParams;  // v0.6: только при features.fairLaunch = true
+  orders: {                 // v0.8: приватные ордера
+    kinds: ("limit_buy" | "limit_sell" | "take_profit" | "stop_loss")[];
+    venues: "pumpfun"[];
+    maxOpenPerKey: number;      // 10
+    maxOpenPerMint: number;     // 4 (на ключ и mint)
+    maxTtlSecs: number;         // 259200 (72 ч)
+    defaultTtlSecs: number;     // 86400
+    defaultSlippageBps: { limit_buy: number; limit_sell: number; take_profit: number; stop_loss: number };  // 500/500/500/1500
+    slConfirmTicks: number;     // 2
+    priceTick: { minSecs: number; maxSecs: number };   // 45/75: «checks about once a minute»
+  };
   launchRules: {            // v0.5: правила создателя Unzeen-запуска, которые реестр применяет принудительно
     lockSecs: number;       // лок токенов первой покупки создателя (86400 = 24 ч); 0 — правило выключено
     capBps: number;         // кап позиции создателя через пул, б.п. саплая (500 = 5 %); 0 — выключено
@@ -169,12 +188,13 @@ interface Portfolio {
   zecHeld: string;          // затоши, зарезервировано действиями в очереди
   frozen: boolean;          // true — баланс заморожен до ручной проверки (reorg); снимается автоматически, если депозит снова в цепочке с K подтверждениями
   holdings: { mint: string; amount: string; held: string }[];  // amount — доступно; held — зарезервировано sell/withdraw_token в очереди
-  claimable: { mint: string; solAmount: string }[];            // пока всегда []
+  claimable: { mint: string; solAmount: string }[];            // v0.7: creator fees к выплате (лампорты) по mint, созданным этим ключом; claim → ZEC
   deposits: DepositInfo[];  // последние 20, новые первыми
   actions: (ActionStatus & {  // v0.4: последние 20 действий владельца (queued первыми)
     id: string;
-    kind: "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token";   // fl_* сюда НЕ попадают (v0.6)
+    kind: "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token" | "claim";   // fl_* сюда НЕ попадают (v0.6); claim (v0.7)
   })[];
+  orders: Order[];               // v0.8: открытые/сработавшие первыми, затем закрытые (суммы и цена живут 24 ч после закрытия); ≤ 20
   fairBids?: FairBid[];          // v0.6: только при features.fairLaunch; последние 20 заявок ключа
   fairLaunches?: OwnFairLaunch[];// v0.6: только при features.fairLaunch; запуски, созданные этим ключом (кабинет создателя)
   pad: string;              // v0.4: пробелы, выравнивают ответ до кратного 4096 байт; игнорировать
@@ -230,17 +250,28 @@ type SignedAction = (
   | { op: "withdraw_zec"; to: string; amount: string; exec?: "delayed" | "max" }  // UA с Orchard/Ironwood receiver; t-адрес и Sapling-only → 400
   | { op: "withdraw_token"; mint: string; amount: string; to: string | string[];   // на новый Solana-адрес
       smart?: { parts: number; maxDelayMin: number }; exec?: "delayed" | "max" }  // умный вывод: parts 2..5 (длина `to` = parts)
-  | { op: "order_create"; venue: Venue; mint: string;
+  | { op: "order_create"; venue: "pumpfun"; mint: string;                        // v0.8, см. «Ордера»
       kind: "limit_buy" | "limit_sell" | "take_profit" | "stop_loss";
-      triggerPriceSol: string; amount: string }                                   // amount: ZEC для buy, токены для sell
-  | { op: "order_cancel"; orderId: string }
+      triggerPriceSol: string;     // десятичная SOL за 1 целый токен (как Token.priceSol), > 0, ≤ 18 значащих цифр
+      amount: string;              // limit_buy: зат; остальные: базовые единицы токена
+      slippageBps?: number;        // 50..5000; по умолчанию PoolInfo.orders.defaultSlippageBps[kind]
+      ttlSecs?: number;            // 3600..PoolInfo.orders.maxTtlSecs; по умолчанию 86400; expiresAt округляется ВВЕРХ до часа
+      exec?: "delayed" | "max" }   // "now" → 400
+  | { op: "order_cancel"; orderId: string }                                       // только из open
   | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean }
 );
 
-interface Order {
-  id: string; venue: Venue; mint: string; kind: string;
-  triggerPriceSol: string; amount: string;
-  status: "open" | "filled" | "cancelled" | "failed"; createdAt: number; filledTx?: string;
+interface Order {                 // v0.8: только в Portfolio.orders (владельцу)
+  id: string;                     // 32 hex (= id ответа order_create)
+  venue: "pumpfun"; mint: string;
+  kind: "limit_buy" | "limit_sell" | "take_profit" | "stop_loss";
+  triggerPriceSol: string; amount: string; slippageBps: number; exec: "delayed" | "max";
+  status: "open" | "triggered" | "filled" | "cancelled" | "expired" | "failed";
+  createdAt: number;              // unix мс, вниз до минуты
+  expiresAt: number;              // unix мс, вверх до часа
+  armed?: true;                   // stop_loss: условие выполнено на одном тике, ждём второго подряд
+  actionId?: string;              // triggered/filled/failed после срабатывания: статус сделки — в Portfolio.actions
+  error?: ErrorCode;              // failed: graduated | slippage | below_minimum | creator_cap | ...
 }
 
 interface ChatMessage {
@@ -342,7 +373,8 @@ interface TokenTrade extends FeedEvent {
 - **create:** *(сейчас `503 venue_unavailable`, см. выше)* hold = `initialBuyZec` (округление как у buy, если есть, ≥ `minActionZat`) + комиссия запуска (`CREATE_FEE_ZAT`, по умолчанию 100 000 зат). `meta.name` 1–32 символа, `meta.symbol` 1–10 ASCII букв/цифр, `meta.image` — только `data:image/(png|jpeg|webp);base64,…` до 512 КиБ (тело запроса ≤ 1 МиБ). `venue: "jupiter"` → 400.
 - **withdraw_zec:** hold = `amount` + комиссия сети (`WITHDRAW_ZEC_FEE_ZAT`, 15 000 зат); выплата с задержкой 1–10 мин (`exec: "max"` — 10–60 мин), готовые выплаты объединяются в одну tx (до 5). `executed` после K подтверждений выплаты; если tx истекла не попав в блок — выплата переотправляется новой tx (двойной выплаты нет). Сумма выплаты ровно `amount`, комиссию сети платит пул из `WITHDRAW_ZEC_FEE_ZAT`.
 - **withdraw_token:** держит `amount` токенов; комиссия в ZEC = частей × (капля SOL получателю + рента ATA + fee) по курсу; без `smart` — `to` строка или массив из 1 адреса, задержка 30 с–5 мин (`exec: "max"` — 10–60 мин); со `smart` — длина `to` = `parts`, адреса разные, суммы частей неравные (±20 %), задержка каждой части до `maxDelayMin`.
-- **Пока не поддерживаются** (→ `400 bad_request "op not supported yet"`): `claim`, `order_create`, `order_cancel`, `chat`.
+- **claim** (v0.7): весь `claimable` (или одного `mint`) → `zecBalance` по `lamportsPerZecSell` (`floor`), сразу, без tx в сети. Сбор комиссий в сети делает пул глобально по своему расписанию, не по запросу (запрос claim ничего не делает в Solana, поэтому не связывает токены одного создателя).
+- **Пока не поддерживаются** (→ `400 bad_request "op not supported yet"`): `chat`.
 - Новое действие при `frozen` → `423 balance_frozen` для **любой** операции (в т. ч. без ZEC-hold).
 - `withdraw_token` **всегда**: капля SOL на газ на каждый адрес получателя, случайная задержка, отправка с vault, где пул держит этот mint (общий инвентарь пула: все vault публичны и видны в Verify, «другой vault» приватности не добавлял — D4), каждая часть — отдельной tx. `smart` добавляет только разбиение на N адресов. Если сумма вывода совпадает с недавней покупкой, фронт предупреждает.
 - `withdraw_zec`: выплата shielded ZEC, с задержкой/батчингом; пул не хранит outgoing viewing data (OVK discard).
@@ -393,8 +425,8 @@ interface FairLaunch {                // публичный, без подпис
   publishedAt: number;                // unix мс: граница эпохи Delayed после fl_create (не момент запроса)
   closeAt: number;                    // unix мс = publishedAt + windowSecs·1000
   drand: {
-    round: number;                    // R = R(closeAt) + 2; шифровать ровно на него
-    roundTime: number;                // t(R), unix мс (> closeAt)
+    round: number;                    // R = R(closeAt + 30 с) + 1 (v0.8); шифровать ровно на него
+    roundTime: number;                // t(R), unix мс (≥ closeAt + 30 с)
     signature?: string;               // hex 48 байт, после проверки beacon (status ≥ executing): проверяемо офлайн
   };
   commitment?: {                      // с момента closed (см. «Commitment»)
@@ -402,8 +434,11 @@ interface FairLaunch {                // публичный, без подпис
     attestation?: {                   // появляется, когда memo-tx с корнем подтверждена на Solana
       solanaTx: string;               // подпись tx SPL Memo; data memo = ровно `root` (64 hex, без префикса)
       slot: number;
-      signer: string;                 // публичный ключ аттестаций пула (не vault, не creator); тот же для всех запусков
+      signer: string;                 // ключ аттестаций fair-launch (v0.8: отдельный от ключа Verify; не vault, не creator)
       matches: boolean;               // memo, прочитанный релейером из ПОДТВЕРЖДЁННОЙ tx, == root (серверная проверка)
+      blockTime: number | null;       // v0.8: время блока memo-tx, unix СЕКУНДЫ
+      beforeRound: boolean;           // v0.8: blockTime·1000 + 2000 < drand.roundTime. UI пишет «anchored before the round»
+                                      // ТОЛЬКО при true; иначе нейтрально: «anchored after the round — inclusion still checkable, timing not proven»
     };
   };
   result?: {                          // только launched
@@ -415,7 +450,7 @@ interface FairLaunch {                // публичный, без подпис
     bids: number | "<5";              // число ВАЛИДНЫХ заявок; < minBidsForCount → "<5"
     oversubscribed: boolean;          // сумма заявок > maxTotalLamports, все урезаны в одной пропорции
   };
-  failure?: "no_bids" | "drand_unavailable" | "venue_unavailable" | "tx_failed";
+  failure?: "no_bids" | "drand_unavailable" | "venue_unavailable" | "tx_failed" | "internal";   // internal (v0.8): набор заявок не совпал с корнем
   rules: UnzeenRule[];                // "fair_launch_sealed_bids" + правила создателя (lock/cap)
 }
 
@@ -457,7 +492,7 @@ type SignedAction = /* ...v0.5... */
 | op | Проверки и эффект | Ошибки |
 |---|---|---|
 | `fl_create` | `meta` по правилам `create` (картинка ≤ 512 КиБ, EXIF чистит релейер); `windowSecs ∈ windowsSecs`; hold `createFeeZat`. Запуск появляется в `GET /api/launches` на ближайшей **границе эпохи Delayed** (30–60 с), не в момент запроса. Комиссия списывается при `launched`, иначе возвращается. Creator fee площадки от launch-tx остаётся пулу | `400 bad_request`, `422 insufficient_balance`, `503 venue_unavailable` (нет параметров кривой / `createEnabled=false`) |
-| `fl_bid` | Запуск опубликован и `open`, `now < closeAt`; `holdZat ∈ holdTiersZat`; `ciphertext` ≤ 1024 байт, age-armor со stanza `tlock <R> <quicknet hash>` (R = `drand.round` запуска); **одна активная заявка** на (ключ, запуск); hold `holdZat`. Создатель: `holdZat` ≤ наименьшего номинала, покрывающего `creatorMaxLamports` по текущему курсу | `404 not_found` (нет/не опубликован), `409 launch_closed`, `409 already_bid`, `400 bad_request` (номинал не из сетки), `400 bad_ciphertext`, `422 insufficient_balance`, `422 creator_cap` |
+| `fl_bid` | Запуск опубликован и `open`, `now < closeAt`, заявок < 1024 (иначе `409 launch_full`); `holdZat ∈ holdTiersZat`; `ciphertext` ≤ 1024 байт, age-armor со stanza `tlock <R> <quicknet hash>` (R = `drand.round` запуска); **одна активная заявка** на (ключ, запуск); hold `holdZat`. Создатель: `holdZat` ≤ наименьшего номинала, покрывающего `creatorMaxLamports` по текущему курсу | `404 not_found` (нет/не опубликован), `409 launch_closed`, `409 already_bid`, `400 bad_request` (номинал не из сетки), `400 bad_ciphertext`, `422 insufficient_balance`, `422 creator_cap` |
 | `fl_cancel` | Своя `sealed` заявка, `now < closeAt`: hold → доступно, ciphertext удаляется. Изменить сумму = отменить + новая заявка | `404 not_found` (нет активной заявки), `409 launch_closed` |
 | `fl_cancel_launch` | Только создатель (иначе 404), `now < closeAt` (в т. ч. до публикации): все заявки `cancelled`, все hold и комиссия возвращаются, запуск `cancelled` | `404 not_found`, `409 launch_closed` |
 
@@ -488,12 +523,12 @@ off len поле
 ### Commitment (проверка включения)
 В момент `closed` сервер публикует `commitment.root` — корень Merkle-дерева по всем `sealed` заявкам:
 - `leaf = sha256(0x00 ‖ utf8(ciphertext))` — ровно строка `ciphertext` из тела `fl_bid`;
-- листья сортируются по возрастанию (байтово) и добиваются случайными 32-байтными листьями до `max(8, 2^⌈log2 N⌉)` (размер дерева не выдаёт число заявок < 8);
+- листья сортируются по возрастанию (байтово) и добиваются случайными 32-байтными листьями до **ровно 1024** (v0.8: глубина всегда 10, длина доказательства ничего не говорит о числе заявок; заявок на запуск ≤ 1024);
 - `node = sha256(0x01 ‖ min(a, b) ‖ max(a, b))` (пара упорядочена байтово, направление в пути не нужно);
 - проверка: `h = leaf; for s of path: h = node(h, s); h === root`.
 `FairBid.proof` даётся владельцу с момента `closed`. Ciphertext после reveal удаляется с сервера и **никогда не публикуется** (после раунда его расшифрует кто угодно).
 
-**Аттестация на Solana (решение владельца).** Корень вычисляется в момент закрытия окна — **до** раунда drand, когда расшифровать заявки не может никто; после закрытия набор заявок не меняется. Сразу после закрытия пул отправляет memo-tx (программа SPL Memo) от отдельного ключа аттестаций; содержимое memo — только 64 hex корня, без префиксов (нейтрально до 28.10). Слот tx — неподделываемая метка времени: корень зафиксирован раньше `roundTime`. Когда tx подтверждена, в `commitment.attestation` появляются `solanaTx`, `slot`, `signer`.
+**Аттестация на Solana (решение владельца).** Корень вычисляется в момент закрытия окна — **до** раунда drand (v0.8: раунд не раньше чем через 30 с после закрытия), когда расшифровать заявки не может никто; после закрытия набор заявок не меняется. Сразу после закрытия пул отправляет memo-tx (программа SPL Memo) от отдельного ключа аттестаций; содержимое memo — только 64 hex корня, без префиксов (нейтрально до 28.10). Слот tx — неподделываемая метка времени: корень зафиксирован раньше `roundTime`. Когда tx подтверждена, в `commitment.attestation` появляются `solanaTx`, `slot`, `signer`.
 Проверка (фронт / любой): получить tx по `solanaTx` у любого RPC или в эксплорере → подписант = `signer`, есть инструкция `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr` с data = `root` (UTF-8) → `blockTime`/`slot` раньше `drand.roundTime`. Плюс своё доказательство: `verify(sha256(0x00 ‖ ciphertext), proof.path, root)`. Серверная проверка: релейер после подтверждения читает tx из сети и отдаёт фактический memo, core сравнивает его с `root` → `matches`. Это удобство; независимая проверка — по ссылке на эксплорер (прямых запросов браузера к сторонним RPC нет). `matches: false` — инцидент, UI показывает предупреждение.
 Если memo-tx не прошла — запуск продолжается (аттестация не блокирует reveal), поле `attestation` отсутствует.
 
@@ -536,13 +571,13 @@ vault.sig    = ed25519(ключ vault, utf8("unzeen/verify/v1/vault\n" + chainId
 
 ### Типы
 ```ts
-type AssetId = "ZEC" | string;            // string = base58 mint
+type AssetId = "ZEC" | "SOL" | string;    // SOL — комиссии создателей к выплате (asset = 32×0xFF, гранула 0.001 SOL); string = base58 mint
 
 interface VerifySnapshotSummary {
   id: number;
   takenAt: number;                        // unix мс, округлено вниз до минуты (= takenAtSec · 1000)
   rootsDigest: string;                    // hex 32 байта
-  anchor?: { solanaTx: string; slot: number; matches: boolean };   // memo-tx подтверждена; matches — memo из tx == rootsDigest
+  anchor?: { solanaTx: string; slot: number; matches: boolean; blockTime: number | null };   // memo-tx подтверждена; matches — memo из tx == rootsDigest
 }
 
 interface VerifySnapshot extends VerifySnapshotSummary {
@@ -575,7 +610,7 @@ interface VerifyProof {                   // GET /api/verify/proof (подпис
     }[];
   }[];                                    // пусто, если в снимке у ключа ничего не было
   truncated: boolean;                     // > 12 активов: ZEC + 11 случайных
-  pad: string;                            // пробелы до кратного 16384 байт
+  pad: string;                            // пробелы: ответ всегда ровно 65536 байт (64 КиБ), размер не выдаёт число активов
 }
 ```
 
@@ -589,10 +624,31 @@ interface VerifyProof {                   // GET /api/verify/proof (подпис
 - `/api/verify`: нет ни одного снимка → `404 not_found`. `/api/verify/:id` неизвестен → 404.
 - `/api/verify/proof`: `?snapshot=` не последний и не предыдущий, или данные уже удалены (48 ч) → `404`. Лимит 10/мин на ключ (`429 rate_limited`). `Cache-Control: no-store`. Публичные — `public, max-age=300` (история — 60).
 
+## Ордера (v0.8)
+
+Спека: `docs/analysis/orders.md`; решения лида — STATUS.md. Ордер — **запись только в реестре пула** с hold; в цепочке его нет. Когда условие выполнилось, ордер превращается в обычный `buy`/`sell` в эпоху (`delayed` 30–60 с или `max` 5–15 мин) с округлением D10: на цепочке сделка неотличима от ручной, и в момент исполнения от пользователя нет HTTP-запроса.
+
+| `kind` | Условие (цена `p` с тика индексатора) | Сделка | `amount` / hold |
+|---|---|---|---|
+| `limit_buy` | `p ≤ trigger` | buy | зат |
+| `limit_sell` | `p ≥ trigger` | sell | токены |
+| `take_profit` | `p ≥ trigger` (сервер = `limit_sell`; «+X % от входа» считается **только в браузере**, на сервер уходит абсолютная цена) | sell | токены |
+| `stop_loss` | `p ≤ trigger` **на 2 тиках подряд** | sell | токены |
+
+- **Только mint, которыми торговал пул** (есть в публичном `GET /api/tokens`), площадка `pumpfun`, на кривой. Иначе `422 order_unsupported_mint`. Токен ушёл в AMM → открытые ордера `failed` (`graduated`), hold освобождается.
+- **Цена — только с тика индексатора** (раз в 45–75 с, по всем токенам пула сразу, независимо от ордеров). Ордера не порождают ни одного запроса к RPC.
+- **Защита исполнения — от цены триггера:** buy `minOut = lamports / (trigger · (1 + slippage))`, sell `minLamports = amount · trigger · (1 − slippage)`. Не исполнилось по slippage → ордер `failed` (`slippage`), hold освобождён (перевзвода в MVP нет).
+- **Hold** берётся при создании (как у действия: `insufficient_balance`, `balance_frozen`, `creator_locked`, `creator_cap` для покупки создателя, `below_minimum`: для sell — по стоимости `amount × trigger`). При срабатывании hold переходит на новое действие без изменения баланса (для buy неиспользованный после D10 остаток сразу возвращается).
+- **TTL** 1–72 ч (по умолчанию 24 ч), `expiresAt` вверх до часа; истёк → `expired`, hold освобождён.
+- **Отмена** — только из `open` (`409 order_not_open` иначе; чужой/неизвестный — 404). Ответ `{ id, status: "cancelled" }`.
+- **Лимиты:** 10 открытых на ключ, 4 на ключ и mint (`422 order_limit`); 1000 открытых на пул (`503 venue_unavailable`).
+- **Ответ `order_create`:** `{ id, status: "open" }` (повтор того же запроса — тот же ответ).
+- **Хранение (D1):** открытый ордер — пока открыт (≤ 72 ч); через 24 ч после закрытия стираются сумма, цена, mint, slippage и связь с действием (ордер пропадает из `Portfolio.orders`); через 48 ч строка удаляется.
+- **Публично ничего:** ни счётчиков, ни стакана. UI: «Stop-loss checks the price about once a minute and executes in the next batch. It is not a guaranteed exit in a crash.»
+
 ## Дополнительные эндпоинты
 | Метод | Путь | Ответ |
 |---|---|---|
-| GET | `/api/orders` (подписанный) | `Order[]` |
 | GET | `/api/creator` (подписанный) | `CreatorToken[]` |
 | GET | `/api/tokens/:mint/chat?before=` | `ChatMessage[]` |
 | WS | `/ws/chat/:mint` | поток `ChatMessage` |
@@ -674,6 +730,10 @@ type ErrorCode =
   | "launch_closed"        // 409 (v0.6): окно заявок fair-launch закрыто (now ≥ closeAt) или запуск не open
   | "already_bid"          // 409 (v0.6): у ключа уже есть активная (sealed) заявка на этот запуск
   | "bad_ciphertext"       // 400 (v0.6): не age-armor tlock, не тот раунд / chain hash, > 1024 байт
+  | "launch_full"          // 409 (v0.8): у запуска уже 1024 заявки
+  | "order_limit"          // 422 (v0.8): > 10 открытых ордеров на ключ или > 4 на ключ и mint
+  | "order_not_open"       // 409 (v0.8): order_cancel не из open (уже сработал / закрыт)
+  | "order_unsupported_mint" // 422 (v0.8): mint не торговался пулом, не pumpfun или graduated
   | "internal";            // 500
 ```
 404 отдаётся и для mint, который сервис не отслеживает (даже если токен существует на Solana); исключения v0.5 — `GET /api/tokens/:mint` и `/safety`, они отвечают `202` и ставят mint в очередь индексатора. `message` — для разработчика, текст UI фронт берёт по `code`.

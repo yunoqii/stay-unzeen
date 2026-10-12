@@ -7,7 +7,6 @@
 //!
 //! Logs: counts and error kinds only — never a launch id together with a key or an amount.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::{
@@ -421,7 +420,15 @@ pub enum Fetch {
 pub struct Drand {
     urls: Vec<String>,
     http: reqwest::Client,
-    next: AtomicUsize,
+}
+
+/// Whole fetch (all relays in parallel) is bounded by this (review F5).
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
+
+enum RelayAnswer {
+    Beacon(VerifiedBeacon),
+    TooEarly,
+    Nothing,
 }
 
 impl Drand {
@@ -429,134 +436,185 @@ impl Drand {
         Self {
             urls,
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
+                .timeout(FETCH_TIMEOUT)
                 .user_agent("unzeen")
                 .build()
                 .expect("reqwest client"),
-            next: AtomicUsize::new(0),
         }
     }
 
-    /// Beacon of `round` from the relays (round-robin). The BLS signature is verified before
-    /// anything is returned; a relay with a bad beacon is skipped (one valid source suffices:
-    /// the signature of a round is unique).
-    pub async fn fetch(&self, round: u64) -> Fetch {
-        let n = self.urls.len();
-        let start = self.next.fetch_add(1, Ordering::Relaxed);
-        let mut early = false;
-        for k in 0..n {
-            let base = &self.urls[(start + k) % n];
-            let url = format!("{base}/{}/public/{round}", fdrand::QUICKNET_CHAIN_HASH_HEX);
-            let Ok(res) = self.http.get(url).send().await else {
-                continue;
-            };
-            if res.status().as_u16() == 425 {
-                early = true;
-                continue;
-            }
-            if !res.status().is_success() {
-                continue;
-            }
-            let Ok(v) = res.json::<Value>().await else {
-                continue;
-            };
-            if v.get("round").and_then(Value::as_u64) != Some(round) {
-                continue;
-            }
-            let Some(sig) = v
-                .get("signature")
-                .and_then(Value::as_str)
-                .and_then(fdrand::signature_from_hex)
-            else {
-                continue;
-            };
-            match fdrand::verify_beacon(round, &sig) {
-                Ok(b) => return Fetch::Beacon(b),
-                Err(_) => tracing::warn!("drand relay returned a beacon that does not verify; skipped"),
+    async fn one(&self, base: &str, round: u64) -> RelayAnswer {
+        let url = format!("{base}/{}/public/{round}", fdrand::QUICKNET_CHAIN_HASH_HEX);
+        let Ok(res) = self.http.get(url).send().await else {
+            return RelayAnswer::Nothing;
+        };
+        if res.status().as_u16() == 425 {
+            return RelayAnswer::TooEarly;
+        }
+        if !res.status().is_success() {
+            return RelayAnswer::Nothing;
+        }
+        let Ok(v) = res.json::<Value>().await else {
+            return RelayAnswer::Nothing;
+        };
+        if v.get("round").and_then(Value::as_u64) != Some(round) {
+            return RelayAnswer::Nothing;
+        }
+        let Some(sig) = v
+            .get("signature")
+            .and_then(Value::as_str)
+            .and_then(fdrand::signature_from_hex)
+        else {
+            return RelayAnswer::Nothing;
+        };
+        match fdrand::verify_beacon(round, &sig) {
+            Ok(b) => RelayAnswer::Beacon(b),
+            Err(_) => {
+                tracing::warn!("drand relay returned a beacon that does not verify; skipped");
+                RelayAnswer::Nothing
             }
         }
-        if early { Fetch::TooEarly } else { Fetch::Unavailable }
+    }
+
+    /// Beacon of `round`: all relays in parallel, the first VERIFIED one wins (the signature of a
+    /// round is unique, one valid source suffices). Bounded by [`FETCH_TIMEOUT`].
+    pub async fn fetch(&self, round: u64) -> Fetch {
+        use futures_util::StreamExt;
+        let mut pending: futures_util::stream::FuturesUnordered<_> =
+            self.urls.iter().map(|u| self.one(u, round)).collect();
+        let mut early = false;
+        let race = async {
+            while let Some(a) = pending.next().await {
+                match a {
+                    RelayAnswer::Beacon(b) => return Some(b),
+                    RelayAnswer::TooEarly => early = true,
+                    RelayAnswer::Nothing => {}
+                }
+            }
+            None
+        };
+        match tokio::time::timeout(FETCH_TIMEOUT, race).await {
+            Ok(Some(b)) => Fetch::Beacon(b),
+            _ if early => Fetch::TooEarly,
+            _ => Fetch::Unavailable,
+        }
     }
 }
 
 // ------------------------------------------------------------------ scheduler
 
-/// One pass: close due launches (root + attest job), reveal due rounds, settle final jobs.
-pub async fn tick(st: &AppState) -> ApiResult<()> {
-    let net = st.cfg.cluster;
-    let closed = st.ledger.fl_close_due(net).await?;
-    if closed > 0 {
-        tracing::info!(closed, "fair launches closed");
-    }
-    for t in st.ledger.fl_reveal_due(net).await? {
-        let late_ms = now_ms().saturating_sub(t.round_time_ms);
-        let f = &st.cfg.fair;
-        let beacon = match st.drand.fetch(t.round).await {
-            Fetch::Beacon(b) => b,
-            Fetch::TooEarly => {
-                st.ledger.fl_retry_later(&t.id, 1.0).await?;
-                continue;
-            }
-            Fetch::Unavailable => {
-                if late_ms > f.drand_give_up_secs * 1000 {
-                    st.ledger.fl_fail(&t.id, "drand_unavailable").await?;
-                    tracing::warn!("fair launch failed: drand unavailable");
-                } else {
-                    let secs = if late_ms < 600_000 { 3.0 } else { 60.0 };
-                    st.ledger.fl_retry_later(&t.id, secs).await?;
-                }
-                continue;
-            }
-        };
-        let curve = fair_curve(st).await?;
-        let rate = st.rate.get().await.ok();
-        let (Some(curve), Some(r)) = (curve, rate) else {
-            if late_ms > f.rate_give_up_secs * 1000 {
-                st.ledger.fl_fail(&t.id, "venue_unavailable").await?;
-                tracing::warn!("fair launch failed: no rate or curve");
+/// Reveal one launch. Errors stay with this launch (review F5).
+async fn reveal_one(st: &AppState, t: &unzeen_ledger::fair::RevealTask) -> ApiResult<()> {
+    let late_ms = now_ms().saturating_sub(t.round_time_ms);
+    let f = &st.cfg.fair;
+    let beacon = match st.drand.fetch(t.round).await {
+        Fetch::Beacon(b) => b,
+        // No verified beacon (not yet / relays down): retry, give up after drand_give_up_secs.
+        other => {
+            if late_ms > f.drand_give_up_secs * 1000 {
+                st.ledger.fl_fail(&t.id, "drand_unavailable").await?;
+                tracing::warn!("fair launch failed: drand unavailable");
             } else {
-                st.ledger.fl_retry_later(&t.id, 5.0).await?;
+                let secs = match other {
+                    Fetch::TooEarly => 1.0,
+                    _ if late_ms < 600_000 => 3.0,
+                    _ => 60.0,
+                };
+                st.ledger.fl_retry_later(&t.id, secs).await?;
             }
-            continue;
-        };
-        let spread = if r.stale {
-            st.cfg.rate.spread_bps.saturating_mul(2)
-        } else {
-            st.cfg.rate.spread_bps
-        };
-        let (max_total, creator_max) = caps(st, &curve);
-        let sk = unzeen_protocol::SigningKey::from_bytes(&rand::random());
-        let mut mint_secret = [0u8; 64];
-        mint_secret[..32].copy_from_slice(&sk.to_bytes());
-        mint_secret[32..].copy_from_slice(&sk.verifying_key().to_bytes());
-        let p = RevealParams {
-            rate: apply_spread(r.lamports_per_zec, spread, true),
-            max_total_lamports: max_total,
-            creator_max_lamports: creator_max,
-            curve,
-            fee_bound_bps: f.fee_bound_bps,
-            slippage_bps: f.slippage_bps,
-            shave: (rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64,
-            mint_secret,
-        };
-        match st.ledger.fl_reveal(&t.id, &beacon, &p).await? {
-            RevealOutcome::Executing { valid, invalid, .. } => {
-                tracing::info!(valid, invalid, "fair launch revealed, job queued")
-            }
-            RevealOutcome::NoBids { invalid } => tracing::info!(invalid, "fair launch failed: no valid bids"),
-            RevealOutcome::Skipped => {}
+            return Ok(());
         }
+    };
+    let curve = fair_curve(st).await?;
+    let rate = st.rate.get().await.ok();
+    let (Some(curve), Some(r)) = (curve, rate) else {
+        if late_ms > f.rate_give_up_secs * 1000 {
+            st.ledger.fl_fail(&t.id, "venue_unavailable").await?;
+            tracing::warn!("fair launch failed: no rate or curve");
+        } else {
+            st.ledger.fl_retry_later(&t.id, 5.0).await?;
+        }
+        return Ok(());
+    };
+    let Some(inputs) = st.ledger.fl_reveal_inputs(&t.id).await? else {
+        return Ok(());
+    };
+    // F6: decryption + validation in a blocking thread, before any row lock.
+    let b2 = beacon.clone();
+    let judged = tokio::task::spawn_blocking(move || unzeen_ledger::fair::judge_bids(&inputs, &b2))
+        .await
+        .map_err(|_| ApiError::internal())?;
+    let spread = if r.stale {
+        st.cfg.rate.spread_bps.saturating_mul(2)
+    } else {
+        st.cfg.rate.spread_bps
+    };
+    let (max_total, creator_max) = caps(st, &curve);
+    let sk = unzeen_protocol::SigningKey::from_bytes(&rand::random());
+    let mut mint_secret = [0u8; 64];
+    mint_secret[..32].copy_from_slice(&sk.to_bytes());
+    mint_secret[32..].copy_from_slice(&sk.verifying_key().to_bytes());
+    let p = RevealParams {
+        rate: apply_spread(r.lamports_per_zec, spread, true),
+        max_total_lamports: max_total,
+        creator_max_lamports: creator_max,
+        curve,
+        fee_bound_bps: f.fee_bound_bps,
+        slippage_bps: f.slippage_bps,
+        shave: (rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64,
+        mint_secret,
+    };
+    // F8: no counts in logs (the line time ≈ the public round time of this launch).
+    match st.ledger.fl_reveal(&judged, &beacon, &p).await? {
+        RevealOutcome::Executing { .. } => tracing::info!("fair launch revealed, job queued"),
+        RevealOutcome::NoBids { .. } => tracing::info!("fair launch failed: no valid bids"),
+        RevealOutcome::Mismatch => tracing::error!(
+            "ALERT: a fair launch bid set does not match its commitment root; launch failed, funds released"
+        ),
+        RevealOutcome::Skipped => {}
     }
-    st.ledger.fl_settle_ready().await?;
     Ok(())
 }
 
-pub async fn scheduler_loop(st: AppState) {
-    let mut tick_i = tokio::time::interval(Duration::from_secs(1));
-    loop {
-        tick_i.tick().await;
-        if let Err(e) = tick(&st).await {
-            tracing::warn!(code = e.code, "fair-launch pass failed");
+/// Reveal pass: each launch on its own; one failure does not stop the others.
+pub async fn reveal_pass(st: &AppState) {
+    match st.ledger.fl_reveal_due(st.cfg.cluster).await {
+        Ok(tasks) => {
+            for t in tasks {
+                if let Err(e) = reveal_one(st, &t).await {
+                    tracing::warn!(code = e.code, "fair launch reveal step failed");
+                }
+            }
         }
+        Err(e) => tracing::warn!(error = %e, "fair launch reveal query failed"),
+    }
+}
+
+/// Close (root + attest job) and settle, independent of reveals (review F5: a slow drand
+/// never delays the commitment of another launch).
+pub async fn housekeeping_pass(st: &AppState) {
+    match st.ledger.fl_close_due(st.cfg.cluster).await {
+        Ok(n) if n > 0 => tracing::info!("fair launch window closed, commitment queued"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "fair launch close failed"),
+    }
+    if let Err(e) = st.ledger.fl_settle_ready().await {
+        tracing::warn!(error = %e, "fair launch settle failed");
+    }
+}
+
+pub async fn scheduler_loop(st: AppState) {
+    let s2 = st.clone();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            every.tick().await;
+            housekeeping_pass(&s2).await;
+        }
+    });
+    let mut every = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        every.tick().await;
+        reveal_pass(&st).await;
     }
 }

@@ -28,12 +28,13 @@ GRANT SELECT (id, part, op, venue, mint, lamports_in, token_amount, min_out, met
               out_token_amount, out_lamports, network_fee, error_code, error_message,
               settled_at, created_at, updated_at, exec_mode,
               mint_secret, out_memo,   -- 0008: fair_create / attest
-              out_sig)                 -- 0009: operator signature of attest
+              out_sig,                 -- 0009: operator signature of attest
+              out_block_time)          -- 0012: block time of attest
     ON relayer_jobs TO unzeen_relayer;
 -- not_before: backoff only; a trigger (0003) refuses to move it earlier.
 GRANT UPDATE (status, attempts, claimed_by, claimed_at, lease_until, not_before, signature,
               last_valid_block_height, vault, slot, out_mint, out_token_amount,
-              out_lamports, network_fee, error_code, error_message, updated_at, out_memo, out_sig)
+              out_lamports, network_fee, error_code, error_message, updated_at, out_memo, out_sig, out_block_time)
     ON relayer_jobs TO unzeen_relayer;
 
 -- mint -> vault pinning (0003): the relayer owns it (re-pin = UPDATE of vault only).
@@ -50,6 +51,16 @@ GRANT SELECT (id, network, chain_id, status, freeze_until, assets_done_at),
       UPDATE (solana_slot, assets_done_at)
     ON verify_snapshots TO unzeen_relayer;
 GRANT SELECT, INSERT ON verify_vaults TO unzeen_relayer;
+
+-- Creator-fee sweeps (0010), as proposed in adapters/src/relayer/fee-sweeper.ts
+-- (PROPOSED_FEE_SWEEPS_GRANTS). credited_at belongs to core.
+GRANT SELECT (id, network, venue, kind, mint, authority, signature, last_valid_block_height,
+              status, lamports, slot, swept_at, created_at)
+    ON creator_fee_sweeps TO unzeen_relayer;
+GRANT INSERT (network, venue, kind, mint, authority, signature, last_valid_block_height)
+    ON creator_fee_sweeps TO unzeen_relayer;
+GRANT UPDATE (status, lamports, slot, swept_at) ON creator_fee_sweeps TO unzeen_relayer;
+GRANT USAGE ON SEQUENCE creator_fee_sweeps_id_seq TO unzeen_relayer;
 
 -- Public market data.
 GRANT SELECT, INSERT, UPDATE ON tokens TO unzeen_relayer;

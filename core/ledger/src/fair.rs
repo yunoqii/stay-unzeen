@@ -112,8 +112,12 @@ pub struct RevealTask {
     pub round_time_ms: u64,
 }
 
+/// Max sealed bids of one launch (review F6/F7: also the fixed commitment tree size).
+pub const MAX_BIDS: i64 = 1024;
+
 /// Inputs fixed at reveal time (computed by the API from the network curve and the rate).
-#[derive(Clone, Debug, PartialEq)]
+/// `Debug` is hand-written: the mint secret must never reach a log (review F10).
+#[derive(Clone, PartialEq)]
 pub struct RevealParams {
     /// Lamports per ZEC, buy side (after spread), one for everybody.
     pub rate: u64,
@@ -130,6 +134,17 @@ pub struct RevealParams {
     pub mint_secret: [u8; 64],
 }
 
+impl std::fmt::Debug for RevealParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevealParams")
+            .field("rate", &self.rate)
+            .field("max_total_lamports", &self.max_total_lamports)
+            .field("creator_max_lamports", &self.creator_max_lamports)
+            .field("mint_secret", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RevealOutcome {
     /// `fair_create` job queued.
@@ -142,6 +157,101 @@ pub enum RevealOutcome {
     NoBids { invalid: usize },
     /// The launch is not in `revealing` any more (another worker, cancelled).
     Skipped,
+    /// The bid set does not match the committed root: failed (`internal`), all released.
+    Mismatch,
+}
+
+/// A sealed bid as read for reveal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SealedBid {
+    pub id: i64,
+    pub anon_pubkey: [u8; 32],
+    pub hold_zat: u64,
+    pub ciphertext: Option<String>,
+    pub leaf: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevealInputs {
+    pub launch_id: [u8; 16],
+    pub round: u64,
+    pub chain: [u8; 2],
+    pub min_action_zat: u64,
+    pub creator: Option<[u8; 32]>,
+    pub bids: Vec<SealedBid>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Decision {
+    pub bid_id: i64,
+    /// `Some(amount)` valid, `None` invalid.
+    pub amount: Option<u64>,
+    pub is_creator: bool,
+}
+
+/// Result of [`judge_bids`]. Carries no ciphertext or plaintext.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Judged {
+    pub launch_id: [u8; 16],
+    pub decisions: Vec<Decision>,
+    /// A ciphertext no longer hashes to the leaf committed at close (review F13).
+    pub mismatch: bool,
+}
+
+/// CPU part of reveal (run it in a blocking thread): commitment check, then decryption and
+/// validation of every bid with a VERIFIED beacon. No I/O.
+pub fn judge_bids(inp: &RevealInputs, beacon: &VerifiedBeacon) -> Judged {
+    // F13: the set must be exactly the committed one — check every leaf before decrypting.
+    let mismatch = inp.bids.iter().any(|b| match (&b.ciphertext, &b.leaf) {
+        (Some(ct), Some(leaf)) => merkle::leaf(ct)[..] != leaf[..],
+        _ => true,
+    });
+    if mismatch {
+        return Judged {
+            launch_id: inp.launch_id,
+            decisions: inp
+                .bids
+                .iter()
+                .map(|b| Decision {
+                    bid_id: b.id,
+                    amount: None,
+                    is_creator: false,
+                })
+                .collect(),
+            mismatch: true,
+        };
+    }
+    let decisions = inp
+        .bids
+        .iter()
+        .map(|b| {
+            let amount = b
+                .ciphertext
+                .as_deref()
+                .and_then(|ct| unzeen_fair::drand::decrypt(ct, beacon).ok())
+                .and_then(|pt| {
+                    bid::validate(
+                        &pt,
+                        inp.chain,
+                        &inp.launch_id,
+                        &b.anon_pubkey,
+                        inp.min_action_zat,
+                        b.hold_zat,
+                    )
+                    .ok()
+                });
+            Decision {
+                bid_id: b.id,
+                amount,
+                is_creator: inp.creator == Some(b.anon_pubkey),
+            }
+        })
+        .collect();
+    Judged {
+        launch_id: inp.launch_id,
+        decisions,
+        mismatch: false,
+    }
 }
 
 fn id16(v: Vec<u8>) -> [u8; 16] {
@@ -152,7 +262,13 @@ fn is_unique_violation(e: &tokio_postgres::Error) -> bool {
     e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION)
 }
 
-async fn is_replay<C: GenericClient>(tx: &C, pk: &[u8], nonce: &[u8]) -> Result<bool> {
+/// Replay check under a transaction-scoped advisory lock on `(pk, nonce)` (review F15): two
+/// identical requests in flight are serialized, so the second sees the first as a replay and
+/// gets the original receipt instead of a conflict.
+pub(crate) async fn is_replay<C: GenericClient>(tx: &C, pk: &[u8], nonce: &[u8]) -> Result<bool> {
+    let key = format!("{}{}", hex::encode(pk), hex::encode(nonce));
+    tx.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&key])
+        .await?;
     Ok(tx
         .query_opt(
             "SELECT 1 FROM actions WHERE anon_pubkey = $1 AND nonce = $2",
@@ -412,8 +528,10 @@ impl Ledger {
         }
         let Some(l) = tx
             .query_opt(
-                "SELECT status, close_at > clock_timestamp(), round FROM fl_launches
-                 WHERE id = $1 AND network = $2 AND published_at <= clock_timestamp() FOR SHARE",
+                "SELECT status, close_at > clock_timestamp(), round,
+                        (SELECT count(*) FROM fl_bids b WHERE b.launch_id = fl_launches.id AND b.status = 'sealed')
+                 FROM fl_launches
+                 WHERE id = $1 AND network = $2 AND published_at <= clock_timestamp() FOR UPDATE",
                 &[&id_s, &network],
             )
             .await?
@@ -425,6 +543,9 @@ impl Ledger {
         }
         if to_u64(l.get(2)) != round {
             return Err(LedgerError::Range);
+        }
+        if l.get::<_, i64>(3) >= MAX_BIDS {
+            return Err(LedgerError::LaunchFull);
         }
         let sealed = tx
             .query_opt(
@@ -442,6 +563,9 @@ impl Ledger {
             ..action("fl_bid", 0)
         };
         let receipt = self.submit_in(&tx, pk, nonce, request_hash, &a).await?;
+        if receipt.replayed {
+            return Ok(receipt);
+        }
         let aid: &[u8] = &receipt.id;
         match tx
             .execute(
@@ -501,6 +625,9 @@ impl Ledger {
         let mut receipt = self
             .submit_in(&tx, pk, nonce, request_hash, &action("fl_cancel", 0))
             .await?;
+        if receipt.replayed {
+            return Ok(receipt);
+        }
         let (bid_id, aid, hold): (i64, Option<Vec<u8>>, i64) = (b.get(0), b.get(1), b.get(2));
         if let Some(aid) = aid {
             release_action(&tx, &aid, "cancelled").await?;
@@ -555,6 +682,9 @@ impl Ledger {
         let mut receipt = self
             .submit_in(&tx, pk, nonce, request_hash, &action("fl_cancel_launch", 0))
             .await?;
+        if receipt.replayed {
+            return Ok(receipt);
+        }
         finish_unsuccessful(&tx, id_s, "cancelled", None, "cancelled").await?;
         let rid: &[u8] = &receipt.id;
         tx.execute(
@@ -730,7 +860,7 @@ impl Ledger {
                 .query_one(
                     "INSERT INTO relayer_jobs (op, meta, network, exec_mode, not_before)
                      VALUES ('attest', $1, $2, 'now', now()) RETURNING id",
-                    &[&json!({ "memo": hex::encode(root) }), &network],
+                    &[&json!({ "memo": hex::encode(root), "purpose": "fair" }), &network],
                 )
                 .await?
                 .get(0);
@@ -808,16 +938,57 @@ impl Ledger {
         Ok(ok)
     }
 
-    /// Reveal with a VERIFIED beacon: decrypt and validate every sealed bid, allocate, queue
-    /// one `fair_create` job. Invalid bids are released at once. All in one transaction.
-    pub async fn fl_reveal(&self, id: &[u8; 16], beacon: &VerifiedBeacon, p: &RevealParams) -> Result<RevealOutcome> {
+    /// Sealed bids of a launch in `revealing` (read only; review F6: decryption happens outside
+    /// any transaction, in a blocking thread).
+    pub async fn fl_reveal_inputs(&self, id: &[u8; 16]) -> Result<Option<RevealInputs>> {
         let id_s: &[u8] = id;
+        let c = self.pool.get().await?;
+        let Some(l) = c
+            .query_opt(
+                "SELECT round, creator_pubkey FROM fl_launches WHERE id = $1 AND status = 'revealing'",
+                &[&id_s],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let bids = c
+            .query(
+                "SELECT id, anon_pubkey, hold_zat, ciphertext, leaf FROM fl_bids
+                 WHERE launch_id = $1 AND status = 'sealed' ORDER BY id",
+                &[&id_s],
+            )
+            .await?
+            .into_iter()
+            .map(|b| SealedBid {
+                id: b.get(0),
+                anon_pubkey: b.get::<_, Vec<u8>>(1).try_into().unwrap_or([0; 32]),
+                hold_zat: to_u64(b.get(2)),
+                ciphertext: b.get(3),
+                leaf: b.get(4),
+            })
+            .collect();
+        Ok(Some(RevealInputs {
+            launch_id: *id,
+            round: to_u64(l.get(0)),
+            chain: self.policy.chain.to_bytes(),
+            min_action_zat: self.policy.min_action_zat,
+            creator: l.get::<_, Option<Vec<u8>>>(1).and_then(|v| v.try_into().ok()),
+            bids,
+        }))
+    }
+
+    /// Reveal with judged bids (from [`judge_bids`] with a VERIFIED beacon): one transaction
+    /// that re-checks the launch and the bid set, releases invalid bids, allocates and queues one
+    /// `fair_create` job. A commitment mismatch (review F13) fails the launch without using
+    /// any decryption.
+    pub async fn fl_reveal(&self, j: &Judged, beacon: &VerifiedBeacon, p: &RevealParams) -> Result<RevealOutcome> {
+        let id_s: &[u8] = &j.launch_id;
         let mut c = self.pool.get().await?;
         let tx = c.transaction().await?;
         let Some(l) = tx
             .query_opt(
-                "SELECT round, creator_pubkey, network, venue, meta FROM fl_launches
-                 WHERE id = $1 AND status = 'revealing' FOR UPDATE",
+                "SELECT round, network, venue, meta FROM fl_launches WHERE id = $1 AND status = 'revealing' FOR UPDATE",
                 &[&id_s],
             )
             .await?
@@ -827,72 +998,77 @@ impl Ledger {
         if to_u64(l.get(0)) != beacon.round() {
             return Err(LedgerError::Range);
         }
-        let creator: Option<Vec<u8>> = l.get(1);
-        let (network, venue, meta): (String, String, Value) = (l.get(2), l.get(3), l.get(4));
-        let chain = self.policy.chain.to_bytes();
-        let bids = tx
+        let (network, venue, meta): (String, String, Value) = (l.get(1), l.get(2), l.get(3));
+        let sig: &[u8] = beacon.signature();
+        let mut sealed: Vec<i64> = tx
             .query(
-                "SELECT id, anon_pubkey, action_id, hold_zat, ciphertext FROM fl_bids
-                 WHERE launch_id = $1 AND status = 'sealed' ORDER BY id FOR UPDATE",
+                "SELECT id FROM fl_bids WHERE launch_id = $1 AND status = 'sealed' FOR UPDATE",
                 &[&id_s],
             )
-            .await?;
-        let mut valid: Vec<(i64, alloc::ValidBid)> = Vec::new();
-        let mut invalid = 0usize;
-        for b in &bids {
-            let (bid_id, pk, aid, hold, ct): (i64, Vec<u8>, Option<Vec<u8>>, i64, Option<String>) =
-                (b.get(0), b.get(1), b.get(2), b.get(3), b.get(4));
-            let author: [u8; 32] = pk.as_slice().try_into().unwrap_or([0; 32]);
-            let amount = ct
-                .as_deref()
-                .and_then(|ct| unzeen_fair::drand::decrypt(ct, beacon).ok())
-                .ok_or(bid::Invalid::Decrypt)
-                .and_then(|pt| bid::validate(&pt, chain, id, &author, self.policy.min_action_zat, to_u64(hold)));
-            match amount {
-                Ok(a) => {
-                    tx.execute(
-                        "UPDATE fl_bids SET status = 'revealed', amount_zat = $2, ciphertext = NULL WHERE id = $1",
-                        &[&bid_id, &to_i64(a)?],
-                    )
-                    .await?;
-                    valid.push((
-                        bid_id,
-                        alloc::ValidBid {
-                            amount_zat: a,
-                            is_creator: creator.as_deref() == Some(pk.as_slice()),
-                        },
-                    ));
-                }
-                Err(_) => {
-                    invalid += 1;
-                    if let Some(aid) = aid {
-                        release_action(&tx, &aid, "invalid").await?;
-                    }
-                    tx.execute(
-                        "UPDATE fl_bids SET status = 'invalid', ciphertext = NULL, released_zat = $2 WHERE id = $1",
-                        &[&bid_id, &hold],
-                    )
-                    .await?;
-                }
-            }
+            .await?
+            .into_iter()
+            .map(|r| r.get(0))
+            .collect();
+        sealed.sort_unstable();
+        let mut judged_ids: Vec<i64> = j.decisions.iter().map(|d| d.bid_id).collect();
+        judged_ids.sort_unstable();
+        if sealed != judged_ids {
+            // The set changed between the read and now (cannot happen after close): retry.
+            return Ok(RevealOutcome::Skipped);
         }
-        let vb: Vec<alloc::ValidBid> = valid.iter().map(|(_, b)| *b).collect();
+        if j.mismatch {
+            tx.execute("UPDATE fl_launches SET beacon_sig = $2 WHERE id = $1", &[&id_s, &sig])
+                .await?;
+            finish_unsuccessful(&tx, id_s, "failed", Some("internal"), "released").await?;
+            tx.commit().await?;
+            return Ok(RevealOutcome::Mismatch);
+        }
+        // Invalid bids: released at once.
+        let mut invalid = 0usize;
+        for d in j.decisions.iter().filter(|d| d.amount.is_none()) {
+            invalid += 1;
+            let r = tx
+                .query_one("SELECT action_id, hold_zat FROM fl_bids WHERE id = $1", &[&d.bid_id])
+                .await?;
+            let (aid, hold): (Option<Vec<u8>>, i64) = (r.get(0), r.get(1));
+            if let Some(aid) = aid {
+                release_action(&tx, &aid, "invalid").await?;
+            }
+            tx.execute(
+                "UPDATE fl_bids SET status = 'invalid', ciphertext = NULL, released_zat = $2 WHERE id = $1",
+                &[&d.bid_id, &hold],
+            )
+            .await?;
+        }
+        let valid: Vec<&Decision> = j.decisions.iter().filter(|d| d.amount.is_some()).collect();
+        let vb: Vec<alloc::ValidBid> = valid
+            .iter()
+            .map(|d| alloc::ValidBid {
+                amount_zat: d.amount.unwrap_or(0),
+                is_creator: d.is_creator,
+            })
+            .collect();
         let plan = alloc::plan(&vb, p.rate, p.max_total_lamports, p.creator_max_lamports);
         let lamports_in = alloc::fuzz_lamports(plan.total, p.shave);
-        let sig: &[u8] = beacon.signature();
+        // Batch update of the revealed bids (review F6).
+        let ids: Vec<i64> = valid.iter().map(|d| d.bid_id).collect();
+        let amounts: Vec<i64> = valid
+            .iter()
+            .map(|d| to_i64(d.amount.unwrap_or(0)))
+            .collect::<Result<_>>()?;
+        let es: Vec<i64> = plan.effective.iter().map(|e| to_i64(*e)).collect::<Result<_>>()?;
+        tx.execute(
+            "UPDATE fl_bids b SET status = 'revealed', amount_zat = u.amount, e_lamports = u.e, ciphertext = NULL
+             FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS u(id, amount, e) WHERE b.id = u.id",
+            &[&ids, &amounts, &es],
+        )
+        .await?;
         if valid.is_empty() || lamports_in < alloc::LAMPORTS_STEP {
             tx.execute("UPDATE fl_launches SET beacon_sig = $2 WHERE id = $1", &[&id_s, &sig])
                 .await?;
             finish_unsuccessful(&tx, id_s, "failed", Some("no_bids"), "released").await?;
             tx.commit().await?;
             return Ok(RevealOutcome::NoBids { invalid });
-        }
-        for ((bid_id, _), e) in valid.iter().zip(&plan.effective) {
-            tx.execute(
-                "UPDATE fl_bids SET e_lamports = $2 WHERE id = $1",
-                &[bid_id, &to_i64(*e)?],
-            )
-            .await?;
         }
         // min_out: fresh-curve output of the buy net of a fee bound, minus slippage. The mint
         // is created by this very tx, so only a venue config change can trip it.
@@ -1129,7 +1305,30 @@ impl Ledger {
                 &[],
             )
             .await?;
-        Ok(a + b + d)
+        // F9: closed fl_* (and order_*) action rows go entirely after 48 h, so "this key took part
+        // in a fair launch / placed an order on day D" does not stay forever. Replay protection
+        // does not rely on these rows after 48 h: a signed request is only accepted within
+        // |now − ts| ≤ 60 s (api_auth), and identical requests within that window are served by
+        // the still-present row (or serialized by the (pk, nonce) advisory lock).
+        let old = "SELECT id FROM actions WHERE (kind LIKE 'fl\\_%' OR kind LIKE 'order\\_%')
+                     AND status <> 'queued' AND updated_at < now() - interval '48 hours'";
+        c.execute(&format!("DELETE FROM ledger_ops WHERE action_id IN ({old})"), &[])
+            .await?;
+        c.execute(&format!("DELETE FROM token_ops WHERE action_id IN ({old})"), &[])
+            .await?;
+        let e = c
+            .execute(&format!("DELETE FROM actions WHERE id IN ({old})"), &[])
+            .await?;
+        // F10: a final fair_create keeps no mint secret (settle erases it; this covers leftovers).
+        let f = c
+            .execute(
+                "UPDATE relayer_jobs SET mint_secret = NULL
+                 WHERE op = 'fair_create' AND mint_secret IS NOT NULL AND status IN ('confirmed', 'failed')
+                   AND updated_at < now() - interval '2 hours'",
+                &[],
+            )
+            .await?;
+        Ok(a + b + d + e + f)
     }
 
     /// Mint of a fair launch (for the `fair_launch_sealed_bids` safety rule).

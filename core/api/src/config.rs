@@ -49,7 +49,7 @@ pub struct VerifyConfig {
     /// devnet where the operator runs `unzeen-api verify-snapshot`).
     pub daily: bool,
     pub timing: unzeen_ledger::verify::VerifyTiming,
-    /// Owner proof responses are padded to a multiple of this (16384).
+    /// Owner proof responses are padded to exactly this (65536: constant, never reveals the asset count).
     pub proof_bucket: usize,
 }
 
@@ -457,7 +457,7 @@ impl Config {
                     _ => mainnet,
                 },
                 timing: unzeen_ledger::verify::VerifyTiming::default(),
-                proof_bucket: 16_384,
+                proof_bucket: 65_536,
             },
         };
         Ok(cfg)

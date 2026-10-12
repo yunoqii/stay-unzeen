@@ -116,6 +116,9 @@ fn asset_bytes(asset: &str) -> Option<[u8; 32]> {
     if asset == "ZEC" {
         return Some(pv::ZEC_ASSET);
     }
+    if asset == "SOL" {
+        return Some(pv::SOL_ASSET);
+    }
     bs58::decode(asset).into_vec().ok()?.try_into().ok()
 }
 
@@ -292,6 +295,22 @@ impl Ledger {
                 assets[0].3.push((pk, to_u64(r.get(1))));
             }
         }
+        // Creator fees owed in SOL (claimable lamports), granule 0.001 SOL.
+        let sol: Vec<([u8; 32], u64)> = tx
+            .query(
+                "SELECT anon_pubkey, lamports FROM creator_claimable WHERE lamports > 0",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .filter_map(|r| {
+                let pk: Vec<u8> = r.get(0);
+                Some((pk.try_into().ok()?, to_u64(r.get(1))))
+            })
+            .collect();
+        if !sol.is_empty() {
+            assets.push(("SOL".into(), 9, 1_000_000, sol));
+        }
         let rows = tx
             .query(
                 "SELECT b.mint, COALESCE(t.decimals, it.decimals, 6::smallint), b.anon_pubkey, b.available + b.held
@@ -431,7 +450,7 @@ impl Ledger {
             .query_one(
                 "INSERT INTO relayer_jobs (op, meta, network, exec_mode, not_before)
                  VALUES ('attest', $1, $2, 'delayed', now()) RETURNING id",
-                &[&json!({ "memo": hex::encode(digest) }), &network],
+                &[&json!({ "memo": hex::encode(digest), "purpose": "verify" }), &network],
             )
             .await?
             .get(0);
@@ -466,7 +485,7 @@ impl Ledger {
             let tx = c.transaction().await?;
             let Some(r) = tx
                 .query_opt(
-                    "SELECT id, status, signature, slot, vault, out_memo, out_sig, meta->>'memo' FROM relayer_jobs
+                    "SELECT id, status, signature, slot, vault, out_memo, out_sig, meta->>'memo', out_block_time FROM relayer_jobs
                      WHERE op = 'attest' AND status IN ('confirmed', 'failed') AND settled_at IS NULL
                      LIMIT 1 FOR UPDATE SKIP LOCKED",
                     &[],
@@ -482,11 +501,17 @@ impl Ledger {
                 let signer: Option<String> = r.get(4);
                 let memo: Option<String> = r.get(7);
                 let matches = memo.is_some() && r.get::<_, Option<String>>(5) == memo;
+                let block_time: Option<i64> = r.get(8);
+                // F2: anchored before the drand round? (+2 s margin on blockTime precision)
                 tx.execute(
-                    "UPDATE fl_launches SET attestation = $2 WHERE attest_job_id = $1",
+                    "UPDATE fl_launches SET attestation = $2::jsonb || jsonb_build_object('beforeRound',
+                            $3::bigint IS NOT NULL AND $3::bigint * 1000 + 2000 < extract(epoch FROM round_time) * 1000)
+                     WHERE attest_job_id = $1",
                     &[
                         &jid,
-                        &json!({ "solanaTx": sig, "slot": slot, "signer": signer, "matches": matches }),
+                        &json!({ "solanaTx": sig, "slot": slot, "signer": signer, "matches": matches,
+                                 "blockTime": block_time }),
+                        &block_time,
                     ],
                 )
                 .await?;
@@ -509,6 +534,46 @@ impl Ledger {
             tx.commit().await?;
             n += 1;
         }
+    }
+
+    /// Re-queue the anchor of built snapshots whose `attest` job failed (no SOL on the key,
+    /// RPC down …): at most every `every_secs`, at most `max_attempts` jobs per snapshot.
+    pub async fn verify_reanchor(&self, network: &str, every_secs: f64, max_attempts: i32) -> Result<u64> {
+        let mut c = self.pool.get().await?;
+        let tx = c.transaction().await?;
+        let rows = tx
+            .query(
+                "SELECT s.id, s.roots_digest FROM verify_snapshots s JOIN relayer_jobs j ON j.id = s.attest_job_id
+                 WHERE s.network = $1 AND s.status = 'built' AND s.anchor IS NULL
+                   AND j.status = 'failed' AND j.settled_at IS NOT NULL
+                   AND s.anchor_attempts < $2 AND (s.anchor_retry_at IS NULL OR s.anchor_retry_at <= now())
+                 FOR UPDATE OF s SKIP LOCKED",
+                &[&network, &max_attempts],
+            )
+            .await?;
+        let mut n = 0;
+        for r in rows {
+            let (id, digest): (i32, Option<Vec<u8>>) = (r.get(0), r.get(1));
+            let Some(digest) = digest else { continue };
+            let job: i64 = tx
+                .query_one(
+                    "INSERT INTO relayer_jobs (op, meta, network, exec_mode, not_before)
+                     VALUES ('attest', $1, $2, 'delayed', now()) RETURNING id",
+                    &[&json!({ "memo": hex::encode(digest), "purpose": "verify" }), &network],
+                )
+                .await?
+                .get(0);
+            tx.execute(
+                "UPDATE verify_snapshots SET attest_job_id = $2, anchor_attempts = anchor_attempts + 1,
+                        anchor_retry_at = now() + make_interval(secs => $3)
+                 WHERE id = $1",
+                &[&id, &job, &every_secs],
+            )
+            .await?;
+            n += 1;
+        }
+        tx.commit().await?;
+        Ok(n)
     }
 
     /// Built snapshots, newest first (`before` = id bound).

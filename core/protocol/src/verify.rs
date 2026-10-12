@@ -19,6 +19,8 @@ pub const NODE_TAG: &[u8] = b"unzeen/verify/v1/node";
 pub const SNAPSHOT_TAG: &[u8] = b"unzeen/verify/v1/snapshot";
 /// `asset` of ZEC.
 pub const ZEC_ASSET: [u8; 32] = [0; 32];
+/// `asset` of SOL (creator fees owed, claimable lamports).
+pub const SOL_ASSET: [u8; 32] = [0xFF; 32];
 /// Minimum tree size.
 pub const MIN_LEAVES: usize = 1024;
 /// ZEC granule: 0.001 ZEC.

@@ -54,10 +54,14 @@ pub fn round_time_ms(round: u64) -> u64 {
     (QUICKNET_GENESIS + round.saturating_sub(1) * QUICKNET_PERIOD) * 1000
 }
 
-/// Reveal round of a launch closing at `close_at_ms`: `R(closeAt) + 2`, strictly after the
-/// close (by 3..6 s, a margin for clock skew). Invariant: `close_at_ms < round_time_ms(R)`.
+/// Seconds between the close of the bid window and the reveal round (review F2): the commitment
+/// root must be anchored on Solana well BEFORE anybody can decrypt a bid.
+pub const REVEAL_MARGIN_SECS: u64 = 30;
+
+/// Reveal round of a launch closing at `close_at_ms`: `R(closeAt + 30 s) + 1`. Invariant:
+/// `round_time_ms(R) − close_at_ms ≥ 30 s` (≤ 34 s).
 pub fn reveal_round(close_at_ms: u64) -> u64 {
-    round_at(close_at_ms / 1000) + 2
+    round_at(close_at_ms / 1000 + REVEAL_MARGIN_SECS) + 1
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -207,8 +211,12 @@ mod tests {
         ] {
             let r = reveal_round(close);
             let t = round_time_ms(r);
-            assert!(close < t, "closeAt < t(R): {close} {t}");
-            assert!(t - close <= 6_000 + 999, "{}", t - close);
+            assert!(
+                t >= close + REVEAL_MARGIN_SECS * 1000,
+                "t(R) - closeAt >= 30 s: {}",
+                t - close
+            );
+            assert!(t - close <= 34_000, "{}", t - close);
         }
     }
 

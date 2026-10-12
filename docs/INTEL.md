@@ -2,7 +2,10 @@
 
 Источник правды для `core/` (Rust, API) и индексатора (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0007_intel.sql` (применяет core при старте; индексатор миграции **не** запускает и схему не меняет). Публичная сторона — `docs/API.md` v0.5, раздел «Безопасность токена и лента сделок». Обоснование схемы (тик, приманки, warm set) — `docs/analysis/token-intel.md` §2.
 
-Статус: **v1** (12.10, дни 6–7).
+Статус: **v2** (12.10, ордера; миграция `0011_orders.sql`). Изменения против v1:
+- **Ценовой проход и `intel_prices`.** На **каждом** тике индексатор читает кривые **всех** `intel_warm.pinned` mint (токены пула) и пишет цены в `intel_prices` в той же транзакции тика. Из них core исполняет приватные ордера (API.md v0.8). Набор опрашиваемых mint от ордеров **не зависит** — ордера не порождают ни одного RPC-запроса.
+
+Статус v1: 12.10, дни 6–7.
 
 ## Кто что делает
 
@@ -106,6 +109,26 @@
 
 `whale`: `sol_amount ≥ UNZEEN_WHALE_LAMPORTS` (по умолчанию 1 SOL, тот же порог core применяет к сделкам пула).
 
+### `intel_prices` — цена с тика (v2, для ордеров)
+| Колонка | Смысл |
+|---|---|
+| `mint` | PK, только `pinned` mint (токены пула) |
+| `price_sol` | `NUMERIC > 0`: SOL за 1 целый токен. pump.fun: `(virtual_sol_reserves / 1e9) / (virtual_token_reserves / 10^decimals)` из аккаунта кривой |
+| `status` | `curve` \| `graduated` (`complete` кривой → `graduated`, цена — последняя на кривой) |
+| `tick_at` | unix мс этого тика (= `intel_meta.last_tick_at`, который пишется в той же транзакции) |
+| `prev_price_sol`, `prev_tick_at` | значение предыдущего тика, где этот mint был прочитан (core проверяет «2 тика подряд» для stop-loss: `prev_tick_at` = тик, на котором SL взвёлся) |
+
+Запись (в транзакции тика, одна строка на mint):
+```sql
+INSERT INTO intel_prices (mint, price_sol, status, tick_at) VALUES ($1, $2, $3, $4)
+ON CONFLICT (mint) DO UPDATE SET prev_price_sol = intel_prices.price_sol, prev_tick_at = intel_prices.tick_at,
+  price_sol = EXCLUDED.price_sol, status = EXCLUDED.status, tick_at = EXCLUDED.tick_at
+WHERE intel_prices.tick_at < EXCLUDED.tick_at;
+```
+- Проход: `getMultipleAccounts` по PDA кривых всех `pinned` (≤ 100 на вызов; при десятках токенов пула это 1–2 вызова на тик). Для `hot` mint можно взять последнее значение подписки, если оно свежее начала тика.
+- Ошибка RPC по mint — строку не трогать (core считает старую цену «этим же тиком» и не срабатывает повторно). Ошибка всего прохода — `intel_prices` в этом тике не пишется.
+- История не хранится: только текущее и предыдущее значение. Логи — без mint и цен.
+
 ### `intel_meta` — расписание
 | key | value | Кто пишет |
 |---|---|---|
@@ -118,8 +141,9 @@ core считает `retryAfterMs = next_tick_at − now + 10 000` (запас �
 1. `t = now()`; `asOf = floor_minute(t)`.
 2. `real = SELECT … FROM intel_requests … LIMIT 4`; приманки до 8; перемешать.
 3. RPC (Shyft): `getMultipleAccounts` (mint + PDA кривой/пула по всей пачке), `getTokenLargestAccounts` по каждому mint пачки, `getMultipleAccounts` владельцев token-аккаунтов; метаданные/картинки по правилам выше. Затем до 20 mint warm set по расписанию. Не больше ~5 rps.
-4. Одна транзакция: `token_safety` / `intel_tokens` (upsert, `as_of = asOf`), `intel_warm.expires_at` для всей пачки, `DELETE intel_requests` для `real`, `intel_meta` (`last_tick_at = t`, `next_tick_at = t + U(45,75) с`).
-5. Ошибка RPC по одному mint — снимок этого mint не пишется (старый остаётся), запрос остаётся в очереди; по всей пачке — тик пропускается целиком, `next_tick_at` всё равно обновляется.
+4. Ценовой проход (v2): кривые всех `pinned` mint одним-двумя `getMultipleAccounts`.
+5. Одна транзакция: `token_safety` / `intel_tokens` (upsert, `as_of = asOf`), `intel_prices` (v2, `tick_at = t`), `intel_warm.expires_at` для всей пачки, `DELETE intel_requests` для `real`, `intel_meta` (`last_tick_at = t`, `next_tick_at = t + U(45,75) с`).
+6. Ошибка RPC по одному mint — снимок этого mint не пишется (старый остаётся), запрос остаётся в очереди; по всей пачке — тик пропускается целиком, `next_tick_at` всё равно обновляется.
 
 ## Роль Postgres `unzeen_indexer`
 `infra/indexer-role.sql` (идемпотентный, перезапускать после новых миграций), подключение по `DATABASE_URL_INDEXER`. Владельческий `DATABASE_URL` и `DATABASE_URL_RELAYER` индексатору не давать.
@@ -129,6 +153,7 @@ core считает `retryAfterMs = next_tick_at − now + 10 000` (запас �
 | `intel_requests` | SELECT, DELETE |
 | `intel_warm` | SELECT, INSERT (`mint`, `expires_at`), UPDATE (`expires_at`) |
 | `token_safety`, `intel_tokens`, `intel_subscriptions`, `intel_meta` | SELECT, INSERT, UPDATE, DELETE |
+| `intel_prices` (v2) | SELECT, INSERT, UPDATE |
 | `market_trades` | SELECT, INSERT, UPDATE (`tags`); sequence USAGE |
 | `tokens`, `trades`, `mint_vaults`, `relayer_vault_usage` | только SELECT |
 | всё остальное (`actions`, `balances`, `deposits`, `creator_tokens`, `relayer_jobs`, журналы, `pool_meta`, …) | нет доступа |
@@ -138,6 +163,7 @@ core считает `retryAfterMs = next_tick_at − now + 10 000` (запас �
 ## Контрольный список для индексатора
 - [ ] Роль `unzeen_indexer`, advisory lock, отказ стартовать с лишними правами.
 - [ ] Тик 45–75 с по своему таймеру; пачка всегда 8, ≤ 4 настоящих, случайный порядок; приманки обрабатываются так же.
+- [ ] (v2) Ценовой проход по **всем** `pinned` на каждом тике → `intel_prices` в транзакции тика; набор не зависит ни от чего, кроме `pinned`.
 - [ ] Все записи снимков — в транзакции тика, `as_of` = минута тика; `next_tick_at` обновляется каждый тик.
 - [ ] Никаких записей в `tokens`/`trades`; никаких логов с mint и признаком «запрос/приманка».
 - [ ] T1: для mint с `trades.kind = 'create'` — без `devPct`/`dev`/тега `dev`, `unzeenLaunchBuy = true`.
