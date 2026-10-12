@@ -74,6 +74,7 @@ interface LaunchpadAdapter {
 Merkle-sum дерево обязательств реестра (каждый anon-ключ проверяет свой лист и сумму) + публичный список vault на Solana + заявленный резерв ZEC. Проверка: сумма обязательств ≤ активы. Без viewing key.
 
 ## Хостинг демо (решение 12.10)
+Два экземпляра бекенда (core + relayer + Postgres) — `devnet` (Zcash testnet + Solana devnet) и `mainnet`; фронт один, переключатель сети в шапке. Состояние (anon-ключ, баланс) у каждой сети своё.
 Всё на своём сервере (VPS): фронт, API, Postgres, релейер. Без Vercel и без Cloudflare-proxy. Access-логи выключены (или без IP и пути), `X-Forwarded-For` не логируется, `NEXT_TELEMETRY_DISABLED=1`, ротация docker-логов. В README: провайдер VPS видит сетевые метаданные. Своей ноды Zebra нет — публичный lightwalletd.
 
 ## Защита приватности

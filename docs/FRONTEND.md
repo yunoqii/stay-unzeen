@@ -27,6 +27,11 @@
 - В браузере хранится **только зашифрованно паролем** (WebCrypto, PBKDF2/Argon2 → AES-GCM). Ключ и фраза никогда не уходят на сервер.
 - Вход на другом устройстве — ввод 12 слов.
 
+## Сеть: переключатель Devnet ↔ Mainnet
+- В шапке переключатель “Devnet” / “Mainnet” (по умолчанию Devnet). Каждая сеть — свой API URL (`NEXT_PUBLIC_API_URL_DEVNET` / `NEXT_PUBLIC_API_URL_MAINNET`), свои explorer-ссылки (Solscan `?cluster=devnet`), свой ZIP-321 (testnet UA).
+- На Devnet — заметный, но спокойный баннер “Devnet — test funds only” и вход по demo-ключу. На Mainnet — предупреждение “Real funds”.
+- Anon-ключ и сессия хранятся раздельно по сети.
+
 ## Страницы
 1. `/` — лента + горячие токены
 2. `/token/[mint]` — график, сделки, купить / продать

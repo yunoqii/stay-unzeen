@@ -16,7 +16,7 @@
 - Весь код пишется в окне хакатона; библиотеки можно, готовые продукты — нельзя.
 - Репозиторий: https://github.com/yunoqii/stay-unzeen — **PRIVATE**. Сделать публичным 28.10 перед сдачей (`gh repo edit --visibility public --accept-visibility-change-consequences`), не раньше.
 - Коммить и пушить после каждой завершённой задачи; ветка `main`.
-- Сети: Zcash **mainnet** для демо (суммы 0.01–0.05 ZEC, ZODL из стора), testnet — для CI/автотестов (pre-release крейты librustzcash из-за NU7). Solana: devnet для разработки, mainnet в демо. Сеть — только через env.
+- Сети: демо с **переключателем Devnet ↔ Mainnet** (решение 12.10). Devnet = Zcash testnet + Solana devnet, судьям — 3–5 заранее пополненных demo anon-ключей; Mainnet = реальные ZEC (0.01–0.05) + Solana mainnet. На VPS — два экземпляра бекенда (по сети), фронт переключается между ними. Сеть в бекенде — только через env. Pre-release крейты librustzcash (NU7 на testnet).
 - Не публиковать детали архитектуры (tlock fair-launch, Jito-бандл) до дедлайна.
 
 ## Команда (субагенты в `.claude/agents/`)
