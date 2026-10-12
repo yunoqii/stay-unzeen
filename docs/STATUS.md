@@ -17,13 +17,14 @@
 - core: API-сервер axum (v0.3), курс 1Click, контракт релейера `docs/RELAYER.md` + миграция 0002 (jobs/trades/tokens/token_balances), N3–N7 закрыты; 66/66 тестов с Postgres (проверил лид)
 - adapters: релейер на Postgres-очереди по RELAYER.md, ротация vault, джиттер, идемпотентная отправка (N1), вывод с каплей SOL с другого vault; devnet buy/sell/withdraw finalized; ключи в `~/.unzeen/devnet/solana`; 89/89 тестов (проверил лид)
 - frontend: API v0.2, Top up (ZIP-321 + unz1 в браузере), /portfolio, переключатель сети, CSP, /verify без viewing key
+- frontend на API v0.3: /api/pool и подписанный /api/portfolio против живого core/api → 200; подпись под чужую сеть → 401; 75/75 тестов (по отчёту). Real-режим в браузере ещё не прогонялся. Для бека нужен `API_CORS_ORIGINS` (есть в .env.example)
 - Ревью кода дня 2: `docs/analysis/review-day3.md` (critical нет; N1–N11 розданы агентам)
 - Ревью безопасности/приватности дня 2: `docs/analysis/review-day2.md` (3 critical закрыты решениями владельца, high — в работе у backend/frontend)
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
 
 ## В работе (день 3)
-- frontend: переход на API v0.3 (chain_id в подписи, ключ по сети), проверка real-режима против живого API
+- —
 
 ## Решения
 - 12.10 (владелец): данные пула на VPS — на зашифрованном томе с ручной разблокировкой (N2); мониторинг с алертом
