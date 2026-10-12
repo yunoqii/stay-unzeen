@@ -1,0 +1,32 @@
+{
+  "name": "@unzeen/adapters",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
+    "test": "vitest run",
+    "keys:gen": "tsx scripts/gen-keys.ts",
+    "e2e:devnet": "tsx scripts/e2e-devnet.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@pump-fun/pump-sdk": "4.0.0",
+    "@solana/spl-token": "0.4.15",
+    "@solana/web3.js": "1.99.0",
+    "bn.js": "5.2.5",
+    "bs58": "6.0.0"
+  },
+  "devDependencies": {
+    "@types/bn.js": "5.2.0",
+    "@types/node": "26.6.5",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.4"
+  }
+}
