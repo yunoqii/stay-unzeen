@@ -32,6 +32,11 @@
 - На Devnet — заметный, но спокойный баннер “Devnet — test funds only” и вход по demo-ключу. На Mainnet — предупреждение “Real funds”.
 - Anon-ключ и сессия хранятся раздельно по сети.
 
+## Токен: безопасность и быстрая торговля (решение 12.10)
+- На `/token/[mint]` — панель “Token safety”: authorities (mint/freeze revoked ✓/✗), top-10 holders %, dev share, dev history (“launched N · rugged M”), snipers/bundles in first blocks, curve progress / graduated / LP burned-locked, socials. Для Unzeen-запусков — бейдж “Unzeen launch: dev anonymous, rules enforced” и, если создатель включил, “Anon creator: N launches · M rugs”.
+- Быстрая торговля: пресеты Buy 0.1 / 0.5 / 1 ZEC (настраиваются в Settings), Sell 25 / 50 / 100%; slippage и priority в настройках панели; позиция — PnL, avg entry, свои сделки маркерами на графике (только в браузере, из локальной истории своих действий); фильтры ленты сделок токена: “Whales” / “Dev” / “unzeen”.
+- Поиск по CA в шапке: вставка адреса → `/token/<mint>` (данные через наш бек). Фронт никогда не ходит к Helius/Solscan/и т.п. напрямую.
+
 ## Режим исполнения
 - У кнопки Buy/Sell — сегментированный переключатель “Now” / “Delayed”; внутри Delayed — пункт “Max privacy (5–15 min)”. Подписи: Now — “1–3 s · on-chain private, network-visible”; Delayed — “30–60 s batch · better privacy”.
 - Режим по умолчанию — настройка профиля (раздел Settings в `/portfolio` или `/key`), по умолчанию Delayed. Хранится локально по сети, на сервер не уходит (кроме поля `exec` в самом действии).
