@@ -1,6 +1,6 @@
 # Status
 
-**День 2 / 16** (начат 12.10.2026 вечером). Последняя сводка: `docs/sessions/2026-10-12-1850.md`. Дедлайн: 28.10 23:59 UTC.
+**День 3 / 16** (по плану; фактически 12.10.2026, опережаем). Последняя сводка: `docs/sessions/2026-10-12-1850.md`. Дедлайн: 28.10 23:59 UTC.
 
 ## Готово
 - Структура команды (CLAUDE.md, агенты), ARCHITECTURE.md, API.md v0
@@ -18,8 +18,11 @@
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
 
-## В работе
-- —
+## В работе (день 3)
+- backend (core): API-сервер axum по API v0.2 (pool, portfolio, actions, feed/tokens, WS)
+- backend (adapters): релейер — исполнение buy/sell из holds реестра через адаптер pump.fun, загрузка .env, RPC по сети
+- frontend: переход на API v0.2, `/portfolio` (баланс + Top up QR ZIP-321 с unz1), переключатель Devnet/Mainnet
+- analyst: ревью кода дня 2 (protocol, ledger, web crypto, adapters)
 
 ## Решения
 - Путь anon-ключа SLIP-0010 `m/44'/133'/0'/0'` фиксируем (лид): с ZIP-32 (Zcash) и `m/44'/501'` (Solana) не пересекается, менять векторы на обеих сторонах не стоит
@@ -30,10 +33,10 @@
 ## Риски
 - Фронт на API v0.1 (intents, /api/deposit) → перевести на v0.2 (`/api/pool`, ZIP-321 строит фронт)
 - wallet.sqlite пула хранит расшифрованные memo + txid незашифрованно (0600, вне Desktop)
-- H1 (lightwalletd видит интерес пула к txid): 0.5–1 дня на запрос всех tx блока — решить
+- H1 (lightwalletd видит интерес пула к txid) — НЕ урезается (владелец), делаем в дни 4–5: запрос всех shielded-tx блока
 - Запасного testnet lightwalletd нет; mainnet fallback — тот же оператор (na/eu.zec.rocks)
 - API-сервер (axum) ещё не написан; выплаты refund_pending не реализованы
-- Публичный devnet RPC часто отвечает 429 → для релейера/демо нужен свой RPC (Helius)
+- Публичный devnet RPC часто отвечает 429 → Helius devnet/mainnet в `.env` (`SOLANA_RPC_URL_DEVNET/_MAINNET`), адаптеру нужно их подгружать
 - pump-sdk 4.0.0 ESM ломается в Node → адаптер CJS; релейер подключает через require
 - После истёкшего blockhash релейер обязан проверить подпись перед повтором (двойная покупка)
 - Все запуски с одного vault связаны через vault → ротация/шардирование vault в релейере
@@ -54,7 +57,7 @@
 
 ## Нужно от владельца
 - аккаунт сабмита + shielded-адрес ZODL для приза
-- ключи Helius, 1Click (JWT), Pyth (опц.)
+- 1Click (JWT) — нужен к дням 11–12; Pyth не нужен
 - VPS для демо до 22.11 (фронт + бек)
 - ~0.1–0.2 ZEC и ~0.3 SOL для mainnet-демо (к дням 6–8)
 

@@ -39,7 +39,7 @@
 | Дни | Цель |
 |---|---|
 | 1–2 | analyst: проверить pump.fun SDK, Meteora DBC SDK, Jupiter, Jito, NEAR Intents, фаусет testnet. backend: Zebra+lightwalletd testnet, чтение memo. frontend: каркас Next.js, дизайн-токены, `/key` (12 слов) |
-| 3–5 | backend: сканер депозитов → баланс ZEC в реестре, подписанные запросы, адаптер pump.fun. frontend: лента, главная с героем, `/portfolio` (баланс + пополнить) |
+| 3–5 | backend: сканер депозитов → баланс ZEC в реестре, подписанные запросы, адаптер pump.fun, **H1 (дни 4–5): сканер запрашивает у lightwalletd все shielded-tx блока, а не только свои**. frontend: лента, главная с героем, `/portfolio` (баланс + пополнить) |
 | 6–8 | backend: действия с баланса buy/sell/create/claim/withdraw, шардирование vault. frontend: страница токена, `/launch`, `/pay` |
 | 9–10 | backend: адаптер Meteora DBC, **лимитки/TP/SL** (движок триггеров), **чат**. frontend: ордера на странице токена, чат |
 | 11–12 | backend: fair-launch (tlock + Jito), **умный вывод**, NEAR Intents ребаланс, `/api/creator`, `/api/stats`. frontend: fair-launch UI, **кабинет создателя**, **статистика**, `/verify` |
@@ -48,4 +48,4 @@
 
 Список функций: `docs/FEATURES.md`.
 
-**Порядок урезания, если не успеваем:** чат → статистика → кабинет создателя → умный вывод → Meteora → Jito с несколькими vault → автоматизация NEAR Intents (ребаланс вручную) → лимитки/TP/SL → полный fair-launch (остаётся tlock + одна tx create+buy) → Jupiter. Ядро (депозит ZEC → баланс → покупка/продажа на pump.fun → лента → вывод) трогать нельзя.
+**Порядок урезания, если не успеваем:** чат → статистика → кабинет создателя → умный вывод → Meteora → Jito с несколькими vault → автоматизация NEAR Intents (ребаланс вручную) → лимитки/TP/SL → полный fair-launch (остаётся tlock + одна tx create+buy) → Jupiter. Ядро (депозит ZEC → баланс → покупка/продажа на pump.fun → лента → вывод) трогать нельзя. **Защиты приватности не урезаются никогда** (любая утечка, в т.ч. третьей стороне вроде lightwalletd/RPC, = дисквалификация): H1, логи без связок, газ+задержка при выводе, свежий creator и т.п.
