@@ -2,6 +2,7 @@ import type { Connection, Signer } from "@solana/web3.js";
 import { AdapterError } from "../errors";
 import type { PumpFunAdapter } from "../pumpfun";
 import { fetchTx, signatureState, type SignatureState, type SignedTx } from "../tx";
+import type { MetadataStore } from "../metadata";
 import type { TokenWithdrawer } from "../withdraw";
 import { DEFAULT_GAS_DROP, pickGasDrop, type GasDropRange, type Rng } from "./random";
 import type { Execution, JobSpec, SentAttempt } from "./types";
@@ -48,27 +49,73 @@ export class RpcChainProbe implements ChainProbe {
   }
 }
 
-/** buy / sell on pump.fun bonding curves. */
-export class PumpFunTradeExecutor implements JobExecutor<Extract<JobSpec, { kind: "buy" | "sell" }>> {
-  constructor(private readonly adapter: PumpFunAdapter) {}
+/** create_v2: mint + curve + vault ATA/accumulator + lookup table of a fresh vault. */
+const CREATE_SOL_HEADROOM = 35_000_000n;
 
-  vaultRequest(spec: Extract<JobSpec, { kind: "buy" | "sell" }>): VaultRequest {
-    return spec.kind === "buy"
-      ? { minSol: spec.lamportsIn + BUY_SOL_HEADROOM }
-      : { minSol: FEE_SOL_HEADROOM, mint: spec.mint, minTokens: spec.amount };
+type PumpSpec = Extract<JobSpec, { kind: "buy" | "sell" | "create" }>;
+
+/** buy / sell / create on pump.fun bonding curves. */
+export class PumpFunTradeExecutor implements JobExecutor<PumpSpec> {
+  constructor(
+    private readonly adapter: PumpFunAdapter,
+    /** Publishes create metadata (sanitized image + JSON). Without it, create jobs fail `venue_unavailable`. */
+    private readonly metadata: MetadataStore | null = null,
+  ) {}
+
+  vaultRequest(spec: PumpSpec): VaultRequest {
+    switch (spec.kind) {
+      case "buy":
+        return { minSol: spec.lamportsIn + BUY_SOL_HEADROOM };
+      case "create":
+        return { minSol: spec.lamportsIn + CREATE_SOL_HEADROOM };
+      case "sell":
+        return { minSol: FEE_SOL_HEADROOM, mint: spec.mint, minTokens: spec.amount };
+    }
   }
 
-  prepare(spec: Extract<JobSpec, { kind: "buy" | "sell" }>, vault: Signer): Promise<SignedTx> {
-    return spec.kind === "buy"
-      ? this.adapter.prepareBuy(spec.mint, spec.lamportsIn, spec.minOut, { vault })
-      : this.adapter.prepareSell(spec.mint, spec.amount, spec.minLamports, { vault });
+  async prepare(spec: PumpSpec, vault: Signer): Promise<SignedTx> {
+    switch (spec.kind) {
+      case "buy":
+        return this.adapter.prepareBuy(spec.mint, spec.lamportsIn, spec.minOut, { vault });
+      case "sell":
+        return this.adapter.prepareSell(spec.mint, spec.amount, spec.minLamports, { vault });
+      case "create": {
+        if (!this.metadata) throw new AdapterError("venue_unavailable", "no metadata store configured");
+        // Content-addressed: a retried job publishes to the same URIs.
+        const { uri } = await this.metadata.publish(spec.meta);
+        return this.adapter.prepareCreate({ name: spec.meta.name, symbol: spec.meta.symbol, uri }, spec.lamportsIn, spec.minOut, { vault });
+      }
+    }
   }
 
   async submit(tx: SignedTx): Promise<void> {
     await this.adapter.submit(tx);
   }
 
-  async result(spec: Extract<JobSpec, { kind: "buy" | "sell" }>, a: SentAttempt): Promise<Execution | null> {
+  async result(spec: PumpSpec, a: SentAttempt): Promise<Execution | null> {
+    if (spec.kind === "create") {
+      const r = await this.adapter.createResult(a.signature, a.vault);
+      if (!r) return null;
+      // Same content-addressed URL the job published before signing (no new upload).
+      const imageUrl = spec.meta.image ? ((await this.metadata?.publish(spec.meta).catch(() => null))?.imageUrl ?? null) : null;
+      return {
+        kind: "create",
+        signature: r.signature,
+        slot: r.slot,
+        vault: r.vault,
+        mint: r.mint,
+        creator: r.creator,
+        tokenAmount: r.tokenAmount,
+        solAmount: r.solAmount,
+        networkFee: r.networkFee,
+        decimals: r.decimals,
+        blockTime: r.blockTime ?? null,
+        name: r.name,
+        symbol: r.symbol,
+        imageUrl,
+        market: await this.adapter.market(r.mint).catch(() => null),
+      };
+    }
     const r = await this.adapter.tradeResult(spec.kind, a.signature, a.vault, spec.mint);
     if (!r || !r.amountsKnown) return null;
     return {
@@ -94,7 +141,7 @@ export class PumpFunTradeExecutor implements JobExecutor<Extract<JobSpec, { kind
   }
 }
 
-/** Token withdrawal: gas drop + transfer, from a vault other than the buyer's. */
+/** Token withdrawal: gas drop + transfer, from the vault the mint is pinned to (D4). */
 export class WithdrawExecutor implements JobExecutor<Extract<JobSpec, { kind: "withdraw" }>> {
   constructor(
     private readonly withdrawer: TokenWithdrawer,
@@ -107,15 +154,10 @@ export class WithdrawExecutor implements JobExecutor<Extract<JobSpec, { kind: "w
       minSol: (spec.gasLamports ?? this.gasDrop.max) + ATA_RENT_HEADROOM + FEE_SOL_HEADROOM,
       mint: spec.mint,
       minTokens: spec.amount,
-      avoid: spec.avoidVaults,
     };
   }
 
   prepare(spec: Extract<JobSpec, { kind: "withdraw" }>, vault: Signer): Promise<SignedTx> {
-    if (spec.avoidVaults.includes(vault.publicKey.toBase58())) {
-      // VaultPool already excludes them; double check, this is a privacy rule.
-      return Promise.reject(new AdapterError("internal", "withdraw from an excluded vault"));
-    }
     return this.withdrawer.prepare({
       vault,
       mint: spec.mint,

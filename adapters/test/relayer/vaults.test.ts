@@ -67,15 +67,18 @@ describe("VaultPool", () => {
     expect(w.publicKey.equals(b!.publicKey)).toBe(true);
   });
 
-  it("respects avoid (withdraw != buying vault) even if it is the only holder", async () => {
+  it("only: the pinned vault or nothing", async () => {
     const inv = new FakeInventory();
     const [a, b] = vaults(2, inv);
     inv.tokens.set(`${a!.publicKey.toBase58()}:${MINT}`, 100n);
     const pool = new VaultPool([a!, b!], inv, seededRng(4));
     const e = await pool
-      .acquire({ minSol: 1n, mint: MINT, minTokens: 1n, avoid: [a!.publicKey.toBase58()] })
+      .acquire({ minSol: 1n, mint: MINT, minTokens: 1n, only: b!.publicKey.toBase58() })
       .catch((x: unknown) => x);
     expect((e as AdapterError).apiCode).toBe("pool_liquidity");
+    const v = await pool.acquire({ minSol: 1n, only: b!.publicKey.toBase58() });
+    expect(v.publicKey.equals(b!.publicKey)).toBe(true);
+    await expect(pool.acquire({ minSol: 1n, only: b!.publicKey.toBase58() })).rejects.toBeInstanceOf(VaultsBusyError);
   });
 
   it("keeps one in-flight job per vault", async () => {

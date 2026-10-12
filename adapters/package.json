@@ -11,7 +11,10 @@
     "test": "vitest run",
     "keys:gen": "tsx scripts/gen-keys.ts",
     "e2e:devnet": "tsx scripts/e2e-devnet.ts",
-    "relayer:devnet": "tsx scripts/relayer-devnet.ts"
+    "relayer:devnet": "tsx scripts/relayer-devnet.ts",
+    "keys:encrypt": "tsx scripts/keys-encrypt.ts",
+    "relayer:run": "tsx scripts/relayer-run.ts",
+    "media:serve": "tsx scripts/media-serve.ts"
   },
   "engines": {
     "node": ">=20"
@@ -20,9 +23,11 @@
     "@pump-fun/pump-sdk": "4.0.0",
     "@solana/spl-token": "0.4.15",
     "@solana/web3.js": "1.99.0",
+    "age-encryption": "0.3.1",
     "bn.js": "5.2.5",
     "bs58": "6.0.0",
-    "pg": "8.23.1"
+    "pg": "8.23.1",
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "@types/bn.js": "5.2.0",

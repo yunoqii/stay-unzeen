@@ -15,7 +15,9 @@ import {
   Keypair,
 } from "@solana/web3.js";
 import { AdapterError } from "../src/errors";
-import { CreatorKeyring, ensureVaults } from "../src/keys";
+import path from "node:path";
+import { CreatorKeyring, FileCreatorIndexCounter } from "../src/keys";
+import { openKeys } from "../src/relayer/runtime";
 import { describeConfig, explorerAddressUrl, explorerTxUrl, loadConfig, makeConnection } from "../src/config";
 import { loadRepoEnv } from "../src/env";
 import { formatUnits, minOutWithSlippage } from "../src/math";
@@ -132,7 +134,8 @@ async function expectError(label: string, code: string, f: () => Promise<unknown
 
 async function main(): Promise<void> {
   console.log(describeConfig(cfg));
-  const vaults = ensureVaults(cfg.keysDir, 2);
+  const keys = await openKeys(cfg, process.env, (m) => console.log(`  WARN ${m}`), 2);
+  const vaults = keys.vaults;
   const [v0, v1] = vaults as [Keypair, Keypair];
   await fund(vaults);
 
@@ -140,7 +143,7 @@ async function main(): Promise<void> {
     connection: conn,
     defaultVault: v0,
     vaults,
-    creators: new CreatorKeyring(cfg.keysDir),
+    creators: new CreatorKeyring(keys.creatorSeed, new FileCreatorIndexCounter(path.join(cfg.keysDir, "creator-counter.json"))),
     stateDir: cfg.keysDir,
     priorityMicroLamports: cfg.priorityMicroLamports,
   });

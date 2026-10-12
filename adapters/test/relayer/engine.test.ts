@@ -4,12 +4,13 @@ import { Relayer, type RelayerEvent } from "../../src/relayer/engine";
 import { InMemoryJobQueue } from "../../src/relayer/memory-queue";
 import { seededRng } from "../../src/relayer/random";
 import type { JobSpec } from "../../src/relayer/types";
+import { MemoryMintVaults, type MintVaults } from "../../src/relayer/mint-vaults";
 import { VaultPool } from "../../src/relayer/vaults";
 import { FakeChain, FakeClock, FakeExecutor, FakeInventory, MINT, vaults } from "./fakes";
 
 const BUY: JobSpec = { kind: "buy", venue: "pumpfun", mint: MINT, lamportsIn: 1_000_000n, minOut: 1n };
 
-function setup(nVaults = 3) {
+function setup(nVaults = 3, mintVaults?: MintVaults) {
   const chain = new FakeChain();
   const clock = new FakeClock(1_700_000_000_000, chain);
   const rng = seededRng(7);
@@ -24,6 +25,7 @@ function setup(nVaults = 3) {
     pool,
     executors: { trade: { pumpfun: ex }, withdraw: ex },
     probe: chain,
+    ...(mintVaults ? { mintVaults } : {}),
     clock,
     rng,
     pollMs: 2_000,
@@ -249,19 +251,6 @@ describe("relayer engine: vault rules", () => {
     expect(t.ex.prepared.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("withdraw never uses an avoided (buying) vault", async () => {
-    const t = setup(3);
-    const [v0, v1, v2] = t.vs.map((v) => v.publicKey.toBase58()) as [string, string, string];
-    for (const v of [v0, v1, v2]) t.inv.tokens.set(`${v}:${MINT}`, 1_000n);
-    for (let i = 0; i < 20; i++) {
-      t.add({ kind: "withdraw", mint: MINT, to: "x", amount: 10n, avoidVaults: [v0] });
-      await t.relayer.tick();
-    }
-    const used = new Set(t.ex.prepared.map((p) => p.vault));
-    expect(used.has(v0)).toBe(false);
-    expect(used).toEqual(new Set([v1, v2]));
-  });
-
   it("buys rotate across vaults (never the same vault twice in a row)", async () => {
     const t = setup(3);
     for (let i = 0; i < 30; i++) {
@@ -274,3 +263,99 @@ describe("relayer engine: vault rules", () => {
     for (let i = 1; i < seq.length; i++) expect(seq[i]).not.toBe(seq[i - 1]);
   });
 });
+
+describe("relayer engine: one vault per mint (D4)", () => {
+  const MINT2 = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+
+  it("first buy pins the mint; later buys, sell-all and every withdraw part use that vault", async () => {
+    const mv = new MemoryMintVaults();
+    const t = setup(4, mv);
+    t.add();
+    await t.relayer.tick();
+    const pinned = await mv.get(MINT);
+    expect(pinned).toBe(t.ex.prepared[0]!.vault);
+    for (const v of t.vs) t.inv.tokens.set(`${v.publicKey.toBase58()}:${MINT}`, v.publicKey.toBase58() === pinned ? 10_000n : 5_000n);
+    for (let i = 0; i < 5; i++) {
+      t.add();
+      t.clock.t += 1_000;
+      await t.relayer.tick();
+    }
+    t.add({ kind: "sell", venue: "pumpfun", mint: MINT, amount: 10_000n, minLamports: 1n }); // all of it, one tx
+    await t.relayer.tick();
+    const dest = "Dest111111111111111111111111111111111111111";
+    for (let p = 0; p < 3; p++) {
+      t.add({ kind: "withdraw", mint: MINT, to: dest, amount: 1_000n });
+      await t.relayer.tick();
+    }
+    expect(new Set(t.ex.prepared.map((p) => p.vault))).toEqual(new Set([pinned]));
+    expect(t.queue.all().every((j) => j.state === "executed")).toBe(true);
+  });
+
+  it("a busy pinned vault means wait (retry), never another vault", async () => {
+    const mv = new MemoryMintVaults();
+    const t = setup(3, mv);
+    const pinned = t.vs[1]!.publicKey.toBase58();
+    await mv.assign(MINT, pinned);
+    await t.pool.lockVault(pinned); // another job holds it
+    const id = t.add();
+    await t.relayer.tick();
+    expect(t.ex.prepared).toEqual([]);
+    expect(t.queue.get(id)!.result).toMatchObject({ status: "retry" });
+    await t.pool.release(pinned);
+    t.clock.t += 5_000;
+    await t.relayer.tick();
+    expect(t.ex.prepared.map((p) => p.vault)).toEqual([pinned]);
+  });
+
+  it("pinned vault short of tokens -> pool_liquidity, other vaults are not used", async () => {
+    const mv = new MemoryMintVaults();
+    const t = setup(3, mv);
+    await mv.assign(MINT, t.vs[0]!.publicKey.toBase58());
+    t.inv.tokens.set(`${t.vs[2]!.publicKey.toBase58()}:${MINT}`, 1_000_000n);
+    const id = t.add({ kind: "sell", venue: "pumpfun", mint: MINT, amount: 10n, minLamports: 1n });
+    await t.relayer.tick();
+    expect(t.ex.prepared).toEqual([]);
+    expect(t.queue.get(id)!.result).toMatchObject({ code: "pool_liquidity" });
+  });
+
+  it("new mints and creates go to the least loaded vaults; create pins its new mint", async () => {
+    const mv = new MemoryMintVaults();
+    const t = setup(3, mv);
+    const [a, b, c] = t.vs.map((v) => v.publicKey.toBase58()) as [string, string, string];
+    for (let i = 0; i < 3; i++) await mv.assign(`OldA${i}`, a);
+    for (let i = 0; i < 2; i++) await mv.assign(`OldB${i}`, b);
+    t.add({ kind: "buy", venue: "pumpfun", mint: MINT2, lamportsIn: 1n, minOut: 1n });
+    await t.relayer.tick();
+    expect(await mv.get(MINT2)).toBe(c); // c had 0 pins (a=3, b=2)
+    const id = t.add({ kind: "create", venue: "pumpfun", meta: { name: "N", symbol: "N" }, lamportsIn: 0n, minOut: 0n });
+    t.clock.t += 1_000;
+    await t.relayer.tick();
+    const e = t.queue.get(id)!.result;
+    expect(e).toMatchObject({ status: "executed", execution: { kind: "create" } });
+    const created = t.ex.prepared.at(-1)!;
+    expect([b, c]).toContain(created.vault); // a (3 pins) is above the median
+    expect(await mv.get(`NewMint${created.signature.slice(3)}`)).toBe(created.vault);
+  });
+
+  it("two first buys of one mint race: the loser does not trade, retries on the winner's vault", async () => {
+    const mv = new MemoryMintVaults();
+    const t = setup(3, mv);
+    const v2 = t.vs[2]!.publicKey.toBase58();
+    const real = mv.assign.bind(mv);
+    let raced = false;
+    // Another worker pins the mint to vault 2 between our get() and assign().
+    mv.assign = async (mint, vault) => {
+      if (!raced) {
+        raced = true;
+        await real(mint, v2);
+      }
+      return real(mint, vault);
+    };
+    t.add();
+    await t.relayer.tick();
+    t.clock.t += 5_000;
+    await t.relayer.tick();
+    expect(t.ex.prepared.map((p) => p.vault)).toEqual([v2]);
+  });
+});
+

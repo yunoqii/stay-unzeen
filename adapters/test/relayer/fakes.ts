@@ -75,17 +75,16 @@ export class FakeExecutor implements JobExecutor {
   constructor(private readonly chain: FakeChain) {}
 
   vaultRequest(spec: JobSpec) {
-    if (spec.kind === "withdraw") {
-      return { minSol: 1n, mint: spec.mint, minTokens: spec.amount, avoid: spec.avoidVaults };
-    }
-    return spec.kind === "buy" ? { minSol: spec.lamportsIn } : { minSol: 1n, mint: spec.mint, minTokens: spec.amount };
+    if (spec.kind === "withdraw" || spec.kind === "sell") return { minSol: 1n, mint: spec.mint, minTokens: spec.amount };
+    return { minSol: spec.lamportsIn };
   }
 
-  async prepare(_spec: JobSpec, vault: Signer): Promise<SignedTx> {
+  async prepare(spec: JobSpec, vault: Signer): Promise<SignedTx & { mint?: string }> {
     if (this.prepareError) throw this.prepareError;
     const signature = `sig${++this.n}`;
     this.prepared.push({ signature, vault: vault.publicKey.toBase58() });
-    return { signature, raw: new Uint8Array([1, 2, 3]), blockhash: "bh", lastValidBlockHeight: this.chain.height + 150 };
+    const tx = { signature, raw: new Uint8Array([1, 2, 3]), blockhash: "bh", lastValidBlockHeight: this.chain.height + 150 };
+    return spec.kind === "create" ? { ...tx, mint: `NewMint${this.n}` } : tx;
   }
 
   async submit(tx: SignedTx): Promise<void> {
@@ -136,6 +135,25 @@ export class FakeExecutor implements JobExecutor {
         networkFee: 5_000n,
         decimals: 6,
         blockTime: 1,
+      };
+    }
+    if (spec.kind === "create") {
+      return {
+        kind: "create",
+        signature: a.signature,
+        slot: 1,
+        vault: a.vault,
+        mint: `NewMint${a.signature.slice(3)}`,
+        creator: "Creator1111111111111111111111111111111111111",
+        tokenAmount: 1_000n,
+        solAmount: 50_000n,
+        networkFee: 5_000n,
+        decimals: 6,
+        blockTime: 1,
+        name: spec.meta.name,
+        symbol: spec.meta.symbol,
+        imageUrl: null,
+        market: { priceSol: "0.00000003", marketCapSol: "30", status: "curve" },
       };
     }
     return {

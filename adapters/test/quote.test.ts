@@ -146,4 +146,22 @@ describe("tradeLamports", () => {
       987_500n,
     );
   });
+
+  // Real devnet TradeEvents (pump v3, fee 95 bps incl. 10 % buyback slice, creator 30 bps),
+  // checked against the vault's lamport delta + network fee of the same transactions.
+  it("buybackFee is part of fee (devnet sell_v3 / buy_exact_quote_in_v3 match balance deltas)", () => {
+    const sell = { isBuy: false, solAmount: bn(4_961_187), fee: bn(47_132), creatorFee: bn(14_884), buybackFee: bn(4_713), cashback: bn(0) };
+    expect(tradeLamports(sell)).toBe(4_899_171n); // vault delta + fee on chain
+    const sell2 = { isBuy: false, solAmount: bn(9_968_630), fee: bn(94_702), creatorFee: bn(29_906), buybackFee: bn(9_470), cashback: bn(0) };
+    expect(tradeLamports(sell2)).toBe(9_844_022n);
+    const buy = { isBuy: true, solAmount: bn(9_876_542), fee: bn(93_828), creatorFee: bn(29_630), buybackFee: bn(9_382), cashback: bn(0) };
+    expect(tradeLamports(buy)).toBe(10_000_000n); // exactly the spendable quote of buy_exact_quote_in
+  });
+
+  it("cashback is charged like a fee (leaves the vault in the trade), never negative on sells", () => {
+    const base = { solAmount: bn(1_000_000), fee: bn(9_500), creatorFee: bn(0), cashback: bn(5_000) };
+    expect(tradeLamports({ ...base, isBuy: true })).toBe(1_014_500n);
+    expect(tradeLamports({ ...base, isBuy: false })).toBe(985_500n);
+    expect(tradeLamports({ isBuy: false, solAmount: bn(10), fee: bn(9), creatorFee: bn(5), cashback: null })).toBe(0n);
+  });
 });

@@ -9,6 +9,15 @@ import { seededRng } from "../../src/relayer/random";
 import { LeaseLostError } from "../../src/relayer/types";
 import { VaultPool } from "../../src/relayer/vaults";
 import { FakeChain, FakeClock, FakeExecutor, FakeInventory, MINT, vaults } from "./fakes";
+import { MINT_VAULTS_TEST_SQL, PgMintVaults } from "../../src/relayer/mint-vaults";
+import {
+  JobsVaultUsage,
+  PROPOSED_RELAYER_STATE_SQL,
+  PgAdvisoryVaultLock,
+  PgCreatorIndexCounter,
+  PgVaultUsage,
+  vaultLockKey,
+} from "../../src/relayer/postgres-vaults";
 
 const ROW: JobRow = {
   id: "1",
@@ -44,11 +53,15 @@ describe("rowToSpec", () => {
     const dest = Keypair.generate().publicKey.toBase58();
     expect(
       rowToSpec({ ...ROW, op: "transfer", venue: null, token_amount: "9", dest, gas_lamports: "2000000" }, "devnet"),
-    ).toEqual({ kind: "withdraw", mint: MINT, to: dest, amount: 9n, avoidVaults: [], gasLamports: 2_000_000n });
+    ).toEqual({ kind: "withdraw", mint: MINT, to: dest, amount: 9n, gasLamports: 2_000_000n });
+    expect(
+      rowToSpec({ ...ROW, op: "create", mint: null, meta: { name: "Unzeen", symbol: "UNZ", image: "data:image/png;base64,AA==" }, lamports_in: "5", min_out: "7" }, "devnet"),
+    ).toEqual({ kind: "create", venue: "pumpfun", meta: { name: "Unzeen", symbol: "UNZ", image: "data:image/png;base64,AA==" }, lamportsIn: 5n, minOut: 7n });
   });
   it("rejects other networks, unsupported ops and missing fields", () => {
     expect(() => rowToSpec(ROW, "mainnet-beta")).toThrow(/devnet/);
-    expect(() => rowToSpec({ ...ROW, op: "create" }, "devnet")).toThrow(/not supported/);
+    expect(() => rowToSpec({ ...ROW, op: "claim" }, "devnet")).toThrow(/not supported/);
+    expect(() => rowToSpec({ ...ROW, op: "create", meta: { symbol: "X" } }, "devnet")).toThrow(/meta/);
     expect(() => rowToSpec({ ...ROW, lamports_in: null }, "devnet")).toThrow(/lamports_in/);
   });
   it("error messages lose addresses", () => {
@@ -105,7 +118,7 @@ describe.skipIf(!DB)("PostgresJobQueue (live Postgres, temp schema)", () => {
 
   it("claims due jobs of its network/ops only, signature before send, confirmed + feed in one tx", async () => {
     await insert({ ...buyJob, network: "mainnet-beta" });
-    await insert({ op: "create", venue: "pumpfun", lamports_in: 0, min_out: 0, network: "devnet", meta: {} });
+    await insert({ op: "create", venue: "pumpfun", lamports_in: 0, min_out: 0, network: "mainnet-beta", meta: { name: "a", symbol: "b" } });
     await insert({ ...buyJob, not_before: new Date(Date.now() + 3_600_000) });
     await pool.query(`INSERT INTO tokens (mint, venue, symbol, name, decimals) VALUES ($1, 'pumpfun', 'UNZT', 'Unzeen', 6)`, [MINT]);
     const id = await insert(buyJob);
@@ -160,19 +173,6 @@ describe.skipIf(!DB)("PostgresJobQueue (live Postgres, temp schema)", () => {
     expect(await row(id)).toMatchObject({ status: "failed", error_code: "slippage", attempts: 2 });
   });
 
-  it("transfer avoids vaults of recent buys of the same mint", async () => {
-    await pool.query(`DELETE FROM relayer_jobs`);
-    await pool.query(
-      `INSERT INTO relayer_jobs (op, venue, mint, lamports_in, min_out, network, status, signature, vault)
-       VALUES ('buy', 'pumpfun', $1, 1, 1, 'devnet', 'confirmed', 'sigB', 'buyVault')`,
-      [MINT],
-    );
-    const dest = Keypair.generate().publicKey.toBase58();
-    await insert({ op: "transfer", mint: MINT, token_amount: 10, dest, gas_lamports: 2_000_000, network: "devnet" });
-    const c = (await claim())!;
-    expect(c.spec).toMatchObject({ kind: "withdraw", to: dest, avoidVaults: ["buyVault"], gasLamports: 2_000_000n });
-  });
-
   it("drives the engine end to end (transport error after send -> exactly one tx)", async () => {
     await pool.query(`DELETE FROM relayer_jobs`);
     await pool.query(`DELETE FROM trades`);
@@ -195,5 +195,149 @@ describe.skipIf(!DB)("PostgresJobQueue (live Postgres, temp schema)", () => {
     expect(ex.submitted).toEqual(["sig1"]);
     expect(await row(id)).toMatchObject({ status: "confirmed", signature: "sig1", out_token_amount: "123" });
     expect((await pool.query(`SELECT count(*)::int AS n FROM trades`)).rows[0].n).toBe(1);
+  });
+
+  it("D7: an in-flight row that cannot be parsed is never failed without proof it expired", async () => {
+    await pool.query(`DELETE FROM relayer_jobs`);
+    // A 'sent' transfer (signature recorded) whose lease ran out, now unparsable (dest lost).
+    const id = await insert({
+      op: "transfer", mint: MINT, token_amount: 10, dest: null, network: "devnet", status: "sent",
+      signature: "sigD7", last_valid_block_height: 900, vault: "v", claimed_by: "old", lease_until: new Date(Date.now() - 1_000),
+    });
+    expect(await claim()).toBeNull();
+    expect(await row(id)).toMatchObject({ status: "sent", error_code: null }); // lease extended, not failed
+
+    // With a probe: landed / pending -> still not failed; expired -> failed is safe.
+    const states: string[] = ["pending", "expired"];
+    const probed = new PostgresJobQueue({ pool, network: "devnet", probe: { state: async () => ({ state: states.shift()! }) } });
+    const reclaim = () => probed.claim({ workerId: "w2", now: Date.now(), leaseMs: 60_000 });
+    await pool.query(`UPDATE relayer_jobs SET lease_until = now() - interval '1 second' WHERE id = $1`, [id]);
+    expect(await reclaim()).toBeNull();
+    expect((await row(id)).status).toBe("sent");
+    await pool.query(`UPDATE relayer_jobs SET lease_until = now() - interval '1 second' WHERE id = $1`, [id]);
+    expect(await reclaim()).toBeNull();
+    expect(await row(id)).toMatchObject({ status: "failed", error_code: "bad_request" });
+  });
+
+  it("D7: a lost result report leaves the job in flight (engine run loop survives, no 'failed')", async () => {
+    await pool.query(`DELETE FROM relayer_jobs`);
+    const id = await insert({ ...buyJob, dest: null });
+    const chain = new FakeChain();
+    const clock = new FakeClock(Date.now(), chain);
+    const inv = new FakeInventory();
+    const ex = new FakeExecutor(chain);
+    let broken = true;
+    const flaky = Object.create(q) as PostgresJobQueue;
+    flaky.reportResult = async (j, r) => {
+      if (broken && r.status === "executed") throw new Error("connection terminated");
+      return q.reportResult(j, r);
+    };
+    const relayer = new Relayer({ queue: flaky, pool: new VaultPool(vaults(1, inv), inv, seededRng(2)), executors: { trade: { pumpfun: ex }, withdraw: ex }, probe: chain, clock, rng: seededRng(2), leaseMs: 1 });
+    const ac = new AbortController();
+    const errors: unknown[] = [];
+    clock.sleep = async () => { ac.abort(); };
+    await relayer.run(ac.signal, 10, (e) => errors.push(e));
+    expect(errors).toHaveLength(1);
+    expect(await row(id)).toMatchObject({ status: "sent", signature: "sig1" });
+    // Next claim (lease ran out) resolves the recorded signature on chain: no second tx.
+    broken = false;
+    await new Promise((r) => setTimeout(r, 5));
+    expect(await relayer.tick()).toBe(true);
+    expect(ex.submitted).toEqual(["sig1"]);
+    expect(await row(id)).toMatchObject({ status: "confirmed", signature: "sig1" });
+  });
+
+  it("create: out_mint + first buy, tokens row and 'create' + 'buy' feed events in one transaction", async () => {
+    await pool.query(`DELETE FROM relayer_jobs`);
+    await pool.query(`DELETE FROM trades`);
+    const id = await insert({ op: "create", venue: "pumpfun", lamports_in: 50_000, min_out: 1, network: "devnet", meta: { name: "Unzeen", symbol: "UNZ" } });
+    const c = (await claim())!;
+    expect(c.spec).toMatchObject({ kind: "create", meta: { name: "Unzeen", symbol: "UNZ" }, lamportsIn: 50_000n });
+    await q.reportSent(c, { signature: "sigC", lastValidBlockHeight: 1, vault: "vC", sentAt: Date.now() });
+    const newMint = Keypair.generate().publicKey.toBase58();
+    await q.reportResult(c, {
+      status: "executed",
+      execution: {
+        kind: "create", signature: "sigC", slot: 9, vault: "vC", mint: newMint, creator: "cr", tokenAmount: 777n, solAmount: 50_000n,
+        networkFee: 5_000n, decimals: 6, blockTime: 1_760_000_000, name: "Unzeen", symbol: "UNZ", imageUrl: "https://m.example/a.jpg",
+        market: { priceSol: "0.00000003", marketCapSol: "30.1", status: "curve" },
+      },
+    });
+    const r = (await pool.query(`SELECT status, out_mint, out_token_amount, out_lamports FROM relayer_jobs WHERE id = $1`, [id])).rows[0];
+    expect(r).toEqual({ status: "confirmed", out_mint: newMint, out_token_amount: "777", out_lamports: "50000" });
+    const tok = (await pool.query(`SELECT symbol, name, image, decimals, market_cap_sol::text AS m FROM tokens WHERE mint = $1`, [newMint])).rows[0];
+    expect(tok).toEqual({ symbol: "UNZ", name: "Unzeen", image: "https://m.example/a.jpg", decimals: 6, m: "30.1" });
+    const t = (await pool.query(`SELECT kind, token_amount, sol_amount, signature FROM trades WHERE mint = $1 ORDER BY id`, [newMint])).rows;
+    expect(t).toEqual([
+      { kind: "create", token_amount: "0", sol_amount: "0", signature: "sigC" },
+      { kind: "buy", token_amount: "777", sol_amount: "50000", signature: "sigC" },
+    ]);
+  });
+
+  it("advisory vault lock: exclusive across connections, released on release() and on disconnect", async () => {
+    const lockPool = new pg.Pool({ connectionString: DB, max: 4 });
+    const otherPool = new pg.Pool({ connectionString: DB, max: 4 });
+    otherPool.on("error", () => undefined);
+    const held: { release(): Promise<void> }[] = [];
+    try {
+      const a = new PgAdvisoryVaultLock(lockPool, "devnet");
+      const b = new PgAdvisoryVaultLock(otherPool, "devnet");
+      const vault = `vault-${schema}`;
+      const l1 = (await a.tryAcquire(vault))!;
+      expect(l1).not.toBeNull();
+      expect(await b.tryAcquire(vault)).toBeNull();
+      held.push((await b.tryAcquire(`${vault}-other`))!); // other vaults independent
+      held.push((await new PgAdvisoryVaultLock(otherPool, "mainnet-beta").tryAcquire(vault))!); // per network
+      expect(held.every(Boolean)).toBe(true);
+      await l1.release();
+      const l2 = (await b.tryAcquire(vault))!;
+      expect(l2).not.toBeNull();
+      // Crash of the holder: its session ends (backend killed), the lock is gone.
+      await admin.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_locks
+          WHERE locktype = 'advisory' AND classid = $1::oid AND objid = $2::oid AND granted`,
+        [0x554e5a56, vaultLockKey("devnet", vault) >>> 0],
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      const l3 = await a.tryAcquire(vault);
+      expect(l3).not.toBeNull();
+      held.push(l3!, l2); // l2's connection is dead: release destroys it, no throw
+    } finally {
+      for (const h of held) await h.release();
+      await lockPool.end();
+      await otherPool.end();
+    }
+  });
+
+  it("vault usage derived from relayer_jobs (no extra table) + local touches", async () => {
+    await pool.query(`DELETE FROM relayer_jobs`);
+    await insert({ ...buyJob, vault: "vu1", claimed_at: new Date(1_700_000_000_000), status: "confirmed", signature: "s1" });
+    await insert({ ...buyJob, vault: "vu1", claimed_at: new Date(1_700_000_100_000), status: "confirmed", signature: "s2" });
+    const u = new JobsVaultUsage(pool, "devnet");
+    await u.touch("vu2", 5);
+    expect(await u.lastUsed(["vu1", "vu2", "vu3"])).toEqual(new Map([["vu1", 1_700_000_100_000], ["vu2", 5]]));
+  });
+
+  it("proposed tables (temp schema): mint pins, vault usage, creator counter are atomic", async () => {
+    await pool.query(PROPOSED_RELAYER_STATE_SQL + MINT_VAULTS_TEST_SQL);
+    const pins = new PgMintVaults(pool, "devnet");
+    const winners = await Promise.all(["va", "vb", "vc", "vd"].map((v) => pins.assign("M1", v)));
+    expect(new Set(winners).size).toBe(1);
+    expect(await pins.get("M1")).toBe(winners[0]);
+    expect(await new PgMintVaults(pool, "mainnet-beta").get("M1")).toBeNull();
+    await pins.assign("M2", "vb");
+    await pins.reassign("M1", "vb");
+    expect(await pins.load()).toEqual(new Map([["vb", 2]]));
+
+    const usage = new PgVaultUsage(pool, "devnet");
+    await usage.touch("vx", 2_000);
+    await usage.touch("vx", 1_000); // never goes back
+    expect(await usage.lastUsed(["vx", "vy"])).toEqual(new Map([["vx", 2_000]]));
+
+    const counter = new PgCreatorIndexCounter(pool, "devnet", 5); // file counter was at 5
+    const got = await Promise.all(Array.from({ length: 10 }, () => counter.next()));
+    expect([...got].sort((x, y) => x - y)).toEqual([5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(await new PgCreatorIndexCounter(pool, "devnet", 0).next()).toBe(15);
+    expect(await new PgCreatorIndexCounter(pool, "mainnet-beta").next()).toBe(0);
   });
 });

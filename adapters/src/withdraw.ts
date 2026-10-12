@@ -72,9 +72,14 @@ export class TokenWithdrawer {
     to: string;
     amount: bigint;
     gasDropLamports: bigint;
+    /**
+     * Pool-internal move between vaults (consolidation tooling): no gas drop,
+     * recipient is a vault. Never used for user withdrawals.
+     */
+    internal?: boolean;
   }): Promise<PreparedWithdraw> {
     if (p.amount <= 0n) throw new AdapterError("bad_request", "amount must be > 0");
-    if (p.gasDropLamports < MIN_GAS_DROP) {
+    if (p.internal ? p.gasDropLamports !== 0n : p.gasDropLamports < MIN_GAS_DROP) {
       throw new AdapterError("bad_request", `gas drop must be >= ${MIN_GAS_DROP} lamports`);
     }
     const to = parseRecipient(p.to);
@@ -107,7 +112,9 @@ export class TokenWithdrawer {
     }
 
     const ixs = [
-      SystemProgram.transfer({ fromPubkey: p.vault.publicKey, toPubkey: to, lamports: p.gasDropLamports }),
+      ...(p.gasDropLamports > 0n
+        ? [SystemProgram.transfer({ fromPubkey: p.vault.publicKey, toPubkey: to, lamports: p.gasDropLamports })]
+        : []),
       createAssociatedTokenAccountIdempotentInstruction(p.vault.publicKey, toAta, to, mint, tokenProgram),
       createTransferCheckedInstruction(fromAta, mint, toAta, p.vault.publicKey, p.amount, decimals, [], tokenProgram),
     ];

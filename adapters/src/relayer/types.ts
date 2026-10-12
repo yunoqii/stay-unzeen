@@ -29,6 +29,20 @@ export interface SellJobSpec {
   minLamports: bigint;
 }
 
+export interface CreateJobSpec {
+  kind: "create";
+  venue: VenueId;
+  /**
+   * From core (`relayer_jobs.meta`). `image` is the user's data URL; it is
+   * re-encoded without metadata and published by the server before signing.
+   */
+  meta: { name: string; symbol: string; image?: string | null };
+  /** First buy, lamports (venue fees included); 0 = create only. */
+  lamportsIn: bigint;
+  /** Minimum tokens of the first buy. */
+  minOut: bigint;
+}
+
 export interface WithdrawJobSpec {
   kind: "withdraw";
   mint: string;
@@ -36,16 +50,11 @@ export interface WithdrawJobSpec {
   to: string;
   /** Token base units for this part. */
   amount: bigint;
-  /**
-   * Vaults that must NOT send this withdrawal: at least the vault(s) that
-   * bought these tokens for the user (API.md: "с другого vault, чем покупка").
-   */
-  avoidVaults: string[];
   /** SOL drop for the recipient's fees (core: `gas_lamports`); random in the default range if omitted. */
   gasLamports?: bigint;
 }
 
-export type JobSpec = BuyJobSpec | SellJobSpec | WithdrawJobSpec;
+export type JobSpec = BuyJobSpec | SellJobSpec | CreateJobSpec | WithdrawJobSpec;
 export type JobKind = JobSpec["kind"];
 
 /**
@@ -124,7 +133,30 @@ export interface WithdrawExecution {
   blockTime: number | null;
 }
 
-export type Execution = TradeExecution | WithdrawExecution;
+export interface CreateExecution {
+  kind: "create";
+  signature: string;
+  slot: number;
+  vault: string;
+  /** The new mint (`out_mint`). */
+  mint: string;
+  /** Fresh creator address recorded on chain (public). */
+  creator: string;
+  /** First buy: tokens received / lamports paid (fees included), 0/0 without one. */
+  tokenAmount: bigint;
+  solAmount: bigint;
+  networkFee: bigint;
+  decimals: number;
+  blockTime: number | null;
+  /** Public token row (`tokens`). */
+  name: string;
+  symbol: string;
+  /** Sanitized image URL served by us / IPFS; null without image. */
+  imageUrl: string | null;
+  market: { priceSol: string; marketCapSol: string; status: "curve" | "graduated" } | null;
+}
+
+export type Execution = TradeExecution | CreateExecution | WithdrawExecution;
 
 export type JobResult =
   /** Done on chain; amounts are the executed ones. */

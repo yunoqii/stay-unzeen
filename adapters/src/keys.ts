@@ -32,8 +32,19 @@ export function readKeypairFile(file: string): Keypair {
   return Keypair.fromSecretKey(Uint8Array.from(raw as number[]));
 }
 
+/**
+ * Legacy plaintext helpers must never run on an encrypted dir: they would
+ * create NEW plaintext keys next to the encrypted ones (lost funds, split pool).
+ */
+function refuseEncrypted(keysDir: string): void {
+  if (fs.existsSync(keysDir) && fs.readdirSync(keysDir).some((f) => f.endsWith(".age"))) {
+    throw new Error("keys dir is age-encrypted: use KeyStore (src/keystore.ts)");
+  }
+}
+
 /** Creates vault-0..vault-(count-1) that do not exist yet. Returns all vaults. */
 export function ensureVaults(keysDir: string, count: number): Keypair[] {
+  refuseEncrypted(keysDir);
   ensureDir(keysDir);
   for (let i = 0; i < count; i++) {
     const file = path.join(keysDir, `vault-${i}.json`);
@@ -47,6 +58,7 @@ export function ensureVaults(keysDir: string, count: number): Keypair[] {
 /** Loads all vault-<n>.json, ordered by n. */
 export function loadVaults(keysDir: string): Keypair[] {
   if (!fs.existsSync(keysDir)) return [];
+  refuseEncrypted(keysDir);
   return fs
     .readdirSync(keysDir)
     .map((f) => ({ f, m: VAULT_RE.exec(f) }))
@@ -100,20 +112,50 @@ export interface CreatorIndexCounter {
   next(): Promise<number>;
 }
 
-/** Single-process file counter (`creator-counter.json`, 0600, atomic rename). */
+/**
+ * File counter (`creator-counter.json`, 0600, atomic rename) guarded by an
+ * exclusive lock file, so two relayer processes on one host never get the
+ * same index (review-day3 L-10). Several hosts: use the Postgres counter.
+ */
 export class FileCreatorIndexCounter implements CreatorIndexCounter {
-  constructor(private readonly file: string) {}
+  constructor(
+    private readonly file: string,
+    private readonly lockTimeoutMs = 10_000,
+  ) {}
+
+  /** Current next value without reserving it (migration to Postgres). */
+  peek(): number {
+    if (!fs.existsSync(this.file)) return 0;
+    const parsed = JSON.parse(fs.readFileSync(this.file, "utf8")) as { next?: unknown };
+    return typeof parsed.next === "number" && Number.isInteger(parsed.next) && parsed.next >= 0 ? parsed.next : 0;
+  }
 
   async next(): Promise<number> {
-    let next = 0;
-    if (fs.existsSync(this.file)) {
-      const parsed = JSON.parse(fs.readFileSync(this.file, "utf8")) as { next?: unknown };
-      if (typeof parsed.next === "number" && Number.isInteger(parsed.next) && parsed.next >= 0) next = parsed.next;
+    const lock = `${this.file}.lock`;
+    const deadline = Date.now() + this.lockTimeoutMs;
+    let fd: number | null = null;
+    while (fd === null) {
+      try {
+        fd = fs.openSync(lock, "wx", 0o600);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        // Stale lock of a crashed process (older than the timeout): take it over.
+        const age = Date.now() - (fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
+        if (age > this.lockTimeoutMs) fs.rmSync(lock, { force: true });
+        else if (Date.now() > deadline) throw new Error("creator counter is locked by another process");
+        else await new Promise((r) => setTimeout(r, 20));
+      }
     }
-    const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ next: next + 1 }), { mode: 0o600 });
-    fs.renameSync(tmp, this.file);
-    return next;
+    try {
+      const next = this.peek();
+      const tmp = `${this.file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ next: next + 1 }), { mode: 0o600 });
+      fs.renameSync(tmp, this.file);
+      return next;
+    } finally {
+      fs.closeSync(fd);
+      fs.rmSync(lock, { force: true });
+    }
   }
 }
 
@@ -130,18 +172,29 @@ export class MemoryCreatorIndexCounter implements CreatorIndexCounter {
  * (pump.fun `creator`), so it must never be a user's wallet and never be
  * reused between launches. Fees accrue to it; the key is re-derivable from
  * the master seed + index to collect them later.
+ *
+ * `new CreatorKeyring(seed, counter)` with a seed from the (encrypted)
+ * KeyStore; `new CreatorKeyring(keysDir)` = legacy plaintext dir (tests, dev).
  */
 export class CreatorKeyring {
   private readonly seed: Buffer;
   private readonly counter: CreatorIndexCounter;
 
-  constructor(keysDir: string, counter?: CreatorIndexCounter) {
-    ensureDir(keysDir);
-    const seedFile = path.join(keysDir, "creator-master.hex");
-    if (!fs.existsSync(seedFile)) writeSecret(seedFile, randomBytes(64).toString("hex"));
-    this.seed = Buffer.from(fs.readFileSync(seedFile, "utf8").trim(), "hex");
-    if (this.seed.length !== 64) throw new Error("creator-master.hex: expected 64 bytes hex");
-    this.counter = counter ?? new FileCreatorIndexCounter(path.join(keysDir, "creator-counter.json"));
+  constructor(keysDirOrSeed: string | Uint8Array, counter?: CreatorIndexCounter) {
+    if (typeof keysDirOrSeed === "string") {
+      const keysDir = keysDirOrSeed;
+      refuseEncrypted(keysDir);
+      ensureDir(keysDir);
+      const seedFile = path.join(keysDir, "creator-master.hex");
+      if (!fs.existsSync(seedFile)) writeSecret(seedFile, randomBytes(64).toString("hex"));
+      this.seed = Buffer.from(fs.readFileSync(seedFile, "utf8").trim(), "hex");
+      this.counter = counter ?? new FileCreatorIndexCounter(path.join(keysDir, "creator-counter.json"));
+    } else {
+      if (!counter) throw new Error("CreatorKeyring: an index counter is required with an explicit seed");
+      this.seed = Buffer.from(keysDirOrSeed);
+      this.counter = counter;
+    }
+    if (this.seed.length !== 64) throw new Error("creator master seed: expected 64 bytes");
   }
 
   /** Reserves the next unused index (persisted before it is returned). */

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { ApiErrorCode } from "../errors";
 import type { VenueId } from "../types";
-import { LeaseLostError, type ClaimedJob, type JobQueue, type JobResult, type JobSpec, type SentAttempt } from "./types";
+import { LeaseLostError, type ClaimedJob, type CreateExecution, type JobQueue, type JobResult, type JobSpec, type SentAttempt } from "./types";
 
 /**
  * JobQueue over `relayer_jobs` (core/migrations/0002_relayer.sql), protocol of
@@ -13,7 +13,7 @@ import { LeaseLostError, type ClaimedJob, type JobQueue, type JobResult, type Jo
  * Mapping to the generic queue:
  * - claim: in-flight rows whose lease ran out (`claimed`/`sent`) are taken
  *   first (restart recovery), then `queued` rows with `not_before <= now()`.
- *   Only ops this relayer executes (buy/sell/transfer) and only its network.
+ *   Only ops this relayer executes (buy/sell/create/transfer) and only its network.
  * - lease token: `claimed_by` = "<worker>:<random>" per claim.
  * - a `transfer` row is the generic `withdraw` spec.
  * - retry: the relayer may not touch `not_before`, so the backoff is the lease:
@@ -27,14 +27,13 @@ export interface PostgresJobQueueOptions {
   pool: Pool;
   network: SolanaNetwork;
   /**
-   * The relayer cannot see which vault bought for the user (no action_id).
-   * Until core passes it in the job, transfers avoid the vaults of buys of the
-   * same mint confirmed within this window (the timing-correlated ones).
+   * Chain access for D7: a malformed in-flight row (signature recorded) is
+   * only failed once its transaction provably expired without landing.
    */
-  avoidBuyVaultsWindowMs?: number;
+  probe?: { state(signature: string, lastValidBlockHeight: number): Promise<{ state: string }> };
 }
 
-const OPS = ["buy", "sell", "transfer"] as const;
+const OPS = ["buy", "sell", "create", "transfer"] as const;
 
 /** Row of relayer_jobs as returned by `claim` (pg returns BIGINT as string). */
 export interface JobRow {
@@ -46,6 +45,7 @@ export interface JobRow {
   lamports_in: string | null;
   token_amount: string | null;
   min_out: string | null;
+  meta?: unknown;
   dest: string | null;
   gas_lamports: string | null;
   network: string;
@@ -61,13 +61,13 @@ export interface JobRow {
 export class PostgresJobQueue implements JobQueue {
   private readonly pool: Pool;
   private readonly network: SolanaNetwork;
-  private readonly avoidWindowMs: number;
+  private readonly probe: PostgresJobQueueOptions["probe"];
   private leaseMs = 10 * 60_000;
 
   constructor(o: PostgresJobQueueOptions) {
     this.pool = o.pool;
     this.network = o.network;
-    this.avoidWindowMs = o.avoidBuyVaultsWindowMs ?? 30 * 60_000;
+    this.probe = o.probe;
   }
 
   async claim(opts: { workerId: string; now: number; leaseMs: number }): Promise<ClaimedJob | null> {
@@ -91,7 +91,7 @@ export class PostgresJobQueue implements JobQueue {
          FROM c
         WHERE j.id = c.id
        RETURNING j.id, j.part, j.op, j.venue, j.mint, j.lamports_in, j.token_amount, j.min_out,
-                 j.dest, j.gas_lamports, j.network, j.attempts, j.status, j.signature,
+                 j.meta, j.dest, j.gas_lamports, j.network, j.attempts, j.status, j.signature,
                  j.last_valid_block_height, j.vault,
                  (extract(epoch FROM j.updated_at) * 1000)::bigint AS sent_at_ms,
                  (extract(epoch FROM j.not_before) * 1000)::bigint AS not_before_ms`,
@@ -99,12 +99,17 @@ export class PostgresJobQueue implements JobQueue {
     );
     const row = res.rows[0];
     if (!row) return null;
+    const inFlight = row.signature !== null && row.last_valid_block_height !== null;
     let spec: JobSpec;
     try {
       spec = rowToSpec(row, this.network);
-      if (spec.kind === "withdraw") spec.avoidVaults = await this.recentBuyVaults(spec.mint);
     } catch (e) {
-      // Malformed job (core bug): fail it instead of looping on it.
+      // Malformed job (core bug). D7: a row whose tx may be on chain is never
+      // failed blindly (the settler would release the hold while the tokens left).
+      if (inFlight && !(await this.provablyExpired(row))) {
+        await this.extendLease({ id: row.id, leaseId }, 60_000).catch(() => undefined);
+        return null;
+      }
       await this.reportResult({ id: row.id, leaseId }, {
         status: "failed",
         code: "bad_request",
@@ -179,7 +184,8 @@ export class PostgresJobQueue implements JobQueue {
         [job.id, e.slot, e.mint, e.tokenAmount.toString(), outLamports.toString(), e.networkFee.toString(), e.signature, job.leaseId],
       );
       if (res.rowCount !== 1) throw new LeaseLostError(job.id);
-      if (e.kind !== "withdraw") await this.writeFeed(client, job, e);
+      if (e.kind === "create") await this.writeCreateFeed(client, job, e);
+      else if (e.kind !== "withdraw") await this.writeFeed(client, job, e);
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -189,11 +195,33 @@ export class PostgresJobQueue implements JobQueue {
     }
   }
 
+  /** New token row + 'create' event (+ 'buy' of the first buy, same signature). Public data only. */
+  private async writeCreateFeed(client: PoolClient, job: { id: string }, e: CreateExecution): Promise<void> {
+    const venue = await client.query<{ venue: string }>(`SELECT venue FROM relayer_jobs WHERE id = $1`, [job.id]);
+    const v = venue.rows[0]?.venue ?? "pumpfun";
+    await client.query(
+      `INSERT INTO tokens (mint, venue, symbol, name, image, decimals, status, price_sol, market_cap_sol)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric)
+       ON CONFLICT (mint) DO NOTHING`,
+      [e.mint, v, e.symbol, e.name, e.imageUrl, e.decimals, e.market?.status ?? "curve", e.market?.priceSol ?? "0", e.market?.marketCapSol ?? "0"],
+    );
+    const ts = e.blockTime;
+    const insert = (kind: "create" | "buy", tokens: bigint, sol: bigint) =>
+      client.query(
+        `INSERT INTO trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE(to_timestamp($10::double precision), now()))
+         ON CONFLICT (signature, kind, mint) DO NOTHING`,
+        [kind, v, e.mint, e.symbol, tokens.toString(), sol.toString(), e.decimals, e.signature, e.slot, ts],
+      );
+    await insert("create", 0n, 0n);
+    if (e.tokenAmount > 0n) await insert("buy", e.tokenAmount, e.solAmount);
+  }
+
   /** Public data only (already on Solana). Transfers never reach the feed. */
   private async writeFeed(
     client: PoolClient,
     job: { id: string },
-    e: Extract<JobResult, { status: "executed" }>["execution"] & { kind: "buy" | "sell" },
+    e: Extract<Extract<JobResult, { status: "executed" }>["execution"], { kind: "buy" | "sell" }>,
   ): Promise<void> {
     const venue = await client.query<{ venue: string }>(`SELECT venue FROM relayer_jobs WHERE id = $1`, [job.id]);
     const v = venue.rows[0]?.venue ?? "pumpfun";
@@ -213,14 +241,23 @@ export class PostgresJobQueue implements JobQueue {
     );
   }
 
-  private async recentBuyVaults(mint: string): Promise<string[]> {
-    const res = await this.pool.query<{ vault: string }>(
-      `SELECT DISTINCT vault FROM relayer_jobs
-        WHERE network = $1 AND op = 'buy' AND mint = $2 AND status = 'confirmed' AND vault IS NOT NULL
-          AND updated_at > now() - $3 * interval '1 millisecond'`,
-      [this.network, mint, this.avoidWindowMs],
+  private async extendLease(job: { id: string; leaseId: string }, ms: number): Promise<void> {
+    await this.pool.query(
+      `UPDATE relayer_jobs SET lease_until = now() + $2 * interval '1 millisecond', updated_at = now()
+        WHERE id = $1 AND status IN ('claimed', 'sent') AND claimed_by = $3 AND settled_at IS NULL`,
+      [job.id, ms, job.leaseId],
     );
-    return res.rows.map((r) => r.vault);
+  }
+
+  /** True only when the recorded tx can no longer land (needs a probe; without one: false). */
+  private async provablyExpired(row: JobRow): Promise<boolean> {
+    if (!this.probe || !row.signature || !row.last_valid_block_height) return false;
+    try {
+      const st = await this.probe.state(row.signature, Number(row.last_valid_block_height));
+      return st.state === "expired";
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -231,14 +268,31 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
     if (v === null || !/^\d+$/.test(v)) throw new Error(`job ${row.id}: ${name} missing`);
     return BigInt(v);
   };
-  const mint = row.mint;
-  if (!mint) throw new Error(`job ${row.id}: mint missing`);
+  const needMint = (): string => {
+    if (!row.mint) throw new Error(`job ${row.id}: mint missing`);
+    return row.mint;
+  };
   switch (row.op) {
     case "buy":
-      return { kind: "buy", venue: venue(row), mint, lamportsIn: big(row.lamports_in, "lamports_in"), minOut: big(row.min_out, "min_out") };
+      return { kind: "buy", venue: venue(row), mint: needMint(), lamportsIn: big(row.lamports_in, "lamports_in"), minOut: big(row.min_out, "min_out") };
     case "sell":
-      return { kind: "sell", venue: venue(row), mint, amount: big(row.token_amount, "token_amount"), minLamports: big(row.min_out, "min_out") };
+      return { kind: "sell", venue: venue(row), mint: needMint(), amount: big(row.token_amount, "token_amount"), minLamports: big(row.min_out, "min_out") };
+    case "create": {
+      const m = row.meta as { name?: unknown; symbol?: unknown; image?: unknown } | null | undefined;
+      if (!m || typeof m !== "object" || typeof m.name !== "string" || typeof m.symbol !== "string") {
+        throw new Error(`job ${row.id}: meta.name / meta.symbol missing`);
+      }
+      if (m.image !== undefined && m.image !== null && typeof m.image !== "string") throw new Error(`job ${row.id}: bad meta.image`);
+      return {
+        kind: "create",
+        venue: venue(row),
+        meta: { name: m.name, symbol: m.symbol, ...(typeof m.image === "string" ? { image: m.image } : {}) },
+        lamportsIn: row.lamports_in === null ? 0n : big(row.lamports_in, "lamports_in"),
+        minOut: row.min_out === null ? 0n : big(row.min_out, "min_out"),
+      };
+    }
     case "transfer": {
+      const mint = needMint();
       if (!row.dest) throw new Error(`job ${row.id}: dest missing`);
       const gas = row.gas_lamports === null ? undefined : big(row.gas_lamports, "gas_lamports");
       return {
@@ -246,7 +300,6 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
         mint,
         to: row.dest,
         amount: big(row.token_amount, "token_amount"),
-        avoidVaults: [],
         ...(gas !== undefined && gas > 0n ? { gasLamports: gas } : {}),
       };
     }

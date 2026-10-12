@@ -34,7 +34,7 @@ import {
 } from "@solana/web3.js";
 import { LookupTables, staticAccounts } from "./alt";
 import { AdapterError, classifyError, type ProgramErrorInfo } from "./errors";
-import { extractTradeEvents, lamportDelta, tokenDelta } from "./events";
+import { extractCreateEvents, extractTradeEvents, lamportDelta, tokenDelta } from "./events";
 import type { CreatorKeyring } from "./keys";
 import { formatUnits, spotPriceSol, toBN, toBig } from "./math";
 import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SendFailure, type SignedTx } from "./tx";
@@ -95,6 +95,29 @@ export interface PreparedTrade extends SignedTx {
   vault: string;
   /** Venue quote at preparation time (tokens for buy, lamports for sell). */
   expectedOut: bigint;
+}
+
+/** A signed, not yet broadcast create (+ first buy). */
+export interface PreparedCreate extends SignedTx {
+  kind: "create";
+  /** New mint (its key signed this tx and is then discarded). */
+  mint: string;
+  vault: string;
+  /** Fresh creator address of this launch and its HD index (fees later). */
+  creator: string;
+  creatorIndex: number;
+  /** Tokens the first buy is quoted to get (0 without first buy). */
+  expectedOut: bigint;
+}
+
+/** Executed create, read from the landed transaction. */
+export interface CreateResult extends TxResult {
+  kind: "create";
+  creator: string;
+  name: string;
+  symbol: string;
+  uri: string;
+  tokenProgram: string;
 }
 
 interface CurveState extends MintInfo {
@@ -163,15 +186,29 @@ export class PumpFunAdapter implements LaunchpadAdapter {
   // -------------------------------------------------------------------------
 
   async create(meta: TokenMeta, initialBuyLamports: bigint, opts: CreateOptions = {}): Promise<TxResult> {
+    const p = await this.prepareCreate(meta, initialBuyLamports, 0n, opts);
+    const sent = await this.submit(p);
+    const r = await this.createResult(sent.signature, p.vault);
+    const fallback = emptyResult(this.id, "create", sent, { mint: new PublicKey(p.mint), tokenProgram: TOKEN_2022_PROGRAM_ID, decimals: 6 }, p.vault);
+    return { ...(r ?? fallback), creator: p.creator, creatorIndex: p.creatorIndex };
+  }
+
+  /**
+   * Pre-checks and signs create_v2 (+ first buy when `initialBuyLamports > 0`)
+   * with a FRESH creator (never a vault, never reused) and a new mint key.
+   * Sends nothing; the relayer records the signature first.
+   * `minOut`: minimum tokens of the first buy (slippage error otherwise).
+   */
+  async prepareCreate(
+    meta: TokenMeta,
+    initialBuyLamports: bigint,
+    minOut: bigint,
+    opts: CreateOptions = {},
+  ): Promise<PreparedCreate> {
     validateMeta(meta);
     if (initialBuyLamports < 0n) throw new AdapterError("bad_request", "initialBuyLamports must be >= 0");
+    if (minOut < 0n) throw new AdapterError("bad_request", "minOut must be >= 0");
     const vault = opts.vault ?? this.defaultVault;
-    const creatorIndex = opts.creatorIndex ?? (await this.creators.allocate());
-    const creator = this.creators.publicKey(creatorIndex);
-    if (this.vaultKeys.has(creator.toBase58())) {
-      // Should be impossible (different key material); never let a vault be a public creator.
-      throw new AdapterError("internal", "creator collides with a vault");
-    }
     const { global, feeConfig } = await this.loadParams();
     if (!global.createV2Enabled) throw new AdapterError("venue_unavailable", "pump.fun create_v2 is disabled");
 
@@ -180,22 +217,78 @@ export class PumpFunAdapter implements LaunchpadAdapter {
       initialBuyLamports + CREATE_RENT_HEADROOM + ACCUMULATOR_RENT_HEADROOM + ALT_RENT_HEADROOM,
     );
 
+    // Allocate only after the cheap checks: every allocated index is burnt (never reused).
+    const creatorIndex = opts.creatorIndex ?? (await this.creators.allocate());
+    const creator = this.creators.publicKey(creatorIndex);
+    if (this.vaultKeys.has(creator.toBase58())) {
+      // Should be impossible (different key material); never let a vault be a public creator.
+      throw new AdapterError("internal", "creator collides with a vault");
+    }
+
     const mintKp = Keypair.generate();
     const build = (mint: PublicKey, user: PublicKey, creatorPk: PublicKey) =>
       createIxs(global, feeConfig, meta, mint, user, creatorPk, initialBuyLamports);
-    const ixs = await build(mintKp.publicKey, vault.publicKey, creator);
+    const { ixs, tokens } = await build(mintKp.publicKey, vault.publicKey, creator);
+    if (tokens < minOut) throw new AdapterError("slippage", `first buy quote ${tokens} < minOut ${minOut}`);
     // create_v2 + buy is ~1476 bytes as legacy (> 1232): needs a v0 tx + lookup table.
-    const table = await this.lookupTable(vault, ixs, build, global);
+    const table = await this.lookupTable(vault, ixs, async (m, u, c) => (await build(m, u, c)).ixs, global);
+    const signed = await this.sign(ixs, vault, CU_CREATE, [mintKp], [table]);
+    return {
+      ...signed,
+      kind: "create",
+      mint: mintKp.publicKey.toBase58(),
+      vault: vault.publicKey.toBase58(),
+      creator: creator.toBase58(),
+      creatorIndex,
+      expectedOut: tokens,
+    };
+  }
 
-    const sent = await this.send(ixs, vault, [mintKp], CU_CREATE, [table]);
-    const res = await this.result("create", sent, vault.publicKey, {
-      mint: mintKp.publicKey,
-      tokenProgram: TOKEN_2022_PROGRAM_ID,
-      decimals: 6,
-    });
-    // Read decimals from chain rather than assuming pump's 6.
-    const mi = await this.loadMint(mintKp.publicKey).catch(() => null);
-    return { ...res, decimals: mi?.decimals ?? res.decimals, creator: creator.toBase58(), creatorIndex };
+  /**
+   * Executed create: mint and creator from the program's CreateEvent, first
+   * buy amounts from its TradeEvent (0/0 without a first buy). Null when the
+   * transaction (or its CreateEvent) cannot be read yet.
+   */
+  async createResult(signature: string, vault: string): Promise<CreateResult | null> {
+    const tx = await fetchTx(this.connection, signature, 10).catch(() => null);
+    if (!tx) return null;
+    const vaultPk = new PublicKey(vault);
+    const ce = extractCreateEvents(tx, PUMP_PROGRAM_ID).find((e) => e.user.equals(vaultPk));
+    if (!ce) return null;
+    const mint = ce.mint;
+    const tokenProgram = ce.tokenProgram.equals(PublicKey.default) ? TOKEN_2022_PROGRAM_ID : ce.tokenProgram;
+    const decimals = (await this.loadMint(mint).catch(() => null))?.decimals ?? 6;
+    const ev = extractTradeEvents(tx, PUMP_PROGRAM_ID).find((e) => e.mint.equals(mint) && e.user.equals(vaultPk));
+    let tokenAmount = 0n;
+    let solAmount = 0n;
+    if (ev) {
+      tokenAmount = BigInt(ev.tokenAmount.toString(10));
+      solAmount = tradeLamports(ev);
+    } else {
+      // No first buy, or the event did not decode: tokens from the vault's balance.
+      tokenAmount = tokenDelta(tx, vaultPk, mint);
+      if (tokenAmount > 0n) return null; // a buy happened but its amounts are unknown: never guess SOL
+    }
+    return {
+      venue: this.id,
+      kind: "create",
+      signature,
+      slot: tx.slot,
+      mint: mint.toBase58(),
+      vault,
+      creator: ce.creator.toBase58(),
+      name: ce.name,
+      symbol: ce.symbol,
+      uri: ce.uri,
+      tokenProgram: tokenProgram.toBase58(),
+      tokenAmount,
+      solAmount,
+      networkFee: BigInt(tx.meta?.fee ?? 0),
+      blockTime: tx.blockTime ?? null,
+      decimals,
+      amountsKnown: true,
+      fromEvent: ev !== undefined,
+    };
   }
 
   async buy(mint: string, lamportsIn: bigint, minOut: bigint, opts: TradeOptions = {}): Promise<TxResult> {
@@ -561,9 +654,9 @@ async function createIxs(
   user: PublicKey,
   creator: PublicKey,
   initialBuyLamports: bigint,
-): Promise<TransactionInstruction[]> {
+): Promise<{ ixs: TransactionInstruction[]; tokens: bigint }> {
   const common = { mint, name: meta.name, symbol: meta.symbol, uri: meta.uri, creator, user, mayhemMode: false };
-  if (initialBuyLamports === 0n) return [await PUMP_SDK.createV2Instruction(common)];
+  if (initialBuyLamports === 0n) return { ixs: [await PUMP_SDK.createV2Instruction(common)], tokens: 0n };
   const quoteAmount = toBN(initialBuyLamports);
   const amount = getBuyTokenAmountFromSolAmount({
     global,
@@ -574,7 +667,8 @@ async function createIxs(
     quoteMint: NATIVE_MINT,
   });
   // slippage 0: the first buy may cost at most exactly initialBuyLamports.
-  return PUMP_SDK.createV2AndBuyV2Instructions({ global, ...common, amount, quoteAmount, slippage: 0 });
+  const ixs = await PUMP_SDK.createV2AndBuyV2Instructions({ global, ...common, amount, quoteAmount, slippage: 0 });
+  return { ixs, tokens: toBig(amount) };
 }
 
 export function curveStatus(curve: BondingCurve): CurveStatus {
@@ -642,18 +736,34 @@ export function priceAndCap(curve: BondingCurve, decimals: number): { priceSol: 
 /**
  * Lamports of a trade from its TradeEvent: what the vault paid (buy) or got
  * (sell), venue fees included, rent and network fee excluded.
+ *
  * The event's `solAmount` is the curve leg; fees are on top for a buy and
- * deducted for a sell.
+ * deducted for a sell:
+ * - `fee` is the whole protocol fee. `buybackFee` is a SLICE of it (paid out
+ *   in the trade, the rest stays on the curve for a sweep), so it is NOT added
+ *   again. Verified on devnet: sell `sol - fee - creatorFee` equals the vault's
+ *   balance delta exactly with buybackFee = 10 % of fee.
+ * - `creatorFee` goes to the creator (or holder rewards; `holderRewards`
+ *   repeats the same amount and is not added).
+ * - `cashback` (legacy cashback coins, v2 trades only) leaves the vault into
+ *   its volume accumulator in the trade; it is claimable later, but it is not
+ *   part of what this trade paid / returned now, so it is charged like a fee.
+ *   Cashback coins are refused by `assertTradable`; this keeps the amount
+ *   right if one ever slips through.
  */
 export function tradeLamports(ev: {
   isBuy: boolean;
   solAmount: { toString(base?: number): string };
   fee: { toString(base?: number): string };
   creatorFee: { toString(base?: number): string };
+  cashback?: { toString(base?: number): string } | null;
 }): bigint {
-  const sol = BigInt(ev.solAmount.toString(10));
-  const fees = BigInt(ev.fee.toString(10)) + BigInt(ev.creatorFee.toString(10));
-  return ev.isBuy ? sol + fees : sol - fees;
+  const n = (x: { toString(base?: number): string } | null | undefined) => (x ? BigInt(x.toString(10)) : 0n);
+  const sol = n(ev.solAmount);
+  const fees = n(ev.fee) + n(ev.creatorFee) + n(ev.cashback);
+  if (ev.isBuy) return sol + fees;
+  // A sell never pays out less than zero (fees larger than the curve leg).
+  return sol > fees ? sol - fees : 0n;
 }
 
 const MAX_NAME = 32;

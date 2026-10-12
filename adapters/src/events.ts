@@ -1,5 +1,5 @@
 import bs58 from "bs58";
-import { PUMP_SDK, pumpIdl, type TradeEventBc } from "@pump-fun/pump-sdk";
+import { PUMP_SDK, pumpIdl, type CreateEventBc, type TradeEventBc } from "@pump-fun/pump-sdk";
 import type { PublicKey, TokenBalance, VersionedTransactionResponse } from "@solana/web3.js";
 
 /** Anchor `emit_cpi!` tag: sha256("anchor:event")[..8], little-endian. */
@@ -12,12 +12,14 @@ function eventDiscriminator(name: string): Buffer {
 }
 
 const TRADE_EVENT = eventDiscriminator("TradeEvent");
+const CREATE_EVENT = eventDiscriminator("CreateEvent");
 
 /**
- * Decodes pump `TradeEvent`s from a confirmed transaction: from self-CPI
- * event instructions (emit_cpi) and, as a fallback, from "Program data:" logs.
+ * Raw payloads of one pump event type from a confirmed transaction: from
+ * self-CPI event instructions (emit_cpi) and, as a fallback, from
+ * "Program data:" logs.
  */
-export function extractTradeEvents(tx: VersionedTransactionResponse, pumpProgramId: PublicKey): TradeEventBc[] {
+function eventPayloads(tx: VersionedTransactionResponse, pumpProgramId: PublicKey, disc: Buffer): Buffer[] {
   const payloads: Buffer[] = [];
   const meta = tx.meta;
   if (meta?.innerInstructions) {
@@ -29,7 +31,7 @@ export function extractTradeEvents(tx: VersionedTransactionResponse, pumpProgram
         const program = keys.get(ix.programIdIndex);
         if (!program?.equals(pumpProgramId)) continue;
         const data = Buffer.from(bs58.decode(ix.data));
-        if (data.length > 16 && data.subarray(0, 8).equals(EVENT_IX_TAG) && data.subarray(8, 16).equals(TRADE_EVENT)) {
+        if (data.length > 16 && data.subarray(0, 8).equals(EVENT_IX_TAG) && data.subarray(8, 16).equals(disc)) {
           payloads.push(data.subarray(16));
         }
       }
@@ -40,18 +42,32 @@ export function extractTradeEvents(tx: VersionedTransactionResponse, pumpProgram
       const m = /^Program data: (.+)$/.exec(line);
       if (!m?.[1]) continue;
       const data = Buffer.from(m[1], "base64");
-      if (data.length > 8 && data.subarray(0, 8).equals(TRADE_EVENT)) payloads.push(data.subarray(8));
+      if (data.length > 8 && data.subarray(0, 8).equals(disc)) payloads.push(data.subarray(8));
     }
   }
-  const out: TradeEventBc[] = [];
+  return payloads;
+}
+
+function decodeAll<T>(payloads: Buffer[], decode: (b: Buffer) => T): T[] {
+  const out: T[] = [];
   for (const p of payloads) {
     try {
-      out.push(PUMP_SDK.decodeTradeEventBc(p));
+      out.push(decode(p));
     } catch {
       // Layout drift: ignore, caller falls back to balance deltas.
     }
   }
   return out;
+}
+
+/** pump `TradeEvent`s of a confirmed transaction. */
+export function extractTradeEvents(tx: VersionedTransactionResponse, pumpProgramId: PublicKey): TradeEventBc[] {
+  return decodeAll(eventPayloads(tx, pumpProgramId, TRADE_EVENT), (b) => PUMP_SDK.decodeTradeEventBc(b));
+}
+
+/** pump `CreateEvent`s (create / create_v2) of a confirmed transaction. */
+export function extractCreateEvents(tx: VersionedTransactionResponse, pumpProgramId: PublicKey): CreateEventBc[] {
+  return decodeAll(eventPayloads(tx, pumpProgramId, CREATE_EVENT), (b) => PUMP_SDK.decodeCreateEventBc(b));
 }
 
 /** Token balance change of `owner` for `mint` in base units (post - pre). */

@@ -100,7 +100,7 @@ export function redactSecrets(text: string, secrets: readonly string[] = knownSe
 
 /** Secret-bearing env values that must never reach logs. */
 export function knownSecretUrls(env: NodeJS.ProcessEnv = process.env): string[] {
-  return ["SOLANA_RPC_URL_DEVNET", "SOLANA_RPC_URL_MAINNET", "SOLANA_RPC_URL", "DATABASE_URL"]
+  return ["SOLANA_RPC_URL_DEVNET", "SOLANA_RPC_URL_MAINNET", "SOLANA_RPC_URL", "DATABASE_URL", "DATABASE_URL_RELAYER", "PINATA_JWT"]
     .map((k) => env[k]?.trim() ?? "")
     .filter((v) => v.length > 0);
 }
