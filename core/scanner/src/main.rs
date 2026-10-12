@@ -13,6 +13,7 @@ mod blocks;
 mod config;
 mod deposits;
 mod memo;
+mod send;
 mod sync;
 mod wallet;
 
@@ -54,16 +55,51 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// List all incoming Orchard notes known to the wallet.
+    /// Send shielded ZEC with an optional text memo (testnet; mainnet gated). Run `sync` first.
+    Send {
+        /// Recipient address (UA / shielded).
+        #[arg(long)]
+        to: String,
+        /// Amount in zatoshis (max 5_000_000 = 0.05 ZEC).
+        #[arg(long)]
+        amount_zat: u64,
+        /// Text memo (ZIP-302 UTF-8, <= 512 bytes).
+        #[arg(long)]
+        memo: Option<String>,
+    },
+    /// Fetch a tx from lightwalletd and decrypt it with the pool's viewing keys (prints memos).
+    InspectTx {
+        txid: String,
+    },
+    /// Read-only check: parse recent full shielded txs from lightwalletd (no wallet needed).
+    Probe {
+        /// How many recent blocks to look at.
+        #[arg(long, default_value_t = 200)]
+        blocks: u32,
+        /// Stop after this many shielded txs.
+        #[arg(long, default_value_t = 5)]
+        max_txs: usize,
+    },
+    /// List all incoming Orchard/Ironwood notes known to the wallet.
     Deposits {
         #[arg(long)]
         json: bool,
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
+    // Treat empty values from .env (e.g. `LIGHTWALLETD_URL=`) as "not set".
+    for key in ["UNZEEN_NETWORK", "LIGHTWALLETD_URL", "UNZEEN_DATA_DIR", "UNZEEN_KEYS_DIR", "UNZEEN_BIRTHDAY"] {
+        if std::env::var_os(key).is_some_and(|v| v.is_empty()) {
+            // SAFETY: no other threads exist yet (the tokio runtime is built below).
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     // tonic's TLS needs an explicit rustls crypto provider.
     let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt()
@@ -130,6 +166,34 @@ async fn main() -> anyhow::Result<()> {
                     Some(secs) => tokio::time::sleep(Duration::from_secs(secs.max(5))).await,
                     None => break,
                 }
+            }
+        }
+        Cmd::Send { to, amount_zat, memo } => {
+            let mut db = wallet::open_db(c)?;
+            let txid = send::send(c, &mut db, &to, amount_zat, memo.as_deref()).await?;
+            println!("sent txid={txid}");
+        }
+        Cmd::InspectTx { txid } => {
+            let db = wallet::open_db(c)?;
+            let mut client = c.connect().await?;
+            let outs = sync::inspect_tx(c.params(), &mut client, &db, &txid).await?;
+            if outs.is_empty() {
+                println!("no outputs decryptable by this wallet");
+            }
+            for (pool, idx, zat, kind, memo) in outs {
+                println!(
+                    "OUTPUT pool={pool} action={idx} value={} ZEC transfer={kind} memo={}",
+                    deposits::format_zec(zat),
+                    memo.display()
+                );
+            }
+        }
+        Cmd::Probe { blocks, max_txs } => {
+            let mut client = c.connect().await?;
+            let (found, ok) = sync::probe(c.params(), &mut client, blocks.max(1), max_txs).await?;
+            println!("probe: {ok}/{found} shielded txs parsed OK ({})", c.network.as_str());
+            if ok < found {
+                anyhow::bail!("some transactions failed to parse");
             }
         }
         Cmd::Deposits { json } => {

@@ -134,3 +134,56 @@ impl Common {
         Ok(CompactTxStreamerClient::new(channel).max_decoding_message_size(64 * 1024 * 1024))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Offline checks that the pinned pre-release librustzcash line handles BOTH networks
+    //! (no network access, no funds).
+    use super::NetName;
+    use zcash_keys::keys::{UnifiedAddressRequest, UnifiedSpendingKey};
+    use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkUpgrade, Parameters};
+
+    const SEED: [u8; 32] = [7u8; 32];
+
+    fn ua(net: NetName) -> String {
+        let p = net.params();
+        let usk = UnifiedSpendingKey::from_seed(&p, &SEED, zip32_account()).unwrap();
+        let (ua, _) = usk
+            .to_unified_full_viewing_key()
+            .default_address(UnifiedAddressRequest::ORCHARD)
+            .unwrap();
+        assert!(ua.has_orchard() && !ua.has_sapling() && !ua.has_transparent());
+        ua.encode(&p)
+    }
+
+    fn zip32_account() -> zip32::AccountId {
+        zip32::AccountId::ZERO
+    }
+
+    #[test]
+    fn address_prefixes_per_network() {
+        assert!(ua(NetName::Main).starts_with("u1"));
+        assert!(ua(NetName::Test).starts_with("utest1"));
+    }
+
+    #[test]
+    fn branch_ids_current_tips() {
+        // Testnet past NU7 activation (4_465_026) must resolve to branch 0x77190AD9.
+        let t = NetName::Test.params();
+        assert_eq!(t.activation_height(NetworkUpgrade::Nu7), Some(BlockHeight::from_u32(4_465_026)));
+        assert_eq!(u32::from(BranchId::for_height(&t, BlockHeight::from_u32(4_492_736))), 0x7719_0ad9);
+        // Mainnet: no NU7; current heights are NU6.3 (Ironwood).
+        let m = NetName::Main.params();
+        assert_eq!(m.activation_height(NetworkUpgrade::Nu7), None);
+        assert_eq!(
+            BranchId::for_height(&m, BlockHeight::from_u32(3_500_000)),
+            BranchId::for_height(&m, m.activation_height(NetworkUpgrade::Nu6_3).unwrap())
+        );
+    }
+
+    #[test]
+    fn default_endpoints() {
+        assert_eq!(NetName::Test.default_lightwalletd(), "https://testnet.zec.rocks:443");
+        assert_eq!(NetName::Main.default_lightwalletd(), "https://zec.rocks:443");
+    }
+}

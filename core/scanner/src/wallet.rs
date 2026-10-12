@@ -9,7 +9,7 @@ use rand::{rand_core::UnwrapErr, rngs::SysRng};
 
 /// OS CSPRNG; panics if the OS RNG fails (there is no safe fallback).
 #[allow(non_upper_case_globals)]
-const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
+pub const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 type OsRngT = UnwrapErr<SysRng>;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use zcash_client_backend::{

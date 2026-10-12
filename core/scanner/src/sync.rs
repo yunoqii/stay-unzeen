@@ -273,3 +273,86 @@ async fn fetch_tx(
     let tx = Transaction::read(&raw.data[..], BranchId::for_height(&net, mined.unwrap_or(tip)))?;
     Ok(Some((tx, mined)))
 }
+
+/// Read-only health check: fetch the last `n` compact blocks, pick txs with Orchard/Ironwood
+/// actions, download the full txs and parse them with the network's consensus branch id.
+/// Proves the memo path (`GetTransaction` → `Transaction::read`) works on the current chain.
+/// Returns (shielded txs found, txs parsed OK). Prints no addresses/values.
+pub async fn probe(net: Network, client: &mut Client, n: u32, max_txs: usize) -> anyhow::Result<(usize, usize)> {
+    let tip = u32::try_from(
+        client.get_latest_block(service::ChainSpec::default()).await?.into_inner().height,
+    )?;
+    let req = service::BlockRange {
+        start: Some(service::BlockId { height: u64::from(tip.saturating_sub(n - 1)), hash: vec![] }),
+        end: Some(service::BlockId { height: u64::from(tip), hash: vec![] }),
+        pool_types: Default::default(),
+    };
+    let blocks: Vec<_> = client.get_block_range(req).await?.into_inner().try_collect().await?;
+    let mut found = 0;
+    let mut ok = 0;
+    for b in blocks.iter().rev() {
+        for ctx in &b.vtx {
+            if ctx.actions.is_empty() && ctx.ironwood_actions.is_empty() {
+                continue;
+            }
+            found += 1;
+            if found > max_txs {
+                return Ok((found - 1, ok));
+            }
+            let mut id = [0u8; 32];
+            id.copy_from_slice(&ctx.txid);
+            let txid = TxId::from_bytes(id);
+            match fetch_tx(net, client, BlockHeight::from_u32(tip), txid).await {
+                Ok(Some((tx, h))) => {
+                    ok += 1;
+                    println!(
+                        "OK  height={} txid={} version={:?} branch={:?} orchard_actions={} ironwood_actions={}",
+                        h.map_or(0, u32::from),
+                        txid,
+                        tx.version(),
+                        tx.consensus_branch_id(),
+                        tx.orchard_bundle().map_or(0, |bd| bd.actions().len()),
+                        tx.ironwood_bundle().map_or(0, |bd| bd.actions().len()),
+                    );
+                }
+                Ok(None) => println!("??  txid={txid} not found by server"),
+                Err(e) => println!("ERR height={} txid={txid}: {e:#}", b.height),
+            }
+        }
+    }
+    Ok((found, ok))
+}
+
+/// Fetch a full transaction from lightwalletd and trial-decrypt it with the wallet's
+/// UFVKs, independently of what the wallet DB already knows. This is exactly the path
+/// a user deposit's memo goes through. Returns (pool, action, value_zat, transfer, memo).
+pub async fn inspect_tx(
+    net: Network,
+    client: &mut Client,
+    db: &Db,
+    txid_hex: &str,
+) -> anyhow::Result<Vec<(&'static str, usize, u64, String, crate::memo::MemoView)>> {
+    use zcash_client_backend::{DecryptedOutput, decrypt_transaction};
+
+    let txid = TxId::from_hex(txid_hex).ok_or_else(|| anyhow!("bad txid (expected 64 hex chars)"))?;
+    let tip = db.chain_height()?.ok_or_else(|| anyhow!("run sync first"))?;
+    let (tx, mined) = fetch_tx(net, client, tip, txid)
+        .await?
+        .ok_or_else(|| anyhow!("tx not found by lightwalletd"))?;
+    let ufvks = db.get_unified_full_viewing_keys()?;
+    let d = decrypt_transaction(&net, mined, Some(tip), &tx, &ufvks);
+    let mut out = Vec::new();
+    for (pool, outs) in [("orchard", d.orchard_outputs()), ("ironwood", d.ironwood_outputs())] {
+        for o in outs {
+            let o: &DecryptedOutput<(orchard::Note, orchard::ValuePool), _> = o;
+            out.push((
+                pool,
+                o.index(),
+                o.note().0.value().inner(),
+                format!("{:?}", o.transfer_type()),
+                crate::memo::MemoView::decode(o.memo().as_slice()),
+            ));
+        }
+    }
+    Ok(out)
+}

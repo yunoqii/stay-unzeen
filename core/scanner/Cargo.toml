@@ -38,3 +38,7 @@ zcash_client_sqlite = { version = "=0.23.0-pre.1", features = ["orchard"] }
 zcash_keys = { version = "=0.17.0-pre.1", features = ["orchard", "sapling"] }
 zcash_primitives = "=0.31.0-pre.1"
 zcash_protocol = "=0.11.0-pre.0"
+zcash_address = "=0.14.0-pre.1"
+zcash_proofs = { version = "=0.31.0-pre.1", features = ["bundled-prover"] }
+zip32 = "0.3"
+zip321 = "=0.10.0-pre.1"

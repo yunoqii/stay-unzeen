@@ -8,13 +8,19 @@
 - frontend: каркас `web/` (Next.js 16, pnpm) на моках, живая лента, навигация, заглушки страниц
 - Решения 12.10: демо Zcash на mainnet (testnet — CI), пул Ironwood, memo `unz1`, новый порядок урезания (CLAUDE.md)
 - Правила: английский для UI/README/демо; сводка session-report в конце каждой сессии
+- backend: `core/scanner` (init/sync/deposits/send/inspect-tx/probe), pre-release librustzcash, пул Ironwood. **Testnet сквозняком: депозит с memo прочитан из цепочки.** cargo test 14/14 (проверил лид). `infra/docker-compose.yml` (конфиг проверен, не запускался)
+- API.md v0.1: `unz1`, единицы в базовых единицах + decimals, свечи, trades, WS-фильтр по mint, подпись в заголовках, формат ошибок
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
 
 ## В работе (день 1)
-- backend (не закоммичено целиком, отчёта нет): `infra/` docker-compose (zebrad, lightwalletd, postgres) + `core/` сканер: init (адрес пула) и sync (чтение memo) на testnet → mainnet; затем `unz1` + ответы фронту в API.md
+- —
 
 ## Риски
+- mainnet init/sync не проверен вживую (заблокировано разрешениями) → ручной прогон владельцем
+- Сид пула открытым текстом в `core/keys/` (0600, gitignore) → шифрование до mainnet-демо
+- Фронт расходится с API.md v0.1 (подпись в заголовках, базовые единицы) → обновить типы/моки
+- UFVK и memo печатаются в stdout CLI → в сервисе убрать
 - CRITICAL: Orchard закрыт для депозитов (NU6.3/ZIP 258) → пул Ironwood; доки переименованы
 - CRITICAL: на testnet активирован NU7 → нужны pre-release крейты librustzcash; решено: демо на mainnet, testnet для CI
 - memo 512 байт: JSON не влезает с refund/nonce/exp → бинарный формат `unz1` (принят, backend вносит в API.md)
@@ -26,13 +32,6 @@
 - Нужны: рабочий демо-URL на весь период судейства (до 22.11) + видео 2 мин
 - Синк Zebra testnet долгий → разработка против публичного lightwalletd
 - Фаусет: только Valar 0.125 TAZ/сутки; zingo-cli на testnet — только ветка dev; ZODL testnet — сборка из исходников
-
-## Открытые вопросы к API.md (от frontend)
-- tokenAmount/solAmount: UI-единицы или базовые (+decimals)?
-- схема подписи запросов anon-ключом (заголовки, nonce/ts)
-- лимит trades в /api/tokens/:mint, фильтр WS по mint
-- эндпоинт свечей OHLC для графика
-- формат ошибок, 404
 
 ## Нужно от владельца
 - аккаунт сабмита + shielded-адрес ZODL для приза
