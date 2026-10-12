@@ -37,6 +37,7 @@
 - —
 
 ## Решения
+- 12.10 (лид, по review-fair-launch.md): раунд drand = R(closeAt + 30 с) + 1 (memo с корнем гарантированно до раунда, поле beforeRound); два ключа аттестаций — отдельный для fair-launch и для Verify (F14); кап 1024 заявки на запуск; fl_* в actions удаляются через 48 ч; фича в бандле только при явном =1, test:bundle:strict — обязательный шаг деплоя
 - 12.10 (лид, по verify.md/orders.md): резерв ZEC — «attested by operator» (доказать без viewing key нельзя, ZIP 311 без Orchard/Ironwood; ZK proof of reserves — roadmap); корень Verify раз в сутки (devnet — вручную) + якорь memo-tx в Solana; один ключ аттестаций пула для memo Verify и fair-launch; ордера только по mint пула, TTL ≤ 72 ч, только delayed/max, цена с тика индексатора; bracket — вне MVP. План: Verify — дни 11–12 вместе с fair-launch; лимитки — дни 13–14 (вместо слота Jupiter)
 - 12.10 (владелец): commitment root fair-launch — в MVP; публикуется при закрытии окна до раунда drand; листья = хэши шифротекстов; корень записывается memo-tx на Solana
 - 12.10 (владелец): top-10 на mainnet — через Helius Free (только на тике с приманками); пробная отправка через Sender — вместе с первым mainnet-прогоном
