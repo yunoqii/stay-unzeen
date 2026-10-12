@@ -18,6 +18,8 @@ thiserror = "2"
 tracing = "0.1"
 unzeen-protocol = { path = "../protocol" }
 unzeen-fair = { path = "../fair" }
+ed25519-dalek = "3"
+bs58 = "0.5"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

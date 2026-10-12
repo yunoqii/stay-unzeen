@@ -14,6 +14,7 @@ pub mod decide;
 pub mod fair;
 mod migrate;
 pub mod payouts;
+pub mod verify;
 
 use deadpool_postgres::{GenericClient, Manager, ManagerConfig, Pool, RecyclingMethod};
 use hmac::{Hmac, KeyInit, Mac};

@@ -38,6 +38,19 @@ pub struct Config {
     pub intel: IntelConfig,
     /// Fair launch (API v0.6). Off by default: everything fair-launch is invisible.
     pub fair: FairConfig,
+    /// Verify snapshots (API v0.7).
+    pub verify: VerifyConfig,
+}
+
+/// Verify (API.md v0.7).
+#[derive(Clone, Copy, Debug)]
+pub struct VerifyConfig {
+    /// Daily snapshot at 00:00 UTC (UNZEEN_VERIFY_DAILY; default: on for mainnet, off for
+    /// devnet where the operator runs `unzeen-api verify-snapshot`).
+    pub daily: bool,
+    pub timing: unzeen_ledger::verify::VerifyTiming,
+    /// Owner proof responses are padded to a multiple of this (16384).
+    pub proof_bucket: usize,
 }
 
 /// Fair launch (API.md v0.6). Internal until 28.10.
@@ -437,6 +450,15 @@ impl Config {
                 whale_lamports: num::<i64>("UNZEEN_WHALE_LAMPORTS", 1_000_000_000)?.max(1),
             },
             fair,
+            verify: VerifyConfig {
+                daily: match var("UNZEEN_VERIFY_DAILY").as_deref() {
+                    Some("1") => true,
+                    Some("0") => false,
+                    _ => mainnet,
+                },
+                timing: unzeen_ledger::verify::VerifyTiming::default(),
+                proof_bucket: 16_384,
+            },
         };
         Ok(cfg)
     }

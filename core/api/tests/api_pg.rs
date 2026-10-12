@@ -118,6 +118,11 @@ fn config(url: &str) -> Config {
             drand_give_up_secs: 3_600,
             rate_give_up_secs: 600,
         },
+        verify: unzeen_api::config::VerifyConfig {
+            daily: false,
+            timing: unzeen_ledger::verify::VerifyTiming::default(),
+            proof_bucket: 16_384,
+        },
     }
 }
 
@@ -298,7 +303,7 @@ async fn pool_info() {
         json!({"address":"utest1example","network":"test","chainId":"0202",
                "minDepositZat":"100000","minActionZat":"100000","confirmations":3,
                "createEnabled":true,
-               "features":{"fullTrades":false,"fairLaunch":false},
+               "features":{"fullTrades":false},
                "launchRules":{"lockSecs":86400,"capBps":500,"maxInitialBuyLamports":"1466000000",
                               "maxInitialBuyLamportsByVenue":{"pumpfun":"1466000000"}},
                "fees":{"createFeeZat":"100000","withdrawZecFeeZat":"15000",
@@ -1671,9 +1676,13 @@ mod fair {
         assert_eq!(fl.status, StatusCode::BAD_REQUEST);
         assert_eq!(fl.body, unknown.body, "indistinguishable from an unknown op");
         e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
-        let pool = e.get("/api/pool").await.body;
-        assert_eq!(pool["features"]["fairLaunch"], false);
-        assert!(pool.get("fairLaunch").is_none());
+        let r = e.get("/api/pool").await;
+        assert_eq!(r.status, StatusCode::OK);
+        let raw = r.body.to_string();
+        assert!(
+            !raw.to_ascii_lowercase().contains("fair"),
+            "PoolInfo mentions fair: {raw}"
+        );
         let pf = e.signed(&user(1), "GET", "/api/portfolio", "").await.body;
         assert!(pf.get("fairBids").is_none() && pf.get("fairLaunches").is_none());
         e.drop_schema().await;
@@ -1770,4 +1779,298 @@ async fn creator_cap_per_venue_meteora_dbc() {
     let r = e.signed(&user(8), "POST", "/api/actions", &create("pumpfun")).await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
     e.drop_schema().await;
+}
+
+// ================================================================== Verify (API v0.7)
+
+mod verify_pl {
+    use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+    use unzeen_ledger::verify::VerifyTiming;
+    use unzeen_protocol::verify::{self as pv, Node, SnapshotHeader};
+
+    use super::*;
+
+    const T: VerifyTiming = VerifyTiming {
+        freeze_secs: 4.0,
+        quiesce_secs: 2.0,
+    };
+
+    async fn wait_status(e: &Env, id: i32, want: &str) {
+        for _ in 0..100 {
+            let st: String = e
+                .admin
+                .query_one(
+                    &format!("SELECT status FROM {}.verify_snapshots WHERE id = $1", e.schema),
+                    &[&id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            if st == want {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("snapshot {id} never reached {want}");
+    }
+
+    fn b58_32(s: &str) -> [u8; 32] {
+        bs58::decode(s).into_vec().unwrap().try_into().unwrap()
+    }
+
+    #[tokio::test]
+    async fn verify_snapshot_proofs_and_retention() {
+        let Some(e) = setup_with(|c| c.verify.timing = T).await else {
+            return;
+        };
+        let s = e.schema.clone();
+        e.fund(1, 0, 123_456_789).await;
+        e.fund(2, 0, 50_000_000).await;
+        let pk1 = user(1).verifying_key().to_bytes();
+        e.sql(&format!(
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals) VALUES ('{MINT}', 'pumpfun', 'T', 'T', 6);
+             INSERT INTO {s}.token_balances (anon_pubkey, mint, available, held)
+               VALUES ('\\x{}', '{MINT}', 2500000, 1);
+             INSERT INTO {s}.pool_meta (key, value) VALUES ('reserve_zat', '123456789'), ('reserve_height', '3000000');",
+            hex::encode(pk1)
+        ))
+        .await;
+        assert_eq!(e.get("/api/verify").await.status, StatusCode::NOT_FOUND);
+
+        // A job in flight: the freeze cannot complete → skipped (busy), freeze lifted.
+        e.sql(&format!(
+            "INSERT INTO {s}.relayer_jobs (op, venue, mint, lamports_in, min_out, network, status)
+             VALUES ('buy', 'pumpfun', '{MINT}', 5000000, 1, 'devnet', 'claimed')"
+        ))
+        .await;
+        let id0 = e
+            .ledger
+            .verify_request("devnet", "0202", "manual", T)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            e.ledger.verify_request("devnet", "0202", "manual", T).await.unwrap(),
+            None,
+            "one at a time"
+        );
+        wait_status(&e, id0, "skipped").await;
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.verify_snapshots WHERE freeze_until > now()"
+            ))
+            .await,
+            0
+        );
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'queued' WHERE op = 'buy'"
+        ))
+        .await;
+
+        // Quiet pool: freezing → collecting; the relayer writes signed vault balances.
+        let id = e
+            .ledger
+            .verify_request("devnet", "0202", "manual", T)
+            .await
+            .unwrap()
+            .unwrap();
+        wait_status(&e, id, "collecting").await;
+        let vault = SigningKey::from_bytes(&[5; 32]);
+        let vaddr = bs58::encode(vault.verifying_key().to_bytes()).into_string();
+        let vsig = bs58::encode(
+            vault
+                .sign(pv::vault_message("0202", id as u32, &vaddr).as_bytes())
+                .to_bytes(),
+        )
+        .into_string();
+        e.sql(&format!(
+            "INSERT INTO {s}.verify_vaults (snapshot_id, address, lamports, tokens, sig)
+             VALUES ({id}, '{vaddr}', 2000000000, '[{{\"mint\":\"{MINT}\",\"amount\":\"9000000\"}}]', '{vsig}');
+             UPDATE {s}.verify_snapshots SET solana_slot = 777, assets_done_at = now() WHERE id = {id};"
+        ))
+        .await;
+        wait_status(&e, id, "built").await;
+
+        let snap = e.get("/api/verify").await;
+        assert_eq!(snap.status, StatusCode::OK);
+        assert_eq!(snap.headers["cache-control"], "public, max-age=300");
+        let v = snap.body;
+        assert_eq!((v["id"].as_i64(), v["leaves"].as_u64()), (Some(id as i64), Some(1024)));
+        assert_eq!(v["zecReserve"]["amountZat"], "123000000", "floored to 0.01 ZEC");
+        assert_eq!(v["zecReserve"]["attested"], true);
+        assert_eq!(v["committedLamports"], "5000000", "queued buy is committed SOL");
+        assert!(
+            v.get("operator").is_none() && v.get("anchor").is_none(),
+            "not anchored yet"
+        );
+        // Liabilities: rounded up to the granule, never below the real balance.
+        let trees = v["trees"].as_array().unwrap();
+        let zec = trees.iter().find(|t| t["asset"] == "ZEC").unwrap();
+        let zsum: u64 = zec["sum"].as_str().unwrap().parse().unwrap();
+        let real = 123_456_789 + 50_000_000;
+        assert!(
+            zsum >= real && zsum < real + 2 * 100_000 && zsum.is_multiple_of(100_000),
+            "{zsum}"
+        );
+        let mt = trees.iter().find(|t| t["asset"] == MINT).unwrap();
+        assert_eq!(mt["sum"], "3000000", "2.5 + 1e-6 tokens rounded up to 3 whole tokens");
+        assert_eq!(mt["granule"], "1000000");
+        // The vault signature checks with its own address.
+        let vv = &v["vaults"][0];
+        let vk = VerifyingKey::from_bytes(&b58_32(vv["address"].as_str().unwrap())).unwrap();
+        let sig = Signature::from_bytes(
+            &bs58::decode(vv["sig"].as_str().unwrap())
+                .into_vec()
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        assert!(
+            vk.verify(pv::vault_message("0202", id as u32, &vaddr).as_bytes(), &sig)
+                .is_ok()
+        );
+        // rootsDigest is reproducible from public fields.
+        let roots: Vec<([u8; 32], Node)> = trees
+            .iter()
+            .map(|t| {
+                let a = if t["asset"] == "ZEC" {
+                    pv::ZEC_ASSET
+                } else {
+                    b58_32(t["asset"].as_str().unwrap())
+                };
+                let root = Node {
+                    hash: hex::decode(t["root"].as_str().unwrap()).unwrap().try_into().unwrap(),
+                    sum: t["sum"].as_str().unwrap().parse().unwrap(),
+                };
+                (a, root)
+            })
+            .collect();
+        let header = SnapshotHeader {
+            chain: [2, 2],
+            snapshot_id: id as u32,
+            taken_at_sec: v["takenAt"].as_u64().unwrap() / 1000,
+            leaves: 1024,
+            solana_slot: 777,
+            zcash_height: 3_000_000,
+            zec_reserve_zat: 123_000_000,
+        };
+        let digest = pv::roots_digest(&header, &roots);
+        assert_eq!(v["rootsDigest"], hex::encode(digest));
+
+        // Anchor: attest job with ONLY the digest hex; relayer confirms with an operator sig.
+        let memo: String = e
+            .admin
+            .query_one(
+                &format!("SELECT meta->>'memo' FROM {s}.relayer_jobs WHERE op = 'attest' AND action_id IS NULL"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(memo, hex::encode(digest));
+        let op = SigningKey::from_bytes(&[9; 32]);
+        let opk = bs58::encode(op.verifying_key().to_bytes()).into_string();
+        let osig = bs58::encode(op.sign(&digest).to_bytes()).into_string();
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGV', slot = 901, vault = '{opk}',
+                    out_memo = '{memo}', out_sig = '{osig}' WHERE op = 'attest'"
+        ))
+        .await;
+        let mut v = Value::Null;
+        for _ in 0..50 {
+            v = e.get("/api/verify").await.body;
+            if v.get("operator").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(v["operator"]["pubkey"], opk);
+        assert_eq!(v["anchor"]["solanaTx"], "SIGV");
+        assert_eq!(v["anchor"]["matches"], true);
+        let hist = e.get("/api/verify/snapshots").await.body;
+        assert_eq!(hist.as_array().unwrap().len(), 1, "skipped snapshots are not published");
+        assert_eq!(e.get(&format!("/api/verify/{id}")).await.status, StatusCode::OK);
+        assert_eq!(e.get(&format!("/api/verify/{id0}")).await.status, StatusCode::NOT_FOUND);
+
+        // Owner proof: pieces sum to the committed value, paths reach the published roots.
+        let r = e.signed(&user(1), "GET", "/api/verify/proof", "").await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        assert_eq!(r.raw_len % 16_384, 0, "padded to 16 KiB");
+        assert_eq!(r.headers["cache-control"], "no-store");
+        let p = &r.body;
+        assert_eq!(p["snapshotId"], id);
+        assert_eq!(p["truncated"], false);
+        let mut seen = 0;
+        for ap in p["proofs"].as_array().unwrap() {
+            let tree = trees.iter().find(|t| t["asset"] == ap["asset"]).unwrap();
+            let a = if ap["asset"] == "ZEC" {
+                pv::ZEC_ASSET
+            } else {
+                b58_32(ap["asset"].as_str().unwrap())
+            };
+            let pieces = ap["pieces"].as_array().unwrap();
+            assert!((2..=4).contains(&pieces.len()));
+            let mut total = 0u64;
+            for pc in pieces {
+                let value: u64 = pc["value"].as_str().unwrap().parse().unwrap();
+                total += value;
+                let blind: [u8; 32] = hex::decode(pc["blind"].as_str().unwrap()).unwrap().try_into().unwrap();
+                let leaf = Node {
+                    hash: pv::leaf_hash(
+                        [2, 2],
+                        id as u32,
+                        &a,
+                        &pk1,
+                        pc["piece"].as_u64().unwrap() as u8,
+                        value,
+                        &blind,
+                    ),
+                    sum: value as u128,
+                };
+                let path: Vec<Node> = pc["path"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|n| Node {
+                        hash: hex::decode(n["hash"].as_str().unwrap()).unwrap().try_into().unwrap(),
+                        sum: n["sum"].as_str().unwrap().parse().unwrap(),
+                    })
+                    .collect();
+                assert_eq!(path.len(), 10);
+                let root = pv::root_from_path(&leaf, pc["leafIndex"].as_u64().unwrap() as usize, &path);
+                assert_eq!(hex::encode(root.hash), tree["root"].as_str().unwrap());
+            }
+            if ap["asset"] == "ZEC" {
+                assert_eq!(total, 123_500_000, "rounded up to 0.001 ZEC");
+            } else {
+                assert_eq!(total, 3_000_000);
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 2);
+        // A key with nothing: empty proofs, same padding bucket.
+        let r9 = e.signed(&user(9), "GET", "/api/verify/proof", "").await;
+        assert_eq!(r9.body["proofs"].as_array().unwrap().len(), 0);
+        assert_eq!(r9.raw_len, r.raw_len, "size does not tell what a key holds");
+        assert_eq!(
+            e.signed(&user(1), "GET", "/api/verify/proof?snapshot=999", "")
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+
+        // 48 h later: paths and bindings are gone, the public snapshot stays.
+        e.sql(&format!(
+            "UPDATE {s}.verify_snapshots SET taken_at = taken_at - interval '49 hours'"
+        ))
+        .await;
+        assert!(e.ledger.verify_janitor().await.unwrap() > 0);
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.verify_leaves")).await, 0);
+        assert_eq!(
+            e.signed(&user(1), "GET", "/api/verify/proof", "").await.status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(e.get("/api/verify").await.status, StatusCode::OK);
+        e.drop_schema().await;
+    }
 }

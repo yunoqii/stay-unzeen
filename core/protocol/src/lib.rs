@@ -11,6 +11,7 @@
 pub mod anon_key;
 pub mod api_auth;
 pub mod memo;
+pub mod verify;
 
 pub use ed25519_dalek::{SigningKey, VerifyingKey};
 

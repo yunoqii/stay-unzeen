@@ -26,6 +26,9 @@ struct Cli {
 enum Cmd {
     /// Run the API server.
     Serve,
+    /// Request a Verify snapshot now (devnet only; mainnet runs daily at 00:00 UTC). The running
+    /// API server performs it (freeze, relayer vault snapshot, trees, anchor).
+    VerifySnapshot,
     /// DEV: sign a request with an anon key file (hex secret, from `unzeen-scanner anon-key`)
     /// and print the response. Refused on mainnet unless UNZEEN_DEV_PRINT=1.
     DevRequest {
@@ -62,6 +65,7 @@ async fn run() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     match cli.cmd.unwrap_or(Cmd::Serve) {
         Cmd::Serve => serve(cfg).await,
+        Cmd::VerifySnapshot => verify_snapshot(&cfg).await,
         Cmd::DevRequest {
             anon_key,
             method,
@@ -101,6 +105,24 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    Ok(())
+}
+
+async fn verify_snapshot(cfg: &Config) -> anyhow::Result<()> {
+    if cfg.cluster != "devnet" {
+        bail!("manual Verify snapshots are devnet-only (mainnet: daily at 00:00 UTC)");
+    }
+    let ledger = Ledger::connect(&cfg.database_url, cfg.policy)
+        .await
+        .map_err(|e| anyhow!("connecting to Postgres: {e}"))?;
+    match ledger
+        .verify_request(cfg.cluster, &cfg.policy.chain.to_hex(), "manual", cfg.verify.timing)
+        .await
+        .map_err(|e| anyhow!("{e}"))?
+    {
+        Some(id) => println!("snapshot #{id} requested; the running API server builds it (watch GET /api/verify)"),
+        None => println!("a snapshot is already in progress"),
+    }
     Ok(())
 }
 

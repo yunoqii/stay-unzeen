@@ -2,9 +2,13 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.6** (12.10, fair-launch; реализуется в `core/fair` + `core/ledger` + `core/api`). **Внутренний раздел: до 28.10 23:59 UTC детали fair-launch не публиковать (CLAUDE.md).** Изменения против v0.5:
+Статус: **v0.7** (12.10, Verify; реализовано в `core/protocol::verify` + `core/ledger` + `core/api`). Изменения против v0.6:
+- **Verify (proof of liabilities):** `GET /api/verify`, `GET /api/verify/snapshots`, `GET /api/verify/:id` (публичные), `GET /api/verify/proof` (подписанный, ответ выровнен до 16 КиБ). Раздел «Verify (v0.7)». Векторы: `core/testdata/verify-vectors.json`.
+- **Флаг fair-launch:** при выключенном флаге ключа `fairLaunch` в `PoolInfo` нет **совсем** (ни в `features`, ни отдельно). Отсутствие = выключено. При включённом: `features.fairLaunch = true` и блок `fairLaunch`.
+
+Изменения v0.6 против v0.5 (fair-launch; **внутреннее до 28.10 23:59 UTC**, детали не публиковать, CLAUDE.md):
 - **Fair-launch (закрытые заявки drand tlock → одна атомарная create+buy).** Полный контракт — раздел «Fair-launch (v0.6)» ниже. Новые эндпоинты `GET /api/launches`, `GET /api/launches/:id`; новые операции `fl_create`, `fl_bid`, `fl_cancel`, `fl_cancel_launch` в `POST /api/actions`; `Portfolio.fairBids`, `Portfolio.fairLaunches`; `PoolInfo.features.fairLaunch`, `PoolInfo.fairLaunch`.
-- **Флаг.** `PoolInfo.features.fairLaunch = false` (по умолчанию, env `UNZEEN_FAIR_LAUNCH=1` включает): `GET /api/launches*` → `404 not_found` (как несуществующий путь), `fl_*` в `POST /api/actions` → `400 bad_request` (как неизвестная операция), в `Portfolio` нет `fairBids`/`fairLaunches`, в `PoolInfo` нет блока `fairLaunch`. Снаружи не отличить от сервера без фичи.
+- **Флаг.** Выключен по умолчанию (env `UNZEEN_FAIR_LAUNCH=1` включает); выключен (v0.7) = ключа `features.fairLaunch` нет: `GET /api/launches*` → `404 not_found` (как несуществующий путь), `fl_*` в `POST /api/actions` → `400 bad_request` (как неизвестная операция), в `Portfolio` нет `fairBids`/`fairLaunches`, в `PoolInfo` нет блока `fairLaunch`. Снаружи не отличить от сервера без фичи.
 - **`PoolInfo.launchRules.maxInitialBuyLamports`** теперь считается по кривой **сети** (параметры pump.fun Global, которые пишет релейер в `launch_curves`, RELAYER.md v3); env `UNZEEN_LAUNCH_*` — только запасной вариант, пока релейер их не записал. На devnet (1 SOL виртуальных резервов) значение в ~30 раз меньше mainnet.
 - `UnzeenRule` += `"fair_launch_sealed_bids"` (для токенов, запущенных через fair-launch).
 - **`PoolInfo.launchRules.maxInitialBuyLamportsByVenue`** — кап первой покупки `create` по площадке; `create` проверяется по кривой своей площадки (meteora-dbc уже, см. тип).
@@ -72,6 +76,10 @@
 | GET | `/media/<sha40>.<png\|jpeg\|jpg\|webp\|json>` | картинка/метаданные токена. Только точное имя (40 hex + расширение), без листинга, `Cache-Control: immutable`, `nosniff`, без логов. Остальное — 404 |
 | GET | `/api/launches?status=&limit=50` | `FairLaunch[]` (v0.6, только при `features.fairLaunch`), см. «Fair-launch» |
 | GET | `/api/launches/:id` | `FairLaunch` \| 404 (v0.6) |
+| GET | `/api/verify` | `VerifySnapshot` (последний) \| 404 (v0.7), публичный |
+| GET | `/api/verify/snapshots?before=<id>&limit=30` | `VerifySnapshotSummary[]` (v0.7), история корней |
+| GET | `/api/verify/:id` | `VerifySnapshot` \| 404 (v0.7) |
+| GET | `/api/verify/proof[?snapshot=<id>]` (подписанный) | `VerifyProof` (v0.7), только последний или предыдущий снимок |
 
 Подписанные запросы — схема в разделе «Подпись запросов».
 
@@ -136,7 +144,7 @@ interface PoolInfo {
   createEnabled: boolean;   // v0.4: false → POST create вернёт 503 venue_unavailable
   features: {               // v0.5: что включено на сервере (не build-time флаг фронта)
     fullTrades: boolean;    // полная лента сделок по mint (чужие сделки, теги whale/dev/sniper); false → filter whales|dev = 400
-    fairLaunch: boolean;    // v0.6: false → весь fair-launch скрыт (UI не показывать), см. «Fair-launch»
+    fairLaunch?: true;      // v0.6/v0.7: есть только при включённом fair-launch; нет ключа → выключено (UI не показывать)
   };
   fairLaunch?: FairLaunchParams;  // v0.6: только при features.fairLaunch = true
   launchRules: {            // v0.5: правила создателя Unzeen-запуска, которые реестр применяет принудительно
@@ -345,7 +353,7 @@ interface TokenTrade extends FeedEvent {
 
 **Внутреннее до 28.10 23:59 UTC.** Спека: `docs/analysis/fair-launch.md`. Суть: создатель открывает окно заявок; участники шлют сумму, зашифрованную **drand tlock** на раунд `R` (позже закрытия окна); до раунда сумм не знает никто, включая оператора (у него только номинал hold). В момент раунда сервер получает подпись раунда, **проверяет её** и расшифровывает заявки; пул делает **одну атомарную tx create+buy** на сумму всех заявок; токены делятся пропорционально, одна цена для всех. v1: только `pumpfun`, без Jito.
 
-Всё ниже существует только при `PoolInfo.features.fairLaunch = true`. При `false`: `GET /api/launches*` → `404 not_found`, `fl_*` → `400 bad_request` (как неизвестная op), полей `fairBids`/`fairLaunches`/`fairLaunch` нет.
+Всё ниже существует только при `PoolInfo.features.fairLaunch === true`. Без ключа (v0.7: при выключенном флаге в `PoolInfo` нет ни одной строки «fair»): `GET /api/launches*` → `404 not_found`, `fl_*` → `400 bad_request` (как неизвестная op), полей `fairBids`/`fairLaunches`/`fairLaunch` нет.
 
 ### Типы
 
@@ -498,6 +506,88 @@ off len поле
 | commitment root + memo-tx аттестации | — | публично | публично |
 
 `GET /api/launches[?status=open|closed|revealing|executing|launched|failed|cancelled][&limit≤100]` — опубликованные запуски, новые первыми; `Cache-Control: public, max-age=5`; без подписи, ответ одинаков для всех. `GET /api/launches/:id` — один запуск; неопубликованный или неизвестный → 404. Опрос фронтом — с одинаковым интервалом для всех зрителей страницы (3–5 с), без привязки к своим действиям. Лента (`/api/feed`, WS) после исполнения получает обычные `create` + `buy` с одной подписью.
+
+## Verify (v0.7)
+
+Спека: `docs/analysis/verify.md`; решения лида — STATUS.md. Проверка честности пула **без viewing key**: обязательства — Merkle-sum деревья (по одному на актив), активы на Solana — снимок балансов vault с подписью каждого vault, резерв ZEC — **заявлен оператором** (доказать без раскрытия нот нельзя; ZK proof of reserves — roadmap).
+
+### Снимок
+- Раз в сутки в **00:00 UTC** (mainnet, расписание не зависит от действий пользователей). Devnet — ручная команда оператора `unzeen-api verify-snapshot` (и по желанию тот же суточный график, `UNZEEN_VERIFY_DAILY=1`).
+- Согласованность: на время снимка (≤ 120 с) релейер не берёт новые задания; core ждёт, пока нет tx в полёте и неучтённых результатов (≤ 90 с, иначе снимок пропускается и повторяется через 10 мин). Затем релейер пишет балансы vault на одном `finalized`-слоте и подписи vault, core строит деревья в одной транзакции `REPEATABLE READ`.
+- Корень подписывает **ключ аттестаций пула** (тот же, что у fair-launch) и якорит его memo-tx на Solana: data memo — **только 64 hex `rootsDigest`**, без префиксов. Подпись и якорь появляются в снимке, когда memo-tx подтверждена.
+- Хранение: снимки, корни, суммы, vault — **вечно** (публичная история). Узлы деревьев и привязки кусков к ключам — **48 ч**, после этого доказательство за снимок получить нельзя (скачайте JSON).
+
+### Обязательства и хеши
+- Актив: ZEC (`asset` = 32 нуля) и каждый mint (`asset` = 32 байта base58-декода mint). Значение ключа = `available + held` (включая hold действий и заявок fair-launch, и замороженные балансы). Нулевые не входят.
+- **Округление вверх** до гранулы `g`: ZEC `100000` зат (0.001 ZEC), mint `10^decimals` (1 целый токен).
+- **Разбиение:** округлённое значение режется на `s ∈ {2,3,4}` случайных кусков, кратных `g` (нулевые допустимы), сумма кусков = округлённое значение.
+- **Паддинг:** все деревья снимка одного размера `N = max(1024, 2^⌈log2(2 × max кусков в дереве)⌉)`; пустые места — листья-заглушки (`value = 0`, случайные pubkey и blind), неотличимые по хешу. Позиции перемешаны (CSPRNG).
+- Хеши — SHA-256, целые big-endian:
+```
+leaf = SHA256("unzeen/verify/v1/leaf" ‖ chainId[2] ‖ u32(snapshotId) ‖ asset[32] ‖ anonPubkey[32] ‖ u8(piece) ‖ u64(value) ‖ blind[32])
+node = SHA256("unzeen/verify/v1/node" ‖ L.hash ‖ u128(L.sum) ‖ R.hash ‖ u128(R.sum)),   sum(node) = L.sum + R.sum
+rootsDigest = SHA256("unzeen/verify/v1/snapshot" ‖ chainId[2] ‖ u32(snapshotId) ‖ u64(takenAtSec) ‖ u32(N)
+                     ‖ u64(solanaSlot) ‖ u32(zcashHeight) ‖ u64(zecReserveZat) ‖ u32(число деревьев)
+                     ‖ для каждого дерева по возрастанию asset: asset[32] ‖ root.hash[32] ‖ u128(root.sum))
+operator.sig = ed25519(ключ аттестаций, rootsDigest — 32 байта)     // покрывает и резерв ZEC
+vault.sig    = ed25519(ключ vault, utf8("unzeen/verify/v1/vault\n" + chainId + "\n" + snapshotId + "\n" + address))
+```
+- Узел коммитит **обе** суммы детей (иначе можно занизить итог), значения `u64` — отрицательных листьев нет. `snapshotId` и новый `blind` в каждом снимке — листья разных снимков не связать.
+
+### Типы
+```ts
+type AssetId = "ZEC" | string;            // string = base58 mint
+
+interface VerifySnapshotSummary {
+  id: number;
+  takenAt: number;                        // unix мс, округлено вниз до минуты (= takenAtSec · 1000)
+  rootsDigest: string;                    // hex 32 байта
+  anchor?: { solanaTx: string; slot: number; matches: boolean };   // memo-tx подтверждена; matches — memo из tx == rootsDigest
+}
+
+interface VerifySnapshot extends VerifySnapshotSummary {
+  chainId: string;                        // "0202" | "0101"
+  leaves: number;                         // N, одинаков для всех деревьев
+  solanaSlot: number;                     // finalized-слот снимка vault
+  zcashHeight: number;                    // высота, на которой оператор заявил резерв
+  operator?: { pubkey: string; sig: string };   // base58; ключ аттестаций пула (фронт сверяет с захардкоженным) + подпись rootsDigest
+  trees: { asset: AssetId; decimals: number; granule: string; root: string; sum: string }[];  // sum — базовые единицы, целое
+  vaults: {
+    address: string;                      // base58 (это и есть ed25519 pubkey)
+    sig: string;                          // base58, vault.sig выше
+    lamports: string;
+    tokens: { mint: string; amount: string }[];  // базовые единицы
+  }[];
+  committedLamports: string;              // SOL, уже обещанный заданиям в очереди (buy/create/fair_create + газ выводов): вычитается из покрытия
+  rateLamportsPerZecSell?: string;        // курс, по которому SOL засчитывается в покрытие ZEC (нет — курса не было)
+  zecReserve: { amountZat: string; height: number; attested: true };   // округлено ВНИЗ до 0.01 ZEC; заявлено оператором, не доказано
+}
+
+interface VerifyProof {                   // GET /api/verify/proof (подписанный), только владельцу
+  snapshotId: number;
+  proofs: {
+    asset: AssetId; decimals: number;
+    pieces: {
+      piece: number; leafIndex: number;
+      value: string;                      // базовые единицы, кратно грануле
+      blind: string;                      // hex 32 байта
+      path: { hash: string; sum: string }[];   // соседи снизу вверх; сосед справа, если бит leafIndex на этом уровне = 0
+    }[];
+  }[];                                    // пусто, если в снимке у ключа ничего не было
+  truncated: boolean;                     // > 12 активов: ZEC + 11 случайных
+  pad: string;                            // пробелы до кратного 16384 байт
+}
+```
+
+### Проверка в браузере
+1. `GET /api/verify` (или `/:id`) → пересчитать `rootsDigest` из полей снимка, проверить `operator.sig` (ed25519, `@noble/curves`) и `vault.sig` каждого vault.
+2. `GET /api/verify/proof` (по кнопке, без автоопроса) → для каждого куска: лист из `(chainId, snapshotId, asset, свой pubkey, piece, value, blind)`, подъём по `path` → совпадает с `trees[asset].root` и `.sum`. Показать «committed ≥ ваш баланс на takenAt» (сумма кусков).
+3. Солвентность: по mint `sum ≤ Σ vault.tokens[mint]` (проверяемо); по ZEC `sum ≤ zecReserve.amountZat + (Σ vault.lamports − committedLamports) · 1e8 / rateLamportsPerZecSell` (часть ZEC — «attested»).
+4. Якорь: ссылка на `anchor.solanaTx` в эксплорере (по клику). Доказательство — только «Download JSON», **не в localStorage**.
+
+### Ошибки и лимиты
+- `/api/verify`: нет ни одного снимка → `404 not_found`. `/api/verify/:id` неизвестен → 404.
+- `/api/verify/proof`: `?snapshot=` не последний и не предыдущий, или данные уже удалены (48 ч) → `404`. Лимит 10/мин на ключ (`429 rate_limited`). `Cache-Control: no-store`. Публичные — `public, max-age=300` (история — 60).
 
 ## Дополнительные эндпоинты
 | Метод | Путь | Ответ |

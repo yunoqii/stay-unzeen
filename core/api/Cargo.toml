@@ -35,6 +35,7 @@ zcash_address = "=0.14.0-pre.1"
 zcash_protocol = "=0.11.0-pre.0"
 
 [dev-dependencies]
+ed25519-dalek = "3"
 unzeen-fair = { path = "../fair" }
 tokio-tungstenite = "0.27"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

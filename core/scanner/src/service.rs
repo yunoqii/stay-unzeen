@@ -173,6 +173,20 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool) ->
                 return Ok(());
             }
             let counts = apply_wallet_notes(c, &db, &ledger, &key, rep.tip).await?;
+            // Verify (API v0.7): spendable (>= confirmations) balance of the pool wallet at this
+            // tip, attested by the operator in the next snapshot. Core only; never logged.
+            if let Some(summary) = db
+                .get_wallet_summary(zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default())
+                .map_err(|e| anyhow!("wallet summary: {e}"))?
+            {
+                let zat: u64 = summary
+                    .account_balances()
+                    .values()
+                    .map(|b| u64::from(b.spendable_value()))
+                    .sum();
+                ledger.set_pool_meta("reserve_zat", &zat.to_string()).await?;
+                ledger.set_pool_meta("reserve_height", &rep.tip.to_string()).await?;
+            }
             let changed: BTreeMap<String, usize> = counts
                 .iter()
                 .filter(|(k, _)| **k != Observed::Unchanged)

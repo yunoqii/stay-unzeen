@@ -950,40 +950,8 @@ impl Ledger {
     /// Settle final `fair_create` and `attest` jobs. Returns how many launches changed.
     pub async fn fl_settle_ready(&self) -> Result<usize> {
         let mut n = 0;
-        // Attestations (independent of the launch outcome).
-        loop {
-            let mut c = self.pool.get().await?;
-            let tx = c.transaction().await?;
-            let Some(r) = tx
-                .query_opt(
-                    "SELECT l.id, j.id, j.status, j.signature, j.slot, j.vault, j.out_memo, l.commitment_root
-                     FROM fl_launches l JOIN relayer_jobs j ON j.id = l.attest_job_id
-                     WHERE j.status IN ('confirmed', 'failed') AND j.settled_at IS NULL
-                     LIMIT 1 FOR UPDATE OF j SKIP LOCKED",
-                    &[],
-                )
-                .await?
-            else {
-                break;
-            };
-            let (lid, jid, status): (Vec<u8>, i64, String) = (r.get(0), r.get(1), r.get(2));
-            if status == "confirmed" {
-                let root: Option<Vec<u8>> = r.get(7);
-                let memo: Option<String> = r.get(6);
-                let matches = root.is_some_and(|root| memo.as_deref() == Some(hex::encode(root).as_str()));
-                let att = json!({
-                    "solanaTx": r.get::<_, Option<String>>(3),
-                    "slot": r.get::<_, Option<i64>>(4),
-                    "signer": r.get::<_, Option<String>>(5),
-                    "matches": matches,
-                });
-                tx.execute("UPDATE fl_launches SET attestation = $2 WHERE id = $1", &[&lid, &att])
-                    .await?;
-            }
-            mark_settled(&tx, &[jid]).await?;
-            tx.commit().await?;
-            n += 1;
-        }
+        // Attestations (independent of the launch outcome); shared with Verify.
+        n += self.settle_attestations().await?;
         loop {
             let mut c = self.pool.get().await?;
             let tx = c.transaction().await?;

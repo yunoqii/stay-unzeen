@@ -17,6 +17,7 @@ pub mod launch;
 pub mod limit;
 pub mod market;
 pub mod rate;
+pub mod verify;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -56,6 +57,8 @@ pub struct Inner {
     pub ws_slots: Arc<Semaphore>,
     pub epochs: actions::Epochs,
     pub drand: fair::Drand,
+    /// `GET /api/verify/proof`: 10/min per key.
+    pub verify_limit: Limiter,
 }
 
 impl std::ops::Deref for AppState {
@@ -76,6 +79,7 @@ impl AppState {
             ws_slots: Arc::new(Semaphore::new(l.max_ws)),
             epochs: actions::Epochs::new(&cfg.exec),
             drand: fair::Drand::new(cfg.fair.drand_urls.clone()),
+            verify_limit: Limiter::new(10.0 / 60.0, 10.0),
             feed_tx,
             ledger: ledger.with_creator_rules(cfg.launch.rules()),
             cfg,
@@ -98,6 +102,10 @@ pub fn router(st: AppState) -> Router {
         .route("/api/tokens/{mint}/trades", get(market::trades))
         .route("/api/tokens/{mint}/candles", get(market::candles))
         .route("/api/tokens/{mint}/safety", get(intel::safety))
+        .route("/api/verify", get(verify::latest))
+        .route("/api/verify/snapshots", get(verify::history))
+        .route("/api/verify/proof", get(verify::proof))
+        .route("/api/verify/{id}", get(verify::one))
         .route("/api/launches", get(fair::list))
         .route("/api/launches/{id}", get(fair::one))
         .route("/ws/feed", get(market::ws_feed))
@@ -250,7 +258,7 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
             "nowFeeZat": st.cfg.fees.now_fee_zat.to_string(),
         },
         "createEnabled": st.cfg.create_enabled,
-        "features": { "fullTrades": st.cfg.intel.full_trades, "fairLaunch": st.cfg.fair.enabled },
+        "features": { "fullTrades": st.cfg.intel.full_trades },
         "launchRules": {
             "lockSecs": st.cfg.launch.lock_secs,
             "capBps": st.cfg.launch.cap_bps,
@@ -258,7 +266,9 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
             "maxInitialBuyLamportsByVenue": by_venue,
         },
     }));
+    // Flag off: no "fair" anywhere in the public PoolInfo (absent key = disabled).
     if let Some(fl) = fair::pool_block(&st).await? {
+        r.0["features"]["fairLaunch"] = json!(true);
         r.0["fairLaunch"] = fl;
     }
     let mut r = r.into_response();
@@ -513,6 +523,9 @@ pub fn spawn_background(st: &AppState) {
             if let Err(e) = s.ledger.purge_api_nonces().await {
                 tracing::warn!(error = %e, "nonce purge failed");
             }
+            if let Err(e) = s.ledger.verify_janitor().await {
+                tracing::warn!(error = %e, "verify janitor failed");
+            }
             if let Err(e) = s.ledger.fl_janitor().await {
                 tracing::warn!(error = %e, "fair-launch janitor failed");
             }
@@ -535,6 +548,7 @@ pub fn spawn_background(st: &AppState) {
     if st.cfg.fair.enabled {
         tokio::spawn(fair::scheduler_loop(st.clone()));
     }
+    tokio::spawn(verify::scheduler_loop(st.clone()));
     // D14: ZEC/SOL quote on a timer, never on demand.
     tokio::spawn(st.rate.clone().refresh_loop());
 }
