@@ -34,12 +34,14 @@
 ## План (16 дней, с 12.10)
 | Дни | Цель |
 |---|---|
-| 1–2 | analyst: проверить pump.fun SDK, Meteora DBC SDK, FROST/Orchard, NEAR Intents. backend: Zebra+lightwalletd testnet, чтение memo из shielded tx |
-| 3–5 | backend: сканер депозитов + реестр балансов + адаптер pump.fun. frontend: каркас, лента |
-| 6–8 | backend: релейер buy/sell/withdraw, шардирование vault. frontend: страница токена, запуск, QR |
-| 9–10 | backend: адаптер Meteora DBC, Jupiter. frontend: портфель по anon-ключу |
-| 11–12 | backend: fair-launch (tlock + Jito bundle), NEAR Intents ребаланс |
-| 13–14 | сквозной прогон, analyst — полный аудит |
-| 15–16 | README, видео-демо, открыть репо, сдача |
+| 1–2 | analyst: проверить pump.fun SDK, Meteora DBC SDK, Jupiter, Jito, NEAR Intents, фаусет testnet. backend: Zebra+lightwalletd testnet, чтение memo. frontend: каркас Next.js, дизайн-токены, `/key` (12 слов) |
+| 3–5 | backend: сканер депозитов → баланс ZEC в реестре, подписанные запросы, адаптер pump.fun. frontend: лента, главная с героем, `/portfolio` (баланс + пополнить) |
+| 6–8 | backend: действия с баланса buy/sell/create/claim/withdraw, шардирование vault. frontend: страница токена, `/launch`, `/pay` |
+| 9–10 | backend: адаптер Meteora DBC, **лимитки/TP/SL** (движок триггеров), **чат**. frontend: ордера на странице токена, чат |
+| 11–12 | backend: fair-launch (tlock + Jito), **умный вывод**, NEAR Intents ребаланс, `/api/creator`, `/api/stats`. frontend: fair-launch UI, **кабинет создателя**, **статистика**, `/verify` |
+| 13–14 | сквозной прогон, Jupiter если успеваем, analyst — полный аудит приватности и безопасности |
+| 15–16 | README (с моделью доверия и roadmap), видео-демо, открыть репо, сдача |
 
-**Порядок урезания, если не успеваем:** Jupiter → Meteora → NEAR Intents (ручной ребаланс) → fair-launch. Ядро (shielded депозит → покупка на pump.fun → лента → вывод) трогать нельзя.
+Список функций: `docs/FEATURES.md`.
+
+**Порядок урезания, если не успеваем:** Jupiter → чат → статистика → кабинет создателя → умный вывод → Meteora → NEAR Intents (ручной ребаланс) → лимитки/TP/SL → fair-launch. Ядро (депозит ZEC → баланс → покупка/продажа на pump.fun → лента → вывод) трогать нельзя.

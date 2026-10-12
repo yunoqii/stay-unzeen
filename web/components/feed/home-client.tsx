@@ -1,0 +1,95 @@
+"use client";
+
+import { useRef, useState } from "react";
+import { motion } from "motion/react";
+import { useLiveFeed } from "@/hooks/use-live-feed";
+import { useNow } from "@/hooks/use-now";
+import { useTokens } from "@/hooks/use-tokens";
+import { cn } from "@/lib/utils";
+import { HotTokens } from "@/components/tokens/hot-tokens";
+import { CursorShadow } from "@/components/motion/cursor-shadow";
+import { Hero } from "./hero";
+import { FeedStatusDot, LiveFeed } from "./live-feed";
+
+type Tab = "feed" | "hot";
+
+export function HomeClient() {
+  const feed = useLiveFeed({ limit: 50 });
+  const createCount = feed.events.filter((e) => e.kind === "create").length;
+  const { tokens } = useTokens(createCount);
+  const now = useNow(5000);
+  const [tab, setTab] = useState<Tab>("feed");
+  const hotRef = useRef<HTMLElement>(null);
+
+  const onBuy = () => {
+    setTab("hot");
+    requestAnimationFrame(() => hotRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  };
+
+  return (
+    <>
+      <CursorShadow />
+      <Hero onBuy={onBuy} />
+
+      <div className="relative mx-auto max-w-6xl px-0 pt-6 sm:px-6 lg:pt-10">
+        <div role="tablist" aria-label="Home sections" className="mx-4 mb-4 flex gap-1 rounded-full border border-border p-1 sm:mx-0 lg:hidden">
+          {(["feed", "hot"] as const).map((t) => (
+            <button
+              key={t}
+              role="tab"
+              aria-selected={tab === t}
+              aria-controls={`panel-${t}`}
+              onClick={() => setTab(t)}
+              className={cn(
+                "relative flex-1 rounded-full py-2 text-sm transition-colors duration-150",
+                tab === t ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              {tab === t && (
+                <motion.span
+                  layoutId="home-tab"
+                  className="absolute inset-0 rounded-full bg-white/[0.07]"
+                  transition={{ type: "spring", bounce: 0, duration: 0.3 }}
+                />
+              )}
+              <span className="relative">{t === "feed" ? "Live feed" : "Hot tokens"}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-8">
+          <section
+            id="panel-feed"
+            aria-labelledby="feed-title"
+            className={cn("min-w-0 border-border/60 sm:rounded-2xl sm:border", tab !== "feed" && "max-lg:hidden")}
+          >
+            <header className="flex items-center justify-between border-b border-border/60 px-4 py-3 sm:px-5">
+              <h2 id="feed-title" className="text-sm font-medium">
+                What unzeen is doing
+              </h2>
+              <FeedStatusDot status={feed.status} />
+            </header>
+            <LiveFeed events={feed.events} fresh={feed.fresh} loading={feed.loading} error={feed.error} />
+          </section>
+
+          <aside
+            id="panel-hot"
+            ref={hotRef}
+            aria-labelledby="hot-title"
+            className={cn("min-w-0 scroll-mt-20 lg:sticky lg:top-[calc(var(--header-h)+1.5rem)] lg:self-start", tab !== "hot" && "max-lg:hidden")}
+          >
+            <div className="border-border/60 sm:rounded-2xl sm:border">
+              <header className="flex items-center justify-between border-b border-border/60 px-4 py-3">
+                <h2 id="hot-title" className="text-sm font-medium">
+                  Hot tokens
+                </h2>
+                <span className="text-xs text-faint-foreground">last 10 min</span>
+              </header>
+              <HotTokens tokens={tokens} events={feed.events} now={now} />
+            </div>
+          </aside>
+        </div>
+      </div>
+    </>
+  );
+}

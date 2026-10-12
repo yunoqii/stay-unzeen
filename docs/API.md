@@ -72,6 +72,43 @@ type SignedAction = {
   | { op: "create"; venue: Venue; meta: { name: string; symbol: string; image?: string }; initialBuyZec?: string }
   | { op: "claim"; mint?: string }                          // creator fees → баланс
   | { op: "withdraw_zec"; to: string; amount: string }       // на любой shielded UA
-  | { op: "withdraw_token"; mint: string; amount: string; to: string } // на новый Solana-адрес
+  | { op: "withdraw_token"; mint: string; amount: string; to: string | string[];   // на новый Solana-адрес
+      smart?: { parts: number; maxDelayMin: number; gasDrop: boolean } }          // умный вывод, опционально
+  | { op: "order_create"; venue: Venue; mint: string;
+      kind: "limit_buy" | "limit_sell" | "take_profit" | "stop_loss";
+      triggerPriceSol: string; amount: string }                                   // amount: ZEC для buy, токены для sell
+  | { op: "order_cancel"; orderId: string }
+  | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean }
 );
+
+interface Order {
+  id: string; venue: Venue; mint: string; kind: string;
+  triggerPriceSol: string; amount: string;
+  status: "open" | "filled" | "cancelled" | "failed"; createdAt: number; filledTx?: string;
+}
+
+interface ChatMessage {
+  id: string; mint: string; nick: string;   // nick = короткий хэш H(anonPubkey ‖ mint)
+  text: string; isCreator: boolean; ts: number;
+}
+
+interface CreatorToken {
+  mint: string; symbol: string; venue: Venue; status: "curve" | "graduated";
+  feesEarnedSol: string; feesClaimedSol: string; volumeSol: string; holders: number;
+}
+
+interface PlatformStats {
+  volumeSol: string; zecShielded: string; trades: number; launches: number;
+  byVenue: Record<Venue, { volumeSol: string; trades: number }>;
+  topTokens: Token[];
+}
 ```
+
+## Дополнительные эндпоинты
+| Метод | Путь | Ответ |
+|---|---|---|
+| GET | `/api/orders` (подписанный) | `Order[]` |
+| GET | `/api/creator` (подписанный) | `CreatorToken[]` |
+| GET | `/api/tokens/:mint/chat?before=` | `ChatMessage[]` |
+| WS | `/ws/chat/:mint` | поток `ChatMessage` |
+| GET | `/api/stats` | `PlatformStats` |

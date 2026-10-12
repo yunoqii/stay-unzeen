@@ -1,0 +1,40 @@
+[package]
+name = "unzeen-scanner"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Unzeen pool wallet: Orchard deposit scanner (Zcash testnet)"
+
+[[bin]]
+name = "unzeen-scanner"
+path = "src/main.rs"
+
+# librustzcash: pre-release line pinned EXACTLY (=). Testnet activated NU7 (branch id
+# 0x77190AD9) on 2026-10-05; the stable 0.24/0.22 line cannot parse post-NU7 testnet txs.
+# API breaks between -pre releases: bump deliberately, never via `cargo update`.
+[dependencies]
+anyhow = "1"
+bip0039 = { version = "0.14", features = ["std"] }
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
+futures-util = "0.3"
+hex = "0.4"
+orchard = { version = "0.16", default-features = false }
+prost = "0.14"
+rand = "0.10"
+rusqlite = "0.37"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sapling = { package = "sapling-crypto", version = "0.9" }
+secrecy = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
+tonic = { version = "0.14", features = ["tls-webpki-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zcash_client_backend = { version = "=0.25.0-pre.1", features = ["lightwalletd-tonic-tls-webpki-roots", "orchard"] }
+zcash_client_sqlite = { version = "=0.23.0-pre.1", features = ["orchard"] }
+zcash_keys = { version = "=0.17.0-pre.1", features = ["orchard", "sapling"] }
+zcash_primitives = "=0.31.0-pre.1"
+zcash_protocol = "=0.11.0-pre.0"
