@@ -14,15 +14,16 @@
 - frontend: API v0.1 (моки), `/key` (BIP-39, PBKDF2→AES-GCM, hold-to-reveal), подпись запросов и кодек unz1 совпадают с векторами core байт в байт, слой данных под Devnet/Mainnet (по отчёту агента: build/lint/test 50/50; лид не перепроверял)
 - core: crate `protocol` (unz1 + подпись HTTP, векторы), crate `ledger` (Postgres: K=3, reorg → freeze, атомарный hold, идемпотентный nonce, минимумы), `serve` без txid/memo в логах, сид пула в age, данные в `~/.unzeen/<net>` (0600). **Testnet: депозит 0.01 TAZ с unz1 → баланс в Postgres.** cargo test 44/44 (проверил лид)
 - API.md v0.2: intents удалены → публичный `GET /api/pool`; `/api/portfolio` без pubkey в пути; коды graduated/pool_liquidity/balance_frozen/below_minimum
+- core: API-сервер axum (v0.3), курс 1Click, контракт релейера `docs/RELAYER.md` + миграция 0002 (jobs/trades/tokens/token_balances), N3–N7 закрыты; 66/66 тестов с Postgres (проверил лид)
+- adapters: релейер на Postgres-очереди по RELAYER.md, ротация vault, джиттер, идемпотентная отправка (N1), вывод с каплей SOL с другого vault; devnet buy/sell/withdraw finalized; ключи в `~/.unzeen/devnet/solana`; 89/89 тестов (проверил лид)
+- frontend: API v0.2, Top up (ZIP-321 + unz1 в браузере), /portfolio, переключатель сети, CSP, /verify без viewing key
 - Ревью кода дня 2: `docs/analysis/review-day3.md` (critical нет; N1–N11 розданы агентам)
 - Ревью безопасности/приватности дня 2: `docs/analysis/review-day2.md` (3 critical закрыты решениями владельца, high — в работе у backend/frontend)
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
 
 ## В работе (день 3)
-- backend (core): API-сервер axum по API v0.2 (pool, portfolio, actions, feed/tokens, WS)
-- backend (adapters): релейер — исполнение buy/sell из holds реестра через адаптер pump.fun, загрузка .env, RPC по сети
-- frontend: переход на API v0.2, `/portfolio` (баланс + Top up QR ZIP-321 с unz1), переключатель Devnet/Mainnet
+- frontend: переход на API v0.3 (chain_id в подписи, ключ по сети), проверка real-режима против живого API
 
 ## Решения
 - 12.10 (владелец): данные пула на VPS — на зашифрованном томе с ручной разблокировкой (N2); мониторинг с алертом
@@ -33,7 +34,12 @@
 - **Своей ноды Zebra/lightwalletd НЕ ставим** (окончательно, владелец). Только публичный lightwalletd (zec.rocks) + запасной; self-host/Tor — только строка в roadmap README
 
 ## Риски
-- Фронт на API v0.1 (intents, /api/deposit) → перевести на v0.2 (`/api/pool`, ZIP-321 строит фронт)
+- Контракт релейера: нет `avoid_vaults` в задании (вывод не знает vault покупки — сейчас эвристика), нет UPDATE not_before у роли, `create` в релейере не реализован, роль unzeen_relayer не проверена вживую
+- Вывод может упереться в отсутствие токенов на «другом» vault → распределение покупок по шардам
+- Блокировка vault и счётчик creator — в памяти/файле → Postgres до мульти-процесса
+- Ключи vault/creator открытым текстом (0600) → шифрование до mainnet
+- Нет исполнителя выплат ZEC (zec_payouts queued), нет EXIF-очистки картинок
+- Утечка БД связывает hold ↔ trade по суммам в пределах суток → зашифрованный том + README
 - wallet.sqlite пула хранит расшифрованные memo + txid незашифрованно (0600, вне Desktop)
 - H1 (lightwalletd видит интерес пула к txid) — НЕ урезается (владелец), делаем в дни 4–5: запрос всех shielded-tx блока
 - Запасного testnet lightwalletd нет; mainnet fallback — тот же оператор (na/eu.zec.rocks)
