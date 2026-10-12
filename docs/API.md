@@ -43,7 +43,7 @@ interface Token {
 }
 
 interface IntentRequest {
-  op: "buy" | "sell" | "create" | "withdraw";
+  op: "buy" | "sell" | "create" | "withdraw" | "claim";   // claim — забрать creator fees в shielded ZEC
   venue?: Venue; mint?: string; amount?: string; minOut?: string;
   anonPubkey: string; sig: string;
   meta?: { name: string; symbol: string; image?: string };
