@@ -12,19 +12,27 @@
 - API.md v0.1: `unz1`, единицы в базовых единицах + decimals, свечи, trades, WS-фильтр по mint, подпись в заголовках, формат ошибок
 - adapters: адаптер pump.fun (pump-sdk 4.0.0, web3.js v1, CJS), create+buy одной v0-tx с ALT на vault, свежий creator на каждый запуск; 36 тестов (проверил лид); **e2e на devnet пройден**: create+buy / buy / sell finalized (статусы проверил лид через RPC)
 - frontend: API v0.1 (моки), `/key` (BIP-39, PBKDF2→AES-GCM, hold-to-reveal), подпись запросов и кодек unz1 совпадают с векторами core байт в байт, слой данных под Devnet/Mainnet (по отчёту агента: build/lint/test 50/50; лид не перепроверял)
+- core: crate `protocol` (unz1 + подпись HTTP, векторы), crate `ledger` (Postgres: K=3, reorg → freeze, атомарный hold, идемпотентный nonce, минимумы), `serve` без txid/memo в логах, сид пула в age, данные в `~/.unzeen/<net>` (0600). **Testnet: депозит 0.01 TAZ с unz1 → баланс в Postgres.** cargo test 44/44 (проверил лид)
+- API.md v0.2: intents удалены → публичный `GET /api/pool`; `/api/portfolio` без pubkey в пути; коды graduated/pool_liquidity/balance_frozen/below_minimum
 - Ревью безопасности/приватности дня 2: `docs/analysis/review-day2.md` (3 critical закрыты решениями владельца, high — в работе у backend/frontend)
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
 
-## В работе (день 2)
-- backend: `core/` — кодек unz1 + тест-векторы, реестр балансов в Postgres (депозит → баланс anon-ключа), шифрование сида пула, тихие логи
+## В работе
+- —
 
 ## Решения
+- Путь anon-ключа SLIP-0010 `m/44'/133'/0'/0'` фиксируем (лид): с ZIP-32 (Zcash) и `m/44'/501'` (Solana) не пересекается, менять векторы на обеих сторонах не стоит
 - 12.10 (владелец): демо с переключателем Devnet ↔ Mainnet; на Devnet — 3–5 pre-funded demo-ключей для судей; K=3 подтверждения
 - 12.10 по ревью аналитика (владелец): «оплата за действие» вырезана — только баланс; Verify = Merkle-sum + публичные vault, viewing key не публикуется никогда; вывод токенов всегда с газом и задержкой; хостинг — всё на своём сервере (VPS), без Vercel, без access-логов
 - **Своей ноды Zebra/lightwalletd НЕ ставим** (окончательно, владелец). Только публичный lightwalletd (zec.rocks) + запасной; self-host/Tor — только строка в roadmap README
 
 ## Риски
+- Фронт на API v0.1 (intents, /api/deposit) → перевести на v0.2 (`/api/pool`, ZIP-321 строит фронт)
+- wallet.sqlite пула хранит расшифрованные memo + txid незашифрованно (0600, вне Desktop)
+- H1 (lightwalletd видит интерес пула к txid): 0.5–1 дня на запрос всех tx блока — решить
+- Запасного testnet lightwalletd нет; mainnet fallback — тот же оператор (na/eu.zec.rocks)
+- API-сервер (axum) ещё не написан; выплаты refund_pending не реализованы
 - Публичный devnet RPC часто отвечает 429 → для релейера/демо нужен свой RPC (Helius)
 - pump-sdk 4.0.0 ESM ломается в Node → адаптер CJS; релейер подключает через require
 - После истёкшего blockhash релейер обязан проверить подпись перед повтором (двойная покупка)
