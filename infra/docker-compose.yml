@@ -1,13 +1,8 @@
-# Unzeen self-hosted Zcash stack: zebrad + lightwalletd + postgres.
+# Unzeen infra: Postgres only (ledger / queue).
 #
-# Default network: TESTNET (CI/dev). The demo uses mainnet via a public lightwalletd
-# (zec.rocks) — you do NOT need this stack to run core/. See infra/README.md.
+# Zcash access is via PUBLIC lightwalletd servers (see infra/README.md); no local node.
 #
-#   docker compose -f infra/docker-compose.yml --env-file .env up -d postgres          # only DB
-#   docker compose -f infra/docker-compose.yml --env-file .env --profile node up -d    # + zebrad + lightwalletd
-#
-# zebrad must be >= 7.0.0-rc.0: testnet activated NU7 at height 4,465,026 (branch 0x77190AD9);
-# 6.x nodes follow the wrong chain on testnet.
+#   docker compose -f infra/docker-compose.yml --env-file .env up -d postgres
 
 name: unzeen
 
@@ -20,64 +15,17 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-unzeen}
     ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"   # localhost only
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"   # localhost only
     volumes:
       - pg-data:/var/lib/postgresql/data
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-unzeen} -d ${POSTGRES_DB:-unzeen}"]
       interval: 5s
       timeout: 3s
       retries: 20
 
-  zebra:
-    profiles: ["node"]
-    image: zfnd/zebra:${ZEBRA_VERSION:-7.0.0-rc.0}
-    platform: linux/amd64
-    restart: unless-stopped
-    environment:
-      ZEBRA_NETWORK__NETWORK: ${ZEBRA_NETWORK:-Testnet}          # Testnet | Mainnet
-      ZEBRA_RPC__LISTEN_ADDR: 0.0.0.0:${ZEBRA_RPC_PORT:-18232}   # 18232 testnet, 8232 mainnet
-      ZEBRA_RPC__ENABLE_COOKIE_AUTH: "false"                     # RPC is NOT published to host
-    ports:
-      - "${ZEBRA_P2P_PORT:-18233}:${ZEBRA_P2P_PORT:-18233}"     # P2P: 18233 testnet, 8233 mainnet
-    volumes:
-      - zebra-cache:/home/zebra/.cache/zebra
-    tty: true
-
-  lightwalletd:
-    profiles: ["node"]
-    image: electriccoinco/lightwalletd:${LWD_VERSION:-v0.5.5}
-    platform: linux/amd64
-    restart: unless-stopped
-    depends_on:
-      zebra:
-        condition: service_started
-    configs:
-      - source: lwd_zcash_conf
-        target: /etc/lightwalletd/zcash.conf
-    # Plaintext gRPC is bound to localhost only. For anything public, terminate TLS in front.
-    command: >
-      --no-tls-very-insecure
-      --grpc-bind-addr=0.0.0.0:9067
-      --http-bind-addr=0.0.0.0:9068
-      --zcash-conf-path=/etc/lightwalletd/zcash.conf
-      --data-dir=/var/lib/lightwalletd/db
-      --log-file=/dev/stdout
-      --log-level=5
-    ports:
-      - "127.0.0.1:9067:9067"   # gRPC -> LIGHTWALLETD_URL=http://127.0.0.1:9067
-    volumes:
-      - lwd-cache:/var/lib/lightwalletd/db
-
-configs:
-  lwd_zcash_conf:
-    content: |
-      rpcbind=zebra
-      rpcport=${ZEBRA_RPC_PORT:-18232}
-      rpcuser=unzeen
-      rpcpassword=none
-
 volumes:
   pg-data:
-  zebra-cache:
-  lwd-cache:

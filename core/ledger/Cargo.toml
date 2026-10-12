@@ -1,0 +1,24 @@
+[package]
+name = "unzeen-ledger"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Unzeen private ledger (Postgres): deposits, balances, holds, journal, nonces"
+
+[dependencies]
+hex = "0.4"
+hmac = "0.13"
+rand = "0.10"
+sha2 = "0.11"
+deadpool-postgres = "0.14"
+tokio-postgres = "0.7"
+thiserror = "2"
+tracing = "0.1"
+unzeen-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+dotenvy = "0.15"
+hex = "0.4"
+rand = "0.10"

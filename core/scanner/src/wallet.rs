@@ -1,9 +1,6 @@
 //! Pool wallet bootstrap: seed generation, wallet DB, account, address/UFVK output.
 
-use std::io::Write as _;
-use std::path::Path;
-
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail};
 use bip0039::{Count, English, Mnemonic};
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
 
@@ -30,6 +27,7 @@ pub fn open_db(common: &Common) -> anyhow::Result<Db> {
         bail!("wallet DB {} not found — run `init` first", path.display());
     }
     common.check_network_marker()?;
+    common.secure_dirs()?;
     Ok(WalletDb::for_path(path, common.params(), SystemClock, OsRng)?)
 }
 
@@ -41,15 +39,17 @@ pub struct InitOutput {
 
 pub async fn init(common: &Common, birthday: Option<u32>) -> anyhow::Result<InitOutput> {
     let net = common.params();
-    let seed_path = common.seed_path();
+    let seed_path = common.seed_age_path();
     let db_path = common.wallet_db_path();
-    if seed_path.exists() || db_path.exists() {
+    if seed_path.exists() || common.seed_path().exists() || db_path.exists() {
         bail!(
             "refusing to overwrite existing pool wallet ({} / {}). Move them away first.",
             seed_path.display(),
             db_path.display()
         );
     }
+    // Fail before touching the network if there is no key to encrypt the seed with.
+    let seed_key = crate::seed::SeedKey::require()?;
 
     let mut client = common.connect().await?;
     let tip: u32 = client
@@ -71,16 +71,19 @@ pub async fn init(common: &Common, birthday: Option<u32>) -> anyhow::Result<Init
     // NOTE: this request reveals the birthday to the lightwalletd operator (acceptable on testnet;
     // in prod use our own lightwalletd).
     let treestate = client
-        .get_tree_state(service::BlockId { height: u64::from(bday - 1), hash: vec![] })
+        .get_tree_state(service::BlockId {
+            height: u64::from(bday - 1),
+            hash: vec![],
+        })
         .await?
         .into_inner();
     let birthday = AccountBirthday::from_treestate(treestate, None)
         .map_err(|e| anyhow!("bad tree state from lightwalletd: {e:?}"))?;
 
-    // Generate the seed and persist it before touching the DB.
+    // Generate the seed and persist it (encrypted) before touching the DB.
     let mnemonic: Mnemonic<English> = Mnemonic::generate(Count::Words24);
-    std::fs::create_dir_all(&common.keys_dir)?;
-    write_secret_file(&seed_path, mnemonic.phrase().as_bytes())?;
+    common.secure_dirs()?;
+    crate::seed::write_encrypted(&seed_path, mnemonic.phrase(), &seed_key)?;
 
     let seed = {
         let mut s = mnemonic.to_seed("");
@@ -89,12 +92,12 @@ pub async fn init(common: &Common, birthday: Option<u32>) -> anyhow::Result<Init
         v
     };
 
-    std::fs::create_dir_all(&common.data_dir)?;
     common.write_network_marker()?;
     let mut db = WalletDb::for_path(&db_path, net, SystemClock, OsRng)?;
     init_wallet_db(&mut db, Some(SecretVec::new(seed.expose_secret().clone())))
         .map_err(|e| anyhow!("wallet DB migration failed: {e:?}"))?;
     let (account_id, usk) = db.create_account(ACCOUNT_NAME, &seed, &birthday, None)?;
+    common.secure_dirs()?;
 
     let ufvk = usk.to_unified_full_viewing_key();
     let (ua, _) = db
@@ -126,21 +129,4 @@ pub fn show(common: &Common) -> anyhow::Result<InitOutput> {
         ufvk: ufvk.encode(&net).map_err(|e| anyhow!("UFVK encoding failed: {e:?}"))?,
         birthday: u32::from(birthday),
     })
-}
-
-fn write_secret_file(path: &Path, data: &[u8]) -> anyhow::Result<()> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts
-        .open(path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    f.write_all(data)?;
-    f.write_all(b"\n")?;
-    f.sync_all()?;
-    Ok(())
 }

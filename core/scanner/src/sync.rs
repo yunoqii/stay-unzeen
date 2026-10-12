@@ -36,6 +36,7 @@ type Client = CompactTxStreamerClient<Channel>;
 /// Blocks per download/scan batch. Testnet blocks are small; keep memory bounded anyway.
 const BATCH: u32 = 2_000;
 const REORG_MARGIN: u32 = 10;
+const MAX_RESTARTS: u32 = 20;
 
 pub struct SyncReport {
     pub tip: u32,
@@ -47,16 +48,27 @@ pub async fn sync(net: Network, client: &mut Client, db: &mut Db) -> anyhow::Res
     update_subtree_roots(client, db).await?;
 
     let mut scanned_blocks = 0u64;
+    let mut restarts = 0u32;
     let tip = loop {
         let tip = update_chain_tip(client, db).await?;
         let restart = scan_all(net, client, db, tip, &mut scanned_blocks).await?;
         if !restart {
             break tip;
         }
+        restarts += 1;
+        if restarts >= MAX_RESTARTS {
+            // Continue next pass instead of spinning forever on re-prioritized ranges.
+            warn!(restarts, "scan restarted too many times in one pass; deferring");
+            break tip;
+        }
     };
 
     let enhanced_txs = enhance(net, client, db, tip).await?;
-    Ok(SyncReport { tip: u32::from(tip), scanned_blocks, enhanced_txs })
+    Ok(SyncReport {
+        tip: u32::from(tip),
+        scanned_blocks,
+        enhanced_txs,
+    })
 }
 
 async fn update_subtree_roots(client: &mut Client, db: &mut Db) -> anyhow::Result<()> {
@@ -175,8 +187,14 @@ async fn scan_batch(
     info!(from = u32::from(start), to = u32::from(end) - 1, priority = ?range.priority(), "scanning");
 
     let req = service::BlockRange {
-        start: Some(service::BlockId { height: u64::from(start), hash: vec![] }),
-        end: Some(service::BlockId { height: u64::from(end - 1), hash: vec![] }),
+        start: Some(service::BlockId {
+            height: u64::from(start),
+            hash: vec![],
+        }),
+        end: Some(service::BlockId {
+            height: u64::from(end - 1),
+            hash: vec![],
+        }),
         pool_types: Default::default(),
     };
     let blocks: Vec<_> = client.get_block_range(req).await?.into_inner().try_collect().await?;
@@ -184,7 +202,10 @@ async fn scan_batch(
 
     let prior = start - 1;
     let chain_state: ChainState = client
-        .get_tree_state(service::BlockId { height: u64::from(prior), hash: vec![] })
+        .get_tree_state(service::BlockId {
+            height: u64::from(prior),
+            hash: vec![],
+        })
         .await?
         .into_inner()
         .to_chain_state()?;
@@ -209,9 +230,8 @@ fn rewind(db: &mut Db, at: BlockHeight, tip: BlockHeight) -> anyhow::Result<()> 
     match db.truncate_to_height(requested) {
         Ok(_) => {}
         Err(SqliteClientError::RequestedRewindInvalid { .. }) => {
-            db.truncate_to_height(at.saturating_sub(2)).map_err(|e| {
-                anyhow!("unrecoverable reorg at {at}: {e:?}; delete the wallet DB and re-init")
-            })?;
+            db.truncate_to_height(at.saturating_sub(2))
+                .map_err(|e| anyhow!("unrecoverable reorg at {at}: {e:?}; delete the wallet DB and re-init"))?;
         }
         Err(e) => return Err(e.into()),
     }
@@ -232,10 +252,11 @@ async fn enhance(net: Network, client: &mut Client, db: &mut Db, tip: BlockHeigh
             progressed = true;
             match &req {
                 TransactionDataRequest::GetStatus(txid) => {
-                    let status = fetch_tx(net, client, tip, *txid).await?.map_or(
-                        TransactionStatus::TxidNotRecognized,
-                        |(_, h)| h.map_or(TransactionStatus::NotInMainChain, TransactionStatus::Mined),
-                    );
+                    let status = fetch_tx(net, client, tip, *txid)
+                        .await?
+                        .map_or(TransactionStatus::TxidNotRecognized, |(_, h)| {
+                            h.map_or(TransactionStatus::NotInMainChain, TransactionStatus::Mined)
+                        });
                     db.set_transaction_status(*txid, status)?;
                 }
                 TransactionDataRequest::Enhancement(txid) => match fetch_tx(net, client, tip, *txid).await? {
@@ -262,14 +283,16 @@ async fn fetch_tx(
     tip: BlockHeight,
     txid: TxId,
 ) -> anyhow::Result<Option<(Transaction, Option<BlockHeight>)>> {
-    let req = service::TxFilter { hash: txid.as_ref().to_vec(), ..Default::default() };
+    let req = service::TxFilter {
+        hash: txid.as_ref().to_vec(),
+        ..Default::default()
+    };
     let raw = match client.get_transaction(req).await {
         Ok(r) => r.into_inner(),
         Err(s) if s.code() == Code::NotFound => return Ok(None),
         Err(s) => return Err(s.into()),
     };
-    let mined = (raw.height > 0 && raw.height <= u64::from(u32::MAX))
-        .then(|| BlockHeight::from_u32(raw.height as u32));
+    let mined = (raw.height > 0 && raw.height <= u64::from(u32::MAX)).then(|| BlockHeight::from_u32(raw.height as u32));
     let tx = Transaction::read(&raw.data[..], BranchId::for_height(&net, mined.unwrap_or(tip)))?;
     Ok(Some((tx, mined)))
 }
@@ -280,11 +303,21 @@ async fn fetch_tx(
 /// Returns (shielded txs found, txs parsed OK). Prints no addresses/values.
 pub async fn probe(net: Network, client: &mut Client, n: u32, max_txs: usize) -> anyhow::Result<(usize, usize)> {
     let tip = u32::try_from(
-        client.get_latest_block(service::ChainSpec::default()).await?.into_inner().height,
+        client
+            .get_latest_block(service::ChainSpec::default())
+            .await?
+            .into_inner()
+            .height,
     )?;
     let req = service::BlockRange {
-        start: Some(service::BlockId { height: u64::from(tip.saturating_sub(n - 1)), hash: vec![] }),
-        end: Some(service::BlockId { height: u64::from(tip), hash: vec![] }),
+        start: Some(service::BlockId {
+            height: u64::from(tip.saturating_sub(n - 1)),
+            hash: vec![],
+        }),
+        end: Some(service::BlockId {
+            height: u64::from(tip),
+            hash: vec![],
+        }),
         pool_types: Default::default(),
     };
     let blocks: Vec<_> = client.get_block_range(req).await?.into_inner().try_collect().await?;

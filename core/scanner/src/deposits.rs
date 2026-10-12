@@ -25,9 +25,17 @@ fn pool_name(code: i64) -> &'static str {
 
 #[derive(Debug, Serialize)]
 pub struct Deposit {
-    /// Internal row id (monotonic) — used to report only notes new since a given point.
+    /// Internal row id (per pool table).
     #[serde(skip)]
     pub row_id: i64,
+    /// Raw txid bytes (internal order) and pool code, for the ledger's note_ref.
+    #[serde(skip)]
+    pub txid_raw: [u8; 32],
+    #[serde(skip)]
+    pub pool_code: u8,
+    /// Raw stored memo (zero-trimmed); `None` = not fetched yet.
+    #[serde(skip)]
+    pub memo_raw: Option<Vec<u8>>,
     pub pool: &'static str,
     pub txid: String,
     pub action_index: u32,
@@ -47,39 +55,26 @@ pub fn format_zec(zat: u64) -> String {
     format!("{}.{:08}", zat / 100_000_000, zat % 100_000_000)
 }
 
-/// Per-pool cursor (row ids are per-pool-table).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Cursor {
-    pub orchard: i64,
-    pub ironwood: i64,
-}
-
-impl Cursor {
-    pub fn advance(&mut self, d: &Deposit) {
-        match d.pool {
-            "orchard" => self.orchard = self.orchard.max(d.row_id),
-            "ironwood" => self.ironwood = self.ironwood.max(d.row_id),
-            _ => {}
-        }
+impl Deposit {
+    /// Identity of what has been printed: a note is reported again when its memo arrives
+    /// or its mined height changes (reorg), so nothing is silently skipped.
+    pub fn print_key(&self) -> (u8, i64, bool, Option<u32>) {
+        (self.pool_code, self.row_id, self.memo.is_some(), self.mined_height)
     }
 }
 
-pub fn list(db_path: &std::path::Path, after: Cursor) -> anyhow::Result<Vec<Deposit>> {
+/// All incoming (non-change) Orchard/Ironwood notes, mined or not.
+pub fn list(db_path: &std::path::Path) -> anyhow::Result<Vec<Deposit>> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = conn.prepare(
         "SELECT ro.pool, ro.id_within_pool_table AS row_id, t.txid, ro.output_index, ro.value,
                 t.mined_height, ro.memo
          FROM v_received_outputs ro
          JOIN transactions t ON t.id_tx = ro.transaction_id
-         WHERE ro.is_change = 0
-           AND ((ro.pool = :orchard AND ro.id_within_pool_table > :after_o)
-             OR (ro.pool = :ironwood AND ro.id_within_pool_table > :after_i))
+         WHERE ro.is_change = 0 AND ro.pool IN (:orchard, :ironwood)
          ORDER BY t.mined_height IS NULL, t.mined_height, ro.pool, ro.id_within_pool_table",
     )?;
-    let params = named_params! {
-        ":orchard": POOL_ORCHARD, ":ironwood": POOL_IRONWOOD,
-        ":after_o": after.orchard, ":after_i": after.ironwood,
-    };
+    let params = named_params! { ":orchard": POOL_ORCHARD, ":ironwood": POOL_IRONWOOD };
     let rows = stmt.query_map(params, |r| {
         let txid: Vec<u8> = r.get("txid")?;
         let memo: Option<Vec<u8>> = r.get("memo")?;
@@ -102,6 +97,9 @@ pub fn list(db_path: &std::path::Path, after: Cursor) -> anyhow::Result<Vec<Depo
             .map_err(|_| anyhow::anyhow!("bad txid length in DB"))?;
         out.push(Deposit {
             row_id,
+            txid_raw: txid,
+            pool_code: pool as u8,
+            memo_raw: memo.clone(),
             pool: pool_name(pool),
             txid: TxId::from_bytes(txid).to_string(),
             action_index: idx,
@@ -113,17 +111,24 @@ pub fn list(db_path: &std::path::Path, after: Cursor) -> anyhow::Result<Vec<Depo
     Ok(out)
 }
 
-/// Cursor pointing past every note currently in the DB.
-pub fn current_cursor(db_path: &std::path::Path) -> anyhow::Result<Cursor> {
+/// Header times (unix seconds) of the given heights, from the wallet's `blocks` table.
+pub fn block_times(
+    db_path: &std::path::Path,
+    heights: impl IntoIterator<Item = u32>,
+) -> anyhow::Result<std::collections::HashMap<u32, u64>> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let q = |pool: i64| -> rusqlite::Result<i64> {
-        conn.query_row(
-            "SELECT COALESCE(MAX(id_within_pool_table), 0) FROM v_received_outputs WHERE pool = :pool",
-            named_params! {":pool": pool},
-            |r| r.get(0),
-        )
-    };
-    Ok(Cursor { orchard: q(POOL_ORCHARD)?, ironwood: q(POOL_IRONWOOD)? })
+    let mut stmt = conn.prepare("SELECT time FROM blocks WHERE height = ?1")?;
+    let mut out = std::collections::HashMap::new();
+    for h in heights {
+        if out.contains_key(&h) {
+            continue;
+        }
+        let t: Option<i64> = stmt.query_row([h], |r| r.get(0)).ok();
+        if let Some(t) = t.and_then(|t| u64::try_from(t).ok()) {
+            out.insert(h, t);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

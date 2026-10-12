@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["scanner"]
+members = ["protocol", "ledger", "scanner"]
 
 [workspace.package]
 edition = "2024"

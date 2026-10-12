@@ -42,3 +42,9 @@ zcash_address = "=0.14.0-pre.1"
 zcash_proofs = { version = "=0.31.0-pre.1", features = ["bundled-prover"] }
 zip32 = "0.3"
 zip321 = "=0.10.0-pre.1"
+age = "0.12"
+libc = "0.2"
+sha2 = "0.11"
+unzeen-ledger = { path = "../ledger" }
+unzeen-protocol = { path = "../protocol" }
+zeroize = "1"

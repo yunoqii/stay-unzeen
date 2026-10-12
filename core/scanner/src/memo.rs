@@ -98,10 +98,7 @@ mod tests {
     #[test]
     fn ascii_text() {
         let json = br#"{"v":1,"op":"buy"}"#;
-        assert_eq!(
-            MemoView::decode(json),
-            MemoView::Text(r#"{"v":1,"op":"buy"}"#.into())
-        );
+        assert_eq!(MemoView::decode(json), MemoView::Text(r#"{"v":1,"op":"buy"}"#.into()));
     }
 
     #[test]

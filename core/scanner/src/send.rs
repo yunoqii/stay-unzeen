@@ -6,7 +6,7 @@
 
 use std::str::FromStr;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail};
 use bip0039::{English, Mnemonic};
 use secrecy::Zeroize;
 use zcash_address::ZcashAddress;
@@ -48,9 +48,7 @@ pub async fn send(
     amount_zat: u64,
     memo: Option<&str>,
 ) -> anyhow::Result<String> {
-    if common.network == NetName::Main
-        && std::env::var("UNZEEN_ALLOW_MAINNET_SEND").as_deref() != Ok("1")
-    {
+    if common.network == NetName::Main && std::env::var("UNZEEN_ALLOW_MAINNET_SEND").as_deref() != Ok("1") {
         bail!("mainnet send is disabled; set UNZEEN_ALLOW_MAINNET_SEND=1 only with lead approval");
     }
     if amount_zat == 0 || amount_zat > MAX_SEND_ZAT {
@@ -63,8 +61,15 @@ pub async fn send(
         .map(|m| Memo::from_str(m).map(MemoBytes::from))
         .transpose()
         .map_err(|e| anyhow!("bad memo: {e:?}"))?;
-    let payment = Payment::new(recipient, Some(Zatoshis::from_u64(amount_zat)?), memo, None, None, vec![])
-        .map_err(|e| anyhow!("invalid payment: {e:?}"))?;
+    let payment = Payment::new(
+        recipient,
+        Some(Zatoshis::from_u64(amount_zat)?),
+        memo,
+        None,
+        None,
+        vec![],
+    )
+    .map_err(|e| anyhow!("invalid payment: {e:?}"))?;
     let request = TransactionRequest::new(vec![payment]).map_err(|e| anyhow!("{e:?}"))?;
 
     let account_id = *db
@@ -77,10 +82,11 @@ pub async fn send(
         .key_derivation()
         .ok_or_else(|| anyhow!("view-only account cannot spend"))?;
 
-    let phrase = std::fs::read_to_string(common.seed_path())
-        .with_context(|| format!("reading {}", common.seed_path().display()))?;
-    let mnemonic = <Mnemonic<English>>::from_phrase(phrase.trim()).map_err(|e| anyhow!("bad seed file: {e:?}"))?;
+    let phrase = crate::seed::load_phrase(common)?;
+    let mnemonic =
+        <Mnemonic<English>>::from_phrase(phrase.as_str()).map_err(|_| anyhow!("bad seed (not a mnemonic)"))?;
     let mut seed = mnemonic.to_seed("");
+    drop(mnemonic);
     let usk = UnifiedSpendingKey::from_seed(&net, &seed, derivation.account_index())
         .map_err(|e| anyhow!("key derivation failed: {e:?}"));
     seed.zeroize();
@@ -105,7 +111,10 @@ pub async fn send(
         None,
     )
     .map_err(|e| anyhow!("proposal failed: {e}"))?;
-    tracing::info!(steps = proposal.steps().len(), "proposal created");
+    // Reject before building: built txs would lock notes in the wallet until expiry.
+    if proposal.steps().len() > 1 {
+        bail!("multi-transaction proposals not supported");
+    }
 
     let prover = LocalTxProver::bundled();
     let mut rng = OsRng;
@@ -117,16 +126,17 @@ pub async fn send(
         &prover,
         &prover,
         &SpendingKeys::from_unified_spending_key(usk),
-        OvkPolicy::Sender,
+        // Payouts must not be recoverable from the pool's OVK (C1): a future OVK/seed leak
+        // must not reveal who was paid. Our own records live in the ledger.
+        OvkPolicy::Discard,
         &proposal,
         None,
     )
     .map_err(|e| anyhow!("building tx failed: {e}"))?;
-    if txids.len() > 1 {
-        bail!("multi-transaction proposals not supported");
-    }
     let txid = *txids.first();
-    let tx = db.get_transaction(txid)?.ok_or_else(|| anyhow!("built tx not found in DB"))?;
+    let tx = db
+        .get_transaction(txid)?
+        .ok_or_else(|| anyhow!("built tx not found in DB"))?;
     let mut raw = service::RawTransaction::default();
     tx.write(&mut raw.data)?;
 
