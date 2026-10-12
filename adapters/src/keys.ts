@@ -14,8 +14,10 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 
 const VAULT_RE = /^vault-(\d+)\.json$/;
 
-function ensureDir(dir: string): void {
+/** Creates the key dir and forces 0700 (mkdir's mode only applies on creation). */
+export function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if ((fs.statSync(dir).mode & 0o077) !== 0) fs.chmodSync(dir, 0o700);
 }
 
 function writeSecret(file: string, data: string): void {
@@ -88,6 +90,42 @@ export function deriveCreatorKeypair(masterSeed: Uint8Array, index: number): Key
 }
 
 /**
+ * Source of never-reused creator HD indexes. Behind an interface so the
+ * counter can move to Postgres (a sequence) without touching the adapter.
+ * Must be atomic across processes: two launches never get the same index.
+ * Stores no mapping to users or tokens.
+ */
+export interface CreatorIndexCounter {
+  /** Reserves and returns the next unused index (durable before it returns). */
+  next(): Promise<number>;
+}
+
+/** Single-process file counter (`creator-counter.json`, 0600, atomic rename). */
+export class FileCreatorIndexCounter implements CreatorIndexCounter {
+  constructor(private readonly file: string) {}
+
+  async next(): Promise<number> {
+    let next = 0;
+    if (fs.existsSync(this.file)) {
+      const parsed = JSON.parse(fs.readFileSync(this.file, "utf8")) as { next?: unknown };
+      if (typeof parsed.next === "number" && Number.isInteger(parsed.next) && parsed.next >= 0) next = parsed.next;
+    }
+    const tmp = `${this.file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ next: next + 1 }), { mode: 0o600 });
+    fs.renameSync(tmp, this.file);
+    return next;
+  }
+}
+
+/** In-memory counter for tests and dry runs. */
+export class MemoryCreatorIndexCounter implements CreatorIndexCounter {
+  constructor(private value = 0) {}
+  async next(): Promise<number> {
+    return this.value++;
+  }
+}
+
+/**
  * Fresh creator address per launch. The creator is public on chain
  * (pump.fun `creator`), so it must never be a user's wallet and never be
  * reused between launches. Fees accrue to it; the key is re-derivable from
@@ -95,28 +133,20 @@ export function deriveCreatorKeypair(masterSeed: Uint8Array, index: number): Key
  */
 export class CreatorKeyring {
   private readonly seed: Buffer;
-  private readonly counterFile: string;
+  private readonly counter: CreatorIndexCounter;
 
-  constructor(private readonly keysDir: string) {
+  constructor(keysDir: string, counter?: CreatorIndexCounter) {
     ensureDir(keysDir);
     const seedFile = path.join(keysDir, "creator-master.hex");
     if (!fs.existsSync(seedFile)) writeSecret(seedFile, randomBytes(64).toString("hex"));
     this.seed = Buffer.from(fs.readFileSync(seedFile, "utf8").trim(), "hex");
     if (this.seed.length !== 64) throw new Error("creator-master.hex: expected 64 bytes hex");
-    this.counterFile = path.join(keysDir, "creator-counter.json");
+    this.counter = counter ?? new FileCreatorIndexCounter(path.join(keysDir, "creator-counter.json"));
   }
 
   /** Reserves the next unused index (persisted before it is returned). */
-  allocate(): number {
-    let next = 0;
-    if (fs.existsSync(this.counterFile)) {
-      const parsed = JSON.parse(fs.readFileSync(this.counterFile, "utf8")) as { next?: unknown };
-      if (typeof parsed.next === "number" && Number.isInteger(parsed.next)) next = parsed.next;
-    }
-    const tmp = `${this.counterFile}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ next: next + 1 }), { mode: 0o600 });
-    fs.renameSync(tmp, this.counterFile);
-    return next;
+  allocate(): Promise<number> {
+    return this.counter.next();
   }
 
   keypair(index: number): Keypair {

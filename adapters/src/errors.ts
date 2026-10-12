@@ -12,23 +12,25 @@ export type AdapterErrorCode =
   | "venue_unavailable" //   RPC / program unavailable, tx not landed
   | "internal";
 
-/** `ErrorCode` from docs/API.md. */
+/** Subset of `ErrorCode` from docs/API.md (v0.2) that adapters/relayer produce. */
 export type ApiErrorCode =
   | "bad_request"
   | "not_found"
-  | "insufficient_balance"
+  | "graduated"
+  | "pool_liquidity"
   | "slippage"
   | "venue_unavailable"
   | "internal";
 
 const API_CODE: Record<AdapterErrorCode, ApiErrorCode> = {
   slippage: "slippage",
-  // Pool reserve problem, not the user's balance: the user gets 503 and the
-  // operator gets alerted to top up the vault.
-  insufficient_sol: "venue_unavailable",
-  insufficient_tokens: "insufficient_balance",
-  // API.md has no dedicated code yet; relayer should reroute to Jupiter first.
-  graduated: "venue_unavailable",
+  // Pool reserve problem, not the user's balance (API.md: never
+  // insufficient_balance): the vault lacks SOL / tokens; operator tops up.
+  insufficient_sol: "pool_liquidity",
+  // The ledger already checked the user's holdings; a vault short of tokens is
+  // a pool-side problem too.
+  insufficient_tokens: "pool_liquidity",
+  graduated: "graduated",
   not_found: "not_found",
   bad_request: "bad_request",
   venue_unavailable: "venue_unavailable",
@@ -41,11 +43,25 @@ export class AdapterError extends Error {
   /** Program error number / name when the failure came from a program. */
   readonly programError?: { code: number; name?: string } | undefined;
   readonly signature?: string | undefined;
+  /**
+   * Send stage of a failed submission (see `SendFailure.stage` in tx.ts):
+   * "build"/"preflight" = never broadcast; "confirm" = may have been broadcast,
+   * check the signature before any retry. Undefined for pre-send checks.
+   */
+  readonly stage?: "build" | "preflight" | "confirm" | undefined;
+  /** True when the transaction landed on chain with an error. */
+  readonly landedErr?: boolean | undefined;
 
   constructor(
     code: AdapterErrorCode,
     message: string,
-    extra: { programError?: { code: number; name?: string }; signature?: string; cause?: unknown } = {},
+    extra: {
+      programError?: { code: number; name?: string };
+      signature?: string;
+      cause?: unknown;
+      stage?: "build" | "preflight" | "confirm";
+      landedErr?: boolean;
+    } = {},
   ) {
     super(message, extra.cause === undefined ? undefined : { cause: extra.cause });
     this.name = "AdapterError";
@@ -53,6 +69,8 @@ export class AdapterError extends Error {
     this.apiCode = API_CODE[code];
     this.programError = extra.programError;
     this.signature = extra.signature;
+    this.stage = extra.stage;
+    this.landedErr = extra.landedErr;
   }
 }
 

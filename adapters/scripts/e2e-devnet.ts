@@ -16,7 +16,8 @@ import {
 } from "@solana/web3.js";
 import { AdapterError } from "../src/errors";
 import { CreatorKeyring, ensureVaults } from "../src/keys";
-import { explorerAddressUrl, explorerTxUrl, loadConfig, makeConnection } from "../src/config";
+import { describeConfig, explorerAddressUrl, explorerTxUrl, loadConfig, makeConnection } from "../src/config";
+import { loadRepoEnv } from "../src/env";
 import { formatUnits, minOutWithSlippage } from "../src/math";
 import { PumpFunAdapter } from "../src/pumpfun";
 import { fetchTx } from "../src/tx";
@@ -32,6 +33,7 @@ const INITIAL_BUY = SOL / 20n; //       0.05 SOL first buy at create
 const BUY = SOL / 50n; //               0.02 SOL buy from vault-1
 const SLIPPAGE_BPS = 100; //            1%
 
+loadRepoEnv();
 const cfg = loadConfig();
 if (cfg.cluster !== "devnet" && cfg.cluster !== "localnet") {
   console.error(`refusing to run e2e on ${cfg.cluster}: devnet only`);
@@ -129,7 +131,7 @@ async function expectError(label: string, code: string, f: () => Promise<unknown
 }
 
 async function main(): Promise<void> {
-  console.log(`cluster=${cfg.cluster} rpc=${new URL(cfg.rpcUrl).host}`);
+  console.log(describeConfig(cfg));
   const vaults = ensureVaults(cfg.keysDir, 2);
   const [v0, v1] = vaults as [Keypair, Keypair];
   await fund(vaults);

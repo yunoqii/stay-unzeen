@@ -2,7 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { CreatorKeyring, ensureVaults, loadVaults, slip10Child, slip10Master } from "../src/keys";
+import {
+  CreatorKeyring,
+  MemoryCreatorIndexCounter,
+  ensureVaults,
+  loadVaults,
+  slip10Child,
+  slip10Master,
+} from "../src/keys";
 
 const tmpDirs: string[] = [];
 function tmp(): string {
@@ -42,15 +49,19 @@ describe("vaults", () => {
 });
 
 describe("creator keyring", () => {
-  it("allocates a fresh, never-reused address per launch", () => {
+  it("allocates a fresh, never-reused address per launch", async () => {
     const dir = tmp();
     const ring = new CreatorKeyring(dir);
-    const idx = [ring.allocate(), ring.allocate(), ring.allocate()];
+    const idx = [await ring.allocate(), await ring.allocate(), await ring.allocate()];
     expect(idx).toEqual([0, 1, 2]);
     const addrs = idx.map((i) => ring.publicKey(i).toBase58());
     expect(new Set(addrs).size).toBe(3);
     // persisted counter: a new process continues, does not restart at 0
-    expect(new CreatorKeyring(dir).allocate()).toBe(3);
+    expect(await new CreatorKeyring(dir).allocate()).toBe(3);
+  });
+  it("takes the index source from an injected counter (future Postgres sequence)", async () => {
+    const ring = new CreatorKeyring(tmp(), new MemoryCreatorIndexCounter(41));
+    expect([await ring.allocate(), await ring.allocate()]).toEqual([41, 42]);
   });
   it("is re-derivable (fees can be collected later) and differs from vaults", () => {
     const dir = tmp();

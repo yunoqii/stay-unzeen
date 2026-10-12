@@ -34,6 +34,16 @@ export interface TxResult {
   solAmount: bigint;
   /** Network fee of the transaction, lamports. */
   networkFee: bigint;
+  /** Block time, unix seconds (null if unknown). */
+  blockTime?: number | null;
+  /**
+   * False when the transaction landed but could not be read yet: then
+   * `tokenAmount`/`solAmount`/`networkFee` are NOT the executed amounts and
+   * must not be credited; re-read with `PumpFunAdapter.tradeResult`.
+   */
+  amountsKnown: boolean;
+  /** True when the amounts come from the venue's on-chain trade event (else balance deltas). */
+  fromEvent?: boolean;
   /** create only: creator address recorded on chain (fresh pool address). */
   creator?: string;
   /** create only: HD index the creator was derived from (to claim fees later). */

@@ -29,10 +29,10 @@ describe("classifyError", () => {
     expect(cls(new Error('{"InstructionError":[3,{"Custom":6003}]}')).code).toBe("slippage");
   });
 
-  it("BondingCurveComplete -> graduated (503 until API.md has a code)", () => {
+  it("BondingCurveComplete -> graduated", () => {
     const e = cls(new Error("x"), ["Program log: AnchorError ... Error Code: BondingCurveComplete. Error Number: 6005."]);
     expect(e.code).toBe("graduated");
-    expect(e.apiCode).toBe("venue_unavailable");
+    expect(e.apiCode).toBe("graduated");
   });
 
   it("system transfer: insufficient lamports -> insufficient_sol", () => {
@@ -42,7 +42,7 @@ describe("classifyError", () => {
       "Program 11111111111111111111111111111111 failed: custom program error: 0x1",
     ]);
     expect(e.code).toBe("insufficient_sol");
-    expect(e.apiCode).toBe("venue_unavailable");
+    expect(e.apiCode).toBe("pool_liquidity");
   });
 
   it("empty fee payer -> insufficient_sol", () => {
@@ -51,14 +51,14 @@ describe("classifyError", () => {
     ).toBe("insufficient_sol");
   });
 
-  it("token program insufficient funds -> insufficient_tokens / insufficient_balance", () => {
+  it("token program insufficient funds -> insufficient_tokens / pool_liquidity", () => {
     const e = cls(new Error("x"), [
       "Program TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb invoke [2]",
       "Program log: Error: insufficient funds",
       "Program TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb failed: custom program error: 0x1",
     ]);
     expect(e.code).toBe("insufficient_tokens");
-    expect(e.apiCode).toBe("insufficient_balance");
+    expect(e.apiCode).toBe("pool_liquidity");
   });
 
   it("expired blockhash -> venue_unavailable", () => {

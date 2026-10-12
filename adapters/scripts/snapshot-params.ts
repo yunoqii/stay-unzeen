@@ -7,9 +7,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { GLOBAL_PDA, PUMP_FEE_CONFIG_PDA } from "@pump-fun/pump-sdk";
 import { loadConfig, makeConnection } from "../src/config";
+import { loadRepoEnv } from "../src/env";
 
 async function main(): Promise<void> {
-  const cfg = loadConfig();
+  loadRepoEnv();
+const cfg = loadConfig();
   const conn = makeConnection(cfg);
   const [g, f] = await conn.getMultipleAccountsInfo([GLOBAL_PDA, PUMP_FEE_CONFIG_PDA]);
   if (!g || !f) throw new Error("Global / FeeConfig not found");

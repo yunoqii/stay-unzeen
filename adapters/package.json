@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
     "test": "vitest run",
     "keys:gen": "tsx scripts/gen-keys.ts",
-    "e2e:devnet": "tsx scripts/e2e-devnet.ts"
+    "e2e:devnet": "tsx scripts/e2e-devnet.ts",
+    "relayer:devnet": "tsx scripts/relayer-devnet.ts"
   },
   "engines": {
     "node": ">=20"
@@ -20,11 +21,13 @@
     "@solana/spl-token": "0.4.15",
     "@solana/web3.js": "1.99.0",
     "bn.js": "5.2.5",
-    "bs58": "6.0.0"
+    "bs58": "6.0.0",
+    "pg": "8.23.1"
   },
   "devDependencies": {
     "@types/bn.js": "5.2.0",
     "@types/node": "26.6.5",
+    "@types/pg": "8.23.1",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vitest": "5.0.4"
