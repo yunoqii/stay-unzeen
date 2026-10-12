@@ -42,10 +42,10 @@ export function HotTokens({ tokens, events, now, limit = 6 }: Props) {
       <ul aria-hidden className="space-y-1 p-2">
         {Array.from({ length: limit }).map((_, i) => (
           <li key={i} className="flex items-center gap-3 p-2">
-            <Skeleton className="size-9 bg-white/[0.04]" />
+            <Skeleton className="size-9 bg-skeleton" />
             <div className="flex-1 space-y-1.5">
-              <Skeleton className="h-4 w-20 bg-white/[0.04]" />
-              <Skeleton className="h-3 w-28 bg-white/[0.03]" />
+              <Skeleton className="h-4 w-20 bg-skeleton" />
+              <Skeleton className="h-3 w-28 bg-skeleton" />
             </div>
           </li>
         ))}
@@ -60,7 +60,7 @@ export function HotTokens({ tokens, events, now, limit = 6 }: Props) {
         <motion.li key={token.mint} layout="position" transition={{ type: "spring", bounce: 0, duration: 0.4 }}>
           <Link
             href={`/token/${token.mint}`}
-            className="group flex items-center gap-3 rounded-xl border border-transparent p-2.5 transition-colors duration-200 hover:border-border hover:bg-white/[0.02] focus-visible:border-ring focus-visible:outline-none"
+            className="group flex items-center gap-3 rounded-xl border border-transparent p-2.5 transition-colors duration-200 hover:border-border hover:bg-surface-1 focus-visible:border-ring focus-visible:outline-none"
           >
             <span className="tabular w-4 shrink-0 text-right font-mono text-[11px] text-faint-foreground">{i + 1}</span>
             <TokenGlyph symbol={token.symbol} image={token.image} />

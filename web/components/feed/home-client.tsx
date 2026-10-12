@@ -48,7 +48,7 @@ export function HomeClient() {
               {tab === t && (
                 <motion.span
                   layoutId="home-tab"
-                  className="absolute inset-0 rounded-full bg-white/[0.07]"
+                  className="absolute inset-0 rounded-full bg-surface-3"
                   transition={{ type: "spring", bounce: 0, duration: 0.3 }}
                 />
               )}

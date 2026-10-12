@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { motion } from "motion/react";
 import { API_MODE } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
+import { KeyStatus } from "./key-status";
 import { Wordmark } from "./logo";
 import { NAV, isActive } from "./nav-items";
 
@@ -32,7 +33,7 @@ export function SiteHeader() {
               mock
             </span>
           )}
-          <span className="hidden font-mono text-[11px] text-faint-foreground sm:inline">shielded · ZEC</span>
+          <KeyStatus />
         </div>
       </div>
     </header>
@@ -63,7 +64,7 @@ function DesktopNavList({ pathname }: { pathname: string | null }) {
                   {active && (
                     <motion.span
                       layoutId="nav-pill"
-                      className="absolute inset-0 rounded-full bg-white/[0.06]"
+                      className="absolute inset-0 rounded-full bg-surface-3"
                       transition={{ type: "spring", bounce: 0, duration: 0.35 }}
                     />
                   )}

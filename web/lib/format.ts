@@ -6,6 +6,45 @@ export const VENUE_LABEL: Record<Venue, string> = {
   jupiter: "Jupiter",
 };
 
+/**
+ * Integer string in base units -> exact decimal string in UI units (no float rounding).
+ * "1234567890", 6 -> "1234.56789"
+ */
+export function formatUnits(amount: string, decimals: number): string {
+  if (!/^-?\d+$/.test(amount)) return "0";
+  const neg = amount.startsWith("-");
+  const digits = (neg ? amount.slice(1) : amount).replace(/^0+(?=\d)/, "");
+  if (decimals === 0) return (neg ? "-" : "") + digits;
+  const padded = digits.padStart(decimals + 1, "0");
+  const int = padded.slice(0, -decimals);
+  const frac = padded.slice(-decimals).replace(/0+$/, "");
+  return (neg ? "-" : "") + int + (frac ? "." + frac : "");
+}
+
+/** Base units -> number, for display and charts only. Never use the result for amounts sent to the API. */
+export function unitsToNumber(amount: string, decimals: number): number {
+  return Number(formatUnits(amount, decimals));
+}
+
+export const SOL_DECIMALS = 9;
+export const ZEC_DECIMALS = 8;
+
+export const lamportsToSol = (lamports: string) => unitsToNumber(lamports, SOL_DECIMALS);
+export const zatToZec = (zat: string) => unitsToNumber(zat, ZEC_DECIMALS);
+
+/**
+ * UI decimal string -> integer base units string. Throws on bad input or too many decimals.
+ * "1.5", 8 -> "150000000"
+ */
+export function parseUnits(value: string, decimals: number): string {
+  const v = value.trim();
+  if (!/^\d+(\.\d*)?$|^\.\d+$/.test(v)) throw new Error("Not a number");
+  const [int = "", frac = ""] = v.split(".");
+  if (frac.length > decimals) throw new Error(`At most ${decimals} decimals`);
+  const out = (int + frac.padEnd(decimals, "0")).replace(/^0+(?=\d)/, "");
+  return out === "" ? "0" : out;
+}
+
 const compact = new Intl.NumberFormat("en-US", {
   notation: "compact",
   maximumFractionDigits: 1,
@@ -59,8 +98,4 @@ export function timeAgo(ts: number, now: number): string {
 
 export function shortAddr(a: string, head = 4, tail = 4): string {
   return a.length <= head + tail + 1 ? a : `${a.slice(0, head)}…${a.slice(-tail)}`;
-}
-
-export function explorerTx(sig: string): string {
-  return `https://solscan.io/tx/${sig}`;
 }

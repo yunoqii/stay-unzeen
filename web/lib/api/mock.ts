@@ -1,12 +1,23 @@
-// In-browser mock of the Unzeen backend, shaped exactly like docs/API.md.
-// Used when NEXT_PUBLIC_API_MODE=mock (the default).
+// In-browser mock of the Unzeen backend, shaped exactly like docs/API.md v0.1.
+// Used when NEXT_PUBLIC_API_MODE=mock (the default). Signed endpoints verify x-unzeen-* headers
+// with the same rules as the backend (60 s window, nonce replay, pubkey in path), so the real
+// signing code is exercised end to end even without core/.
 
+import { base64urlnopad } from "@scure/base";
+import { HEADER_NONCE, verifyRequest, type SignedHeaders } from "@/lib/crypto/sign";
+import { ApiError } from "./errors";
 import type {
+  ActionAccepted,
+  ActionStatusResponse,
+  Candle,
+  CandleTimeframe,
   FeedEvent,
   IntentRequest,
   IntentStatusResponse,
   PaymentRequest,
+  PlatformStats,
   Portfolio,
+  SignedAction,
   Token,
   TokenWithTrades,
   Venue,
@@ -45,10 +56,21 @@ function trimDecimals(n: number, digits: number): string {
   return n.toFixed(digits).replace(/\.?0+$/, "");
 }
 
+// pump.fun = 6 decimals; Meteora DBC mocks use 9 so the UI is forced to honour `decimals`.
+const DECIMALS: Record<Venue, number> = { pumpfun: 6, "meteora-dbc": 9, jupiter: 6 };
+
+/** Whole tokens (2 dp precision) -> integer string in base units. */
+function toBaseUnits(whole: number, decimals: number): string {
+  const cents = BigInt(Math.round(whole * 100));
+  return decimals >= 2 ? (cents * BigInt(10) ** BigInt(decimals - 2)).toString() : (cents / BigInt(10) ** BigInt(2 - decimals)).toString();
+}
+
+const toLamports = (sol: number) => BigInt(Math.round(sol * 1e9)).toString();
+
 interface MockTokenState {
   token: Token;
-  price: number; // SOL per token
-  supply: number;
+  price: number; // SOL per whole token
+  supply: number; // whole tokens
   heat: number; // relative trade frequency
 }
 
@@ -79,6 +101,8 @@ let state: MockTokenState[] | null = null;
 let history: FeedEvent[] = [];
 let newTokenCursor = 0;
 const intents = new Map<string, { createdAt: number }>();
+const actions = new Map<string, { createdAt: number; action: SignedAction }>();
+const seenNonces = new Map<string, number>(); // `${pubkey}:${nonce}` -> expiry
 
 function init(now: number) {
   if (state) return;
@@ -89,6 +113,7 @@ function init(now: number) {
       name: s.name,
       venue: s.venue,
       status: s.status,
+      decimals: DECIMALS[s.venue],
       priceSol: "0",
       marketCapSol: "0",
       createdAt: now - (i + 1) * rand(25, 90) * 60_000,
@@ -99,11 +124,11 @@ function init(now: number) {
   }));
   syncTokenFields();
 
-  // Back-fill the last ~12 minutes of activity.
+  // Back-fill the last ~40 minutes of activity.
   const backfill: FeedEvent[] = [];
-  let t = now - 12 * 60_000;
+  let t = now - 40 * 60_000;
   while (t < now - 4_000) {
-    t += rand(6_000, 28_000);
+    t += rand(4_000, 20_000);
     backfill.push(makeTradeEvent(Math.min(t, now - 4_000), false));
   }
   history = backfill.reverse();
@@ -133,7 +158,7 @@ function makeTradeEvent(ts: number, mutate = true): FeedEvent {
   // Rounded amounts, as the relayer rounds to blur deposit sizes.
   const raw = logRand(0.05, 6);
   const sol = Number(trimDecimals(raw, raw >= 1 ? 1 : 2));
-  const tokens = Math.round(sol / s.price);
+  const tokens = sol / s.price;
   if (mutate) {
     const impact = sol / Math.max(30, s.price * s.supply) / 2;
     s.price *= kind === "buy" ? 1 + impact : 1 - impact;
@@ -145,8 +170,9 @@ function makeTradeEvent(ts: number, mutate = true): FeedEvent {
     venue: s.token.venue,
     mint: s.token.mint,
     symbol: s.token.symbol,
-    tokenAmount: String(tokens),
-    solAmount: String(sol),
+    tokenAmount: toBaseUnits(tokens, s.token.decimals),
+    solAmount: toLamports(sol),
+    decimals: s.token.decimals,
     solanaTx: b58(88),
     ts,
   };
@@ -165,6 +191,7 @@ function makeCreateEvent(ts: number): FeedEvent | null {
       name,
       venue,
       status: "curve",
+      decimals: DECIMALS[venue],
       priceSol: "0",
       marketCapSol: "0",
       createdAt: ts,
@@ -181,8 +208,9 @@ function makeCreateEvent(ts: number): FeedEvent | null {
     venue,
     mint: s.token.mint,
     symbol,
-    tokenAmount: String(Math.round(initialBuySol / price)),
-    solAmount: String(initialBuySol),
+    tokenAmount: toBaseUnits(initialBuySol / price, s.token.decimals),
+    solAmount: toLamports(initialBuySol),
+    decimals: s.token.decimals,
     solanaTx: b58(88),
     ts,
   };
@@ -191,43 +219,82 @@ function makeCreateEvent(ts: number): FeedEvent | null {
 function nextEvent(now: number): FeedEvent {
   const ev = (Math.random() < 0.06 && makeCreateEvent(now)) || makeTradeEvent(now);
   history.unshift(ev);
-  if (history.length > 500) history.length = 500;
+  if (history.length > 1000) history.length = 1000;
   return ev;
 }
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const latency = () => delay(rand(120, 380));
-
-// ---- REST ----
-
-export async function getFeed(limit = 50): Promise<FeedEvent[]> {
-  init(Date.now());
-  await latency();
-  return history.slice(0, limit);
-}
-
-export async function getTokens(): Promise<Token[]> {
-  init(Date.now());
-  await latency();
-  return state!.map((s) => ({ ...s.token }));
-}
-
-export async function getToken(mint: string): Promise<TokenWithTrades | null> {
-  init(Date.now());
-  await latency();
+function findToken(mint: string): MockTokenState {
   const s = state!.find((x) => x.token.mint === mint);
-  if (!s) return null;
-  return { ...s.token, trades: history.filter((e) => e.mint === mint).slice(0, 100) };
+  if (!s) throw new ApiError("not_found", `unknown mint ${mint}`, 404);
+  return s;
 }
 
-export async function createIntent(req: IntentRequest): Promise<PaymentRequest> {
-  await latency();
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// ---- candles ----
+
+const TF_SEC: Record<CandleTimeframe, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14_400, "1d": 86_400 };
+
+function candles(s: MockTokenState, tf: CandleTimeframe, from: number | undefined, to: number | undefined): Candle[] {
+  const step = TF_SEC[tf];
+  const nowSec = Math.floor(Date.now() / 1000);
+  const end = Math.floor(Math.min(to ?? nowSec, nowSec) / step) * step;
+  const created = Math.floor(s.token.createdAt / 1000 / step) * step;
+  let start = from !== undefined ? Math.ceil(from / step) * step : end - 299 * step;
+  start = Math.max(start, created, end - 999 * step);
+  if (start > end) return [];
+
+  // Walk backwards from the live price so the last close matches priceSol.
+  const rnd = seeded(`candles:${s.token.mint}:${tf}`);
+  const bars: Candle[] = [];
+  let close = s.price;
+  for (let t = end; t >= start; t -= step) {
+    const vol = 0.012 * Math.sqrt(step / 60);
+    const open = close * Math.exp((rnd() - 0.52) * 2 * vol);
+    const high = Math.max(open, close) * (1 + rnd() * vol);
+    const low = Math.min(open, close) * (1 - rnd() * vol);
+    const empty = rnd() < 0.12 && t !== end; // bars without trades are omitted
+    if (!empty) {
+      bars.push({
+        time: t,
+        open: open.toPrecision(6),
+        high: high.toPrecision(6),
+        low: low.toPrecision(6),
+        close: close.toPrecision(6),
+        volume: toLamports(logRand(0.2, 40) * Math.sqrt(step / 60)),
+      });
+    }
+    close = open;
+  }
+  return bars.reverse();
+}
+
+// ---- auth (same checks as core/) ----
+
+function authorize(method: string, path: string, body: string | undefined, headers: Partial<SignedHeaders>): string {
+  const now = Date.now();
+  const res = verifyRequest(headers, { method, pathWithQuery: path, body }, now);
+  if (!res.ok) throw new ApiError("unauthorized", `signature ${res.reason}`, 401);
+  for (const [k, exp] of seenNonces) if (exp < now) seenNonces.delete(k);
+  const key = `${res.pubkey}:${headers[HEADER_NONCE]}`;
+  if (seenNonces.has(key)) throw new ApiError("replay", "nonce already used", 409);
+  seenNonces.set(key, now + 120_000);
+  return res.pubkey;
+}
+
+// ---- payment requests ----
+
+function opaqueMemo(): string {
+  // Real memo is built by core/ (unz1 binary, 152..195 bytes). The UI never parses it.
+  return "unz1:" + base64urlnopad.encode(crypto.getRandomValues(new Uint8Array(152)));
+}
+
+function paymentRequest(amountZec: string): PaymentRequest {
   const intentId = b58(12);
-  const amountZec = req.amount ?? "0.1";
   const address = "utest1" + b58(100).toLowerCase();
-  const memo = `unzeen:v0:${intentId}`;
+  const memo = opaqueMemo();
   intents.set(intentId, { createdAt: Date.now() });
-  const memo64 = btoa(memo).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const memo64 = base64urlnopad.encode(new TextEncoder().encode(memo));
   return {
     intentId,
     address,
@@ -238,26 +305,139 @@ export async function createIntent(req: IntentRequest): Promise<PaymentRequest> 
   };
 }
 
-export async function getIntent(id: string): Promise<IntentStatusResponse> {
-  await latency();
-  const it = intents.get(id);
-  if (!it) return { status: "failed" };
-  const age = Date.now() - it.createdAt;
-  if (age < 15_000) return { status: "awaiting_payment" };
-  if (age < 30_000) return { status: "seen" };
-  return { status: "executed", tx: b58(88) };
+function demoPortfolio(pubkey: string): Portfolio {
+  const rnd = seeded("portfolio:" + pubkey);
+  const picks = state!.filter(() => rnd() < 0.45).slice(0, 3);
+  return {
+    zecBalance: String(Math.round(logRand(0.05, 2.5) * 1e8)),
+    holdings: picks.map((s) => ({ mint: s.token.mint, amount: toBaseUnits((rnd() * 4 + 0.2) / s.price, s.token.decimals) })),
+    claimable: [],
+  };
 }
 
-export async function getPortfolio(anonPubkey: string): Promise<Portfolio> {
-  void anonPubkey;
+function stats(): PlatformStats {
+  const byVenue: PlatformStats["byVenue"] = {
+    pumpfun: { volumeSol: "0", trades: 0 },
+    "meteora-dbc": { volumeSol: "0", trades: 0 },
+    jupiter: { volumeSol: "0", trades: 0 },
+  };
+  let vol = 0;
+  for (const e of history) {
+    const sol = Number(e.solAmount) / 1e9;
+    vol += sol;
+    byVenue[e.venue].trades++;
+    byVenue[e.venue].volumeSol = trimDecimals(Number(byVenue[e.venue].volumeSol) + sol, 2);
+  }
+  return {
+    volumeSol: trimDecimals(vol, 2),
+    zecShielded: trimDecimals(vol * 0.31, 2),
+    trades: history.length,
+    launches: history.filter((e) => e.kind === "create").length,
+    byVenue,
+    topTokens: [...state!].sort((a, b) => b.price * b.supply - a.price * a.supply).slice(0, 5).map((s) => ({ ...s.token })),
+  };
+}
+
+// ---- router ----
+
+/** Emulates one HTTP round-trip. Throws ApiError exactly where core/ would answer non-2xx. */
+export async function handle(
+  method: "GET" | "POST",
+  pathWithQuery: string,
+  body: string | undefined,
+  headers: Partial<SignedHeaders>,
+): Promise<unknown> {
   init(Date.now());
-  await latency();
-  return { holdings: [] };
+  await delay(rand(120, 380));
+  const url = new URL(pathWithQuery, "http://mock.local");
+  const p = url.pathname;
+  const q = url.searchParams;
+  let m: RegExpMatchArray | null;
+  const json = () => (body ? (JSON.parse(body) as unknown) : null);
+
+  if (method === "GET") {
+    if (p === "/api/feed") return history.slice(0, Math.min(Number(q.get("limit") ?? 50), 200));
+    if (p === "/api/tokens") return state!.map((s) => ({ ...s.token }));
+    if (p === "/api/stats") return stats();
+
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)$/))) {
+      const s = findToken(decodeURIComponent(m[1]));
+      const out: TokenWithTrades = { ...s.token, trades: history.filter((e) => e.mint === s.token.mint).slice(0, 50) };
+      return out;
+    }
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)\/trades$/))) {
+      const s = findToken(decodeURIComponent(m[1]));
+      const limit = Number(q.get("limit") ?? 50);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new ApiError("bad_request", "limit must be 1..200", 400);
+      let list = history.filter((e) => e.mint === s.token.mint);
+      const before = q.get("before");
+      if (before) {
+        const i = list.findIndex((e) => e.id === before);
+        if (i < 0) throw new ApiError("not_found", "unknown trade id", 404);
+        list = list.slice(i + 1);
+      }
+      return list.slice(0, limit);
+    }
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)\/candles$/))) {
+      const s = findToken(decodeURIComponent(m[1]));
+      const tf = (q.get("tf") ?? "5m") as CandleTimeframe;
+      if (!(tf in TF_SEC)) throw new ApiError("bad_request", "bad tf", 400);
+      const num = (k: string) => (q.get(k) ? Number(q.get(k)) : undefined);
+      return candles(s, tf, num("from"), num("to"));
+    }
+    if ((m = p.match(/^\/api\/intents\/([^/]+)$/))) {
+      const it = intents.get(decodeURIComponent(m[1]));
+      if (!it) throw new ApiError("not_found", "unknown intent", 404);
+      const age = Date.now() - it.createdAt;
+      const res: IntentStatusResponse =
+        age < 15_000 ? { status: "awaiting_payment" } : age < 30_000 ? { status: "seen" } : { status: "executed", tx: b58(88) };
+      return res;
+    }
+    if ((m = p.match(/^\/api\/actions\/([^/]+)$/))) {
+      const a = actions.get(decodeURIComponent(m[1]));
+      if (!a) throw new ApiError("not_found", "unknown action", 404);
+      const res: ActionStatusResponse =
+        Date.now() - a.createdAt < 4_000 ? { status: "queued" } : { status: "executed", solanaTx: b58(88) };
+      return res;
+    }
+    if (p === "/api/portfolio") {
+      // pubkey comes only from the signed header (analyst review H9), never from the path.
+      return demoPortfolio(authorize(method, pathWithQuery, body, headers));
+    }
+    if (p === "/api/orders" || p === "/api/creator") {
+      authorize(method, pathWithQuery, body, headers);
+      return [];
+    }
+  }
+
+  if (method === "POST") {
+    if (p === "/api/intents") {
+      const req = json() as IntentRequest | null;
+      if (!req?.op || !req.anonPubkey) throw new ApiError("bad_request", "op and anonPubkey required", 400);
+      return paymentRequest(req.amount ?? "0.1");
+    }
+    if (p === "/api/deposit") {
+      const req = json() as { anonPubkey?: string } | null;
+      if (!req?.anonPubkey) throw new ApiError("bad_request", "anonPubkey required", 400);
+      return paymentRequest("0.1");
+    }
+    if (p === "/api/actions") {
+      authorize(method, pathWithQuery, body, headers);
+      const action = json() as SignedAction | null;
+      if (!action?.op) throw new ApiError("bad_request", "op required", 400);
+      const id = b58(16);
+      actions.set(id, { createdAt: Date.now(), action });
+      const res: ActionAccepted = { id, status: "queued" };
+      return res;
+    }
+  }
+
+  throw new ApiError("not_found", `${method} ${p}`, 404);
 }
 
-// ---- WS /ws/feed (simulated) ----
+// ---- WS /ws/feed[?mint=] (simulated) ----
 
-export function subscribeFeed(onEvent: (e: FeedEvent) => void): () => void {
+export function subscribeFeed(onEvent: (e: FeedEvent) => void, mint?: string): () => void {
   init(Date.now());
   let timer: ReturnType<typeof setTimeout>;
   let stopped = false;
@@ -266,7 +446,8 @@ export function subscribeFeed(onEvent: (e: FeedEvent) => void): () => void {
     const wait = Math.random() < 0.15 ? rand(300, 900) : rand(1500, 4500);
     timer = setTimeout(() => {
       if (stopped) return;
-      onEvent(nextEvent(Date.now()));
+      const ev = nextEvent(Date.now());
+      if (!mint || ev.mint === mint) onEvent(ev);
       schedule();
     }, wait);
   };

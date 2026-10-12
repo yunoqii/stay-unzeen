@@ -44,7 +44,7 @@ export function Hero({ onBuy }: { onBuy?: () => void }) {
             variant="outline"
             size="lg"
             onClick={onBuy}
-            className="h-11 rounded-full border-border bg-white/[0.02] px-5 text-[15px] hover:border-white/20 hover:bg-white/[0.04]"
+            className="h-11 rounded-full border-border bg-surface-1 px-5 text-[15px] hover:border-border-strong hover:bg-surface-2"
           >
             Buy privately
           </Button>

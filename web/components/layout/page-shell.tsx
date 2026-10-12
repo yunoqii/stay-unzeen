@@ -40,7 +40,7 @@ export function EmptyState({
         className,
       )}
     >
-      <div aria-hidden className="absolute top-1/2 left-1/2 size-48 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/[0.025] blur-3xl" />
+      <div aria-hidden className="absolute top-1/2 left-1/2 size-48 -translate-x-1/2 -translate-y-1/2 rounded-full bg-surface-1 blur-3xl" />
       {icon && <div className="relative mb-4 text-muted-foreground">{icon}</div>}
       <p className="relative text-sm font-medium">{title}</p>
       {children && <div className="relative mt-2 max-w-sm text-sm text-pretty text-muted-foreground">{children}</div>}

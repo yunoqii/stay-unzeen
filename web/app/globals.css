@@ -7,7 +7,11 @@
 
 /*
  * Tokens, three layers:
- *   primitive (--uz-*)  ->  semantic (shadcn names)  ->  Tailwind theme (--color-*)
+ *   1. primitive  (--uz-*)            raw values: ink, fog, accent, alpha steps, motion, blur
+ *   2. semantic   (shadcn names, --surface-*, --border-strong, --motion-*)   meaning, never raw values
+ *   3. component  (--feed-*, --phrase-*, --tile-*, --hold-*, --skeleton)     per-component, built from semantic
+ * Tailwind sees layers 2 and 3 through @theme inline (--color-*, --ease-*, --blur-*).
+ * Components use utilities (bg-surface-1, border-strong, ease-shadow), never raw hex / white alphas.
  * One accent only: Zcash yellow. Green / red are reserved for buy / sell numbers.
  */
 :root {
@@ -26,6 +30,22 @@
   --uz-zec-ink: #1a1405;
   --uz-buy: #4fc98a;
   --uz-sell: #ef6b73;
+  --uz-white-a1: rgb(255 255 255 / 0.02);
+  --uz-white-a2: rgb(255 255 255 / 0.035);
+  --uz-white-a3: rgb(255 255 255 / 0.06);
+  --uz-white-a4: rgb(255 255 255 / 0.07);
+  --uz-white-a5: rgb(255 255 255 / 0.1);
+  --uz-white-a6: rgb(255 255 255 / 0.2);
+  --uz-zec-a1: rgb(244 183 40 / 0.04);
+  --uz-zec-a2: rgb(244 183 40 / 0.2);
+  --uz-zec-a3: rgb(244 183 40 / 0.55);
+  --uz-dur-1: 150ms;
+  --uz-dur-2: 250ms;
+  --uz-dur-3: 300ms;
+  --uz-dur-4: 500ms;
+  --uz-ease-expo-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --uz-blur-veil: 7px;
+  --uz-blur-enter: 12px;
 
   /* semantic */
   --background: var(--uz-ink-0);
@@ -44,9 +64,20 @@
   --accent: var(--uz-ink-3);
   --accent-foreground: var(--uz-paper);
   --destructive: var(--uz-sell);
-  --border: rgb(255 255 255 / 0.07);
-  --input: rgb(255 255 255 / 0.1);
-  --ring: rgb(244 183 40 / 0.55);
+  --border: var(--uz-white-a4);
+  --border-strong: var(--uz-white-a6);
+  --input: var(--uz-white-a5);
+  --ring: var(--uz-zec-a3);
+  --surface-1: var(--uz-white-a1); /* rows, cells, inputs */
+  --surface-2: var(--uz-white-a2); /* placeholders, skeletons */
+  --surface-3: var(--uz-white-a3); /* selected pill, active nav */
+  --zec-soft: var(--uz-zec-a1); /* notices */
+  --motion-fast: var(--uz-dur-1); /* hover, color */
+  --motion-base: var(--uz-dur-2); /* small elements */
+  --motion-slow: var(--uz-dur-4); /* large surfaces */
+  --ease-out-shadow: var(--uz-ease-expo-out); /* "appears from the blur" */
+  --blur-veil: var(--uz-blur-veil); /* hidden secrets (phrase) */
+  --blur-enter: var(--uz-blur-enter); /* feed item entering */
   --buy: var(--uz-buy);
   --sell: var(--uz-sell);
   --zec: var(--uz-zec);
@@ -57,6 +88,14 @@
   --chart-3: var(--uz-fog-3);
   --chart-4: var(--uz-fog-2);
   --chart-5: var(--uz-fog-1);
+
+  /* component */
+  --feed-row-hover: var(--surface-1);
+  --phrase-cell: var(--surface-1);
+  --tile: var(--secondary);
+  --tile-border: var(--border);
+  --hold-fill: var(--uz-zec-a2);
+  --skeleton: var(--surface-2);
 
   --header-h: 3.5rem;
   --bottom-nav-h: 4rem;
@@ -90,6 +129,20 @@
   --color-buy: var(--buy);
   --color-sell: var(--sell);
   --color-zec: var(--zec);
+  --color-border-strong: var(--border-strong);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-zec-soft: var(--zec-soft);
+  --color-feed-row-hover: var(--feed-row-hover);
+  --color-phrase-cell: var(--phrase-cell);
+  --color-tile: var(--tile);
+  --color-tile-border: var(--tile-border);
+  --color-hold-fill: var(--hold-fill);
+  --color-skeleton: var(--skeleton);
+  --ease-shadow: var(--ease-out-shadow);
+  --blur-veil: var(--blur-veil);
+  --blur-enter: var(--blur-enter);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);

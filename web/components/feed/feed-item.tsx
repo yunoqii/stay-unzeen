@@ -5,7 +5,8 @@ import { forwardRef, memo } from "react";
 import { motion } from "motion/react";
 import { ArrowUpRight } from "@phosphor-icons/react";
 import type { FeedEvent } from "@/lib/api/types";
-import { explorerTx, formatCompact, formatSol, timeAgo } from "@/lib/format";
+import { formatCompact, formatSol, lamportsToSol, timeAgo, unitsToNumber } from "@/lib/format";
+import { explorerTx, useNetwork } from "@/lib/network";
 import { cn } from "@/lib/utils";
 import { CountUp } from "@/components/motion/count-up";
 import { ScrambleText } from "@/components/motion/scramble-text";
@@ -26,8 +27,9 @@ interface Props {
 }
 
 const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event, now, fresh, dense }, ref) {
-  const tokenNum = Number(event.tokenAmount);
-  const solNum = Number(event.solAmount);
+  const tokenNum = unitsToNumber(event.tokenAmount, event.decimals);
+  const solNum = lamportsToSol(event.solAmount);
+  const network = useNetwork();
   const isBuy = event.kind === "buy";
   const isSell = event.kind === "sell";
 
@@ -43,7 +45,7 @@ const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event
     >
       <div
         className={cn(
-          "flex items-start gap-3 border-b border-border/60 transition-colors duration-150 hover:bg-white/[0.015] sm:gap-4",
+          "flex items-start gap-3 border-b border-border/60 transition-colors duration-150 hover:bg-feed-row-hover sm:gap-4",
           dense ? "px-3 py-3" : "px-4 py-4 sm:px-5",
         )}
       >
@@ -87,7 +89,7 @@ const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event
             <VenueTag venue={event.venue} />
             <span aria-hidden>·</span>
             <a
-              href={explorerTx(event.solanaTx)}
+              href={explorerTx(event.solanaTx, network)}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-0.5 font-mono transition-colors hover:text-muted-foreground"

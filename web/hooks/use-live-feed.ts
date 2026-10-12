@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type FeedStatus } from "@/lib/api/client";
+import { api, errorText, type FeedStatus } from "@/lib/api/client";
+import { useNetwork } from "@/lib/network";
 import type { FeedEvent } from "@/lib/api/types";
 
 interface Options {
@@ -21,7 +22,7 @@ export interface LiveFeed {
   error: string | null;
 }
 
-/** GET /api/feed for history, then /ws/feed for new events. */
+/** History (GET /api/feed, or /api/tokens/:mint/trades), then /ws/feed[?mint=] for new events. */
 export function useLiveFeed({ limit = 50, mint, initial }: Options = {}): LiveFeed {
   const [events, setEvents] = useState<FeedEvent[]>(initial ?? []);
   const [status, setStatus] = useState<FeedStatus>("connecting");
@@ -30,6 +31,7 @@ export function useLiveFeed({ limit = 50, mint, initial }: Options = {}): LiveFe
   const [fresh, setFresh] = useState<ReadonlySet<string>>(() => new Set());
   const hasInitial = initial !== undefined;
 
+  const network = useNetwork(); // refetch / resubscribe on Devnet <-> Mainnet
   useEffect(() => {
     let alive = true;
     let unsubscribe = () => {};
@@ -37,28 +39,28 @@ export function useLiveFeed({ limit = 50, mint, initial }: Options = {}): LiveFe
     const start = () => {
       unsubscribe = api.subscribeFeed(
         (e) => {
-          if (mint && e.mint !== mint) return;
+          if (mint && e.mint !== mint) return; // server filters by ?mint=, keep the guard anyway
           setEvents((prev) => (prev.some((p) => p.id === e.id) ? prev : [e, ...prev].slice(0, limit)));
           setFresh((prev) => new Set([e.id, ...Array.from(prev).slice(0, limit * 2)]));
         },
         (s) => alive && setStatus(s),
+        { mint },
       );
     };
 
     if (hasInitial) {
       start();
     } else {
-      api
-        .getFeed(limit)
+      (mint ? api.getTrades(mint, { limit: Math.min(limit, 200) }) : api.getFeed(limit))
         .then((list) => {
           if (!alive) return;
-          setEvents(mint ? list.filter((e) => e.mint === mint) : list);
+          setEvents(list);
           setLoading(false);
           start();
         })
         .catch((e: unknown) => {
           if (!alive) return;
-          setError(e instanceof Error ? e.message : "Feed unavailable");
+          setError(errorText(e));
           setLoading(false);
         });
     }
@@ -67,7 +69,7 @@ export function useLiveFeed({ limit = 50, mint, initial }: Options = {}): LiveFe
       alive = false;
       unsubscribe();
     };
-  }, [limit, mint, hasInitial]);
+  }, [limit, mint, hasInitial, network]);
 
   return { events, fresh, status, loading, error };
 }

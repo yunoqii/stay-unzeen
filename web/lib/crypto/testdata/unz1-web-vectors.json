@@ -1,0 +1,118 @@
+{
+  "description": "unz1 memo vectors (docs/API.md v0.1 offset table). Generated with node:crypto + Buffer, independent of web/lib/crypto/unz1.ts. u64 values are decimal strings.",
+  "secretKeyHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "anonPubkey": "FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z",
+  "vectors": [
+    {
+      "name": "deposit",
+      "op": "deposit",
+      "venue": "none",
+      "minOut": "0",
+      "nonce": "1",
+      "expiry": 1760003600,
+      "target": {
+        "kind": "none"
+      },
+      "chainId": [
+        2,
+        2
+      ],
+      "bodyHex": "5501050000000000000000000000000000000000000000000000000000000000000000000000000000000000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a01000000000000001086e76800",
+      "sigHex": "0e22a0b4b2d8c1507cc54dfb684928f7560af16c6bb720467630e53d2d78006dee7370d7623b6d0970fd21f31232949addbb4d15892dc48cb5468e9e3e152607",
+      "memoHex": "5501050000000000000000000000000000000000000000000000000000000000000000000000000000000000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a01000000000000001086e768000e22a0b4b2d8c1507cc54dfb684928f7560af16c6bb720467630e53d2d78006dee7370d7623b6d0970fd21f31232949addbb4d15892dc48cb5468e9e3e152607",
+      "memoLength": 153,
+      "memo": "unz1:VQEFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADXWpgBgrEKt9VL_tPJZAc6DuFy89qmIyWvAhpo9wdRGgEAAAAAAAAAEIbnaAAOIqC0stjBUHzFTftoSSj3VgrxbGu3IEZ2MOU9LXgAbe5zcNdiO20JcP0h8xIylJrdu00ViS3EjLVGjp4-FSYH"
+    },
+    {
+      "name": "buy-pumpfun-refund-shielded",
+      "op": "buy",
+      "venue": "pumpfun",
+      "mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
+      "minOut": "1200000000000",
+      "nonce": "18446744073709551615",
+      "expiry": 1760003600,
+      "target": {
+        "kind": "shielded",
+        "receiverHex": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b2229"
+      },
+      "chainId": [
+        2,
+        2
+      ],
+      "bodyHex": "550101015d0b159affcbccf165c09bc2f5d4bafb4aa6345af793b9b3222daa40293a950d00e0926517010000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511affffffffffffffff1086e76801030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b2229",
+      "sigHex": "eb708af3e6526fc8f7c368a7ad3e0c901aad401a385ecdc4c8371516558caa0a720097626c0ddf25cc8397253364c711daa47bf57fcb25abaf5e2907bb5dc404",
+      "memoHex": "550101015d0b159affcbccf165c09bc2f5d4bafb4aa6345af793b9b3222daa40293a950d00e0926517010000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511affffffffffffffff1086e76801030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b2229eb708af3e6526fc8f7c368a7ad3e0c901aad401a385ecdc4c8371516558caa0a720097626c0ddf25cc8397253364c711daa47bf57fcb25abaf5e2907bb5dc404",
+      "memoLength": 196,
+      "memo": "unz1:VQEBAV0LFZr_y8zxZcCbwvXUuvtKpjRa95O5syItqkApOpUNAOCSZRcBAADXWpgBgrEKt9VL_tPJZAc6DuFy89qmIyWvAhpo9wdRGv__________EIbnaAEDChEYHyYtNDtCSVBXXmVsc3qBiI-WnaSrsrnAx87V3OPq8fj_Bg0UGyIp63CK8-ZSb8j3w2inrT4MkBqtQBo4Xs3EyDcVFlWMqgpyAJdibA3fJcyDlyUzZMcR2qR79X_LJauvXikHu13EBA"
+    },
+    {
+      "name": "sell-meteora",
+      "op": "sell",
+      "venue": "meteora-dbc",
+      "mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
+      "minOut": "500000000000000000",
+      "nonce": "42",
+      "expiry": 4294967295,
+      "target": {
+        "kind": "none"
+      },
+      "chainId": [
+        2,
+        2
+      ],
+      "bodyHex": "550102025d0b159affcbccf165c09bc2f5d4bafb4aa6345af793b9b3222daa40293a950d0000b2d3595bf006d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a2a00000000000000ffffffff00",
+      "sigHex": "0d08e399fee1bbd413d5f67b7a7807b397060436a8a88bdd7280ad4715a882e6f7887c350082092fc93208c6f3f4021f955a35fce6119d1087e4da666cb9b80b",
+      "memoHex": "550102025d0b159affcbccf165c09bc2f5d4bafb4aa6345af793b9b3222daa40293a950d0000b2d3595bf006d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a2a00000000000000ffffffff000d08e399fee1bbd413d5f67b7a7807b397060436a8a88bdd7280ad4715a882e6f7887c350082092fc93208c6f3f4021f955a35fce6119d1087e4da666cb9b80b",
+      "memoLength": 153,
+      "memo": "unz1:VQECAl0LFZr_y8zxZcCbwvXUuvtKpjRa95O5syItqkApOpUNAACy01lb8AbXWpgBgrEKt9VL_tPJZAc6DuFy89qmIyWvAhpo9wdRGioAAAAAAAAA_____wANCOOZ_uG71BPV9nt6eAezlwYENqioi91ygK1HFaiC5veIfDUAggkvyTIIxvP0Ah-VWjX85hGdEIfk2mZsubgL"
+    },
+    {
+      "name": "create-pumpfun",
+      "op": "create",
+      "venue": "pumpfun",
+      "meta": {
+        "symbol": "ZEEN",
+        "name": "Never Zeen",
+        "image": "ipfs://bafy"
+      },
+      "minOut": "0",
+      "nonce": "7",
+      "expiry": 1760003600,
+      "target": {
+        "kind": "none"
+      },
+      "chainId": [
+        2,
+        2
+      ],
+      "canonicalMeta": "{\"image\":\"ipfs://bafy\",\"name\":\"Never Zeen\",\"symbol\":\"ZEEN\"}",
+      "bodyHex": "55010301aae8c3d271ee3ea42405092a22a7945cb698eb6457b17205bf3a7bc51f1669f90000000000000000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a07000000000000001086e76800",
+      "sigHex": "f8d93848753555532fe946e218987f042dad1c9c77b206d5cf9a23a8caefb0790fc4ae568e7d9ad7bbcc58f7088d3e8d464f04deeced8e0947e039af1c97d703",
+      "memoHex": "55010301aae8c3d271ee3ea42405092a22a7945cb698eb6457b17205bf3a7bc51f1669f90000000000000000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a07000000000000001086e76800f8d93848753555532fe946e218987f042dad1c9c77b206d5cf9a23a8caefb0790fc4ae568e7d9ad7bbcc58f7088d3e8d464f04deeced8e0947e039af1c97d703",
+      "memoLength": 153,
+      "memo": "unz1:VQEDAarow9Jx7j6kJAUJKiKnlFy2mOtkV7FyBb86e8UfFmn5AAAAAAAAAADXWpgBgrEKt9VL_tPJZAc6DuFy89qmIyWvAhpo9wdRGgcAAAAAAAAAEIbnaAD42ThIdTVVUy_pRuIYmH8ELa0cnHeyBtXPmiOoyu-weQ_ErlaOfZrXu8xY9wiNPo1GTwTe7O2OCUfgOa8cl9cD"
+    },
+    {
+      "name": "withdraw-solana-mainnet",
+      "op": "withdraw",
+      "venue": "pumpfun",
+      "mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
+      "minOut": "1000000",
+      "nonce": "9007199254740993",
+      "expiry": 1760003600,
+      "target": {
+        "kind": "solana",
+        "address": "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+      },
+      "chainId": [
+        1,
+        1
+      ],
+      "bodyHex": "550104015d0b159affcbccf165c09bc2f5d4bafb4aa6345af793b9b3222daa40293a950d40420f0000000000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a01000000000020001086e76802850f2d6e02a47af824d09ab69dc42d70cb28cbfa249fb7ee57b9d256c12762ef",
+      "sigHex": "16f2db9f4ed25b9ec38123def01057b7b7c6a6098c49d1291b4d19c4f13ed09905abfe301a5fb356d9841377cd82b532dbcc39266746e4af3298009110c0290f",
+      "memoHex": "550104015d0b159affcbccf165c09bc2f5d4bafb4aa6345af793b9b3222daa40293a950d40420f0000000000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a01000000000020001086e76802850f2d6e02a47af824d09ab69dc42d70cb28cbfa249fb7ee57b9d256c12762ef16f2db9f4ed25b9ec38123def01057b7b7c6a6098c49d1291b4d19c4f13ed09905abfe301a5fb356d9841377cd82b532dbcc39266746e4af3298009110c0290f",
+      "memoLength": 185,
+      "memo": "unz1:VQEEAV0LFZr_y8zxZcCbwvXUuvtKpjRa95O5syItqkApOpUNQEIPAAAAAADXWpgBgrEKt9VL_tPJZAc6DuFy89qmIyWvAhpo9wdRGgEAAAAAACAAEIbnaAKFDy1uAqR6-CTQmradxC1wyyjL-iSft-5XudJWwSdi7xby259O0luew4Ej3vAQV7e3xqYJjEnRKRtNGcTxPtCZBav-MBpfs1bZhBN3zYK1MtvMOSZnRuSvMpgAkRDAKQ8"
+    }
+  ]
+}

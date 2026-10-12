@@ -4,7 +4,8 @@ import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import { ArrowLeft, ChartLineUp, Copy, ShieldCheck } from "@phosphor-icons/react";
 import { toast } from "sonner";
-import { api } from "@/lib/api/client";
+import { api, errorText } from "@/lib/api/client";
+import { useNetwork } from "@/lib/network";
 import type { TokenWithTrades } from "@/lib/api/types";
 import { formatCompact, formatPrice, shortAddr, timeAgo } from "@/lib/format";
 import { useLiveFeed } from "@/hooks/use-live-feed";
@@ -20,16 +21,17 @@ export function TokenView({ params }: { params: Promise<{ mint: string }> }) {
   const [token, setToken] = useState<TokenWithTrades | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
 
+  const network = useNetwork(); // refetch / resubscribe on Devnet <-> Mainnet
   useEffect(() => {
     let alive = true;
     api
       .getToken(mint)
       .then((t) => alive && setToken(t))
-      .catch((e: unknown) => alive && setError(e instanceof Error ? e.message : "Token unavailable"));
+      .catch((e: unknown) => alive && setError(errorText(e)));
     return () => {
       alive = false;
     };
-  }, [mint]);
+  }, [mint, network]);
 
   if (error)
     return (
@@ -156,16 +158,16 @@ function Frame({ children }: { children: React.ReactNode }) {
 export function TokenViewSkeleton() {
   return (
     <div aria-busy className="mx-auto w-full max-w-6xl px-4 pt-6 sm:px-6 sm:pt-8">
-      <Skeleton className="mb-6 h-5 w-16 bg-white/[0.04]" />
+      <Skeleton className="mb-6 h-5 w-16 bg-skeleton" />
       <div className="flex items-center gap-4">
-        <Skeleton className="size-14 rounded-xl bg-white/[0.04]" />
+        <Skeleton className="size-14 rounded-xl bg-skeleton" />
         <div className="space-y-2">
-          <Skeleton className="h-8 w-40 bg-white/[0.04]" />
-          <Skeleton className="h-4 w-56 bg-white/[0.03]" />
+          <Skeleton className="h-8 w-40 bg-skeleton" />
+          <Skeleton className="h-4 w-56 bg-skeleton" />
         </div>
       </div>
-      <Skeleton className="mt-8 h-20 rounded-2xl bg-white/[0.03]" />
-      <Skeleton className="mt-6 h-64 rounded-2xl bg-white/[0.03]" />
+      <Skeleton className="mt-8 h-20 rounded-2xl bg-skeleton" />
+      <Skeleton className="mt-6 h-64 rounded-2xl bg-skeleton" />
     </div>
   );
 }

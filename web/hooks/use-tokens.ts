@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api/client";
+import { api, errorText } from "@/lib/api/client";
+import { useNetwork } from "@/lib/network";
 import type { Token } from "@/lib/api/types";
 
 /** GET /api/tokens, refreshed every `refreshMs` and whenever `refreshKey` changes. */
@@ -9,6 +10,7 @@ export function useTokens(refreshKey?: unknown, refreshMs = 15_000) {
   const [tokens, setTokens] = useState<Token[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const network = useNetwork(); // refetch / resubscribe on Devnet <-> Mainnet
   useEffect(() => {
     let alive = true;
     const load = () =>
@@ -19,14 +21,14 @@ export function useTokens(refreshKey?: unknown, refreshMs = 15_000) {
           setTokens(t);
           setError(null);
         })
-        .catch((e: unknown) => alive && setError(e instanceof Error ? e.message : "Tokens unavailable"));
+        .catch((e: unknown) => alive && setError(errorText(e)));
     load();
     const id = setInterval(load, refreshMs);
     return () => {
       alive = false;
       clearInterval(id);
     };
-  }, [refreshKey, refreshMs]);
+  }, [refreshKey, refreshMs, network]);
 
   return { tokens, error };
 }

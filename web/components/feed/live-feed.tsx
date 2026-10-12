@@ -45,10 +45,10 @@ function FeedSkeleton({ dense }: { dense?: boolean }) {
     <ul aria-hidden className="animate-in fade-in duration-300">
       {Array.from({ length: 7 }).map((_, i) => (
         <li key={i} className={cn("flex items-start gap-4 border-b border-border/60", dense ? "p-3" : "px-5 py-4")}>
-          <Skeleton className="mt-1 size-8 rounded-full bg-white/[0.04]" />
+          <Skeleton className="mt-1 size-8 rounded-full bg-skeleton" />
           <div className="flex-1 space-y-2">
-            <Skeleton className="h-5 bg-white/[0.04]" style={{ width: `${55 + ((i * 17) % 35)}%` }} />
-            <Skeleton className="h-3 w-32 bg-white/[0.03]" />
+            <Skeleton className="h-5 bg-skeleton" style={{ width: `${55 + ((i * 17) % 35)}%` }} />
+            <Skeleton className="h-3 w-32 bg-skeleton" />
           </div>
         </li>
       ))}
