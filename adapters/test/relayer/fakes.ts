@@ -76,6 +76,7 @@ export class FakeExecutor implements JobExecutor {
 
   vaultRequest(spec: JobSpec) {
     if (spec.kind === "withdraw" || spec.kind === "sell") return { minSol: 1n, mint: spec.mint, minTokens: spec.amount };
+    if (spec.kind === "attest") return { minSol: 0n };
     return { minSol: spec.lamportsIn };
   }
 
@@ -84,6 +85,7 @@ export class FakeExecutor implements JobExecutor {
     const signature = `sig${++this.n}`;
     this.prepared.push({ signature, vault: vault.publicKey.toBase58() });
     const tx = { signature, raw: new Uint8Array([1, 2, 3]), blockhash: "bh", lastValidBlockHeight: this.chain.height + 150 };
+    if (spec.kind === "fair_create") return { ...tx, mint: spec.mintKeypair.publicKey.toBase58() };
     return spec.kind === "create" ? { ...tx, mint: `NewMint${this.n}` } : tx;
   }
 
@@ -137,13 +139,16 @@ export class FakeExecutor implements JobExecutor {
         blockTime: 1,
       };
     }
-    if (spec.kind === "create") {
+    if (spec.kind === "attest") {
+      return { kind: "attest", signature: a.signature, slot: 1, vault: a.vault, memo: spec.memo, networkFee: 5_000n, blockTime: 1 };
+    }
+    if (spec.kind === "create" || spec.kind === "fair_create") {
       return {
         kind: "create",
         signature: a.signature,
         slot: 1,
         vault: a.vault,
-        mint: `NewMint${a.signature.slice(3)}`,
+        mint: spec.kind === "fair_create" ? spec.mintKeypair.publicKey.toBase58() : `NewMint${a.signature.slice(3)}`,
         creator: "Creator1111111111111111111111111111111111111",
         tokenAmount: 1_000n,
         solAmount: 50_000n,

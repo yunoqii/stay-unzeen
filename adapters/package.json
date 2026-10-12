@@ -19,7 +19,9 @@
     "intel:run": "tsx scripts/intel-run.ts",
     "intel:probe": "tsx scripts/intel-probe.ts",
     "keys:creators-pub": "tsx scripts/creators-pub.ts",
-    "meteora:config": "tsx scripts/meteora-config.ts"
+    "meteora:config": "tsx scripts/meteora-config.ts",
+    "fees:sweep": "tsx scripts/fees-sweep.ts",
+    "fair:devnet": "tsx scripts/fair-devnet.ts"
   },
   "engines": {
     "node": ">=20"

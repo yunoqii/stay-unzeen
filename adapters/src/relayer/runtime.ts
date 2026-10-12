@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
-import { PUMP_PROGRAM_ID } from "@pump-fun/pump-sdk";
+import { OnlinePumpSdk, PUMP_PROGRAM_ID } from "@pump-fun/pump-sdk";
+import { Attester, deriveAttestKeypair } from "../attest";
 import type { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import pg from "pg";
 import type { AdapterConfig } from "../config";
@@ -14,7 +15,8 @@ import { PumpFunAdapter } from "../pumpfun";
 import { txPipeline, type TxPipeline } from "../sender";
 import { TokenWithdrawer } from "../withdraw";
 import { Relayer, type RelayerEvent } from "./engine";
-import { RpcChainProbe, VenueTradeExecutor, WithdrawExecutor, type JobExecutor } from "./executors";
+import { AttestExecutor, RpcChainProbe, VenueTradeExecutor, WithdrawExecutor, type JobExecutor } from "./executors";
+import { LaunchCurveWriter, pumpLaunchCurve } from "./launch-curves";
 import { FileMintVaults, PgMintVaults, type MintVaults } from "./mint-vaults";
 import { PostgresJobQueue, type SolanaNetwork } from "./postgres-queue";
 import { JobsVaultUsage, PgAdvisoryVaultLock, PgCreatorIndexCounter, PgVaultUsage } from "./postgres-vaults";
@@ -142,6 +144,10 @@ export interface RelayerRuntime {
   fees: PriorityFeeCache;
   /** How every pool tx is tipped and sent (one instance shared by all builders). */
   pipeline: TxPipeline;
+  /** RELAYER v3 attest: memo signer (own HD branch, not a vault / creator / partner). */
+  attester: Attester;
+  /** RELAYER v3 launch_curves writer (pump Global); run it only when the table is writable. */
+  launchCurves: LaunchCurveWriter;
 }
 
 /**
@@ -206,6 +212,9 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     : null;
   const trade: Partial<Record<"pumpfun" | "meteora-dbc", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
   if (meteora) trade["meteora-dbc"] = new VenueTradeExecutor(meteora, metadata);
+  const attester = new Attester(o.connection, deriveAttestKeypair(o.keys.creatorSeed), fees, pipeline);
+  const online = new OnlinePumpSdk(o.connection);
+  const launchCurves = new LaunchCurveWriter(o.db, o.network, async () => [pumpLaunchCurve(await online.fetchGlobal())]);
   const probe = new RpcChainProbe(o.connection, pipeline.broadcaster);
   const queue = new PostgresJobQueue({ pool: o.db, network: o.network, probe });
   const pool = new VaultPool(vaults, new RpcVaultInventory(o.connection), cryptoRng, {
@@ -221,13 +230,14 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
         new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: fees, pipeline }),
         cryptoRng,
       ),
+      attest: new AttestExecutor(attester),
     },
     probe,
     mintVaults,
     ...(o.leaseMs ? { leaseMs: o.leaseMs } : {}),
     ...(o.onEvent ? { onEvent: o.onEvent } : {}),
   });
-  return { relayer, adapter, meteora, pool, queue, mintVaults, metadata, fees, pipeline };
+  return { relayer, adapter, meteora, pool, queue, mintVaults, metadata, fees, pipeline, attester, launchCurves };
 }
 
 export function makePools(url: string, vaultCount: number, schema?: string): { db: pg.Pool; lockDb: pg.Pool } {

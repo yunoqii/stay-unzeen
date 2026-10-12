@@ -1,7 +1,8 @@
 import type { Connection, Signer } from "@solana/web3.js";
+import type { Attester } from "../attest";
 import { AdapterError } from "../errors";
 import type { CreateResult, PreparedCreate, PreparedTrade } from "../pumpfun";
-import type { CurveStatus, TokenMeta, TradeOptions, TxResult } from "../types";
+import type { CreateOptions, CurveStatus, TokenMeta, TradeOptions, TxResult } from "../types";
 import { fetchTx, signatureState, type Broadcaster, type SignatureState, type SignedTx } from "../tx";
 import type { MetadataStore } from "../metadata";
 import type { TokenWithdrawer } from "../withdraw";
@@ -25,6 +26,11 @@ export interface JobExecutor<S extends JobSpec = JobSpec> {
   /** Executed amounts of a landed attempt; null when the tx cannot be read yet. */
   result(spec: S, attempt: SentAttempt): Promise<Execution | null>;
   classify(err: unknown, logs?: readonly string[] | null): AdapterError;
+  /**
+   * When set, the job is signed by this key instead of a pool vault (attest:
+   * the attestation key). The engine then takes no vault lease.
+   */
+  ownSigner?(): Signer;
 }
 
 /** Chain access used to resolve recorded attempts. */
@@ -65,7 +71,7 @@ export class RpcChainProbe implements ChainProbe {
  */
 const CREATE_SOL_HEADROOM = 35_000_000n;
 
-type PumpSpec = Extract<JobSpec, { kind: "buy" | "sell" | "create" }>;
+type PumpSpec = Extract<JobSpec, { kind: "buy" | "sell" | "create" | "fair_create" }>;
 
 /**
  * What the relayer needs from a bonding-curve venue adapter (PumpFunAdapter,
@@ -74,7 +80,7 @@ type PumpSpec = Extract<JobSpec, { kind: "buy" | "sell" | "create" }>;
 export interface TradeVenue {
   prepareBuy(mint: string, lamportsIn: bigint, minOut: bigint, opts?: TradeOptions): Promise<PreparedTrade>;
   prepareSell(mint: string, amount: bigint, minLamports: bigint, opts?: TradeOptions): Promise<PreparedTrade>;
-  prepareCreate(meta: TokenMeta, lamportsIn: bigint, minOut: bigint, opts?: TradeOptions): Promise<PreparedCreate>;
+  prepareCreate(meta: TokenMeta, lamportsIn: bigint, minOut: bigint, opts?: CreateOptions): Promise<PreparedCreate>;
   submit(tx: SignedTx): Promise<unknown>;
   createResult(signature: string, vault: string): Promise<CreateResult | null>;
   tradeResult(kind: "buy" | "sell", signature: string, vault: string, mint: string): Promise<TxResult | null>;
@@ -100,6 +106,7 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
       case "buy":
         return { minSol: spec.lamportsIn + BUY_SOL_HEADROOM };
       case "create":
+      case "fair_create":
         return { minSol: spec.lamportsIn + CREATE_SOL_HEADROOM };
       case "sell":
         return { minSol: FEE_SOL_HEADROOM, mint: spec.mint, minTokens: spec.amount };
@@ -118,6 +125,16 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
         const { uri } = await this.metadata.publish(spec.meta);
         return this.adapter.prepareCreate({ name: spec.meta.name, symbol: spec.meta.symbol, uri }, spec.lamportsIn, spec.minOut, { vault });
       }
+      case "fair_create": {
+        if (!this.metadata) throw new AdapterError("venue_unavailable", "no metadata store configured");
+        if (spec.minOut <= 0n) throw new AdapterError("bad_request", "fair_create needs min_out > 0");
+        const { uri } = await this.metadata.publish(spec.meta);
+        // Core's mint keypair, identical on every attempt: a retry cannot create a second mint.
+        return this.adapter.prepareCreate({ name: spec.meta.name, symbol: spec.meta.symbol, uri }, spec.lamportsIn, spec.minOut, {
+          vault,
+          mintKeypair: spec.mintKeypair,
+        });
+      }
     }
   }
 
@@ -126,9 +143,13 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
   }
 
   async result(spec: PumpSpec, a: SentAttempt): Promise<Execution | null> {
-    if (spec.kind === "create") {
+    if (spec.kind === "create" || spec.kind === "fair_create") {
       const r = await this.adapter.createResult(a.signature, a.vault);
       if (!r) return null;
+      if (spec.kind === "fair_create" && r.mint !== spec.mintKeypair.publicKey.toBase58()) {
+        // Impossible (the mint key signs the tx); never report another mint as the launch.
+        throw new AdapterError("internal", "fair_create landed with an unexpected mint");
+      }
       // Same content-addressed URL the job published before signing (no new upload).
       const imageUrl = spec.meta.image ? ((await this.metadata?.publish(spec.meta).catch(() => null))?.imageUrl ?? null) : null;
       return {
@@ -216,5 +237,40 @@ export class WithdrawExecutor implements JobExecutor<Extract<JobSpec, { kind: "w
 
   classify(err: unknown, logs: readonly string[] | null = null): AdapterError {
     return this.withdrawer.classify(err, logs);
+  }
+}
+
+/**
+ * attest (RELAYER v3): SPL Memo with the commitment root, signed and paid by
+ * the pool's attestation key (never a vault). `out_memo` is read back from the
+ * confirmed transaction.
+ */
+export class AttestExecutor implements JobExecutor<Extract<JobSpec, { kind: "attest" }>> {
+  constructor(private readonly attester: Attester) {}
+
+  vaultRequest(): VaultRequest {
+    return { minSol: 0n };
+  }
+
+  ownSigner(): Signer {
+    return this.attester.key;
+  }
+
+  prepare(spec: Extract<JobSpec, { kind: "attest" }>): Promise<SignedTx> {
+    return this.attester.prepare(spec.memo);
+  }
+
+  async submit(tx: SignedTx): Promise<void> {
+    await this.attester.submit(tx);
+  }
+
+  async result(_spec: Extract<JobSpec, { kind: "attest" }>, a: SentAttempt): Promise<Execution | null> {
+    const r = await this.attester.result(a.signature);
+    if (!r) return null;
+    return { kind: "attest", signature: r.signature, slot: r.slot, vault: r.signer, memo: r.memo, networkFee: r.networkFee, blockTime: r.blockTime };
+  }
+
+  classify(err: unknown, logs: readonly string[] | null = null): AdapterError {
+    return this.attester.classify(err, logs);
   }
 }

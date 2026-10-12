@@ -13,6 +13,8 @@
  */
 import { loadRepoEnv, redactSecrets } from "../src/env";
 import { describeConfig, loadConfig, makeConnection } from "../src/config";
+import { buildFeeSweeper } from "../src/relayer/fee-runtime";
+import { launchCurvesWritable } from "../src/relayer/launch-curves";
 import { buildRelayer, checkMintVaultsAccess, checkRelayerRole, makePools, openKeys, relayerDatabaseUrl, relayerNetwork } from "../src/relayer/runtime";
 
 loadRepoEnv();
@@ -38,9 +40,10 @@ async function main(): Promise<void> {
     throw new Error("mint_vaults (core 0003) is missing or not writable for this role; grant it or set RELAYER_MINT_VAULTS=file");
   }
 
-  const { relayer, fees, pipeline } = buildRelayer({
+  const connection = makeConnection(cfg);
+  const { relayer, fees, pipeline, pool, attester, launchCurves } = buildRelayer({
     cfg,
-    connection: makeConnection(cfg),
+    connection,
     network,
     keys,
     db,
@@ -59,11 +62,29 @@ async function main(): Promise<void> {
     `[relayer] running with ${keys.vaults.length} vault(s), fee source ${cfg.priorityFeeSource}, send via ${pipeline.broadcaster.name}` +
       `${pipeline.tip ? ` (pool tip ${pipeline.tip.lamports} lamports on every tx)` : ""}, >= ${cfg.sendMinIntervalMs} ms between sends`,
   );
+  // RELAYER v3: launch curve of this network (core caps), at start and every 10 min.
+  const curves = (await launchCurvesWritable(db))
+    ? launchCurves.run(ac.signal, (e) => warn(`launch_curves: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 160)}`))
+    : (warn("launch_curves (core 0008) missing or not writable: fair launch unavailable on this network"), Promise.resolve());
+  // Attestation key pays its own memo fees (never topped up from a vault).
+  const attestBalance = await connection.getBalance(attester.publicKey, "confirmed").catch(() => null);
+  if (attestBalance !== null && attestBalance < 1_000_000) warn("attestation key balance < 0.001 SOL: attest jobs will fail (fund it, not from a vault)");
+  // Creator-fee sweep on its own random 6-12 h schedule (H7), same vault pool / locks / pipeline.
+  const sweep =
+    process.env.RELAYER_FEE_SWEEP?.trim() === "1"
+      ? (
+          await buildFeeSweeper({ cfg, connection, network, keys, db, pool, fees, pipeline, log: (m) => console.error(`[relayer] ${m}`) })
+        ).sweeper.runForever(ac.signal, (e) =>
+          console.error(`[relayer] fee sweep error: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 200)}`),
+        )
+      : Promise.resolve();
   // Two lanes (R-relayer-1); no lane / exec_mode in any log line (R-relayer-6).
   await relayer.runLanes(ac.signal, { nowMs: 300, batchMs: 1_000 + Math.floor(Math.random() * 1_000) }, (e) =>
     // Message only, redacted: DB/RPC errors may carry URLs; never row data (SQLSTATE detail is not printed).
     console.error(`[relayer] loop error: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 200)}`),
   );
+  await sweep;
+  await curves;
   fees.stop();
   await db.end();
   await lockDb.end();

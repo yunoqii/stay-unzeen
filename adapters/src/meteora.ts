@@ -526,7 +526,7 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     const creatorPk = this.creators.publicKey(creatorIndex); // recorded in creator-pubkeys.json first (T1)
     if (this.vaultKeys.has(creatorPk.toBase58())) throw new AdapterError("internal", "creator collides with a vault");
     const creatorKp = this.creators.keypair(creatorIndex);
-    const mintKp = Keypair.generate();
+    const mintKp = opts.mintKeypair ?? Keypair.generate();
 
     const build = (mint: PublicKey, payer: PublicKey, creator: PublicKey) =>
       this.sdk(async () => {

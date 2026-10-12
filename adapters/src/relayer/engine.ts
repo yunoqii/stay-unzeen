@@ -33,6 +33,8 @@ export interface RelayerEvent {
 export interface Executors {
   trade: Partial<Record<VenueId, JobExecutor>>;
   withdraw: JobExecutor;
+  /** RELAYER v3 attest; absent = attest jobs fail venue_unavailable (nothing signed). */
+  attest?: JobExecutor;
 }
 
 export interface RelayerOptions {
@@ -168,6 +170,15 @@ export class Relayer {
     if (!mv) return { req, pinFor: null };
     const spec = job.spec;
     if (spec.kind === "create") return { req: { ...req, load: await mv.load() }, pinFor: null };
+    if (spec.kind === "attest") return { req, pinFor: null };
+    if (spec.kind === "fair_create") {
+      // The mint is fixed by core and identical on every attempt: a retry must
+      // use the vault the first attempt pinned (D4), like a buy of a known mint.
+      const mint = spec.mintKeypair.publicKey.toBase58();
+      const pinned = await mv.get(mint);
+      if (pinned) return { req: { ...req, only: pinned }, pinFor: null };
+      return { req: { ...req, load: await mv.load() }, pinFor: mint };
+    }
     const pinned = await mv.get(spec.mint);
     if (pinned) return { req: { ...req, only: pinned }, pinFor: null };
     if (spec.kind === "buy") return { req: { ...req, load: await mv.load() }, pinFor: spec.mint };
@@ -176,6 +187,10 @@ export class Relayer {
 
   private executor(spec: JobSpec): JobExecutor {
     if (spec.kind === "withdraw") return this.o.executors.withdraw;
+    if (spec.kind === "attest") {
+      if (!this.o.executors.attest) throw new AdapterError("venue_unavailable", "no attestation key configured");
+      return this.o.executors.attest;
+    }
     const ex = this.o.executors.trade[spec.venue];
     if (!ex) throw new AdapterError("venue_unavailable", `no executor for venue ${spec.venue}`);
     return ex;
@@ -202,10 +217,16 @@ export class Relayer {
     for (let i = 0; i < this.o.maxSendAttempts; i++) {
       let vault: Signer;
       let pinFor: string | null;
+      const own = ex.ownSigner?.() ?? null;
       try {
-        const v = await this.vaultRequest(job, ex);
-        pinFor = v.pinFor;
-        vault = await this.o.pool.acquire(v.req);
+        if (own) {
+          vault = own; // attest: the attestation key signs and pays; no vault lease
+          pinFor = null;
+        } else {
+          const v = await this.vaultRequest(job, ex);
+          pinFor = v.pinFor;
+          vault = await this.o.pool.acquire(v.req);
+        }
       } catch (e) {
         if (e instanceof VaultsBusyError) return this.retry(job, "venue_unavailable", "vaults busy", 2_000);
         return this.fromError(job, ex.classify(e));
@@ -239,7 +260,7 @@ export class Relayer {
         };
         // Durable record first: if this throws, nothing has been sent.
         await this.o.queue.reportSent(job, attempt);
-        await this.o.pool.markUsed(attempt.vault, attempt.sentAt).catch(() => undefined);
+        if (!own) await this.o.pool.markUsed(attempt.vault, attempt.sentAt).catch(() => undefined);
         try {
           await ex.submit(tx);
         } catch (e) {
@@ -261,7 +282,7 @@ export class Relayer {
         }
         return this.finalize(job, ex, attempt);
       } finally {
-        await this.o.pool.release(vault).catch(() => undefined);
+        if (!own) await this.o.pool.release(vault).catch(() => undefined);
       }
     }
     return this.retryOrFail(job, "venue_unavailable", "transaction did not land");

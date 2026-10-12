@@ -1,3 +1,4 @@
+import type { Keypair } from "@solana/web3.js";
 import type { ApiErrorCode } from "../errors";
 import type { VenueId } from "../types";
 
@@ -54,7 +55,30 @@ export interface WithdrawJobSpec {
   gasLamports?: bigint;
 }
 
-export type JobSpec = BuyJobSpec | SellJobSpec | CreateJobSpec | WithdrawJobSpec;
+/**
+ * RELAYER v3 `fair_create`: one atomic create + buy of a fair launch. Like
+ * create, but the mint keypair comes from core (`mint_secret`) and is the same
+ * on every attempt, so a retry can never create a second mint. The keypair is
+ * secret until the tx lands: never log the spec.
+ */
+export interface FairCreateJobSpec {
+  kind: "fair_create";
+  venue: VenueId;
+  meta: { name: string; symbol: string; image?: string | null };
+  /** The whole launch buy, lamports (venue fees included). */
+  lamportsIn: bigint;
+  /** Minimum tokens (> 0). */
+  minOut: bigint;
+  mintKeypair: Keypair;
+}
+
+/** RELAYER v3 `attest`: SPL Memo with exactly `memo` (64 hex), signed by the pool's attestation key. */
+export interface AttestJobSpec {
+  kind: "attest";
+  memo: string;
+}
+
+export type JobSpec = BuyJobSpec | SellJobSpec | CreateJobSpec | WithdrawJobSpec | FairCreateJobSpec | AttestJobSpec;
 export type JobKind = JobSpec["kind"];
 
 /**
@@ -156,7 +180,19 @@ export interface CreateExecution {
   market: { priceSol: string; marketCapSol: string; status: "curve" | "graduated" } | null;
 }
 
-export type Execution = TradeExecution | CreateExecution | WithdrawExecution;
+/** attest: memo read back from the confirmed tx (`out_memo`); `vault` = attestation key. */
+export interface AttestExecution {
+  kind: "attest";
+  signature: string;
+  slot: number;
+  vault: string;
+  memo: string;
+  networkFee: bigint;
+  blockTime: number | null;
+}
+
+/** fair_create executes like create (same feed rows); `CreateExecution.mint` = pubkey of `mint_secret`. */
+export type Execution = TradeExecution | CreateExecution | WithdrawExecution | AttestExecution;
 
 export type JobResult =
   /** Done on chain; amounts are the executed ones. */

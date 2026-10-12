@@ -24,4 +24,6 @@ export { TokenWithdrawer, parseRecipient, MIN_GAS_DROP, type PreparedWithdraw, t
 export * as relayer from "./relayer";
 export * from "./fees";
 export * from "./sender";
+export * from "./creator-fees";
+export * from "./attest";
 export * as intel from "./intel";

@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { Keypair } from "@solana/web3.js";
 import type { Pool, PoolClient } from "pg";
 import type { ApiErrorCode } from "../errors";
 import type { VenueId } from "../types";
@@ -40,6 +41,8 @@ export interface PostgresJobQueueOptions {
 }
 
 const OPS = ["buy", "sell", "create", "transfer"] as const;
+/** RELAYER v3 (core 0008): taken only when relayer_jobs has the v3 columns. */
+const OPS_V3 = [...OPS, "fair_create", "attest"] as const;
 
 /** Row of relayer_jobs as returned by `claim` (pg returns BIGINT as string). */
 export interface JobRow {
@@ -62,6 +65,8 @@ export interface JobRow {
   vault: string | null;
   sent_at_ms: string | null;
   not_before_ms: string;
+  /** v3 fair_create: 64-byte mint keypair. Never logged. */
+  mint_secret?: Buffer | null;
 }
 
 export class PostgresJobQueue implements JobQueue {
@@ -70,6 +75,7 @@ export class PostgresJobQueue implements JobQueue {
   private readonly probe: PostgresJobQueueOptions["probe"];
   private leaseMs = 10 * 60_000;
   private execModeColumn: Promise<boolean> | null = null;
+  private v3Columns: Promise<boolean> | null = null;
 
   constructor(o: PostgresJobQueueOptions) {
     this.pool = o.pool;
@@ -95,6 +101,24 @@ export class PostgresJobQueue implements JobQueue {
     return this.execModeColumn;
   }
 
+  /** Whether relayer_jobs has the v3 columns (core 0008: mint_secret, out_memo). Cached. */
+  private hasV3(): Promise<boolean> {
+    if (!this.v3Columns) {
+      this.v3Columns = this.pool
+        .query<{ ok: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = current_schema() AND table_name = 'relayer_jobs'
+                             AND column_name = 'mint_secret') AS ok`,
+        )
+        .then((r) => r.rows[0]?.ok === true)
+        .catch((e) => {
+          this.v3Columns = null;
+          throw e;
+        });
+    }
+    return this.v3Columns;
+  }
+
   async claim(opts: { workerId: string; now: number; leaseMs: number; lane?: Lane }): Promise<ClaimedJob | null> {
     this.leaseMs = opts.leaseMs;
     const leaseId = `${opts.workerId}:${randomBytes(6).toString("hex")}`;
@@ -111,6 +135,7 @@ export class PostgresJobQueue implements JobQueue {
     }
     // Now lane: FIFO. Batch: random order inside an epoch (N-4).
     const tieBreak = opts.lane === "now" ? "id" : "random()";
+    const v3 = await this.hasV3();
     // DB clock (not opts.now): all relayers and core agree on time.
     const res = await this.pool.query<JobRow>(
       `WITH c AS (
@@ -133,8 +158,9 @@ export class PostgresJobQueue implements JobQueue {
                  j.meta, j.dest, j.gas_lamports, j.network, j.attempts, j.status, j.signature,
                  j.last_valid_block_height, j.vault,
                  (extract(epoch FROM j.updated_at) * 1000)::bigint AS sent_at_ms,
-                 (extract(epoch FROM j.not_before) * 1000)::bigint AS not_before_ms`,
-      [leaseId, this.network, opts.leaseMs, OPS],
+                 (extract(epoch FROM j.not_before) * 1000)::bigint AS not_before_ms
+                 ${v3 ? ", j.mint_secret" : ""}`,
+      [leaseId, this.network, opts.leaseMs, v3 ? OPS_V3 : OPS],
     );
     const row = res.rows[0];
     if (!row) return null;
@@ -211,6 +237,16 @@ export class PostgresJobQueue implements JobQueue {
       return;
     }
     const e = r.execution;
+    if (e.kind === "attest") {
+      // No feed rows; the memo comes from the confirmed tx, not from the job.
+      const res = await this.pool.query(
+        `UPDATE relayer_jobs SET status = 'confirmed', slot = $2, out_memo = $3, network_fee = $4, updated_at = now()
+          WHERE id = $1 AND status = 'sent' AND signature = $5 AND claimed_by = $6 AND settled_at IS NULL`,
+        [job.id, e.slot, e.memo, e.networkFee.toString(), e.signature, job.leaseId],
+      );
+      if (res.rowCount !== 1) throw new LeaseLostError(job.id);
+      return;
+    }
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -329,6 +365,36 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
         lamportsIn: row.lamports_in === null ? 0n : big(row.lamports_in, "lamports_in"),
         minOut: row.min_out === null ? 0n : big(row.min_out, "min_out"),
       };
+    }
+    case "fair_create": {
+      const m = row.meta as { name?: unknown; symbol?: unknown; image?: unknown } | null | undefined;
+      if (!m || typeof m !== "object" || typeof m.name !== "string" || typeof m.symbol !== "string") {
+        throw new Error(`job ${row.id}: meta.name / meta.symbol missing`);
+      }
+      if (m.image !== undefined && m.image !== null && typeof m.image !== "string") throw new Error(`job ${row.id}: bad meta.image`);
+      const secret = row.mint_secret;
+      if (!secret || secret.length !== 64) throw new Error(`job ${row.id}: mint_secret missing`);
+      let mintKeypair: Keypair;
+      try {
+        mintKeypair = Keypair.fromSecretKey(Uint8Array.from(secret)); // checks pubkey = seed's
+      } catch {
+        throw new Error(`job ${row.id}: bad mint_secret`);
+      }
+      const minOut = big(row.min_out, "min_out");
+      if (minOut <= 0n) throw new Error(`job ${row.id}: min_out must be > 0`);
+      return {
+        kind: "fair_create",
+        venue: venue(row),
+        meta: { name: m.name, symbol: m.symbol, ...(typeof m.image === "string" ? { image: m.image } : {}) },
+        lamportsIn: big(row.lamports_in, "lamports_in"),
+        minOut,
+        mintKeypair,
+      };
+    }
+    case "attest": {
+      const m = row.meta as { memo?: unknown } | null | undefined;
+      if (!m || typeof m.memo !== "string" || !/^[0-9a-f]{64}$/.test(m.memo)) throw new Error(`job ${row.id}: meta.memo must be 64 hex`);
+      return { kind: "attest", memo: m.memo };
     }
     case "transfer": {
       const mint = needMint();

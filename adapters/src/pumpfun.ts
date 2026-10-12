@@ -238,7 +238,7 @@ export class PumpFunAdapter implements LaunchpadAdapter {
       throw new AdapterError("internal", "creator collides with a vault");
     }
 
-    const mintKp = Keypair.generate();
+    const mintKp = opts.mintKeypair ?? Keypair.generate();
     const build = (mint: PublicKey, user: PublicKey, creatorPk: PublicKey) =>
       createIxs(global, feeConfig, meta, mint, user, creatorPk, initialBuyLamports);
     const { ixs, tokens } = await build(mintKp.publicKey, vault.publicKey, creator);

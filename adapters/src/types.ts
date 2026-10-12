@@ -1,4 +1,4 @@
-import type { PublicKey, Signer } from "@solana/web3.js";
+import type { Keypair, PublicKey, Signer } from "@solana/web3.js";
 
 /** Venue ids, same strings as `Venue` in docs/API.md. */
 export type VenueId = "pumpfun" | "meteora-dbc" | "jupiter";
@@ -81,6 +81,12 @@ export interface CreateOptions extends TradeOptions {
    * the next unused index. Never a vault, never a user wallet.
    */
   creatorIndex?: number;
+  /**
+   * Mint keypair fixed by the caller (fair launch: core's `mint_secret`, the
+   * same on every attempt so a retry can never create a second mint). Default
+   * a fresh one per call.
+   */
+  mintKeypair?: Keypair;
 }
 
 /** docs/ARCHITECTURE.md "Адаптер", with an optional trailing options arg. */
