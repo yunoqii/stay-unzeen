@@ -14,11 +14,9 @@ import type {
   CandleTimeframe,
   CreatorToken,
   FeedEvent,
-  IntentRequest,
-  IntentStatusResponse,
   Order,
-  PaymentRequest,
   PlatformStats,
+  PoolInfo,
   Portfolio,
   SignedAction,
   Token,
@@ -73,12 +71,12 @@ export interface Api {
   getToken(mint: string): Promise<TokenWithTrades | null>;
   getTrades(mint: string, q?: TradesQuery): Promise<FeedEvent[]>;
   getCandles(mint: string, q?: CandlesQuery): Promise<Candle[]>;
-  createIntent(body: IntentRequest): Promise<PaymentRequest>;
-  getIntent(id: string): Promise<IntentStatusResponse>;
-  createDeposit(anonPubkey: string): Promise<PaymentRequest>;
+  /** Public pool info: UA, chain id, minimums, K. No pubkey, no cookies. */
+  getPool(): Promise<PoolInfo>;
   getPortfolio(signer: Signer): Promise<Portfolio>;
   postAction(signer: Signer, action: SignedAction): Promise<ActionAccepted>;
-  getAction(id: string): Promise<ActionStatusResponse>;
+  /** Owner only (header pubkey = action author), otherwise 404. */
+  getAction(signer: Signer, id: string): Promise<ActionStatusResponse>;
   getOrders(signer: Signer): Promise<Order[]>;
   getCreator(signer: Signer): Promise<CreatorToken[]>;
   getStats(): Promise<PlatformStats>;
@@ -125,7 +123,7 @@ async function httpCall<T>(call: Call): Promise<T> {
 
 async function mockCall<T>(call: Call): Promise<T> {
   const { body, headers } = prepare(call);
-  return mock.handle(call.method, call.path, body, headers as Partial<SignedHeaders>) as Promise<T>;
+  return mock.handle(networkConfig().id, call.method, call.path, body, headers as Partial<SignedHeaders>) as Promise<T>;
 }
 
 function makeApi(send: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscribeFeed"]): Api {
@@ -145,14 +143,11 @@ function makeApi(send: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscr
     },
     getTrades: (mint, q = {}) => get(`/api/tokens/${enc(mint)}/trades${qs({ before: q.before, limit: q.limit })}`),
     getCandles: (mint, q = {}) => get(`/api/tokens/${enc(mint)}/candles${qs({ tf: q.tf, from: q.from, to: q.to })}`),
-    createIntent: (body) => post("/api/intents", body),
-    getIntent: (id) => get(`/api/intents/${enc(id)}`),
-    createDeposit: (anonPubkey) => post("/api/deposit", { anonPubkey }),
-    // Deviation from docs/API.md v0.1 (`/api/portfolio/:anonPubkey`), per analyst review H9: the anon
-    // pubkey never goes into a URL path or query (hosting access logs = IP <-> key). Header only.
+    getPool: () => get("/api/pool"),
+    // The anon pubkey never goes into a URL path or query (access logs = IP <-> key). Header only.
     getPortfolio: (signer) => get("/api/portfolio", signer),
     postAction: (signer, action) => post("/api/actions", action, signer),
-    getAction: (id) => get(`/api/actions/${enc(id)}`),
+    getAction: (signer, id) => get(`/api/actions/${enc(id)}`, signer),
     getOrders: (signer) => get("/api/orders", signer),
     getCreator: (signer) => get("/api/creator", signer),
     getStats: () => get("/api/stats"),

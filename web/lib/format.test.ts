@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatUnits, lamportsToSol, parseUnits, unitsToNumber, zatToZec } from "./format";
+import { formatUnits, formatZec, lamportsToSol, parseUnits, unitsToNumber, zatToZec } from "./format";
 
 describe("base units", () => {
   it("formats exactly", () => {
@@ -24,5 +24,14 @@ describe("base units", () => {
     expect(parseUnits("0", 6)).toBe("0");
     expect(() => parseUnits("0.000000001", 8)).toThrow();
     expect(() => parseUnits("1e3", 8)).toThrow();
+  });
+});
+
+describe("formatZec", () => {
+  it("is exact and grouped", () => {
+    expect(formatZec("123456789012")).toBe("1,234.56789012");
+    expect(formatZec("10000000")).toBe("0.1");
+    expect(formatZec("0")).toBe("0");
+    expect(formatZec("100000000000000")).toBe("1,000,000");
   });
 });

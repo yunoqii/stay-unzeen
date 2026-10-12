@@ -1,24 +1,24 @@
 import type { Metadata } from "next";
-import { Eye, ListChecks, Scales } from "@phosphor-icons/react/ssr";
+import { ListChecks, Scales, TreeStructure } from "@phosphor-icons/react/ssr";
 import { EmptyState, PageShell } from "@/components/layout/page-shell";
 
 export const metadata: Metadata = { title: "Verify" };
 
 const STEPS = [
   {
-    icon: Eye,
-    title: "Viewing key",
-    body: "The pool publishes a viewing key. Anyone can see what came in, without seeing who sent it.",
+    icon: TreeStructure,
+    title: "Find your leaf",
+    body: "The pool commits to every balance in a Merkle-sum tree. Your anon key proves your leaf is in it, and nobody else learns your balance.",
+  },
+  {
+    icon: Scales,
+    title: "Check the reserves",
+    body: "Public vault addresses on Solana and the pool's ZEC reserve must cover the tree's total, token by token.",
   },
   {
     icon: ListChecks,
     title: "Match the trades",
     body: "Every feed event links to a public Solana transaction from a pool vault.",
-  },
-  {
-    icon: Scales,
-    title: "Check solvency",
-    body: "Vault holdings on Solana should cover the private ledger, token by token.",
   },
 ];
 
@@ -42,7 +42,7 @@ export default function VerifyPage() {
         ))}
       </ol>
       <EmptyState title="Verification tools are on their way" className="mt-6">
-        Viewing key, vault list and the reconciliation report will appear here.
+        Your Merkle-sum proof, the public vault list and the reserve check will appear here.
       </EmptyState>
     </PageShell>
   );

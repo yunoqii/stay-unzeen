@@ -76,7 +76,7 @@ export function HomeClient() {
             id="panel-hot"
             ref={hotRef}
             aria-labelledby="hot-title"
-            className={cn("min-w-0 scroll-mt-20 lg:sticky lg:top-[calc(var(--header-h)+1.5rem)] lg:self-start", tab !== "hot" && "max-lg:hidden")}
+            className={cn("min-w-0 scroll-mt-20 lg:sticky lg:top-[calc(var(--header-h)+var(--banner-h)+1.5rem)] lg:self-start", tab !== "hot" && "max-lg:hidden")}
           >
             <div className="border-border/60 sm:rounded-2xl sm:border">
               <header className="flex items-center justify-between border-b border-border/60 px-4 py-3">

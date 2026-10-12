@@ -1,21 +1,25 @@
-// In-browser mock of the Unzeen backend, shaped exactly like docs/API.md v0.1.
+// In-browser mock of the Unzeen backend, shaped exactly like docs/API.md v0.2.
 // Used when NEXT_PUBLIC_API_MODE=mock (the default). Signed endpoints verify x-unzeen-* headers
-// with the same rules as the backend (60 s window, nonce replay, pubkey in path), so the real
-// signing code is exercised end to end even without core/.
+// with the same rules as the backend (60 s window, nonce replay, pubkey only in the header), so the
+// real signing code is exercised end to end even without core/.
+//
+// It also simulates the chain side of a Top up (`mockPay`): the "wallet" pays a ZIP-321 URI and the
+// "scanner" applies the same rules as core/ (unz1 verdict, chain_id, K confirmations, minimum).
 
-import { base64urlnopad } from "@scure/base";
 import { HEADER_NONCE, verifyRequest, type SignedHeaders } from "@/lib/crypto/sign";
+import { checkUnz1, decodeUnz1, type ChainId } from "@/lib/crypto/unz1";
+import type { Network } from "@/lib/network";
+import { memoText, parseZip321 } from "@/lib/zip321";
 import { ApiError } from "./errors";
 import type {
   ActionAccepted,
   ActionStatusResponse,
   Candle,
   CandleTimeframe,
+  DepositInfo,
   FeedEvent,
-  IntentRequest,
-  IntentStatusResponse,
-  PaymentRequest,
   PlatformStats,
+  PoolInfo,
   Portfolio,
   SignedAction,
   Token,
@@ -100,8 +104,7 @@ const SUPPLY = 1_000_000_000;
 let state: MockTokenState[] | null = null;
 let history: FeedEvent[] = [];
 let newTokenCursor = 0;
-const intents = new Map<string, { createdAt: number }>();
-const actions = new Map<string, { createdAt: number; action: SignedAction }>();
+const actions = new Map<string, { createdAt: number; action: SignedAction; pubkey: string }>();
 const seenNonces = new Map<string, number>(); // `${pubkey}:${nonce}` -> expiry
 
 function init(now: number) {
@@ -282,37 +285,146 @@ function authorize(method: string, path: string, body: string | undefined, heade
   return res.pubkey;
 }
 
-// ---- payment requests ----
+// ---- pool and accounts (per network) ----
 
-function opaqueMemo(): string {
-  // Real memo is built by core/ (unz1 binary, 152..195 bytes). The UI never parses it.
-  return "unz1:" + base64urlnopad.encode(crypto.getRandomValues(new Uint8Array(152)));
+function poolAddress(network: Network): string {
+  // Looks like a UA (bech32 charset); not a real address.
+  const rnd = seeded("unzeen-mock-pool:" + network);
+  const cs = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+  let out = network === "mainnet" ? "u1" : "utest1";
+  for (let i = 0; i < 106; i++) out += cs[Math.floor(rnd() * cs.length)];
+  return out;
 }
 
-function paymentRequest(amountZec: string): PaymentRequest {
-  const intentId = b58(12);
-  const address = "utest1" + b58(100).toLowerCase();
-  const memo = opaqueMemo();
-  intents.set(intentId, { createdAt: Date.now() });
-  const memo64 = base64urlnopad.encode(new TextEncoder().encode(memo));
-  return {
-    intentId,
-    address,
-    amountZec,
-    memo,
-    zip321Uri: `zcash:${address}?amount=${amountZec}&memo=${memo64}`,
-    expiresAt: Date.now() + 30 * 60_000,
-  };
+export function mockPool(network: Network): PoolInfo {
+  return network === "mainnet"
+    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3 }
+    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3 };
 }
 
-function demoPortfolio(pubkey: string): Portfolio {
-  const rnd = seeded("portfolio:" + pubkey);
-  const picks = state!.filter(() => rnd() < 0.45).slice(0, 3);
+interface MockAccount {
+  zecBalance: bigint;
+  zecHeld: bigint;
+  frozen: boolean;
+  holdings: { mint: string; amount: string }[];
+  deposits: DepositInfo[];
+}
+
+const accounts = new Map<string, MockAccount>(); // `${network}:${pubkey}`
+
+function account(network: Network, pubkey: string): MockAccount {
+  const key = `${network}:${pubkey}`;
+  let a = accounts.get(key);
+  if (!a) {
+    // New keys start with no ZEC (empty states are visible); some get a few demo tokens.
+    const rnd = seeded("portfolio:" + key);
+    const picks = rnd() < 0.7 ? state!.filter(() => rnd() < 0.5).slice(0, 3) : [];
+    a = {
+      zecBalance: BigInt(0),
+      zecHeld: BigInt(0),
+      frozen: false,
+      holdings: picks.map((s) => ({ mint: s.token.mint, amount: toBaseUnits((rnd() * 4 + 0.2) / s.price, s.token.decimals) })),
+      deposits: [],
+    };
+    accounts.set(key, a);
+  }
+  return a;
+}
+
+function portfolioOf(network: Network, pubkey: string): Portfolio {
+  const a = account(network, pubkey);
   return {
-    zecBalance: String(Math.round(logRand(0.05, 2.5) * 1e8)),
-    holdings: picks.map((s) => ({ mint: s.token.mint, amount: toBaseUnits((rnd() * 4 + 0.2) / s.price, s.token.decimals) })),
+    zecBalance: a.zecBalance.toString(),
+    zecHeld: a.zecHeld.toString(),
+    frozen: a.frozen,
+    holdings: a.holdings.map((h) => ({ ...h })),
     claimable: [],
+    deposits: a.deposits.slice(0, 20).map((d) => ({ ...d })),
   };
+}
+
+// ---- simulated chain: wallet pays a ZIP-321 URI, scanner credits it ----
+
+export type MockDepositPhase = "mempool" | "confirming" | "credited" | "dust" | "frozen" | "ignored";
+
+interface MockNote {
+  network: Network;
+  memo: string | null;
+  amountZat: bigint;
+  toPool: boolean;
+  sentAt: number;
+  minedAt: number;
+  settled: boolean;
+  outcome?: MockDepositPhase;
+}
+
+const notes: MockNote[] = [];
+const MEMPOOL_MS = 1_500;
+const BLOCK_MS = 4_000;
+
+function chainIdOf(pool: PoolInfo): ChainId {
+  return [parseInt(pool.chainId.slice(0, 2), 16), parseInt(pool.chainId.slice(2), 16)] as unknown as ChainId;
+}
+
+/** Runs the scanner rules (docs/API.md table) on every note that reached K confirmations. */
+function scan(now: number) {
+  for (const n of notes) {
+    if (n.settled) continue;
+    const pool = mockPool(n.network);
+    const confs = now < n.minedAt ? 0 : 1 + Math.floor((now - n.minedAt) / BLOCK_MS);
+    if (confs < pool.confirmations) continue;
+    n.settled = true;
+    if (!n.toPool) {
+      n.outcome = "ignored";
+      continue;
+    }
+    if (n.amountZat < BigInt(pool.minDepositZat)) {
+      n.outcome = "dust";
+      continue;
+    }
+    const verdict = n.memo ? checkUnz1(n.memo, chainIdOf(pool), Math.floor(n.minedAt / 1000)) : "malformed";
+    if (verdict === "malformed" || verdict === "bad_signature") {
+      n.outcome = "frozen"; // pubkey from such a memo is not kept
+      continue;
+    }
+    // valid, or expired without refund receiver: credited either way (we never set a refund).
+    const pub = decodeUnz1(n.memo!, chainIdOf(pool)).anonPubkey;
+    const a = account(n.network, pub);
+    a.zecBalance += n.amountZat;
+    a.deposits.unshift({ amountZat: n.amountZat.toString(), status: "credited", ts: Math.floor(now / 60_000) * 60_000 });
+    n.outcome = "credited";
+  }
+}
+
+/** The "wallet" sends the payment described by a ZIP-321 URI. Throws on a URI a wallet would reject. */
+export function mockPay(network: Network, uri: string): void {
+  init(Date.now());
+  const [p] = parseZip321(uri);
+  if (!p.amountZat) throw new Error("amount required");
+  const now = Date.now();
+  notes.push({
+    network,
+    memo: memoText(p),
+    amountZat: BigInt(p.amountZat),
+    toPool: p.address === mockPool(network).address,
+    sentAt: now,
+    minedAt: now + MEMPOOL_MS + BLOCK_MS,
+    settled: false,
+  });
+}
+
+/**
+ * What a wallet watching its own outgoing tx would see for the latest payment with this memo.
+ * Mock-only helper (the real API cannot attribute a note before K confirmations).
+ */
+export function mockDepositPhase(network: Network, memo: string): { phase: MockDepositPhase | "none"; confirmations: number } {
+  const now = Date.now();
+  scan(now);
+  const n = [...notes].reverse().find((x) => x.network === network && x.memo === memo);
+  if (!n || now < n.sentAt + MEMPOOL_MS) return { phase: "none", confirmations: 0 };
+  const confs = now < n.minedAt ? 0 : 1 + Math.floor((now - n.minedAt) / BLOCK_MS);
+  if (n.outcome) return { phase: n.outcome, confirmations: confs };
+  return { phase: confs === 0 ? "mempool" : "confirming", confirmations: confs };
 }
 
 function stats(): PlatformStats {
@@ -342,6 +454,7 @@ function stats(): PlatformStats {
 
 /** Emulates one HTTP round-trip. Throws ApiError exactly where core/ would answer non-2xx. */
 export async function handle(
+  network: Network,
   method: "GET" | "POST",
   pathWithQuery: string,
   body: string | undefined,
@@ -349,6 +462,7 @@ export async function handle(
 ): Promise<unknown> {
   init(Date.now());
   await delay(rand(120, 380));
+  scan(Date.now());
   const url = new URL(pathWithQuery, "http://mock.local");
   const p = url.pathname;
   const q = url.searchParams;
@@ -385,24 +499,18 @@ export async function handle(
       const num = (k: string) => (q.get(k) ? Number(q.get(k)) : undefined);
       return candles(s, tf, num("from"), num("to"));
     }
-    if ((m = p.match(/^\/api\/intents\/([^/]+)$/))) {
-      const it = intents.get(decodeURIComponent(m[1]));
-      if (!it) throw new ApiError("not_found", "unknown intent", 404);
-      const age = Date.now() - it.createdAt;
-      const res: IntentStatusResponse =
-        age < 15_000 ? { status: "awaiting_payment" } : age < 30_000 ? { status: "seen" } : { status: "executed", tx: b58(88) };
-      return res;
-    }
+    if (p === "/api/pool") return mockPool(network);
     if ((m = p.match(/^\/api\/actions\/([^/]+)$/))) {
+      const pub = authorize(method, pathWithQuery, body, headers);
       const a = actions.get(decodeURIComponent(m[1]));
-      if (!a) throw new ApiError("not_found", "unknown action", 404);
+      if (!a || a.pubkey !== pub) throw new ApiError("not_found", "unknown action", 404);
       const res: ActionStatusResponse =
         Date.now() - a.createdAt < 4_000 ? { status: "queued" } : { status: "executed", solanaTx: b58(88) };
       return res;
     }
     if (p === "/api/portfolio") {
-      // pubkey comes only from the signed header (analyst review H9), never from the path.
-      return demoPortfolio(authorize(method, pathWithQuery, body, headers));
+      // pubkey comes only from the signed header, never from the path.
+      return portfolioOf(network, authorize(method, pathWithQuery, body, headers));
     }
     if (p === "/api/orders" || p === "/api/creator") {
       authorize(method, pathWithQuery, body, headers);
@@ -411,22 +519,14 @@ export async function handle(
   }
 
   if (method === "POST") {
-    if (p === "/api/intents") {
-      const req = json() as IntentRequest | null;
-      if (!req?.op || !req.anonPubkey) throw new ApiError("bad_request", "op and anonPubkey required", 400);
-      return paymentRequest(req.amount ?? "0.1");
-    }
-    if (p === "/api/deposit") {
-      const req = json() as { anonPubkey?: string } | null;
-      if (!req?.anonPubkey) throw new ApiError("bad_request", "anonPubkey required", 400);
-      return paymentRequest("0.1");
-    }
     if (p === "/api/actions") {
-      authorize(method, pathWithQuery, body, headers);
+      const pub = authorize(method, pathWithQuery, body, headers);
       const action = json() as SignedAction | null;
       if (!action?.op) throw new ApiError("bad_request", "op required", 400);
-      const id = b58(16);
-      actions.set(id, { createdAt: Date.now(), action });
+      if (account(network, pub).frozen) throw new ApiError("balance_frozen", "balance frozen", 423);
+      const hex = Array.from(crypto.getRandomValues(new Uint8Array(16)), (x) => x.toString(16).padStart(2, "0")).join("");
+      const id = hex; // 128 random bits, hex (docs/API.md)
+      actions.set(id, { createdAt: Date.now(), action, pubkey: pub });
       const res: ActionAccepted = { id, status: "queued" };
       return res;
     }

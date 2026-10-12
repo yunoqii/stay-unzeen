@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "motion/react";
 import {
   ArrowLeft,
@@ -35,9 +36,29 @@ type Flow = null | "create" | "restore";
 
 const SURFACE = { duration: 0.3, ease: [0.16, 1, 0.3, 1] as const };
 
+/** Where to go after unlocking, from ?next=. Whitelisted: never an open redirect. */
+const NEXT_PATHS = ["/portfolio", "/pay"] as const;
+
+function nextPath(): string | null {
+  const n = new URLSearchParams(window.location.search).get("next");
+  return n && (NEXT_PATHS as readonly string[]).includes(n) ? n : null;
+}
+
 export function KeyApp() {
   const state = useKeyState();
   const [flow, setFlow] = useState<Flow>(null);
+  const router = useRouter();
+  const prev = useRef(state.status);
+
+  // Came here from a gated page: return there once the key gets unlocked (not if it already was).
+  useEffect(() => {
+    const was = prev.current;
+    prev.current = state.status;
+    if (state.status === "unlocked" && was !== "unlocked" && was !== "loading") {
+      const n = nextPath();
+      if (n) router.replace(n);
+    }
+  }, [state.status, router]);
 
   // Loading is rendered outside AnimatePresence: the first real view appears without waiting on an exit.
   if (state.status === "loading")

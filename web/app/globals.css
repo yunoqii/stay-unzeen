@@ -98,6 +98,7 @@
   --skeleton: var(--surface-2);
 
   --header-h: 3.5rem;
+  --banner-h: 1.75rem;
   --bottom-nav-h: 4rem;
 
   color-scheme: dark;
@@ -213,5 +214,20 @@
 @media (prefers-reduced-motion: reduce) {
   .live-dot {
     animation: none;
+  }
+}
+
+/* Top up: the ring around the QR breathes while we wait for the payment. */
+@keyframes uz-breathe {
+  0%, 100% { opacity: 0.2; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.025); }
+}
+.qr-breathe {
+  animation: uz-breathe 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .qr-breathe {
+    animation: none;
+    opacity: 0.4;
   }
 }

@@ -1,4 +1,4 @@
-// Mirrors docs/API.md (draft v0.1). Do not diverge: change the contract first.
+// Mirrors docs/API.md v0.2. Do not diverge: change the contract first.
 //
 // Units (docs/API.md "Единицы сумм"):
 //   - spendable amounts: integer strings in BASE units (token base units, lamports, zatoshis)
@@ -57,39 +57,40 @@ export interface Candle {
   volume: Lamports;
 }
 
-export interface IntentRequest {
-  op: "buy" | "sell" | "create" | "withdraw" | "claim";
-  venue?: Venue;
-  mint?: string;
-  amount?: string;
-  minOut?: string;
-  anonPubkey: string;
-  sig: string;
-  meta?: { name: string; symbol: string; image?: string };
-  withdrawTo?: string; // fresh Solana address
-  refundUA?: string; // shielded address for payouts
-}
-
-export interface PaymentRequest {
-  intentId: string;
+/** GET /api/pool: public, no pubkey, no cookies. Same for every user. */
+export interface PoolInfo {
+  /** Pool Unified Address (Orchard/Ironwood receiver only). */
   address: string;
-  amountZec: DecimalString; // decimal ZEC, as in ZIP-321 amount=
-  memo: string; // "unz1:..." ready-made, opaque to the frontend
-  zip321Uri: string;
-  expiresAt: number;
+  network: "main" | "test";
+  /** 2 bytes hex for the unz1 memo signature: [Zcash 1 main | 2 test][Solana 1 mainnet-beta | 2 devnet], e.g. "0202". */
+  chainId: string;
+  /** Below this a deposit is not credited (stays with the pool as dust). */
+  minDepositZat: Zatoshis;
+  /** Minimum amount of an action from the balance (zecIn / withdraw_zec). */
+  minActionZat: Zatoshis;
+  /** K: blocks until a deposit is credited (default 3). */
+  confirmations: number;
 }
 
-export type IntentStatus = "awaiting_payment" | "seen" | "executed" | "failed";
-
-export interface IntentStatusResponse {
-  status: IntentStatus;
-  tx?: string;
+export interface DepositInfo {
+  amountZat: Zatoshis;
+  status: "credited" | "refund_pending";
+  /** Credit time, unix ms rounded to the minute. */
+  ts: number;
 }
 
+/** GET /api/portfolio (signed; pubkey only in x-unzeen-pubkey, never in the path). */
 export interface Portfolio {
+  /** Available. */
   zecBalance: Zatoshis;
+  /** Reserved by queued actions. */
+  zecHeld: Zatoshis;
+  /** true: frozen pending manual review (reorg); new actions -> balance_frozen. */
+  frozen: boolean;
   holdings: { mint: string; amount: TokenBaseUnits }[];
   claimable: { mint: string; solAmount: Lamports }[];
+  /** Last 20, newest first. */
+  deposits: DepositInfo[];
 }
 
 /** Body of POST /api/actions. anonPubkey/nonce/ts/sig go in x-unzeen-* headers, not here. */
@@ -104,7 +105,7 @@ export type SignedAction =
       mint: string;
       amount: TokenBaseUnits;
       to: string | string[];
-      smart?: { parts: number; maxDelayMin: number; gasDrop: boolean };
+      smart?: { parts: number; maxDelayMin: number }; // parts 2..5, to.length === parts
     }
   | {
       op: "order_create";
@@ -127,7 +128,7 @@ export type ActionStatus = "queued" | "executed" | "failed";
 export interface ActionStatusResponse {
   status: ActionStatus;
   solanaTx?: string;
-  error?: string;
+  error?: ErrorCode;
 }
 
 export type OrderKind = "limit_buy" | "limit_sell" | "take_profit" | "stop_loss";
@@ -181,6 +182,10 @@ export type ErrorCode =
   | "not_found"
   | "replay"
   | "insufficient_balance"
+  | "below_minimum"
+  | "balance_frozen"
+  | "graduated"
+  | "pool_liquidity"
   | "slippage"
   | "rate_limited"
   | "venue_unavailable"

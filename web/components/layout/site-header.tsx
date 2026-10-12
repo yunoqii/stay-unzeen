@@ -7,6 +7,8 @@ import { motion } from "motion/react";
 import { API_MODE } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
 import { KeyStatus } from "./key-status";
+import { NetworkBanner } from "./network-banner";
+import { NetworkSwitch } from "./network-switch";
 import { Wordmark } from "./logo";
 import { NAV, isActive } from "./nav-items";
 
@@ -24,18 +26,20 @@ export function SiteHeader() {
           </Suspense>
         </nav>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2">
           {API_MODE === "mock" && (
             <span
               title="Running on mock data (NEXT_PUBLIC_API_MODE=mock)"
-              className="rounded-full border border-dashed border-border px-2 py-0.5 font-mono text-[10px] tracking-wider text-faint-foreground uppercase"
+              className="hidden rounded-full border border-dashed border-border px-2 py-0.5 font-mono text-[10px] tracking-wider text-faint-foreground uppercase lg:inline"
             >
               mock
             </span>
           )}
+          <NetworkSwitch />
           <KeyStatus />
         </div>
       </div>
+      <NetworkBanner />
     </header>
   );
 }

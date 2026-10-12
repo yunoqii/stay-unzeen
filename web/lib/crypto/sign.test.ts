@@ -93,6 +93,8 @@ interface BackendApiCase {
   message: string;
   now: number;
   headers: SignedHeaders;
+  /** Present once the backend binds chain_id into the signing string (pending web migration). */
+  chainIdHex?: string;
 }
 
 const backendApi: BackendApiCase[] = existsSync(BACKEND)
@@ -103,6 +105,11 @@ const VERDICT = { ok: "ok", stale: "stale", bad_signature: "bad_sig" } as const;
 
 describe.skipIf(backendApi.length === 0)("request signing: backend vectors (core/testdata/unz1-vectors.json)", () => {
   for (const c of backendApi) {
+    // The lead holds the chain_id-in-signature migration until core/ settles; listed, not hidden.
+    if (c.chainIdHex) {
+      it.todo(`${c.name} -> ${c.expect} (chain_id ${c.chainIdHex} in signing string: pending web migration)`);
+      continue;
+    }
     it(`${c.name} -> ${c.expect}`, () => {
       const signed = { method: c.method, pathWithQuery: c.pathQuery, body: c.signedBody || undefined };
       const sent = { method: c.method, pathWithQuery: c.pathQuery, body: c.sentBody || undefined };

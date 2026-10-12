@@ -119,7 +119,7 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
           </section>
         </div>
 
-        <aside className="lg:sticky lg:top-[calc(var(--header-h)+1.5rem)] lg:self-start">
+        <aside className="lg:sticky lg:top-[calc(var(--header-h)+var(--banner-h)+1.5rem)] lg:self-start">
           <EmptyState icon={<ShieldCheck size={28} weight="thin" />} title="Buy or sell privately" className="border-solid">
             Pay with shielded ZEC from ZODL by QR. Coming next.
           </EmptyState>

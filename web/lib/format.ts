@@ -99,3 +99,22 @@ export function timeAgo(ts: number, now: number): string {
 export function shortAddr(a: string, head = 4, tail = 4): string {
   return a.length <= head + tail + 1 ? a : `${a.slice(0, head)}…${a.slice(-tail)}`;
 }
+
+/** Zatoshis -> exact ZEC with thousands separators: "123456789012" -> "1,234.56789012". */
+export function formatZec(zat: string): string {
+  const s = formatUnits(zat, ZEC_DECIMALS);
+  const [int, frac] = s.split(".");
+  const neg = int.startsWith("-");
+  const grouped = (neg ? int.slice(1) : int).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return (neg ? "-" : "") + grouped + (frac ? "." + frac : "");
+}
+
+/** Coarse age for minute-rounded timestamps. */
+export function minutesAgo(ts: number, now: number): string {
+  const m = Math.floor((now - ts) / 60_000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} h ago`;
+  return `${Math.floor(h / 24)} d ago`;
+}

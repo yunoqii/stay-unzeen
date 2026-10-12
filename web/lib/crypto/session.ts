@@ -5,9 +5,9 @@
 // request. Reload = locked again.
 
 import { useSyncExternalStore } from "react";
-import { getNetwork, networkConfig, subscribeNetwork, type Network } from "@/lib/network";
+import { getNetwork, subscribeNetwork, type Network } from "@/lib/network";
 import { signerFromSecret, type Signer } from "./sign";
-import { MEMO_ALLOWED_OPS, unz1MemoString, type Unz1Fields } from "./unz1";
+import { MEMO_ALLOWED_OPS, unz1MemoString, type ChainId, type Unz1Fields } from "./unz1";
 import { deleteVault, loadVault, saveVault, vaultStorageKey, type EncryptedVault } from "./vault";
 
 export type KeyState =
@@ -136,9 +136,12 @@ export function getSigner(n: Network = getNetwork()): Signer | null {
   return s ? signerFromSecret(s) : null;
 }
 
-/** Build and sign an unz1 memo locally, bound to the network's chain_id. Null when locked. */
-export function signMemo(fields: Unz1Fields, n: Network = getNetwork()): string | null {
+/**
+ * Build and sign an unz1 memo locally with this network's key. `chainId` comes from GET /api/pool,
+ * already checked against the selected network (lib/deposit.ts). Null when locked.
+ */
+export function signMemo(fields: Unz1Fields, chainId: ChainId, n: Network = getNetwork()): string | null {
   if (!MEMO_ALLOWED_OPS.includes(fields.op)) throw new Error(`unz1 memo op "${fields.op}" is not accepted by the backend`);
   const s = slots[n].secret;
-  return s ? unz1MemoString(fields, s, networkConfig(n).chainId) : null;
+  return s ? unz1MemoString(fields, s, chainId) : null;
 }
