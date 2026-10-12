@@ -6,3 +6,6 @@ target/
 .next/
 *.sqlite
 keys/
+
+# third-party design references (local only, never publish)
+design-refs/
