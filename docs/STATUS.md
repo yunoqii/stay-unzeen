@@ -14,6 +14,7 @@
 - frontend: API v0.1 (моки), `/key` (BIP-39, PBKDF2→AES-GCM, hold-to-reveal), подпись запросов и кодек unz1 совпадают с векторами core байт в байт, слой данных под Devnet/Mainnet (по отчёту агента: build/lint/test 50/50; лид не перепроверял)
 - core: crate `protocol` (unz1 + подпись HTTP, векторы), crate `ledger` (Postgres: K=3, reorg → freeze, атомарный hold, идемпотентный nonce, минимумы), `serve` без txid/memo в логах, сид пула в age, данные в `~/.unzeen/<net>` (0600). **Testnet: депозит 0.01 TAZ с unz1 → баланс в Postgres.** cargo test 44/44 (проверил лид)
 - API.md v0.2: intents удалены → публичный `GET /api/pool`; `/api/portfolio` без pubkey в пути; коды graduated/pool_liquidity/balance_frozen/below_minimum
+- Ревью кода дня 2: `docs/analysis/review-day3.md` (critical нет; N1–N11 розданы агентам)
 - Ревью безопасности/приватности дня 2: `docs/analysis/review-day2.md` (3 critical закрыты решениями владельца, high — в работе у backend/frontend)
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
@@ -22,9 +23,10 @@
 - backend (core): API-сервер axum по API v0.2 (pool, portfolio, actions, feed/tokens, WS)
 - backend (adapters): релейер — исполнение buy/sell из holds реестра через адаптер pump.fun, загрузка .env, RPC по сети
 - frontend: переход на API v0.2, `/portfolio` (баланс + Top up QR ZIP-321 с unz1), переключатель Devnet/Mainnet
-- analyst: ревью кода дня 2 (protocol, ledger, web crypto, adapters)
 
 ## Решения
+- 12.10 (владелец): данные пула на VPS — на зашифрованном томе с ручной разблокировкой (N2); мониторинг с алертом
+- 12.10 (лид, по review-day3): chain_id в подписи HTTP; anon-ключ отдельно по сети `m/44'/133'/<net>'/0'`; учёт токенов в миграции 0002; refund в memo v1 не используется
 - Путь anon-ключа SLIP-0010 `m/44'/133'/0'/0'` фиксируем (лид): с ZIP-32 (Zcash) и `m/44'/501'` (Solana) не пересекается, менять векторы на обеих сторонах не стоит
 - 12.10 (владелец): демо с переключателем Devnet ↔ Mainnet; на Devnet — 3–5 pre-funded demo-ключей для судей; K=3 подтверждения
 - 12.10 по ревью аналитика (владелец): «оплата за действие» вырезана — только баланс; Verify = Merkle-sum + публичные vault, viewing key не публикуется никогда; вывод токенов всегда с газом и задержкой; хостинг — всё на своём сервере (VPS), без Vercel, без access-логов
