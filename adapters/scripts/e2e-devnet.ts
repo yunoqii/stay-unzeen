@@ -6,13 +6,13 @@
  *   pnpm e2e:devnet
  */
 import {
+  Connection,
   LAMPORTS_PER_SOL,
   PublicKey,
   SystemProgram,
   Transaction,
   sendAndConfirmTransaction,
-  type Connection,
-  type Keypair,
+  Keypair,
 } from "@solana/web3.js";
 import { AdapterError } from "../src/errors";
 import { CreatorKeyring, ensureVaults } from "../src/keys";
@@ -46,40 +46,50 @@ async function balance(pk: PublicKey): Promise<bigint> {
 }
 
 async function airdrop(pk: PublicKey, lamports: bigint): Promise<boolean> {
-  for (let i = 0; i < 3; i++) {
+  // Separate connection without web3.js's built-in 429 backoff (~8 s per call):
+  // a rate-limited faucet answers "limit reached" for the whole day anyway.
+  const faucet = new Connection(cfg.rpcUrl, { commitment: "confirmed", disableRetryOnRateLimit: true });
+  for (let i = 0; i < 2; i++) {
     try {
-      const sig = await conn.requestAirdrop(pk, Number(lamports));
+      const sig = await faucet.requestAirdrop(pk, Number(lamports));
       const bh = await conn.getLatestBlockhash("confirmed");
       await conn.confirmTransaction({ signature: sig, ...bh }, "confirmed");
       console.log(`  airdrop ${sol(lamports)} -> ${pk.toBase58()}  ${tx(sig)}`);
       return true;
     } catch (e) {
-      console.log(`  airdrop attempt ${i + 1} failed: ${(e as Error).message.split("\n", 1)[0]}`);
-      await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
+      const msg = (e as Error).message.split("\n", 1)[0] ?? "";
+      console.log(`  airdrop attempt ${i + 1} failed: ${msg.slice(0, 120)}`);
+      if (/429|limit/i.test(msg)) return false;
+      await new Promise((r) => setTimeout(r, 2000));
     }
   }
   return false;
 }
 
 async function fund(vaults: Keypair[]): Promise<void> {
-  console.log("\n[1] funding vaults (devnet airdrop)");
+  console.log("\n[1] funding vaults (existing balance -> transfer from another vault -> devnet airdrop)");
   for (let i = 0; i < vaults.length; i++) {
     const v = vaults[i]!;
     const want = TARGET[i] ?? SOL / 10n;
     const have = await balance(v.publicKey);
     console.log(`  vault-${i} ${v.publicKey.toBase58()} has ${sol(have)}`);
     if (have >= want) continue;
-    if (await airdrop(v.publicKey, SOL)) continue;
-    // Faucet is rate-limited: top up from another vault if it has spare SOL.
-    const donor = vaults.find((d) => d !== v);
-    if (donor && (await balance(donor.publicKey)) > (TARGET[vaults.indexOf(donor)] ?? 0n) + want) {
-      const t = new Transaction().add(
-        SystemProgram.transfer({ fromPubkey: donor.publicKey, toPubkey: v.publicKey, lamports: want - have }),
-      );
-      const sig = await sendAndConfirmTransaction(conn, t, [donor], { commitment: "confirmed" });
-      console.log(`  transfer ${sol(want - have)} from another vault  ${tx(sig)}`);
-      continue;
+    // Prefer an internal top-up: no faucet round-trips when the pool has SOL.
+    let donated = false;
+    for (let j = 0; j < vaults.length && !donated; j++) {
+      const d = vaults[j]!;
+      if (d === v) continue;
+      if ((await balance(d.publicKey)) > (TARGET[j] ?? 0n) + want) {
+        const t = new Transaction().add(
+          SystemProgram.transfer({ fromPubkey: d.publicKey, toPubkey: v.publicKey, lamports: want - have }),
+        );
+        const sig = await sendAndConfirmTransaction(conn, t, [d], { commitment: "confirmed" });
+        console.log(`  transfer ${sol(want - have)} from vault-${j}  ${tx(sig)}`);
+        donated = true;
+      }
     }
+    if (donated) continue;
+    if (await airdrop(v.publicKey, SOL)) continue;
     console.error(
       `\nCannot fund vault-${i}. Devnet faucet refused. Fund it manually at https://faucet.solana.com ` +
         `(address ${v.publicKey.toBase58()}) and rerun.`,
@@ -165,7 +175,7 @@ async function main(): Promise<void> {
     adapter.sell(mint, bought.tokenAmount * 10n, 0n, { vault: v1 }),
   );
   await expectError("quote unknown mint", "not_found", () =>
-    adapter.quote(PublicKey.unique().toBase58(), "buy", BUY),
+    adapter.quote(Keypair.generate().publicKey.toBase58(), "buy", BUY),
   );
 
   console.log("\n[6] quote + sell half from vault-1");

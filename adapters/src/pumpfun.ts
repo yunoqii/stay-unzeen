@@ -272,7 +272,8 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     if (!info) throw new AdapterError("not_found", `mint ${mint.toBase58()} does not exist`);
     const tokenProgram = info.owner;
     if (!tokenProgram.equals(TOKEN_PROGRAM_ID) && !tokenProgram.equals(TOKEN_2022_PROGRAM_ID)) {
-      throw new AdapterError("bad_request", `${mint.toBase58()} is not an SPL mint`);
+      // API.md: unknown mint -> 404, whatever lives at that address.
+      throw new AdapterError("not_found", `${mint.toBase58()} is not an SPL mint`);
     }
     const decimals = unpackMint(mint, info, tokenProgram).decimals;
     return { mint, tokenProgram, decimals };

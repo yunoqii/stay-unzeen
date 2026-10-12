@@ -53,16 +53,38 @@ export class LookupTables {
   }
 
   private async create(vault: Signer, file: string): Promise<AddressLookupTableAccount> {
-    const recentSlot = await this.connection.getSlot("finalized");
-    const [ix, address] = AddressLookupTableProgram.createLookupTable({
-      authority: vault.publicKey,
-      payer: vault.publicKey,
-      recentSlot,
-    });
-    await sendAndConfirm(this.connection, [ix], vault, [], this.opts());
-    fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(file, JSON.stringify({ address: address.toBase58() }) + "\n", { mode: 0o600 });
-    return this.waitActive(address, 0);
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const recentSlot = await this.pickRecentSlot();
+      const [ix, address] = AddressLookupTableProgram.createLookupTable({
+        authority: vault.publicKey,
+        payer: vault.publicKey,
+        recentSlot,
+      });
+      try {
+        await sendAndConfirm(this.connection, [ix], vault, [], this.opts());
+      } catch (e) {
+        lastErr = e;
+        if (!isNotRecentSlotError(e)) throw e;
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(file, JSON.stringify({ address: address.toBase58() }) + "\n", { mode: 0o600 });
+      return this.waitActive(address, 0);
+    }
+    throw lastErr;
+  }
+
+  /**
+   * A slot that is surely in every node's SlotHashes: a real (non-skipped)
+   * finalized block a few blocks back. Public RPCs are load-balanced, and the
+   * node simulating the tx can lag the one that answered getSlot.
+   */
+  private async pickRecentSlot(): Promise<number> {
+    const finalized = await this.connection.getSlot("finalized");
+    const blocks = await this.connection.getBlocks(Math.max(0, finalized - 40), finalized, "finalized").catch(() => []);
+    return chooseRecentSlot(blocks, finalized);
   }
 
   private async extend(vault: Signer, table: PublicKey, addrs: PublicKey[]): Promise<AddressLookupTableAccount> {
@@ -125,4 +147,26 @@ export function staticAccounts(a: readonly TransactionInstruction[], b: readonly
   const ka = keysOf(a);
   const kb = keysOf(b);
   return [...ka.entries()].filter(([k]) => kb.has(k)).map(([, v]) => v);
+}
+
+/** Picks the block `back` blocks before the newest finalized one (falls back to `finalized`). */
+export function chooseRecentSlot(finalizedBlocks: readonly number[], finalized: number, back = 8): number {
+  if (finalizedBlocks.length === 0) return finalized;
+  const sorted = [...finalizedBlocks].sort((a, b) => a - b);
+  return sorted[Math.max(0, sorted.length - 1 - back)] ?? finalized;
+}
+
+/** ALT program: "<slot> is not a recent slot" (InvalidInstructionData). */
+export function isNotRecentSlotError(e: unknown): boolean {
+  const parts: string[] = [];
+  const collect = (x: unknown) => {
+    if (x instanceof Error) parts.push(x.message);
+    else if (typeof x === "string") parts.push(x);
+  };
+  if (e && typeof e === "object" && "error" in e) {
+    collect((e as { error: unknown }).error);
+    const logs = (e as { logs?: unknown }).logs;
+    if (Array.isArray(logs)) logs.forEach(collect);
+  } else collect(e);
+  return parts.some((p) => /is not a recent slot/i.test(p));
 }

@@ -10,15 +10,14 @@
 - Правила: английский для UI/README/демо; сводка session-report в конце каждой сессии
 - backend: `core/scanner` (init/sync/deposits/send/inspect-tx/probe), pre-release librustzcash, пул Ironwood. **Testnet сквозняком: депозит с memo прочитан из цепочки.** cargo test 14/14 (проверил лид). `infra/docker-compose.yml` (конфиг проверен, не запускался)
 - API.md v0.1: `unz1`, единицы в базовых единицах + decimals, свечи, trades, WS-фильтр по mint, подпись в заголовках, формат ошибок
-- adapters: адаптер pump.fun (pump-sdk 4.0.0, web3.js v1, CJS), create+buy одной v0-tx с ALT на vault, свежий creator на каждый запуск; 36 тестов (проверил лид); e2e пройден на локальном валидаторе с клоном devnet-программ, **на devnet ещё нет**
+- adapters: адаптер pump.fun (pump-sdk 4.0.0, web3.js v1, CJS), create+buy одной v0-tx с ALT на vault, свежий creator на каждый запуск; 36 тестов (проверил лид); **e2e на devnet пройден**: create+buy / buy / sell finalized (статусы проверил лид через RPC)
+- frontend: API v0.1 (моки), `/key` (BIP-39, PBKDF2→AES-GCM, hold-to-reveal), подпись запросов и кодек unz1 совпадают с векторами core байт в байт, слой данных под Devnet/Mainnet (по отчёту агента: build/lint/test 50/50; лид не перепроверял)
 - Ревью безопасности/приватности дня 2: `docs/analysis/review-day2.md` (3 critical закрыты решениями владельца, high — в работе у backend/frontend)
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
 
 ## В работе (день 2)
 - backend: `core/` — кодек unz1 + тест-векторы, реестр балансов в Postgres (депозит → баланс anon-ключа), шифрование сида пула, тихие логи
-- adapters: devnet e2e ждёт SOL (фаусет devnet 429) — владелец пополняет vault-0 через faucet.solana.com
-- frontend: типы/моки под API v0.1, `/key` (12 слов, шифрование паролем), подпись запросов
 
 ## Решения
 - 12.10 (владелец): демо с переключателем Devnet ↔ Mainnet; на Devnet — 3–5 pre-funded demo-ключей для судей; K=3 подтверждения
@@ -26,6 +25,7 @@
 - **Своей ноды Zebra/lightwalletd НЕ ставим** (окончательно, владелец). Только публичный lightwalletd (zec.rocks) + запасной; self-host/Tor — только строка в roadmap README
 
 ## Риски
+- Публичный devnet RPC часто отвечает 429 → для релейера/демо нужен свой RPC (Helius)
 - pump-sdk 4.0.0 ESM ломается в Node → адаптер CJS; релейер подключает через require
 - После истёкшего blockhash релейер обязан проверить подпись перед повтором (двойная покупка)
 - Все запуски с одного vault связаны через vault → ротация/шардирование vault в релейере
