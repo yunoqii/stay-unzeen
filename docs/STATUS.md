@@ -18,6 +18,9 @@
 - adapters: релейер на Postgres-очереди по RELAYER.md, ротация vault, джиттер, идемпотентная отправка (N1), вывод с каплей SOL с другого vault; devnet buy/sell/withdraw finalized; ключи в `~/.unzeen/devnet/solana`; 89/89 тестов (проверил лид)
 - frontend: API v0.2, Top up (ZIP-321 + unz1 в браузере), /portfolio, переключатель сети, CSP, /verify без viewing key
 - frontend на API v0.3: /api/pool и подписанный /api/portfolio против живого core/api → 200; подпись под чужую сеть → 401; 75/75 тестов (по отчёту). Real-режим в браузере ещё не прогонялся. Для бека нужен `API_CORS_ORIGINS` (есть в .env.example)
+- core (дни 4–6): **H1 закрыт** — сканер скачивает все shielded-tx блока (mainnet ~25 KiB/блок, ~28 MiB/сутки, zec.rocks не троттлит); выплаты ZEC (до 5 в одной tx, testnet ok); эпохи; режимы exec; D1–D14; роль релейера проверена вживую; /media; API v0.4, RELAYER v2; 84/84 тестов (проверил лид)
+- adapters (дни 4–5): create с EXIF-очисткой, один vault на mint, Postgres-раннер, age-ключи; 115/115
+- web (дни 4–6): страница токена (график, buy/sell), WebGL-герой, вывод, режимы Now/Delayed/Max, постоянный опрос портфеля, pad
 - Ревью кода дня 2: `docs/analysis/review-day3.md` (critical нет; N1–N11 розданы агентам)
 - Ревью безопасности/приватности дня 2: `docs/analysis/review-day2.md` (3 critical закрыты решениями владельца, high — в работе у backend/frontend)
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
@@ -44,10 +47,9 @@
 - Контракт релейера: нет `avoid_vaults` в задании (вывод не знает vault покупки — сейчас эвристика), нет UPDATE not_before у роли, `create` в релейере не реализован, роль unzeen_relayer не проверена вживую
 - Блокировка vault и счётчик creator — в памяти/файле → Postgres до мульти-процесса
 - Ключи vault/creator открытым текстом (0600) → шифрование до mainnet
-- Нет исполнителя выплат ZEC (zec_payouts queued), нет EXIF-очистки картинок
 - Утечка БД связывает ключ ↔ сделку по суммам (D1) → обнуление через 24 ч, удаление ops через 48 ч, зашифрованный том
 - wallet.sqlite пула хранит расшифрованные memo + txid незашифрованно (0600, вне Desktop)
-- H1 (lightwalletd видит интерес пула к txid) — НЕ урезается (владелец), делаем в дни 4–5: запрос всех shielded-tx блока
+- lightwalletd видит, что пул отправил tx выплаты (время, не получатель) — закрывается только Tor/своим сервером (своего сервера не будет) → README
 - Запасного testnet lightwalletd нет; mainnet fallback — тот же оператор (na/eu.zec.rocks)
 - API-сервер (axum) ещё не написан; выплаты refund_pending не реализованы
 - Публичный devnet RPC часто отвечает 429 → Helius devnet/mainnet в `.env` (`SOLANA_RPC_URL_DEVNET/_MAINNET`), адаптеру нужно их подгружать
