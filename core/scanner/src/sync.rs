@@ -42,6 +42,10 @@ pub struct SyncReport {
     pub tip: u32,
     pub scanned_blocks: u64,
     pub enhanced_txs: usize,
+    /// False if the scan was deferred (too many restarts after reorgs): wallet notes may
+    /// look un-mined only because their blocks were rewound and not rescanned yet, so the
+    /// ledger must not be fed from this pass (review-day3 N4).
+    pub complete: bool,
 }
 
 pub async fn sync(net: Network, client: &mut Client, db: &mut Db) -> anyhow::Result<SyncReport> {
@@ -49,6 +53,7 @@ pub async fn sync(net: Network, client: &mut Client, db: &mut Db) -> anyhow::Res
 
     let mut scanned_blocks = 0u64;
     let mut restarts = 0u32;
+    let mut complete = true;
     let tip = loop {
         let tip = update_chain_tip(client, db).await?;
         let restart = scan_all(net, client, db, tip, &mut scanned_blocks).await?;
@@ -59,6 +64,7 @@ pub async fn sync(net: Network, client: &mut Client, db: &mut Db) -> anyhow::Res
         if restarts >= MAX_RESTARTS {
             // Continue next pass instead of spinning forever on re-prioritized ranges.
             warn!(restarts, "scan restarted too many times in one pass; deferring");
+            complete = false;
             break tip;
         }
     };
@@ -68,6 +74,7 @@ pub async fn sync(net: Network, client: &mut Client, db: &mut Db) -> anyhow::Res
         tip: u32::from(tip),
         scanned_blocks,
         enhanced_txs,
+        complete,
     })
 }
 

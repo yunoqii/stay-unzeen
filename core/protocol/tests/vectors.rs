@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use unzeen_protocol::{
-    ChainId, SigningKey, SolanaCluster, ZcashNet, api_auth,
+    ChainId, SigningKey, SolanaCluster, ZcashNet, anon_key, api_auth,
     memo::{Op, Target, Unz1, Unz1Body, Venue, classify},
     pubkey_to_b58,
 };
@@ -207,6 +207,8 @@ fn build_memo_case(c: &MemoCase) -> Value {
 }
 
 struct ApiCase {
+    chain: ChainId,
+    verify_chain: ChainId,
     name: &'static str,
     sk: SigningKey,
     method: &'static str,
@@ -223,6 +225,8 @@ fn api_cases() -> Vec<ApiCase> {
     let ts = NOW_SEC * 1000;
     vec![
         ApiCase {
+            chain: TESTNET,
+            verify_chain: TESTNET,
             name: "get_portfolio",
             sk: key(1),
             method: "GET",
@@ -235,6 +239,8 @@ fn api_cases() -> Vec<ApiCase> {
             expect: "ok",
         },
         ApiCase {
+            chain: TESTNET,
+            verify_chain: TESTNET,
             name: "post_action_buy",
             sk: key(2),
             method: "POST",
@@ -247,6 +253,8 @@ fn api_cases() -> Vec<ApiCase> {
             expect: "ok",
         },
         ApiCase {
+            chain: TESTNET,
+            verify_chain: TESTNET,
             name: "stale_ts",
             sk: key(1),
             method: "GET",
@@ -259,6 +267,8 @@ fn api_cases() -> Vec<ApiCase> {
             expect: "stale",
         },
         ApiCase {
+            chain: TESTNET,
+            verify_chain: TESTNET,
             name: "bad_signature_body_changed",
             sk: key(2),
             method: "POST",
@@ -270,21 +280,59 @@ fn api_cases() -> Vec<ApiCase> {
             tamper: Some(r#"{"op":"claim","mint":"x"}"#),
             expect: "bad_signature",
         },
+        ApiCase {
+            chain: MAINNET,
+            verify_chain: MAINNET,
+            name: "mainnet_get_portfolio",
+            sk: key(1),
+            method: "GET",
+            path_query: "/api/portfolio".into(),
+            body: "",
+            nonce: [0x55; 16],
+            ts,
+            now: ts,
+            tamper: None,
+            expect: "ok",
+        },
+        ApiCase {
+            chain: MAINNET,
+            verify_chain: TESTNET,
+            name: "wrong_network",
+            sk: key(1),
+            method: "GET",
+            path_query: "/api/portfolio".into(),
+            body: "",
+            nonce: [0x66; 16],
+            ts,
+            now: ts,
+            tamper: None,
+            expect: "bad_signature",
+        },
     ]
 }
 
 fn build_api_case(c: &ApiCase) -> Value {
-    let h = api_auth::sign_request(&c.sk, c.method, &c.path_query, c.body.as_bytes(), c.nonce, c.ts);
+    let h = api_auth::sign_request(
+        c.chain,
+        &c.sk,
+        c.method,
+        &c.path_query,
+        c.body.as_bytes(),
+        c.nonce,
+        c.ts,
+    );
     let sent_body = c.tamper.unwrap_or(c.body);
     json!({
         "name": c.name,
         "secretKeyHex": hex::encode(c.sk.to_bytes()),
+        "chainIdHex": c.chain.to_hex(),
+        "verifyChainIdHex": c.verify_chain.to_hex(),
         "method": c.method,
         "pathQuery": c.path_query,
         "signedBody": c.body,
         "sentBody": sent_body,
         "bodySha256Hex": api_auth::body_hash_hex(c.body.as_bytes()),
-        "message": api_auth::signing_message(c.method, &c.path_query, c.body.as_bytes(), &h.nonce, c.ts),
+        "message": api_auth::signing_message(c.chain, c.method, &c.path_query, c.body.as_bytes(), &h.nonce, c.ts),
         "headers": {
             api_auth::H_PUBKEY: h.pubkey,
             api_auth::H_NONCE: h.nonce,
@@ -311,11 +359,45 @@ fn build() -> Value {
         },
         "api": {
             "domain": api_auth::DOMAIN,
-            "message": "domain \\n METHOD \\n pathQuery \\n hex(sha256(body)) \\n nonce \\n ts  (no trailing newline)",
+            "message": "domain \\n chainIdHex \\n METHOD \\n pathQuery \\n hex(sha256(body)) \\n nonce \\n ts  (no trailing newline)",
             "tsWindowMs": api_auth::TS_WINDOW_MS,
             "cases": api_cases().iter().map(build_api_case).collect::<Vec<_>>(),
+        },
+        "anonKey": {
+            "derivation": "BIP-39 (English, empty passphrase) -> 64-byte seed -> SLIP-0010 ed25519, all segments hardened",
+            "path": "m/44'/133'/<net>'/0'  (net: 0 = mainnet [chainId 0101], 1 = devnet/testnet)",
+            "cases": anon_key_cases(),
         }
     })
+}
+
+const MNEMONICS: [&str; 2] = [
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    "legal winner thank year wave sausage worth useful legal winner thank yellow",
+];
+
+fn seed_of(phrase: &str) -> [u8; 64] {
+    let m = bip0039::Mnemonic::<bip0039::English>::from_phrase(phrase).unwrap();
+    m.to_seed("")
+}
+
+fn anon_key_cases() -> Vec<Value> {
+    let mut out = vec![];
+    for phrase in MNEMONICS {
+        let seed = seed_of(phrase);
+        for chain in [MAINNET, TESTNET] {
+            let sk = anon_key::derive(&seed, chain);
+            out.push(json!({
+                "mnemonic": phrase,
+                "seedHex": hex::encode(seed),
+                "chainIdHex": chain.to_hex(),
+                "path": anon_key::path_string(chain),
+                "secretKeyHex": hex::encode(sk.to_bytes()),
+                "pubkey": pubkey_to_b58(&sk.verifying_key().to_bytes()),
+            }));
+        }
+    }
+    out
 }
 
 #[test]
@@ -377,6 +459,7 @@ fn vectors_verify_as_consumer() {
             sig: h[api_auth::H_SIG].as_str().unwrap().into(),
         };
         let r = api_auth::verify_request(
+            chain(c["verifyChainIdHex"].as_str().unwrap()),
             &headers,
             c["method"].as_str().unwrap(),
             c["pathQuery"].as_str().unwrap(),
@@ -390,6 +473,17 @@ fn vectors_verify_as_consumer() {
             Err(api_auth::AuthError::Header(_)) => "bad_header",
         };
         assert_eq!(got, c["expect"].as_str().unwrap(), "api case {}", c["name"]);
+    }
+    let keys = v["anonKey"]["cases"].as_array().unwrap();
+    assert_eq!(keys.len(), 4);
+    for c in keys {
+        let seed = seed_of(c["mnemonic"].as_str().unwrap());
+        assert_eq!(hex::encode(seed), c["seedHex"].as_str().unwrap());
+        let sk = anon_key::derive(&seed, chain(c["chainIdHex"].as_str().unwrap()));
+        assert_eq!(
+            pubkey_to_b58(&sk.verifying_key().to_bytes()),
+            c["pubkey"].as_str().unwrap()
+        );
     }
 }
 

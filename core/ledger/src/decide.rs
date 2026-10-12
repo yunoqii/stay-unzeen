@@ -74,11 +74,6 @@ pub enum Outcome {
         op: Op,
         reason: Option<&'static str>,
     },
-    /// Expired, signed, with a refund target: return funds (payout not implemented yet).
-    RefundPending {
-        pk: [u8; 32],
-        op: Op,
-    },
 }
 
 pub fn evaluate(obs: &NoteObs, p: &Policy, fallback_now: u64) -> Stage {
@@ -111,18 +106,17 @@ pub fn evaluate(obs: &NoteObs, p: &Policy, fallback_now: u64) -> Stage {
         Verdict::BadSignature(_) => Outcome::Frozen {
             reason: "bad_signature",
         },
-        Verdict::Expired(m) => {
-            let pk = m.body.anon_pubkey;
-            if m.body.target == Target::None {
-                Outcome::Credit {
-                    pk,
-                    op: m.body.op,
-                    reason: Some("expired_no_refund_target"),
-                }
+        // Refunds are not used in memo v1 (lead decision 12.10): an expired but correctly
+        // signed deposit is always credited to the balance, whatever `target_kind` says.
+        Verdict::Expired(m) => Outcome::Credit {
+            pk: m.body.anon_pubkey,
+            op: m.body.op,
+            reason: Some(if m.body.target == Target::None {
+                "expired_no_refund_target"
             } else {
-                Outcome::RefundPending { pk, op: m.body.op }
-            }
-        }
+                "expired_refund_unsupported"
+            }),
+        },
         // Each note is credited on its own (idempotency = note_ref), so paying the same
         // deposit QR twice credits both payments; the memo nonce is not uniquified.
         Verdict::Valid(m) => Outcome::Credit {
@@ -228,9 +222,10 @@ mod tests {
         let with_target = MemoInput::Text(memo(Op::Deposit, exp, Target::Shielded([1; 43])));
         assert_eq!(
             evaluate(&obs(1_000_000, Some(1), 10, with_target.clone()), &P, 0),
-            Stage::Final(Outcome::RefundPending {
+            Stage::Final(Outcome::Credit {
                 pk: pk(),
-                op: Op::Deposit
+                op: Op::Deposit,
+                reason: Some("expired_refund_unsupported")
             })
         );
         let no_target = MemoInput::Text(memo(Op::Deposit, exp, Target::None));

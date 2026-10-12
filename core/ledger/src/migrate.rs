@@ -3,7 +3,10 @@
 use deadpool_postgres::Client;
 
 /// (version, name, sql) — append only; never edit an applied migration.
-const MIGRATIONS: &[(i32, &str, &str)] = &[(1, "0001_ledger", include_str!("../../migrations/0001_ledger.sql"))];
+const MIGRATIONS: &[(i32, &str, &str)] = &[
+    (1, "0001_ledger", include_str!("../../migrations/0001_ledger.sql")),
+    (2, "0002_relayer", include_str!("../../migrations/0002_relayer.sql")),
+];
 
 /// Arbitrary constant for `pg_advisory_xact_lock` so concurrent starters serialize.
 const LOCK_KEY: i64 = 0x756e_7a65_656e_0001;

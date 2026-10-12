@@ -1,81 +1,167 @@
 {
+  "anonKey": {
+    "cases": [
+      {
+        "chainIdHex": "0101",
+        "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        "path": "m/44'/133'/0'/0'",
+        "pubkey": "3aY2SvoAGX6pYdFfUwqaj8LVn499hDrrQ1w8bJVWbN1E",
+        "secretKeyHex": "eb643a97e20f3cea2dab0548f4d09817dfa3b947ae758d1259387cbb7547b67f",
+        "seedHex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+      },
+      {
+        "chainIdHex": "0202",
+        "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        "path": "m/44'/133'/1'/0'",
+        "pubkey": "BvSbw1qy4VG3xgvss1kERnc6tY2cAEmouMiBUDhhU8j7",
+        "secretKeyHex": "d025eb3251a1c4d354ebe84976a62429d36f89d4ea755d862e95ba4baa49df5a",
+        "seedHex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+      },
+      {
+        "chainIdHex": "0101",
+        "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        "path": "m/44'/133'/0'/0'",
+        "pubkey": "Ap97P8M24MsB5dAnhkTrHM8htPwGWPEnLCSf1vf69Wa4",
+        "secretKeyHex": "27dbf0e7650e081933a4d7282cfb41e1aea82ed99d383859ee48f8d9b441eec2",
+        "seedHex": "878386efb78845b3355bd15ea4d39ef97d179cb712b77d5c12b6be415fffeffe5f377ba02bf3f8544ab800b955e51fbff09828f682052a20faa6addbbddfb096"
+      },
+      {
+        "chainIdHex": "0202",
+        "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        "path": "m/44'/133'/1'/0'",
+        "pubkey": "HRmNEnGwxDqypLZMWAr2h4ccvPVusKv34BTSfeoCXMCF",
+        "secretKeyHex": "5d867ab8241e8449db09576419b8ab04a3ec8f4d1ee0ba2058b74d756908e198",
+        "seedHex": "878386efb78845b3355bd15ea4d39ef97d179cb712b77d5c12b6be415fffeffe5f377ba02bf3f8544ab800b955e51fbff09828f682052a20faa6addbbddfb096"
+      }
+    ],
+    "derivation": "BIP-39 (English, empty passphrase) -> 64-byte seed -> SLIP-0010 ed25519, all segments hardened",
+    "path": "m/44'/133'/<net>'/0'  (net: 0 = mainnet [chainId 0101], 1 = devnet/testnet)"
+  },
   "api": {
     "cases": [
       {
         "bodySha256Hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chainIdHex": "0202",
         "expect": "ok",
         "headers": {
           "x-unzeen-nonce": "11111111111111111111111111111111",
           "x-unzeen-pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
-          "x-unzeen-sig": "52ax1ERZuqGi9Jf8j5NuFFhRhdg5BEjYsHUmTri1tabiiFqRb5CYshngJMjEFZtLn5AaMTFVioFLBdg92Mw3wfuH",
+          "x-unzeen-sig": "34xQac13ZPfr7cp8RgGtiw5ujCG5fE8UTrW3dhRw25J4P4yoAsCTQZdKBgpSHfBXTbC2zmqToED8mJzv6Y1pLgG6",
           "x-unzeen-ts": "1791763200000"
         },
-        "message": "unzeen/api/v1\nGET\n/api/portfolio\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n11111111111111111111111111111111\n1791763200000",
+        "message": "unzeen/api/v1\n0202\nGET\n/api/portfolio\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n11111111111111111111111111111111\n1791763200000",
         "method": "GET",
         "name": "get_portfolio",
         "now": 1791763205000,
         "pathQuery": "/api/portfolio",
         "secretKeyHex": "0101010101010101010101010101010101010101010101010101010101010101",
         "sentBody": "",
-        "signedBody": ""
+        "signedBody": "",
+        "verifyChainIdHex": "0202"
       },
       {
         "bodySha256Hex": "3caa46044566b27e70288f42abece60758480f02bc8df340d04d967ab8127510",
+        "chainIdHex": "0202",
         "expect": "ok",
         "headers": {
           "x-unzeen-nonce": "22222222222222222222222222222222",
           "x-unzeen-pubkey": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
-          "x-unzeen-sig": "HjKMqbWMr4hyCHsUsntESsufzYWj24H9AFGxjpzbmA5ZfLPXBTHZBTdNCxp7vsg7ShBQj9VUvvnxw312ZpxUGQk",
+          "x-unzeen-sig": "3UvzUj8g1mLGANph5adEnFMQFrmodDDiEpGbapxFP2XcTd8Bvnf1PzSVHnZ52m1a2L5jmpXZoZZu1WagwaHcRG8m",
           "x-unzeen-ts": "1791763200000"
         },
-        "message": "unzeen/api/v1\nPOST\n/api/actions\n3caa46044566b27e70288f42abece60758480f02bc8df340d04d967ab8127510\n22222222222222222222222222222222\n1791763200000",
+        "message": "unzeen/api/v1\n0202\nPOST\n/api/actions\n3caa46044566b27e70288f42abece60758480f02bc8df340d04d967ab8127510\n22222222222222222222222222222222\n1791763200000",
         "method": "POST",
         "name": "post_action_buy",
         "now": 1791763170000,
         "pathQuery": "/api/actions",
         "secretKeyHex": "0202020202020202020202020202020202020202020202020202020202020202",
         "sentBody": "{\"op\":\"buy\",\"venue\":\"pumpfun\",\"mint\":\"So11111111111111111111111111111111111111112\",\"zecIn\":\"1000000\",\"minOut\":\"123456789\"}",
-        "signedBody": "{\"op\":\"buy\",\"venue\":\"pumpfun\",\"mint\":\"So11111111111111111111111111111111111111112\",\"zecIn\":\"1000000\",\"minOut\":\"123456789\"}"
+        "signedBody": "{\"op\":\"buy\",\"venue\":\"pumpfun\",\"mint\":\"So11111111111111111111111111111111111111112\",\"zecIn\":\"1000000\",\"minOut\":\"123456789\"}",
+        "verifyChainIdHex": "0202"
       },
       {
         "bodySha256Hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chainIdHex": "0202",
         "expect": "stale",
         "headers": {
           "x-unzeen-nonce": "33333333333333333333333333333333",
           "x-unzeen-pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
-          "x-unzeen-sig": "EZT8bCEhYAzm56WYtv1gLWrPuFdcBKt723wgc7F4ro6ZJo39AZF5dGUhNQ8g7KFRiZjHSUCYrAU44J86AEd61cs",
+          "x-unzeen-sig": "nHhVoN2LmGbBChcHabsxhNFBiXcsRTdH1CCet4rUbgoZLBoKE2zdpt4vXREsbVCpgnsennT5Qc1bAF9FuyTqGDR",
           "x-unzeen-ts": "1791763200000"
         },
-        "message": "unzeen/api/v1\nGET\n/api/orders?status=open\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n33333333333333333333333333333333\n1791763200000",
+        "message": "unzeen/api/v1\n0202\nGET\n/api/orders?status=open\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n33333333333333333333333333333333\n1791763200000",
         "method": "GET",
         "name": "stale_ts",
         "now": 1791763260001,
         "pathQuery": "/api/orders?status=open",
         "secretKeyHex": "0101010101010101010101010101010101010101010101010101010101010101",
         "sentBody": "",
-        "signedBody": ""
+        "signedBody": "",
+        "verifyChainIdHex": "0202"
       },
       {
         "bodySha256Hex": "1fd9aa5df3c59b43ff2f23be946761b49d425fad5b5113c82319b84d907b269e",
+        "chainIdHex": "0202",
         "expect": "bad_signature",
         "headers": {
           "x-unzeen-nonce": "44444444444444444444444444444444",
           "x-unzeen-pubkey": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
-          "x-unzeen-sig": "3HXo7jnsy2CpLwNJwLNKLnesqgE9PfaqzsC9PnSofyVJUmazKbA6bERNPgB631ze5FQf8X28kanNduChVTGZjgTr",
+          "x-unzeen-sig": "5KwKT9X1ZREXtfoYmetP8ismBJEz8RNuwsKerE9AidhQbkVauq3hhPD5zDLATXBDbq27GLkTEFDnJzPK5FxD66ki",
           "x-unzeen-ts": "1791763200000"
         },
-        "message": "unzeen/api/v1\nPOST\n/api/actions\n1fd9aa5df3c59b43ff2f23be946761b49d425fad5b5113c82319b84d907b269e\n44444444444444444444444444444444\n1791763200000",
+        "message": "unzeen/api/v1\n0202\nPOST\n/api/actions\n1fd9aa5df3c59b43ff2f23be946761b49d425fad5b5113c82319b84d907b269e\n44444444444444444444444444444444\n1791763200000",
         "method": "POST",
         "name": "bad_signature_body_changed",
         "now": 1791763200000,
         "pathQuery": "/api/actions",
         "secretKeyHex": "0202020202020202020202020202020202020202020202020202020202020202",
         "sentBody": "{\"op\":\"claim\",\"mint\":\"x\"}",
-        "signedBody": "{\"op\":\"claim\"}"
+        "signedBody": "{\"op\":\"claim\"}",
+        "verifyChainIdHex": "0202"
+      },
+      {
+        "bodySha256Hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chainIdHex": "0101",
+        "expect": "ok",
+        "headers": {
+          "x-unzeen-nonce": "55555555555555555555555555555555",
+          "x-unzeen-pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+          "x-unzeen-sig": "4NC62drL4UjPNfkwypCHUopjitt63kBXLbb8A6HVAh8BJXVaetvAqQHwtga4hAKpnPwn6wgRtssPcbFfLyZisoS7",
+          "x-unzeen-ts": "1791763200000"
+        },
+        "message": "unzeen/api/v1\n0101\nGET\n/api/portfolio\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n55555555555555555555555555555555\n1791763200000",
+        "method": "GET",
+        "name": "mainnet_get_portfolio",
+        "now": 1791763200000,
+        "pathQuery": "/api/portfolio",
+        "secretKeyHex": "0101010101010101010101010101010101010101010101010101010101010101",
+        "sentBody": "",
+        "signedBody": "",
+        "verifyChainIdHex": "0101"
+      },
+      {
+        "bodySha256Hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chainIdHex": "0101",
+        "expect": "bad_signature",
+        "headers": {
+          "x-unzeen-nonce": "66666666666666666666666666666666",
+          "x-unzeen-pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+          "x-unzeen-sig": "3hJrRsTu6cZNBNSeFriChbgkFLVSQKCcWxSfraZm55QnWDmu3zahZ1xe94DqxdhqwFx2w5NrSmf79zthtvvYk73t",
+          "x-unzeen-ts": "1791763200000"
+        },
+        "message": "unzeen/api/v1\n0101\nGET\n/api/portfolio\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n66666666666666666666666666666666\n1791763200000",
+        "method": "GET",
+        "name": "wrong_network",
+        "now": 1791763200000,
+        "pathQuery": "/api/portfolio",
+        "secretKeyHex": "0101010101010101010101010101010101010101010101010101010101010101",
+        "sentBody": "",
+        "signedBody": "",
+        "verifyChainIdHex": "0202"
       }
     ],
     "domain": "unzeen/api/v1",
-    "message": "domain \\n METHOD \\n pathQuery \\n hex(sha256(body)) \\n nonce \\n ts  (no trailing newline)",
+    "message": "domain \\n chainIdHex \\n METHOD \\n pathQuery \\n hex(sha256(body)) \\n nonce \\n ts  (no trailing newline)",
     "tsWindowMs": 60000
   },
   "description": "Unzeen test vectors (docs/API.md). Generated by core/protocol/tests/vectors.rs. Test keys only.",

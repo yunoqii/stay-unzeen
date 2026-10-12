@@ -24,8 +24,28 @@ docker compose -f infra/docker-compose.yml --env-file .env up -d postgres
 ```
 
 - Port: `POSTGRES_PORT` (default 55432) on 127.0.0.1.
-- Migrations are embedded in `core/` and applied automatically by `unzeen-scanner serve`.
-- Docker logs are rotated (`json-file`, 10 MB x 3).
+- Migrations are embedded in `core/` (compile time) and applied automatically by `unzeen-scanner serve` and `unzeen-api serve`. Rebuild both binaries after pulling a new migration.
+- Docker logs are rotated (`json-file`, 10 MB x 3). Postgres runs with `log_error_verbosity=terse`, no statement/connection logging: row values from constraint errors (DETAIL) and client IPs never reach the container log.
+- Relayer role (least privilege, cannot read `action_id`, balances, deposits): `infra/relayer-role.sql`, contract in `docs/RELAYER.md`.
+
+## API server (core/api)
+
+```bash
+cd core && cargo build --release
+./target/release/unzeen-scanner serve      # also publishes the pool UA to Postgres (pool_meta)
+./target/release/unzeen-api serve          # API_BIND (default 127.0.0.1:8080)
+curl -s localhost:8080/api/pool
+# DEV: signed request with an anon key file (hex secret from `unzeen-scanner anon-key`)
+./target/release/unzeen-api dev-request --anon-key /path/anon.key                 # GET /api/portfolio
+./target/release/unzeen-api dev-request --anon-key /path/anon.key --method POST --path /api/actions \
+  --body '{"op":"buy","venue":"pumpfun","mint":"<mint>","zecIn":"200000","minOut":"1"}'
+```
+
+Reverse proxy (H9): TLS on this host, `access_log off;` (or a format without `$remote_addr`
+and `$request_uri`), no CDN proxy, one origin per network with the API at the root
+(no path prefix: the signed request-target must reach the server unchanged), WS upgrade for
+`/ws/feed`. The API never reads `X-Forwarded-For`; its per-socket limiter is global behind a
+local proxy, so per-client limits belong in the proxy (`limit_req`, in memory).
 
 ## Scanner quick reference (core/)
 

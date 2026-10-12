@@ -3,10 +3,12 @@
 //! - [`memo`]: the binary `unz1` memo carried in shielded ZEC deposits (docs/API.md,
 //!   "Формат memo `unz1`").
 //! - [`api_auth`]: ed25519-signed HTTP requests (`x-unzeen-*` headers).
+//! - [`anon_key`]: anon-key derivation (BIP-39 seed → SLIP-0010, one key per network).
 //!
 //! Test vectors for both formats live in `core/testdata/unz1-vectors.json`; the web
 //! client checks its implementation against the same file.
 
+pub mod anon_key;
 pub mod api_auth;
 pub mod memo;
 
@@ -41,6 +43,11 @@ impl ChainId {
 
     pub const fn to_bytes(self) -> [u8; 2] {
         [self.zcash as u8, self.solana as u8]
+    }
+
+    /// Lowercase hex of [`Self::to_bytes`], e.g. `"0202"` (PoolInfo.chainId).
+    pub fn to_hex(self) -> String {
+        hex::encode(self.to_bytes())
     }
 }
 

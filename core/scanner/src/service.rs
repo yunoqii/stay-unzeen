@@ -110,6 +110,10 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool) -> anyhow::Result
         .context("connecting to the ledger")?;
     let mut db = wallet::open_db(c)?;
     let key = note_ref_key(c, &db)?;
+    // Public facts for `GET /api/pool` (the API server has no wallet access).
+    let ua = wallet::show(c)?.ua_orchard;
+    ledger.set_pool_meta("network", c.network.as_str()).await?;
+    ledger.set_pool_meta("pool_ua", &ua).await?;
     info!(
         network = c.network.as_str(),
         confirmations = policy.confirmations,
@@ -127,6 +131,13 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool) -> anyhow::Result
             }
             let cl = client.as_mut().expect("set above");
             let rep = sync::sync(c.params(), cl, &mut db).await?;
+            if !rep.complete {
+                warn!(
+                    tip = rep.tip,
+                    "scan incomplete (reorg rewind pending); ledger not updated this pass"
+                );
+                return Ok(());
+            }
             let counts = apply_wallet_notes(c, &ledger, &key, rep.tip).await?;
             let changed: BTreeMap<String, usize> = counts
                 .iter()
@@ -156,7 +167,8 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool) -> anyhow::Result
             Err(e) => {
                 // Drop the connection: next pass reconnects (with fallbacks).
                 client = None;
-                warn!(error = %format!("{e:#}"), retry_in_s = backoff, "scan pass failed");
+                // Never log Postgres DETAIL (row values): LedgerError prints SQLSTATE only.
+                warn!(error = %unzeen_ledger::error_chain(e.as_ref()), retry_in_s = backoff, "scan pass failed");
                 if once {
                     return Err(e);
                 }

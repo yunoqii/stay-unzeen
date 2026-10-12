@@ -10,6 +10,20 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    # Privacy (review-day3 N3): Postgres must not write row values (DETAIL of constraint
+    # errors), failing statements or client IPs (connection logs) to the container log.
+    command:
+      - postgres
+      - -c
+      - log_error_verbosity=terse
+      - -c
+      - log_min_error_statement=panic
+      - -c
+      - log_connections=off
+      - -c
+      - log_disconnections=off
+      - -c
+      - log_statement=none
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-unzeen}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}

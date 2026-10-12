@@ -2,7 +2,17 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.2** (12.10, вечер). Изменения против v0.1: оплата за действие вырезана (memo только `op=deposit`, `/api/intents` и `/api/deposit` удалены, вместо них публичный `GET /api/pool`); memo собирает и подписывает фронт; `/api/portfolio` без pubkey в пути; статусы депозита и минимумы; идемпотентность действий по nonce; правила вывода; коды ошибок `graduated`, `pool_liquidity`, `balance_frozen`, `below_minimum`; исправлены размеры memo (153/196). Тест-векторы: `core/testdata/unz1-vectors.json`.
+Статус: **v0.3** (12.10, ночь; реализовано в `core/api`). Изменения против v0.2:
+- **Подпись запросов привязана к сети:** вторая строка подписываемого сообщения — `chainId` hex (`0202` / `0101`). Векторы пересобраны.
+- **anon-ключ по сети:** путь `m/44'/133'/<net>'/0'`, `net` = 0 mainnet, 1 devnet/testnet. Одна фраза — разные ключи в разных сетях. Векторы: раздел `anonKey`.
+- Допустимы только два `chainId`: `0202` (Zcash testnet + Solana devnet) и `0101` (mainnet + mainnet-beta); сервер со смешанной конфигурацией не стартует.
+- API каждой сети живёт **в корне своего origin** (отдельный поддомен), без префиксов пути: подписывается сырой request-target.
+- Refund в memo v1 не используется: фронт всегда шлёт `target_kind = 0`; истёкший депозит зачисляется на баланс (даже если `target_kind = 1`). Статус `refund_pending` больше не возникает.
+- `DepositInfo.id` (стабильный случайный, только владельцу); `DepositInfo.ts` округлён до **суток** (UTC); `holdings[].held`.
+- `POST /api/actions` и `GET /api/actions/:id` возвращают зафиксированный курс `rate`; `GET` — ещё `fill` после исполнения.
+- Комиссии и курс действий, правила `create.meta`, минимум для `sell`, неподдерживаемые пока операции — см. «Правила исполнения действий».
+
+Изменения v0.2 против v0.1: оплата за действие вырезана (memo только `op=deposit`, `/api/intents` и `/api/deposit` удалены, вместо них публичный `GET /api/pool`); memo собирает и подписывает фронт; `/api/portfolio` без pubkey в пути; статусы депозита и минимумы; идемпотентность действий по nonce; правила вывода; коды ошибок `graduated`, `pool_liquidity`, `balance_frozen`, `below_minimum`; исправлены размеры memo (153/196). Тест-векторы: `core/testdata/unz1-vectors.json`.
 
 ## REST
 
@@ -15,10 +25,14 @@
 | GET | `/api/tokens/:mint/candles?tf=1m&from=&to=` | `Candle[]` — OHLC для lightweight-charts (см. ниже) |
 | GET | `/api/pool` | `PoolInfo` — публичный: UA пула, `chainId`, минимумы, K подтверждений. Без pubkey и без cookies |
 | GET | `/api/portfolio` (подписанный) | `Portfolio` — pubkey только в заголовке `x-unzeen-pubkey`, **не в пути** |
-| POST | `/api/actions` (подписанный) | `SignedAction` → `{ id, status }` — все действия только с баланса |
-| GET | `/api/actions/:id` (подписанный) | `{ status: "queued" \| "executed" \| "failed", solanaTx?: string, error?: ErrorCode }` — только владельцу (pubkey заголовка = автор действия), иначе 404 |
+| POST | `/api/actions` (подписанный) | `SignedAction` → `ActionReceipt` — все действия только с баланса |
+| GET | `/api/actions/:id` (подписанный) | `ActionStatus` — только владельцу (pubkey заголовка = автор действия), иначе 404 |
 
 Подписанные запросы — схема в разделе «Подпись запросов».
+
+**Origin.** Каждая сеть — свой origin (например `https://devnet-api.<домен>` и `https://api.<домен>`), API в корне, без префикса пути (`/devnet/api/…` не допускается: подписанный путь должен совпадать с request-target на сервере). CORS: сервер разрешает только origin'ы из `API_CORS_ORIGINS`, методы GET/POST, заголовки `content-type`, `x-unzeen-*`. Cookies не используются.
+
+**Статус пополнения.** Публичного эндпоинта «депозит seen» нет и не будет: любой запрос статуса по хешу memo/txid связывает IP с депозитом. Статус — только через подписанный `/api/portfolio` (`deposits`, `zecBalance`); на фронте ручная кнопка «I've sent it» и опрос портфеля.
 
 **Пополнение (Top up) без сервера.** Фронт берёт `GET /api/pool`, сам собирает и подписывает memo `unz1` (op=deposit), сам строит ZIP-321 URI (`zcash:<address>?amount=<ZEC>&memo=<base64url(memo UTF-8)>`). Сервер не узнаёт о намерении пополнить до появления ноты в цепочке, связки «IP ↔ anon-ключ ↔ сумма» на сервере нет. Статус пополнения фронт видит в `Portfolio.deposits` (после зачисления) и по росту `zecBalance`; до K подтверждений депозит не атрибутируется.
 
@@ -63,7 +77,7 @@ interface Candle {
 interface PoolInfo {
   address: string;          // UA пула (только Orchard/Ironwood receiver), одинаковый для всех
   network: "main" | "test";
-  chainId: string;          // hex 2 байта для подписи memo, например "0202" (см. memo)
+  chainId: string;          // hex 2 байта для подписи memo и HTTP: только "0202" (Zcash testnet + Solana devnet) или "0101" (mainnet + mainnet-beta)
   minDepositZat: string;    // ниже — не зачисляется (остаётся пулу как пыль)
   minActionZat: string;     // минимальная сумма действия с баланса (zecIn / withdraw_zec)
   confirmations: number;    // K: через сколько блоков депозит зачисляется (по умолчанию 3)
@@ -72,16 +86,43 @@ interface PoolInfo {
 interface Portfolio {
   zecBalance: string;       // затоши, доступно
   zecHeld: string;          // затоши, зарезервировано действиями в очереди
-  frozen: boolean;          // true — баланс заморожен до ручной проверки (reorg)
-  holdings: { mint: string; amount: string }[];
-  claimable: { mint: string; solAmount: string }[];
+  frozen: boolean;          // true — баланс заморожен до ручной проверки (reorg); снимается автоматически, если депозит снова в цепочке с K подтверждениями
+  holdings: { mint: string; amount: string; held: string }[];  // amount — доступно; held — зарезервировано sell/withdraw_token в очереди
+  claimable: { mint: string; solAmount: string }[];            // пока всегда []
   deposits: DepositInfo[];  // последние 20, новые первыми
 }
 
 interface DepositInfo {
+  id: string;               // 16 случайных байт, hex (32 символа); стабилен, виден только владельцу; НЕ связан с txid/note
   amountZat: string;
-  status: "credited" | "refund_pending";
-  ts: number;               // время зачисления, unix мс, округлено до минуты
+  status: "credited";       // "refund_pending" в v1 не возникает (refund не используется)
+  ts: number;               // время зачисления, unix мс, округлено ВНИЗ до начала суток UTC
+}
+
+interface ActionReceipt {
+  id: string;               // 32 hex
+  status: "queued" | "executed" | "failed";
+  rate?: RateUsed;          // для buy / sell / create / withdraw_token
+}
+
+interface ActionStatus {
+  status: "queued" | "executed" | "failed";
+  solanaTx?: string;        // первая подтверждённая подпись; через 24 ч после исполнения связь удаляется (поле пропадает)
+  error?: ErrorCode;        // при failed: slippage | graduated | pool_liquidity | venue_unavailable | not_found | bad_request | internal
+  rate?: RateUsed;
+  fill?: {                  // после исполнения, хранится 24–48 ч
+    tokenAmount: string;    // получено (buy/create) / продано (sell) / отправлено (withdraw_token), базовые единицы
+    solAmount?: string;     // лампорты сделки (нет у withdraw_token)
+    zecSpent?: string;      // затоши списано (с учётом возврата неистраченного)
+    zecCredited?: string;   // sell: затоши зачислено
+    mint?: string;          // create: новый mint
+  };
+}
+
+interface RateUsed {
+  lamportsPerZec: string;   // лампорты за 1 ZEC, уже со спредом пула (buy: меньше SOL; sell: больше SOL за 1 ZEC)
+  source: "near-1click" | "fixed";   // fixed — только devnet (DEVNET_ZEC_SOL_RATE)
+  ts: number;               // время котировки, unix мс
 }
 ```
 
@@ -130,7 +171,15 @@ interface PlatformStats {
 ```
 
 ### Правила исполнения действий
-- Действия исполняются **батчами** (эпоха 3–10 с плюс случайный джиттер 0–20 с на действие). `status` остаётся `queued` до исполнения.
+- Действия исполняются **батчами** (эпоха 3–10 с плюс случайный джиттер; по умолчанию задержка 3–20 с на действие). `status` остаётся `queued` до исполнения.
+- **Курс.** Сумма в SOL считается при приёме по курсу ZEC→SOL (dry-котировка NEAR Intents 1Click на 1 ZEC, кэш ~45 с; на devnet — фиксированный) со спредом пула (по умолчанию 0,5 %). Курс фиксируется в действии и возвращается в `rate`. Нет курса → `503 venue_unavailable`.
+- **buy:** hold = `zecIn`; неистраченные лампорты (если площадка взяла меньше) возвращаются в ZEC по курсу действия.
+- **sell:** держит `amount` токенов; выручка зачисляется в ZEC по курсу действия; непроданный остаток возвращается. Минимум: `minZecOut ≥ minActionZat` **или** оценка по текущей цене токена ≥ `minActionZat`, иначе `below_minimum`.
+- **create:** hold = `initialBuyZec` (если есть, ≥ `minActionZat`) + комиссия запуска (`CREATE_FEE_ZAT`, по умолчанию 100 000 зат). `meta.name` 1–32 символа, `meta.symbol` 1–10 ASCII букв/цифр, `meta.image` — только `data:image/(png|jpeg|webp);base64,…` до 512 КиБ (тело запроса ≤ 1 МиБ). `venue: "jupiter"` → 400.
+- **withdraw_zec:** hold = `amount` + комиссия сети (`WITHDRAW_ZEC_FEE_ZAT`, 15 000 зат); выплата с задержкой 1–10 мин. *Исполнитель выплат ещё не подключён — действие остаётся `queued`.*
+- **withdraw_token:** держит `amount` токенов; комиссия в ZEC = частей × (капля SOL получателю + рента ATA + fee) по курсу; без `smart` — `to` строка или массив из 1 адреса, задержка 30 с–5 мин; со `smart` — длина `to` = `parts`, адреса разные, суммы частей неравные (±20 %), задержка каждой части до `maxDelayMin`.
+- **Пока не поддерживаются** (→ `400 bad_request "op not supported yet"`): `claim`, `order_create`, `order_cancel`, `chat`.
+- Новое действие при `frozen` → `423 balance_frozen` для **любой** операции (в т. ч. без ZEC-hold).
 - `withdraw_token` **всегда**: капля SOL на газ на каждый адрес получателя, случайная задержка, отправка с **другого** vault, чем покупка, каждая часть — отдельной tx. `smart` добавляет только разбиение на N адресов. Если сумма вывода совпадает с недавней покупкой, фронт предупреждает.
 - `withdraw_zec`: выплата shielded ZEC, с задержкой/батчингом; пул не хранит outgoing viewing data (OVK discard).
 - `create.meta.image`: файл идёт только на наш бэкенд; сервер удаляет метаданные (EXIF), перекодирует и заливает сам.
@@ -171,7 +220,7 @@ interface PlatformStats {
 
 ## Подпись запросов anon-ключом
 
-Ключ: ed25519. Деривация фиксирована (v1): BIP-39 (12 слов, пустой passphrase) → seed → **SLIP-0010 ed25519, путь `m/44'/133'/0'/0'`** → 32-байтный секрет. Смена пути = смена всех anon-ключей, только с миграцией. Заголовки:
+Ключ: ed25519. Деривация фиксирована (v1): BIP-39 (12 слов, пустой passphrase) → seed → **SLIP-0010 ed25519 (все сегменты hardened), путь `m/44'/133'/<net>'/0'`** → 32-байтный секрет, где **`<net>` = 0 для mainnet (`chainId 0101`) и 1 для devnet/testnet (`chainId 0202`)**. Одна фраза даёт разные anon-ключи в разных сетях. Смена пути = смена всех anon-ключей, только с миграцией. Векторы: `core/testdata/unz1-vectors.json`, раздел `anonKey` (мнемоника → seed → ключ для каждой сети). Заголовки:
 
 | Заголовок | Значение |
 |---|---|
@@ -183,6 +232,7 @@ interface PlatformStats {
 Подписываемое сообщение (UTF-8, разделитель `\n`):
 ```
 unzeen/api/v1
+<chainId>                // hex 2 байта в нижнем регистре, = PoolInfo.chainId ("0202" devnet, "0101" mainnet)
 <METHOD>                 // GET, POST — в верхнем регистре
 <path?query>             // сырой request-target как на проводе, например /api/orders?status=open
 <hex(sha256(body))>      // для пустого тела — sha256 пустой строки
@@ -192,7 +242,8 @@ unzeen/api/v1
 Проверки на беке: строгий формат заголовков (иначе 401); `|now − ts| ≤ 60 с`; strict-верификация ed25519 (без malleable-подписей и small-order ключей). Пара `(pubkey, nonce)` хранится в Postgres до `ts + 120 с`.
 - `POST /api/actions`: nonce расходуется **в той же транзакции**, что резервирует сумму. Повтор того же подписанного запроса (тот же nonce и то же тело) → **200 с исходным `{id, status}`** (безопасный ретрай после таймаута — фронт шлёт те же заголовки и тело). Тот же nonce с другим телом → `409 replay`. Если действие отклонено (`insufficient_balance` и т. п.), nonce не считается использованным.
 - Подписанные GET: повтор nonce → `409 replay`.
-- Префикс `unzeen/api/v1` отделяет подпись HTTP-запросов от подписи memo (`unzeen/memo/v1`).
+- Префикс `unzeen/api/v1` отделяет подпись HTTP-запросов от подписи memo (`unzeen/memo/v1`). Строка `chainId` не даёт подписи к devnet-API работать на mainnet-API.
+- Лимиты: in-memory по ключу (по умолчанию 60/мин, burst 20) и по сокету; превышение → `429 rate_limited` с `Retry-After`.
 - Векторы: `core/testdata/unz1-vectors.json`, раздел `api`.
 
 ## Ошибки
@@ -203,7 +254,7 @@ interface ApiError { error: { code: ErrorCode; message: string; details?: unknow
 type ErrorCode =
   | "bad_request"          // 400: невалидное тело/параметры
   | "unauthorized"         // 401: нет/плохая подпись, ts вне окна
-  | "not_found"            // 404: неизвестный mint / intent / action / order
+  | "not_found"            // 404: неизвестный mint / action / order (чужой action — тоже 404)
   | "replay"               // 409: nonce уже использован
   | "insufficient_balance" // 422: на балансе anon-ключа не хватает
   | "below_minimum"        // 422: сумма меньше PoolInfo.minActionZat
@@ -212,7 +263,7 @@ type ErrorCode =
   | "pool_liquidity"       // 503: у vault пула не хватает SOL/ZEC — проблема пула, НЕ баланса юзера (не путать с insufficient_balance)
   | "slippage"             // 422: minOut/minZecOut не выполним по текущей котировке
   | "rate_limited"         // 429: есть заголовок Retry-After (сек)
-  | "venue_unavailable"    // 503: площадка/RPC недоступны
+  | "venue_unavailable"    // 503: площадка/RPC недоступны, площадка не включена, нет курса ZEC/SOL, действия на mainnet выключены
   | "internal";            // 500
 ```
 404 отдаётся и для mint, который сервис не отслеживает (даже если токен существует на Solana). `message` — для разработчика, текст UI фронт берёт по `code`.
@@ -237,8 +288,8 @@ off  len     поле
 ..   64      sig
 ```
 - `sig = ed25519(anon_sk, utf8("unzeen/memo/v1") ‖ chain_id ‖ bytes[0 .. перед sig])`.
-- `chain_id` (2 байта, не передаётся; берётся из `PoolInfo.chainId`): байт 0 — Zcash (1 mainnet, 2 testnet), байт 1 — Solana (1 mainnet-beta, 2 devnet).
-- **Рекомендация фронту:** `target_kind = 0` (без refund) и `expiry = now + 24 ч`. Истёкший депозит без refund всё равно зачисляется на баланс, поэтому разбирать UA пользователя на фронте не нужно. Если когда-нибудь понадобится refund, raw receiver из UA извлекает фронт (F4Jumble + bech32m, ZIP-316); бек принимает только сырые 43 байта.
+- `chain_id` (2 байта, не передаётся; берётся из `PoolInfo.chainId`): байт 0 — Zcash (1 mainnet, 2 testnet), байт 1 — Solana (1 mainnet-beta, 2 devnet). Допустимы только `0202` и `0101`; смешанные (`0102`, `0201`) не используются, сервер с такой конфигурацией не стартует.
+- **Refund в v1 не используется (решение лида 12.10).** Фронт **всегда** шлёт `target_kind = 0` и `expiry = now + 24 ч`. Формат не меняется: `target_kind = 1` по-прежнему декодируется и подписывается, но получатель игнорируется — истёкший депозит **всегда зачисляется на баланс**.
 - `nonce` для deposit не уникализируется: каждая нота зачисляется отдельно по `(txid, pool, action_index)`. Оплатили тот же QR дважды → зачислены оба платежа. Несколько нот с одним memo в одной tx суммируются.
 - `expiry` сравнивается со **временем блока**, в котором tx замайнена (не с часами сервера): истёк, если `block_time > expiry`.
 
@@ -249,9 +300,9 @@ off  len     поле
 | ≥ K, memo ещё не получен | `confirmed` | ждём |
 | сумма < `minDepositZat` | `dust` | остаются пулу, не зачисляются |
 | валидная подпись, не истёк | `credited` | на баланс `anon_pubkey` |
-| валидная подпись, истёк, есть refund | `refund_pending` | возврат на refund (выплата — позже) |
-| валидная подпись, истёк, нет refund | `credited` | на баланс |
+| валидная подпись, истёк (с refund-получателем или без) | `credited` | на баланс (refund не используется) |
 | плохая подпись / чужой `chain_id` / не `unz1` / битый / op ≠ deposit | `frozen` | до ручного разбора; pubkey из такого memo не сохраняется |
 | зачисленный депозит пропал после reorg | флаг `reorged` | баланс ключа `frozen` (новые действия → `balance_frozen`), в минус не уходит |
+| `reorged`-депозит снова в цепочке с ≥ K подтверждениями | флаг снят | `frozen` снимается, если у ключа нет других `reorged` |
 
 Векторы (валидный deposit, deposit с refund, op=buy → отвергнут, плохая подпись, чужая сеть, истёкший): `core/testdata/unz1-vectors.json`, раздел `memo`.

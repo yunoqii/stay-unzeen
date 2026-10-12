@@ -9,6 +9,7 @@
 //!
 //! Privacy: nothing here logs keys, amounts or refs. Callers must not either.
 
+pub mod actions;
 pub mod decide;
 mod migrate;
 
@@ -17,13 +18,18 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use tokio_postgres::NoTls;
 
+pub use actions::{ActionView, DepositRow, JobOp, NewAction, NewJob, NewPayout, RateUsed, TokenHolding};
+pub use deadpool_postgres;
 pub use decide::{MemoInput, NoteObs, Outcome, Policy, Stage, evaluate};
+pub use tokio_postgres;
 pub use tokio_postgres::Config as PgConfig;
 
+/// Errors never carry row values: Postgres errors are reduced to their SQLSTATE (the
+/// `DETAIL` of a constraint violation contains whole rows, e.g. anon keys and amounts).
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
-    #[error("database: {0}")]
-    Db(#[from] tokio_postgres::Error),
+    #[error("database error (SQLSTATE {0})")]
+    Db(String),
     #[error("connection pool: {0}")]
     Pool(String),
     #[error("insufficient balance")]
@@ -40,10 +46,64 @@ pub enum LedgerError {
     NotFound,
 }
 
+/// SQLSTATE of a Postgres error, or a coarse kind for client-side errors. Safe to log.
+pub fn sqlstate(e: &tokio_postgres::Error) -> String {
+    match e.code() {
+        Some(c) => c.code().to_string(),
+        None if e.is_closed() => "connection-closed".into(),
+        None => "client".into(),
+    }
+}
+
+impl From<tokio_postgres::Error> for LedgerError {
+    fn from(e: tokio_postgres::Error) -> Self {
+        LedgerError::Db(sqlstate(&e))
+    }
+}
+
 impl From<deadpool_postgres::PoolError> for LedgerError {
     fn from(e: deadpool_postgres::PoolError) -> Self {
-        LedgerError::Pool(e.to_string())
+        use deadpool_postgres::PoolError as P;
+        match e {
+            P::Backend(e) => e.into(),
+            P::Timeout(_) => LedgerError::Pool("timeout".into()),
+            P::Closed => LedgerError::Pool("closed".into()),
+            _ => LedgerError::Pool("unavailable".into()),
+        }
     }
+}
+
+impl LedgerError {
+    /// Stable short label for logs/metrics.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            LedgerError::Db(_) => "db",
+            LedgerError::Pool(_) => "pool",
+            LedgerError::InsufficientBalance => "insufficient_balance",
+            LedgerError::Frozen => "frozen",
+            LedgerError::BelowMinimum => "below_minimum",
+            LedgerError::Replay => "replay",
+            LedgerError::Range => "range",
+            LedgerError::NotFound => "not_found",
+        }
+    }
+}
+
+/// Render an error chain for logs, replacing any Postgres error by its SQLSTATE.
+pub fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = Vec::new();
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        match err.downcast_ref::<tokio_postgres::Error>() {
+            Some(pg) => {
+                out.push(format!("postgres SQLSTATE {}", sqlstate(pg)));
+                break;
+            }
+            None => out.push(err.to_string()),
+        }
+        cur = err.source();
+    }
+    out.join(": ")
 }
 
 pub type Result<T> = std::result::Result<T, LedgerError>;
@@ -81,11 +141,13 @@ pub enum Observed {
     Seen,
     Confirmed,
     Credited,
-    RefundPending,
     Frozen,
     Dust,
     /// A finalized deposit is no longer mined: balance frozen, operator alert.
     ReorgAlert,
+    /// A reorged deposit is mined again with >= K confirmations: flag cleared, and the
+    /// balance unfrozen if no other deposit of the key is still reorged.
+    ReorgCleared,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +156,8 @@ pub struct ActionReceipt {
     pub status: String,
     /// The same signed request was submitted before; this is the original receipt.
     pub replayed: bool,
+    /// ZEC→SOL rate fixed for this action (buy / sell / create / withdraw_token).
+    pub rate: Option<actions::RateUsed>,
 }
 
 #[derive(Clone)]
@@ -131,7 +195,7 @@ impl Ledger {
         let pool = Pool::builder(mgr)
             .max_size(8)
             .build()
-            .map_err(|e| LedgerError::Pool(e.to_string()))?;
+            .map_err(|_| LedgerError::Pool("build".into()))?;
         let mut c = pool.get().await?;
         migrate::run(&mut c).await?;
         drop(c);
@@ -140,6 +204,11 @@ impl Ledger {
 
     pub fn policy(&self) -> &Policy {
         &self.policy
+    }
+
+    /// The connection pool, for read-only public queries (feed, tokens) of the API server.
+    pub fn pg(&self) -> &Pool {
+        &self.pool
     }
 
     pub async fn balance(&self, pk: &[u8; 32]) -> Result<Option<Balance>> {
@@ -205,7 +274,7 @@ impl Ledger {
                 }
             }
             (Stage::Unmined, None) => Observed::Unchanged,
-            (Stage::Seen | Stage::Confirmed, Some((id, status, _, _))) => {
+            (Stage::Seen | Stage::Confirmed, Some((id, status, reorged, pk))) => {
                 if status == "seen" || status == "confirmed" {
                     let new_status = pending_status(&stage);
                     tx.execute(
@@ -221,11 +290,16 @@ impl Ledger {
                 } else {
                     // Already final (e.g. re-mined after a shallow reorg): keep the decision.
                     tx.execute(
-                        "UPDATE deposits SET mined_height = $2, updated_at = now() WHERE id = $1",
+                        "UPDATE deposits SET mined_height = $2, updated_at = now()
+                         WHERE id = $1 AND anon_pubkey IS NULL",
                         &[&id, &height],
                     )
                     .await?;
-                    Observed::Unchanged
+                    if reorged && stage == Stage::Confirmed {
+                        clear_reorg(&tx, id, pk.as_deref()).await?
+                    } else {
+                        Observed::Unchanged
+                    }
                 }
             }
             (Stage::Seen | Stage::Confirmed, None) => {
@@ -236,13 +310,18 @@ impl Ledger {
                 .await?;
                 stage_observed(&stage)
             }
-            (Stage::Final(_), Some((id, status, _, _))) if status != "seen" && status != "confirmed" => {
+            (Stage::Final(_), Some((id, status, reorged, pk))) if status != "seen" && status != "confirmed" => {
                 tx.execute(
-                    "UPDATE deposits SET mined_height = $2 WHERE id = $1 AND mined_height IS DISTINCT FROM $2",
+                    "UPDATE deposits SET mined_height = $2
+                     WHERE id = $1 AND anon_pubkey IS NULL AND mined_height IS DISTINCT FROM $2",
                     &[&id, &height],
                 )
                 .await?;
-                Observed::Unchanged
+                if reorged {
+                    clear_reorg(&tx, id, pk.as_deref()).await?
+                } else {
+                    Observed::Unchanged
+                }
             }
             (Stage::Final(outcome), existing) => {
                 let id: i64 = match existing {
@@ -263,7 +342,7 @@ impl Ledger {
         Ok(out)
     }
 
-    /// Reserve funds for a signed API action, consuming its nonce in the same transaction.
+    /// Reserve `hold_zat` for a signed API action without relayer work (see [`Self::submit`]).
     ///
     /// Same `(pk, nonce)` + same `request_hash` returns the original receipt (client retry);
     /// same nonce with a different request is [`LedgerError::Replay`].
@@ -275,71 +354,17 @@ impl Ledger {
         kind: &str,
         hold_zat: u64,
     ) -> Result<ActionReceipt> {
-        if hold_zat > 0 && hold_zat < self.policy.min_action_zat {
-            return Err(LedgerError::BelowMinimum);
-        }
-        let hold = to_i64(hold_zat)?;
-        let id: [u8; 16] = rand::random();
-        let (pk_s, nonce_s, hash_s, id_s): (&[u8], &[u8], &[u8], &[u8]) = (pk, nonce, request_hash, &id);
-        let mut c = self.pool.get().await?;
-        let tx = c.transaction().await?;
-        let inserted = tx
-            .execute(
-                "INSERT INTO actions (id, anon_pubkey, nonce, request_hash, kind, hold_zat, status)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'queued')
-                 ON CONFLICT (anon_pubkey, nonce) DO NOTHING",
-                &[&id_s, &pk_s, &nonce_s, &hash_s, &kind, &hold],
-            )
-            .await?
-            == 1;
-        if !inserted {
-            let r = tx
-                .query_one(
-                    "SELECT id, request_hash, status FROM actions WHERE anon_pubkey = $1 AND nonce = $2",
-                    &[&pk_s, &nonce_s],
-                )
-                .await?;
-            let prev_hash: Vec<u8> = r.get(1);
-            if prev_hash != request_hash[..] {
-                return Err(LedgerError::Replay);
-            }
-            let prev_id: Vec<u8> = r.get(0);
-            return Ok(ActionReceipt {
-                id: prev_id.try_into().map_err(|_| LedgerError::Range)?,
-                status: r.get(2),
-                replayed: true,
-            });
-        }
-        if hold > 0 {
-            let ok = tx
-                .execute(
-                    "UPDATE balances SET available_zat = available_zat - $2, held_zat = held_zat + $2,
-                            updated_at = now()
-                     WHERE anon_pubkey = $1 AND available_zat >= $2 AND NOT frozen",
-                    &[&pk_s, &hold],
-                )
-                .await?
-                == 1;
-            if !ok {
-                let frozen: Option<bool> = tx
-                    .query_opt("SELECT frozen FROM balances WHERE anon_pubkey = $1", &[&pk_s])
-                    .await?
-                    .map(|r| r.get(0));
-                // Dropping `tx` rolls back the action insert, so the nonce stays unused.
-                return Err(if frozen == Some(true) {
-                    LedgerError::Frozen
-                } else {
-                    LedgerError::InsufficientBalance
-                });
-            }
-            journal(&tx, pk_s, "hold", -hold, hold, None, Some(id_s)).await?;
-        }
-        tx.commit().await?;
-        Ok(ActionReceipt {
-            id,
-            status: "queued".into(),
-            replayed: false,
-        })
+        let a = NewAction {
+            kind: kind.into(),
+            amount_zat: hold_zat,
+            fee_zat: 0,
+            token_hold: None,
+            rate: None,
+            network: String::new(),
+            jobs: vec![],
+            payout: None,
+        };
+        self.submit(pk, nonce, request_hash, &a).await
     }
 
     /// Action executed on-chain: the hold is spent.
@@ -424,6 +449,26 @@ impl Ledger {
     }
 }
 
+/// N4: a reorged final deposit is mined again with >= K confirmations. Clear its flag and
+/// unfreeze the owner unless another of their deposits is still reorged.
+async fn clear_reorg<C: GenericClient>(tx: &C, id: i64, pk: Option<&[u8]>) -> Result<Observed> {
+    tx.execute(
+        "UPDATE deposits SET reorged = FALSE, updated_at = now() WHERE id = $1",
+        &[&id],
+    )
+    .await?;
+    if let Some(pk) = pk {
+        tx.execute(
+            "UPDATE balances SET frozen = FALSE, updated_at = now()
+             WHERE anon_pubkey = $1 AND frozen
+               AND NOT EXISTS (SELECT 1 FROM deposits WHERE anon_pubkey = $1 AND reorged)",
+            &[&pk],
+        )
+        .await?;
+    }
+    Ok(Observed::ReorgCleared)
+}
+
 fn pending_status(s: &Stage) -> &'static str {
     if *s == Stage::Seen { "seen" } else { "confirmed" }
 }
@@ -464,17 +509,6 @@ async fn finalize<C: GenericClient>(
             // The pubkey of an unverified memo is untrusted: do not store it.
             set("frozen", Some(reason), None, None, 0).await?;
             Observed::Frozen
-        }
-        Outcome::RefundPending { pk, op } => {
-            set(
-                "refund_pending",
-                Some("expired"),
-                Some(pk.to_vec()),
-                Some(*op as i16),
-                0,
-            )
-            .await?;
-            Observed::RefundPending
         }
         Outcome::Credit { pk, op, reason } => {
             set("credited", *reason, Some(pk.to_vec()), Some(*op as i16), amount).await?;
