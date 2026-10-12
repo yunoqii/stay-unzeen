@@ -22,6 +22,9 @@ pub enum SignedAction {
         zec_in: String,
         #[serde(rename = "minOut")]
         min_out: String,
+        /// `now` | `delayed` (default, 30–60 s epoch) | `max` (5–15 min epoch).
+        #[serde(default)]
+        exec: ExecMode,
     },
     Sell {
         venue: String,
@@ -29,22 +32,34 @@ pub enum SignedAction {
         amount: String,
         #[serde(rename = "minZecOut")]
         min_zec_out: String,
+        /// `now` | `delayed` (default, 30–60 s epoch) | `max` (5–15 min epoch).
+        #[serde(default)]
+        exec: ExecMode,
     },
     Create {
         venue: String,
         meta: Meta,
         #[serde(rename = "initialBuyZec")]
         initial_buy_zec: Option<String>,
+        /// `now` | `delayed` (default, 30–60 s epoch) | `max` (5–15 min epoch).
+        #[serde(default)]
+        exec: ExecMode,
     },
     WithdrawZec {
         to: String,
         amount: String,
+        /// `delayed` (default) | `max` (10–60 min); `now` is refused (400).
+        #[serde(default)]
+        exec: ExecMode,
     },
     WithdrawToken {
         mint: String,
         amount: String,
         to: To,
         smart: Option<Smart>,
+        /// `delayed` (default) | `max` (10–60 min); `now` is refused (400).
+        #[serde(default)]
+        exec: ExecMode,
     },
     Claim {
         #[allow(dead_code)]
@@ -53,6 +68,30 @@ pub enum SignedAction {
     OrderCreate {},
     OrderCancel {},
     Chat {},
+}
+
+/// Execution mode of an action (API.md v0.4 `exec`, relayer_jobs.exec_mode).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecMode {
+    /// No epoch: executed within seconds (pool-wide quantized priority fee, no Jito), paid
+    /// by the user as `nowFeeLamports`. No timing privacy against network observers.
+    Now,
+    /// 30–60 s epochs, random order inside the epoch.
+    #[default]
+    Delayed,
+    /// 5–15 min epochs (withdrawals: 10–60 min delay).
+    Max,
+}
+
+impl ExecMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExecMode::Now => "now",
+            ExecMode::Delayed => "delayed",
+            ExecMode::Max => "max",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +159,68 @@ pub fn check_ua(st: &AppState, s: &str) -> ApiResult<()> {
         ));
     }
     Ok(())
+}
+
+/// D2: execution epochs. Boundaries follow a random schedule (gaps uniform in
+/// [min, max]) that does not depend on when requests arrive; every buy/sell/create gets
+/// `not_before` = the next boundary of its schedule, so the relayer picks up the whole epoch
+/// at once and runs it in random order.
+pub struct Epochs {
+    fast: std::sync::Mutex<f64>,
+    max: std::sync::Mutex<f64>,
+    cfg: crate::config::ExecConfig,
+}
+
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
+}
+
+impl Epochs {
+    pub fn new(cfg: &crate::config::ExecConfig) -> Self {
+        let now = unix_now();
+        Self {
+            fast: std::sync::Mutex::new(now + delay(cfg.epoch_min_secs, cfg.epoch_max_secs)),
+            max: std::sync::Mutex::new(now + delay(cfg.max_epoch_min_secs, cfg.max_epoch_max_secs)),
+            cfg: *cfg,
+        }
+    }
+
+    /// Seconds from `now` until the next boundary of the chosen schedule.
+    pub fn delay_at(&self, max_privacy: bool, now: f64) -> f64 {
+        let (m, lo, hi) = if max_privacy {
+            (&self.max, self.cfg.max_epoch_min_secs, self.cfg.max_epoch_max_secs)
+        } else {
+            (&self.fast, self.cfg.epoch_min_secs, self.cfg.epoch_max_secs)
+        };
+        let mut b = m.lock().unwrap_or_else(|e| e.into_inner());
+        if *b <= now {
+            // Skip whole idle periods in O(1) steps on average, then walk the random gaps.
+            let mean = (lo + hi) / 2.0;
+            let skip = ((now - *b) / mean).floor() - 1.0;
+            if skip > 0.0 {
+                *b += skip * mean;
+            }
+            while *b <= now {
+                *b += delay(lo, hi);
+            }
+        }
+        *b - now
+    }
+
+    pub fn delay(&self, max_privacy: bool) -> f64 {
+        self.delay_at(max_privacy, unix_now())
+    }
+}
+
+/// Delay of a withdrawal: none (`now`), the configured range (`delayed`) or 10–60 min (`max`).
+fn withdraw_delay(min: f64, max: f64, mode: ExecMode) -> f64 {
+    match mode {
+        ExecMode::Now => 0.0,
+        ExecMode::Delayed => delay(min, max),
+        ExecMode::Max => delay(600.0, 3600.0),
+    }
 }
 
 fn rand_unit() -> f64 {
@@ -249,10 +350,67 @@ pub fn split_amount(amount: u64, parts: u32) -> Vec<u64> {
     out
 }
 
+/// D10: (zat charged, lamports to spend, scaled minOut) for a buy of `zec_in`. The SOL
+/// amount is shaved 0–1 % and rounded down to 0.001 SOL so it does not reveal `zec_in`; the
+/// user is charged only the ZEC equivalent of the lamports actually sent (the rest stays
+/// available), and `minOut` shrinks in proportion (same minimum price).
+pub fn fuzzed_buy(zec_in: u64, min_out: u64, applied: u64, min_action: u64) -> ApiResult<(u64, u64, u64)> {
+    let full = zat_to_lamports(zec_in, applied);
+    let mut lamports = rate::fuzz_lamports(full, rand_unit());
+    // Never charge less than the minimum action because of rounding: step back up if possible.
+    while lamports > 0 && lamports_to_zat_ceil(lamports, applied) < min_action {
+        let up = lamports + rate::LAMPORTS_STEP;
+        if up > full {
+            break;
+        }
+        lamports = up;
+    }
+    let zat = lamports_to_zat_ceil(lamports, applied).min(zec_in);
+    if lamports == 0 || zat < min_action {
+        return Err(ApiError::below_minimum(
+            "zecIn too small (buys are rounded down to 0.001 SOL)",
+        ));
+    }
+    let min_out = ((min_out as u128) * (lamports as u128) / (full.max(1) as u128)) as u64;
+    Ok((zat, lamports, min_out))
+}
+
 pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
     let exec = st.cfg.exec;
-    let jitter = || delay(exec.jitter_min_secs, exec.jitter_max_secs);
-    let spread = st.cfg.rate.spread_bps;
+    let epoch = |mode: ExecMode| match mode {
+        ExecMode::Now => 0.0,
+        ExecMode::Delayed => st.epochs.delay(false),
+        ExecMode::Max => st.epochs.delay(true),
+    };
+    let job = |op: JobOp, mode: ExecMode, delay_secs: f64| NewJob {
+        exec_mode: mode.as_str(),
+        ..NewJob::new(op, delay_secs)
+    };
+    // R-core-3: `now` costs a flat fee (PoolInfo.fees.nowFeeZat), part of the hold, not taken
+    // out of lamports_in. It pays for the pool's priority lane, not for one tx's exact fee.
+    let now_fee = |mode: ExecMode| {
+        if mode == ExecMode::Now {
+            st.cfg.fees.now_fee_zat
+        } else {
+            0
+        }
+    };
+    let no_now = |mode: ExecMode| {
+        if mode == ExecMode::Now {
+            Err(ApiError::bad_request("exec: \"now\" is not available for withdrawals"))
+        } else {
+            Ok(())
+        }
+    };
+    let spread_bps = st.cfg.rate.spread_bps;
+    // D14: a stale quote (background refresh failing) doubles the spread.
+    let spread = |r: &rate::Rate| {
+        if r.stale {
+            spread_bps.saturating_mul(2)
+        } else {
+            spread_bps
+        }
+    };
     let min_action = st.cfg.policy.min_action_zat;
     let base = |kind: &str| NewAction {
         kind: kind.into(),
@@ -270,6 +428,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             mint,
             zec_in,
             min_out,
+            exec: mode,
         } => {
             let v = venue(st, &v)?;
             let mint = solana_address(&mint, "mint")?;
@@ -280,20 +439,18 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             }
             check_venue_status(st, &mint, &v).await?;
             let r = rate(st).await?;
-            let applied = apply_spread(r.lamports_per_zec, spread, true);
-            let lamports = zat_to_lamports(zec_in, applied);
-            if lamports == 0 {
-                return Err(ApiError::below_minimum("zecIn too small"));
-            }
+            let applied = apply_spread(r.lamports_per_zec, spread(&r), true);
+            let (amount_zat, lamports, min_out) = fuzzed_buy(zec_in, min_out, applied, min_action)?;
             NewAction {
-                amount_zat: zec_in,
+                amount_zat,
+                fee_zat: now_fee(mode),
                 rate: Some(used(&r, applied)),
                 jobs: vec![NewJob {
                     venue: Some(v),
                     mint: Some(mint),
                     lamports_in: Some(lamports),
                     min_out: Some(min_out),
-                    ..NewJob::new(JobOp::Buy, jitter())
+                    ..job(JobOp::Buy, mode, epoch(mode))
                 }],
                 ..base("buy")
             }
@@ -303,6 +460,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             mint,
             amount,
             min_zec_out,
+            exec: mode,
         } => {
             let v = venue(st, &v)?;
             let mint = solana_address(&mint, "mint")?;
@@ -310,7 +468,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             let min_zec_out = parse_amount(&min_zec_out, "minZecOut")?;
             let known = check_venue_status(st, &mint, &v).await?;
             let r = rate(st).await?;
-            let applied = apply_spread(r.lamports_per_zec, spread, false);
+            let applied = apply_spread(r.lamports_per_zec, spread(&r), false);
             // N7: sells are checked against the minimum too (by the signed floor, or by the
             // current price when the token is known).
             let est = known
@@ -322,6 +480,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                 ));
             }
             NewAction {
+                fee_zat: now_fee(mode),
                 token_hold: Some((mint.clone(), amount)),
                 rate: Some(used(&r, applied)),
                 jobs: vec![NewJob {
@@ -329,7 +488,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                     mint: Some(mint),
                     token_amount: Some(amount),
                     min_out: Some(zat_to_lamports_ceil(min_zec_out, applied)),
-                    ..NewJob::new(JobOp::Sell, jitter())
+                    ..job(JobOp::Sell, mode, epoch(mode))
                 }],
                 ..base("sell")
             }
@@ -338,12 +497,17 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             venue: v,
             meta,
             initial_buy_zec,
+            exec: mode,
         } => {
             let v = venue(st, &v)?;
             if v == "jupiter" {
                 return Err(ApiError::bad_request("create: jupiter is not a launchpad"));
             }
             check_meta(&meta)?;
+            // D6: no relayer executes `create` yet; never take a hold that nobody settles.
+            if !st.cfg.create_enabled {
+                return Err(ApiError::venue_unavailable("create is not available yet"));
+            }
             let initial = match initial_buy_zec.as_deref() {
                 Some(s) => parse_amount(s, "initialBuyZec")?,
                 None => 0,
@@ -352,26 +516,32 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                 return Err(ApiError::below_minimum("initialBuyZec below PoolInfo.minActionZat"));
             }
             let r = rate(st).await?;
-            let applied = apply_spread(r.lamports_per_zec, spread, true);
+            let applied = apply_spread(r.lamports_per_zec, spread(&r), true);
+            let (amount_zat, lamports, _) = if initial > 0 {
+                fuzzed_buy(initial, 0, applied, min_action)?
+            } else {
+                (0, 0, 0)
+            };
             let mut m = json!({ "name": meta.name.trim(), "symbol": meta.symbol });
             if let Some(img) = meta.image {
                 m["image"] = json!(img);
             }
             NewAction {
-                amount_zat: initial,
-                fee_zat: st.cfg.fees.create_fee_zat,
+                amount_zat,
+                fee_zat: st.cfg.fees.create_fee_zat + now_fee(mode),
                 rate: Some(used(&r, applied)),
                 jobs: vec![NewJob {
                     venue: Some(v),
-                    lamports_in: Some(zat_to_lamports(initial, applied)),
+                    lamports_in: Some(lamports),
                     min_out: Some(0),
                     meta: Some(m),
-                    ..NewJob::new(JobOp::Create, jitter())
+                    ..job(JobOp::Create, mode, epoch(mode))
                 }],
                 ..base("create")
             }
         }
-        SignedAction::WithdrawZec { to, amount } => {
+        SignedAction::WithdrawZec { to, amount, exec: mode } => {
+            no_now(mode)?;
             check_ua(st, &to)?;
             let amount = positive(&amount, "amount")?;
             NewAction {
@@ -380,7 +550,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                 payout: Some(NewPayout {
                     to_ua: to,
                     amount_zat: amount,
-                    delay_secs: delay(exec.zec_payout_delay_min_secs, exec.zec_payout_delay_max_secs),
+                    delay_secs: withdraw_delay(exec.zec_payout_delay_min_secs, exec.zec_payout_delay_max_secs, mode),
                 }),
                 ..base("withdraw_zec")
             }
@@ -390,7 +560,9 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             amount,
             to,
             smart,
+            exec: mode,
         } => {
+            no_now(mode)?;
             let mint = solana_address(&mint, "mint")?;
             let amount = positive(&amount, "amount")?;
             let dests: Vec<String> = match to {
@@ -422,7 +594,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                 return Err(ApiError::bad_request("amount smaller than the number of parts"));
             }
             let r = rate(st).await?;
-            let applied = apply_spread(r.lamports_per_zec, spread, true);
+            let applied = apply_spread(r.lamports_per_zec, spread(&r), true);
             let f = st.cfg.fees;
             let cost = u64::from(parts) * (f.withdraw_token_gas_lamports + f.withdraw_token_cost_lamports);
             let min_delay = exec.withdraw_token_delay_min_secs.min(max_delay);
@@ -434,7 +606,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                     token_amount: Some(n),
                     dest: Some(d),
                     gas_lamports: Some(f.withdraw_token_gas_lamports),
-                    ..NewJob::new(JobOp::Transfer, delay(min_delay, max_delay))
+                    ..job(JobOp::Transfer, mode, withdraw_delay(min_delay, max_delay, mode))
                 })
                 .collect();
             NewAction {
@@ -493,21 +665,113 @@ mod tests {
     }
 
     #[test]
+    fn fuzzed_buy_charges_only_what_is_spent() {
+        let rate = 11_532_100_000; // lamports per ZEC
+        for _ in 0..200 {
+            let (zat, lamports, min_out) = fuzzed_buy(50_000_000, 1_000_000, rate, 100_000).unwrap();
+            assert_eq!(lamports % rate::LAMPORTS_STEP, 0);
+            assert!((49_400_000..=50_000_000).contains(&zat), "{zat}");
+            assert!(lamports_to_zat_ceil(lamports, rate) == zat);
+            assert!(zat_to_lamports(zat, rate) >= lamports);
+            assert!((980_000..=1_000_000).contains(&min_out), "{min_out}");
+        }
+        // Too small to round to 0.001 SOL at all.
+        assert!(fuzzed_buy(5_000, 0, rate, 1_000).is_err());
+        // Right at the minimum: never charged below it.
+        for _ in 0..200 {
+            if let Ok((zat, _, _)) = fuzzed_buy(100_000, 0, rate, 100_000) {
+                assert!(zat >= 100_000);
+            }
+        }
+    }
+
+    #[test]
+    fn epochs_batch_actions_on_shared_boundaries() {
+        let cfg = crate::config::ExecConfig {
+            epoch_min_secs: 30.0,
+            epoch_max_secs: 60.0,
+            max_epoch_min_secs: 300.0,
+            max_epoch_max_secs: 900.0,
+            withdraw_token_delay_min_secs: 30.0,
+            withdraw_token_delay_max_secs: 300.0,
+            zec_payout_delay_min_secs: 60.0,
+            zec_payout_delay_max_secs: 600.0,
+        };
+        let e = Epochs::new(&cfg);
+        let t0 = unix_now();
+        let d0 = e.delay_at(false, t0);
+        assert!(d0 > 0.0 && d0 <= 60.0);
+        // Two actions in the same epoch share the boundary.
+        let d1 = e.delay_at(false, t0 + d0 / 2.0);
+        assert!((t0 + d0 - (t0 + d0 / 2.0 + d1)).abs() < 1e-6);
+        // After the boundary: the next one is 30..60 s later.
+        let d2 = e.delay_at(false, t0 + d0 + 0.001);
+        assert!((29.9..=60.0).contains(&d2), "{d2}");
+        // Idle for a day: still a boundary within one gap.
+        let d3 = e.delay_at(false, t0 + 86_400.0);
+        assert!(d3 > 0.0 && d3 <= 60.0, "{d3}");
+        let m = e.delay_at(true, t0);
+        assert!(m > 0.0 && m <= 900.0);
+    }
+
+    #[test]
+    fn exec_field() {
+        let a: SignedAction = serde_json::from_str(
+            r#"{"op":"sell","venue":"pumpfun","mint":"m","amount":"1","minZecOut":"1","exec":"max"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            a,
+            SignedAction::Sell {
+                exec: ExecMode::Max,
+                ..
+            }
+        ));
+        // Optional everywhere, default `delayed`.
+        let a: SignedAction =
+            serde_json::from_str(r#"{"op":"buy","venue":"pumpfun","mint":"m","zecIn":"1","minOut":"1"}"#).unwrap();
+        assert!(matches!(
+            a,
+            SignedAction::Buy {
+                exec: ExecMode::Delayed,
+                ..
+            }
+        ));
+        let a: SignedAction = serde_json::from_str(r#"{"op":"withdraw_zec","to":"u","amount":"1"}"#).unwrap();
+        assert!(matches!(
+            a,
+            SignedAction::WithdrawZec {
+                exec: ExecMode::Delayed,
+                ..
+            }
+        ));
+        for bad in ["slow", "fast", "NOW", ""] {
+            let body = format!(r#"{{"op":"withdraw_zec","to":"u","amount":"1","exec":"{bad}"}}"#);
+            assert!(serde_json::from_str::<SignedAction>(&body).is_err(), "{bad}");
+        }
+        assert!(
+            serde_json::from_str::<SignedAction>(r#"{"op":"withdraw_zec","to":"u","amount":"1","privacy":"max"}"#)
+                .is_err()
+        );
+        assert_eq!(ExecMode::Now.as_str(), "now");
+    }
+
+    #[test]
     fn body_parsing() {
         let ok: SignedAction = serde_json::from_str(
-            r#"{"op":"buy","venue":"pumpfun","mint":"So11111111111111111111111111111111111111112","zecIn":"1000000","minOut":"1"}"#,
+            r#"{"op":"buy","venue":"pumpfun","mint":"So11111111111111111111111111111111111111112","zecIn":"1000000","minOut":"1","exec":"delayed"}"#,
         )
         .unwrap();
         assert!(matches!(ok, SignedAction::Buy { .. }));
         assert!(
             serde_json::from_str::<SignedAction>(
-                r#"{"op":"buy","venue":"pumpfun","mint":"x","zecIn":"1","minOut":"1","extra":1}"#
+                r#"{"op":"buy","venue":"pumpfun","mint":"x","zecIn":"1","minOut":"1","exec":"now","extra":1}"#
             )
             .is_err()
         );
         assert!(serde_json::from_str::<SignedAction>(r#"{"op":"nope"}"#).is_err());
         let w: SignedAction = serde_json::from_str(
-            r#"{"op":"withdraw_token","mint":"m","amount":"5","to":["a","b"],"smart":{"parts":2,"maxDelayMin":5}}"#,
+            r#"{"op":"withdraw_token","mint":"m","amount":"5","to":["a","b"],"smart":{"parts":2,"maxDelayMin":5},"exec":"delayed"}"#,
         )
         .unwrap();
         assert!(matches!(w, SignedAction::WithdrawToken { to: To::Many(_), .. }));

@@ -1,13 +1,22 @@
 -- Least-privilege Postgres role for the TS relayer (docs/RELAYER.md).
--- The relayer sees the job queue and public market data only: no balances, actions,
--- deposits, journals or creator rights.
+-- The relayer sees the job queue, mint -> vault pins and public market data only: no
+-- balances, actions, deposits, payouts, journals or creator rights, and NOT relayer_jobs.action_id.
 --
--- Run once, after core has applied its migrations:
+-- Idempotent: creates the role once, (re)applies grants every run. Run after core has applied
+-- its migrations (the API or scanner does that at start), and again after new migrations:
 --   docker compose -f infra/docker-compose.yml --env-file .env exec -T postgres \
---     psql -U unzeen -d unzeen -v pw="'<RELAYER_DB_PASSWORD>'" < infra/relayer-role.sql
--- Then give the relayer DATABASE_URL=postgres://unzeen_relayer:<pw>@127.0.0.1:55432/unzeen
+--     psql -v ON_ERROR_STOP=1 -U unzeen -d unzeen -v pw="'<RELAYER_DB_PASSWORD>'" < infra/relayer-role.sql
+-- Then give the relayer DATABASE_URL_RELAYER=postgres://unzeen_relayer:<pw>@127.0.0.1:55432/unzeen
+-- (never the owner's DATABASE_URL).
 
+SELECT NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'unzeen_relayer') AS need_role \gset
+\if :need_role
 CREATE ROLE unzeen_relayer LOGIN PASSWORD :pw;
+\endif
+
+-- Nothing by default: drop anything granted earlier, then grant exactly the contract.
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM unzeen_relayer;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM unzeen_relayer;
 GRANT CONNECT ON DATABASE unzeen TO unzeen_relayer;
 GRANT USAGE ON SCHEMA public TO unzeen_relayer;
 
@@ -17,12 +26,18 @@ GRANT SELECT (id, part, op, venue, mint, lamports_in, token_amount, min_out, met
               gas_lamports, network, status, not_before, attempts, claimed_by, claimed_at,
               lease_until, signature, last_valid_block_height, vault, slot, out_mint,
               out_token_amount, out_lamports, network_fee, error_code, error_message,
-              settled_at, created_at, updated_at)
+              settled_at, created_at, updated_at, exec_mode)
     ON relayer_jobs TO unzeen_relayer;
-GRANT UPDATE (status, attempts, claimed_by, claimed_at, lease_until, signature,
+-- not_before: backoff only; a trigger (0003) refuses to move it earlier.
+GRANT UPDATE (status, attempts, claimed_by, claimed_at, lease_until, not_before, signature,
               last_valid_block_height, vault, slot, out_mint, out_token_amount,
               out_lamports, network_fee, error_code, error_message, updated_at)
     ON relayer_jobs TO unzeen_relayer;
+
+-- mint -> vault pinning (0003): the relayer owns it (re-pin = UPDATE of vault only).
+GRANT SELECT, INSERT, UPDATE (vault) ON mint_vaults TO unzeen_relayer;
+-- Relayer state (0004): vault rotation and the fresh-creator counter.
+GRANT SELECT, INSERT, UPDATE ON relayer_vault_usage, relayer_creator_counter TO unzeen_relayer;
 
 -- Public market data.
 GRANT SELECT, INSERT, UPDATE ON tokens TO unzeen_relayer;

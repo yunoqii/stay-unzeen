@@ -23,6 +23,9 @@ pub struct Rate {
     pub source: &'static str,
     /// When the quote was obtained, unix ms.
     pub ts_ms: u64,
+    /// The last background refresh failed and this quote is older than `RATE_CACHE_SECS`
+    /// (callers double the spread).
+    pub stale: bool,
 }
 
 #[derive(Debug)]
@@ -75,35 +78,55 @@ impl RateProvider {
         self.cfg.fixed_lamports_per_zec.is_some()
     }
 
-    /// Current mid rate (cached `RATE_CACHE_SECS`; stale up to `RATE_MAX_STALE_SECS` if
-    /// 1Click is down).
+    /// Current mid rate. D14: never fetched on demand (a quote request at the moment of a
+    /// user action would tell 1Click when actions happen); a background task refreshes it every
+    /// 30–60 s ([`Self::refresh_loop`]). Older than `RATE_MAX_STALE_SECS` → unavailable.
     pub async fn get(&self) -> Result<Rate, RateError> {
         if let Some(l) = self.cfg.fixed_lamports_per_zec {
             return Ok(Rate {
                 lamports_per_zec: l,
                 source: "fixed",
                 ts_ms: now_ms(),
+                stale: false,
             });
         }
-        // Single flight: concurrent callers wait for one fetch.
-        let mut cache = self.cache.lock().await;
-        if let Some((r, at)) = cache.as_ref()
-            && at.elapsed() < Duration::from_secs(self.cfg.cache_secs)
-        {
-            return Ok(r.clone());
+        let cache = self.cache.lock().await;
+        match cache.as_ref() {
+            Some((r, at)) if at.elapsed() <= Duration::from_secs(self.cfg.max_stale_secs) => Ok(Rate {
+                stale: at.elapsed() > Duration::from_secs(self.cfg.cache_secs),
+                ..r.clone()
+            }),
+            _ => Err(RateError::Unavailable),
         }
+    }
+
+    /// One quote fetch into the cache.
+    pub async fn refresh(&self) -> bool {
         match self.fetch_oneclick().await {
             Ok(r) => {
-                *cache = Some((r.clone(), Instant::now()));
-                Ok(r)
+                *self.cache.lock().await = Some((r, Instant::now()));
+                true
             }
             Err(kind) => {
                 tracing::warn!(kind, "1Click quote failed");
-                match cache.as_ref() {
-                    Some((r, at)) if at.elapsed() < Duration::from_secs(self.cfg.max_stale_secs) => Ok(r.clone()),
-                    _ => Err(RateError::Unavailable),
-                }
+                false
             }
+        }
+    }
+
+    /// Background refresh: every 30–60 s (uniform jitter), 10 s retry after a failure.
+    pub async fn refresh_loop(self: Arc<Self>) {
+        if self.is_fixed() {
+            return;
+        }
+        loop {
+            let ok = self.refresh().await;
+            let secs = if ok {
+                30.0 + 30.0 * ((rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64)
+            } else {
+                10.0
+            };
+            tokio::time::sleep(Duration::from_secs_f64(secs)).await;
         }
     }
 
@@ -139,6 +162,7 @@ impl RateProvider {
             lamports_per_zec: out,
             source: "near-1click",
             ts_ms: now_ms(),
+            stale: false,
         })
     }
 }
@@ -181,6 +205,17 @@ pub fn lamports_to_zat_ceil(lamports: u64, lamports_per_zec: u64) -> u64 {
     ((lamports as u128) * 100_000_000)
         .div_ceil(lamports_per_zec as u128)
         .min(u64::MAX as u128) as u64
+}
+
+/// SOL amounts of buys are rounded to this step (0.001 SOL).
+pub const LAMPORTS_STEP: u64 = 1_000_000;
+
+/// D10: the SOL amount of a buy must not reveal the ZEC amount the user typed (zecIn × rate is
+/// reversible). Shave a random 0–1 % and round DOWN to 0.001 SOL; the user is only charged
+/// the ZEC equivalent of what is actually spent. `u` is uniform in [0, 1).
+pub fn fuzz_lamports(lamports: u64, u: f64) -> u64 {
+    let shaved = (lamports as f64 * (1.0 - 0.01 * u.clamp(0.0, 1.0))) as u64;
+    shaved / LAMPORTS_STEP * LAMPORTS_STEP
 }
 
 /// Minimal RFC 3339 UTC formatter (no chrono dependency).
@@ -234,6 +269,18 @@ mod tests {
         assert_eq!(apply_spread(10_000, 50, true), 9_950);
         assert_eq!(apply_spread(10_000, 50, false), 10_050);
         assert_eq!(zat_to_lamports(u64::MAX, u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn fuzz_rounds_down_within_one_percent() {
+        let l = 5_766_050_000u64; // 0.5 ZEC at 11.5321 SOL/ZEC
+        for u in [0.0, 0.3, 0.999] {
+            let f = fuzz_lamports(l, u);
+            assert_eq!(f % LAMPORTS_STEP, 0);
+            assert!(f <= l && f as f64 >= l as f64 * 0.99 - LAMPORTS_STEP as f64, "{f}");
+        }
+        assert_eq!(fuzz_lamports(5_766_050_000, 0.0), 5_766_000_000);
+        assert_eq!(fuzz_lamports(999_999, 0.0), 0);
     }
 
     #[test]

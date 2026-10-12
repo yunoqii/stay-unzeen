@@ -1,10 +1,10 @@
 # Unzeen — контракт core ↔ relayer
 
-Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
+Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
 
 Статус: **v2** (12.10, дни 4–5). Изменения против v1:
 1. **Подключение только под ролью `unzeen_relayer`** через `DATABASE_URL_RELAYER` (D8). Владельческий `DATABASE_URL` релейеру не давать. На старте релейер проверяет `SELECT has_column_privilege('relayer_jobs','action_id','SELECT')` и при `true` отказывается стартовать.
-2. **Эпохи (D2).** Core ставит buy/sell/create `not_before` = ближайшая граница эпохи (интервалы случайные 30–60 с, режим «max privacy» — 5–15 мин; расписание не зависит от прихода запросов). Задания одной эпохи имеют одинаковый `not_before`: релейер берёт всё готовое разом и исполняет в случайном порядке. Свой джиттер к эпохе релейер не добавляет.
+2. **Режимы исполнения, колонка `exec_mode` (0005, `now` | `delayed` | `max`).** Для `delayed`/`max` core ставит `not_before` = ближайшая граница эпохи (интервалы случайные 30–60 с / 5–15 мин; расписание не зависит от прихода запросов). Задания одной эпохи имеют одинаковый `not_before`: релейер берёт всё готовое разом и исполняет в случайном порядке, свой джиттер не добавляет. Для `now` (только buy/sell/create) `not_before` = момент приёма: релейер исполняет сразу. Priority fee — **единый квантованный compute unit price на ВСЕ tx пула** (любого режима, по Helius `getPriorityFeeEstimate`), чтобы tx режима now не выделялись комиссией. **Jito для now не используется** (Jito остаётся только для fair-launch). Юзер платит плоскую `nowFeeZat` core-у, на сумму `lamports_in` это не влияет. `transfer` всегда `delayed`/`max`. При settle core обнуляет `exec_mode` (0006).
 3. **Backoff через `not_before`.** Роли выдан `UPDATE (not_before)`; триггер `relayer_jobs_not_before_monotonic` (0003) разрешает только **увеличение** (`check_violation` при попытке сдвинуть раньше). Ранний запуск = нарушение тайминга.
 4. **Позиция по mint на одном vault (D4, решение владельца).** Таблица `mint_vaults (network, mint, vault)`: релейер закрепляет mint за vault при первой покупке/запуске и ведёт через него все buy/sell/transfer этого mint. Правило «вывод с другого vault» **снято** (vault публичны и связаны графом пополнений, приватности не добавляло). Поле `avoid_vaults` в задание **не добавлено**: при общем инвентаре оно не нужно.
 5. **Состояние релейера в Postgres (0004):** `relayer_vault_usage (network, vault, last_used_at)` для ротации и `relayer_creator_counter (network, next_index)` для свежих creator (несколько процессов не выдадут один creator двум запускам, L-10).
@@ -56,6 +56,7 @@
 | `dest` | core | `transfer`: свежий Solana-адрес получателя |
 | `gas_lamports` | core | `transfer`: капля SOL получателю на комиссии (отправить вместе с токенами) |
 | `network` | core | `devnet` \| `mainnet-beta`. Релейер берёт только свою сеть |
+| `exec_mode` | core | `now` \| `delayed` \| `max` (0005); `now` — сразу, тот же единый priority fee, что у всех tx пула, без Jito. NULL после settle |
 | `status` | оба | `queued` → `claimed` → `sent` → `confirmed` \| `failed` |
 | `not_before` | core (+ relayer: только увеличение) | граница эпохи / задержка вывода; раньше не брать. Релейер может отложить (backoff), но не ускорить |
 | `attempts`, `claimed_by`, `claimed_at`, `lease_until` | relayer | аренда задания |
@@ -94,7 +95,7 @@ UPDATE relayer_jobs j
         LIMIT $3
         FOR UPDATE SKIP LOCKED)
 RETURNING j.id, j.part, j.op, j.venue, j.mint, j.lamports_in, j.token_amount, j.min_out,
-          j.meta, j.dest, j.gas_lamports, j.attempts;
+          j.meta, j.dest, j.gas_lamports, j.attempts, j.exec_mode;
 ```
 `$1` — id инстанса релейера (не hostname с IP), `$2` — сеть релейера, `$3` — размер батча (≥ ожидаемого размера эпохи, например 50). Опрос раз в 1–3 с. Задания одного батча (= одной эпохи core) исполнять в случайном порядке.
 

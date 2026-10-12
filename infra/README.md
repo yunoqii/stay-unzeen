@@ -3,7 +3,7 @@
 ## TL;DR
 
 - **Postgres** (ledger) runs from `docker-compose.yml`, bound to `127.0.0.1` only.
-- **Zcash** is reached through **public lightwalletd** servers; there is no local node.
+- **Zcash** is reached through **public lightwalletd** servers; there is no local node. H1: the scanner downloads **every** Orchard/Ironwood transaction of each scanned block (random order, `UNZEEN_COVER_RPS`/`UNZEEN_COVER_CONCURRENCY`, backoff), so the server cannot tell which ones are deposits to the pool. Mainnet cost (12.10): ~2.2 shielded tx and ~25 KiB per block (~28 MiB/day).
 
 | Network | Primary (checked 2026-10-12) | Fallbacks |
 |---|---|---|
@@ -26,7 +26,7 @@ docker compose -f infra/docker-compose.yml --env-file .env up -d postgres
 - Port: `POSTGRES_PORT` (default 55432) on 127.0.0.1.
 - Migrations are embedded in `core/` (compile time) and applied automatically by `unzeen-scanner serve` and `unzeen-api serve`. Rebuild both binaries after pulling a new migration.
 - Docker logs are rotated (`json-file`, 10 MB x 3). Postgres runs with `log_error_verbosity=terse`, no statement/connection logging: row values from constraint errors (DETAIL) and client IPs never reach the container log.
-- Relayer role (least privilege, cannot read `action_id`, balances, deposits): `infra/relayer-role.sql`, contract in `docs/RELAYER.md`.
+- Relayer role (least privilege, cannot read `action_id`, balances, deposits): `infra/relayer-role.sql` (idempotent; re-run after new migrations), contract in `docs/RELAYER.md`. The relayer gets `DATABASE_URL_RELAYER`, never the owner's `DATABASE_URL`.
 
 ## API server (core/api)
 
@@ -58,6 +58,8 @@ $B seed-keygen --out ~/.unzeen/seed.agekey     # once; set UNZEEN_SEED_KEY_FILE 
 $B init                       # encrypted seed + wallet, prints the pool UA
 $B seed-encrypt               # migrate a legacy plaintext keys/pool.mnemonic
 $B serve                      # service: sync + credit deposits into Postgres (no deposit data in logs)
+$B serve --payouts            # + withdraw_zec executor (needs UNZEEN_SEED_KEY_FILE; mainnet also UNZEEN_ALLOW_MAINNET_SEND=1). Use the release build: proving takes ~80 s in debug
+$B probe --blocks 100         # read-only H1 traffic probe (no wallet): fetches all shielded txs of the last N blocks
 $B ledger-stats               # deposit counts by status
 $B probe                      # read-only health check of the lightwalletd
 

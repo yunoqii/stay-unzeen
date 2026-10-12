@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail};
 use bip0039::{English, Mnemonic};
 use secrecy::Zeroize;
 use zcash_address::ZcashAddress;
+use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
 use zcash_client_backend::{
     data_api::{
         Account as _, WalletRead,
@@ -25,6 +26,7 @@ use zcash_client_backend::{
 };
 use zcash_client_sqlite::util::SystemClock;
 use zcash_keys::keys::UnifiedSpendingKey;
+use zcash_primitives::transaction::TxId;
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
     ShieldedPool,
@@ -32,6 +34,8 @@ use zcash_protocol::{
     value::Zatoshis,
 };
 use zip321::{Payment, TransactionRequest};
+
+type Client = CompactTxStreamerClient<tonic::transport::Channel>;
 
 use crate::{
     config::{Common, NetName},
@@ -48,14 +52,10 @@ pub async fn send(
     amount_zat: u64,
     memo: Option<&str>,
 ) -> anyhow::Result<String> {
-    if common.network == NetName::Main && std::env::var("UNZEEN_ALLOW_MAINNET_SEND").as_deref() != Ok("1") {
-        bail!("mainnet send is disabled; set UNZEEN_ALLOW_MAINNET_SEND=1 only with lead approval");
-    }
+    mainnet_gate(common)?;
     if amount_zat == 0 || amount_zat > MAX_SEND_ZAT {
         bail!("amount must be in 1..={MAX_SEND_ZAT} zat");
     }
-    let net = common.params();
-
     let recipient = ZcashAddress::from_str(to).map_err(|e| anyhow!("bad recipient address: {e}"))?;
     let memo = memo
         .map(|m| Memo::from_str(m).map(MemoBytes::from))
@@ -70,7 +70,38 @@ pub async fn send(
         vec![],
     )
     .map_err(|e| anyhow!("invalid payment: {e:?}"))?;
-    let request = TransactionRequest::new(vec![payment]).map_err(|e| anyhow!("{e:?}"))?;
+    let (txid, raw) = build_tx(common, db, vec![payment])?;
+    let mut client = common.connect().await?;
+    broadcast(&mut client, raw).await?;
+    Ok(txid.to_string())
+}
+
+/// Mainnet spending needs `UNZEEN_ALLOW_MAINNET_SEND=1` (lead approval).
+pub fn mainnet_gate(common: &Common) -> anyhow::Result<()> {
+    if common.network == NetName::Main && std::env::var("UNZEEN_ALLOW_MAINNET_SEND").as_deref() != Ok("1") {
+        bail!("mainnet send is disabled; set UNZEEN_ALLOW_MAINNET_SEND=1 only with lead approval");
+    }
+    Ok(())
+}
+
+/// Error of [`build_tx`] at the proposal stage (not enough confirmed funds, bad request):
+/// nothing was built and no notes were locked.
+#[derive(Debug)]
+pub struct ProposalError(pub String);
+
+impl std::fmt::Display for ProposalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "proposal failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for ProposalError {}
+
+/// Build, prove and store (in the wallet DB) ONE shielded tx paying all `payments`, with
+/// Ironwood change and `OvkPolicy::Discard`. Not broadcast. Returns (txid, raw tx).
+pub fn build_tx(common: &Common, db: &mut Db, payments: Vec<Payment>) -> anyhow::Result<(TxId, Vec<u8>)> {
+    let net = common.params();
+    let request = TransactionRequest::new(payments).map_err(|e| ProposalError(format!("{e:?}")))?;
 
     let account_id = *db
         .get_account_ids()?
@@ -82,22 +113,13 @@ pub async fn send(
         .key_derivation()
         .ok_or_else(|| anyhow!("view-only account cannot spend"))?;
 
-    let phrase = crate::seed::load_phrase(common)?;
-    let mnemonic =
-        <Mnemonic<English>>::from_phrase(phrase.as_str()).map_err(|_| anyhow!("bad seed (not a mnemonic)"))?;
-    let mut seed = mnemonic.to_seed("");
-    drop(mnemonic);
-    let usk = UnifiedSpendingKey::from_seed(&net, &seed, derivation.account_index())
-        .map_err(|e| anyhow!("key derivation failed: {e:?}"));
-    seed.zeroize();
-    let usk = usk?;
-
     let change = SingleOutputChangeStrategy::new(
         StandardFeeRule::Zip317,
         None,
         ShieldedPool::Ironwood,
         DustOutputPolicy::default(),
     );
+    // Propose first (no secrets needed): a failure here locks nothing.
     let proposal = propose_transfer::<_, _, _, _, std::convert::Infallible>(
         db,
         &net,
@@ -110,11 +132,21 @@ pub async fn send(
         None,
         None,
     )
-    .map_err(|e| anyhow!("proposal failed: {e}"))?;
+    .map_err(|e| ProposalError(format!("{e}")))?;
     // Reject before building: built txs would lock notes in the wallet until expiry.
     if proposal.steps().len() > 1 {
-        bail!("multi-transaction proposals not supported");
+        return Err(ProposalError("multi-transaction proposals not supported".into()).into());
     }
+
+    let phrase = crate::seed::load_phrase(common)?;
+    let mnemonic =
+        <Mnemonic<English>>::from_phrase(phrase.as_str()).map_err(|_| anyhow!("bad seed (not a mnemonic)"))?;
+    let mut seed = mnemonic.to_seed("");
+    drop(mnemonic);
+    let usk = UnifiedSpendingKey::from_seed(&net, &seed, derivation.account_index())
+        .map_err(|e| anyhow!("key derivation failed: {e:?}"));
+    seed.zeroize();
+    let usk = usk?;
 
     let prover = LocalTxProver::bundled();
     let mut rng = OsRng;
@@ -137,13 +169,19 @@ pub async fn send(
     let tx = db
         .get_transaction(txid)?
         .ok_or_else(|| anyhow!("built tx not found in DB"))?;
-    let mut raw = service::RawTransaction::default();
-    tx.write(&mut raw.data)?;
+    let mut raw = Vec::new();
+    tx.write(&mut raw)?;
+    Ok((txid, raw))
+}
 
-    let mut client = common.connect().await?;
-    let resp = client.send_transaction(raw).await?.into_inner();
+/// Broadcast a raw tx. Re-sending the same tx is harmless (same txid).
+pub async fn broadcast(client: &mut Client, raw: Vec<u8>) -> anyhow::Result<()> {
+    let resp = client
+        .send_transaction(service::RawTransaction { data: raw, height: 0 })
+        .await?
+        .into_inner();
     if resp.error_code != 0 {
         bail!("lightwalletd rejected tx: {} {}", resp.error_code, resp.error_message);
     }
-    Ok(txid.to_string())
+    Ok(())
 }

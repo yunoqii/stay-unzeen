@@ -37,6 +37,7 @@ pub fn policy_from_env(c: &Common) -> anyhow::Result<Policy> {
         confirmations,
         min_deposit_zat: env_u64("MIN_DEPOSIT_ZAT", 100_000)?,
         min_action_zat: env_u64("MIN_ACTION_ZAT", 100_000)?,
+        credit_jitter: u32::try_from(env_u64("UNZEEN_CONFIRMATIONS_JITTER", 3)?)?.min(10),
     })
 }
 
@@ -67,6 +68,16 @@ pub fn memo_input(raw: &Option<Vec<u8>>) -> MemoInput {
     }
 }
 
+/// D3: does this deposit tx reveal its amount on chain? True if it spends transparent
+/// inputs, or moves value out of Sapling or legacy Orchard into Ironwood (turnstile: a
+/// positive value balance of those pools is public). Ironwood→Ironwood (only the fee leaves
+/// the Ironwood pool) is private. Addresses are not looked at or stored.
+pub fn public_source(tx: &zcash_primitives::transaction::Transaction) -> bool {
+    tx.transparent_bundle().is_some_and(|b| !b.vin.is_empty())
+        || tx.sapling_bundle().is_some_and(|b| i64::from(*b.value_balance()) > 0)
+        || tx.orchard_bundle().is_some_and(|b| i64::from(*b.value_balance()) > 0)
+}
+
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
@@ -74,6 +85,7 @@ fn now_unix() -> u64 {
 /// One pass over all wallet notes. Returns per-outcome counters.
 pub async fn apply_wallet_notes(
     c: &Common,
+    db: &wallet::Db,
     ledger: &Ledger,
     key: &NoteRefKey,
     tip: u32,
@@ -83,7 +95,20 @@ pub async fn apply_wallet_notes(
     let times = deposits::block_times(&db_path, notes.iter().filter_map(|n| n.mined_height))?;
     let now = now_unix();
     let mut counts = BTreeMap::new();
+    let mut public_src: BTreeMap<[u8; 32], bool> = BTreeMap::new();
     for n in &notes {
+        // D3: only look at the full tx once the memo is there (tx enhanced).
+        let public_source = match (n.memo_raw.is_some(), public_src.get(&n.txid_raw)) {
+            (_, Some(v)) => *v,
+            (false, None) => false,
+            (true, None) => {
+                let v = db
+                    .get_transaction(zcash_primitives::transaction::TxId::from_bytes(n.txid_raw))?
+                    .is_some_and(|tx| public_source(&tx));
+                public_src.insert(n.txid_raw, v);
+                v
+            }
+        };
         let obs = NoteObs {
             note_ref: key.note_ref(&n.txid_raw, n.pool_code, n.action_index),
             amount_zat: n.value_zat,
@@ -91,6 +116,7 @@ pub async fn apply_wallet_notes(
             tip,
             block_time: n.mined_height.and_then(|h| times.get(&h).copied()),
             memo: memo_input(&n.memo_raw),
+            public_source,
         };
         let r = ledger.observe_note(&obs, now).await?;
         if r == Observed::ReorgAlert {
@@ -102,7 +128,7 @@ pub async fn apply_wallet_notes(
     Ok(counts)
 }
 
-pub async fn serve(c: &Common, interval_secs: u64, once: bool) -> anyhow::Result<()> {
+pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool) -> anyhow::Result<()> {
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required for serve")?;
     let policy = policy_from_env(c)?;
     let ledger = Ledger::connect(&database_url, policy)
@@ -121,6 +147,14 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool) -> anyhow::Result
         "scanner service started"
     );
 
+    let cover_cfg = crate::cover::CoverCfg::from_env()?;
+    let payout_cfg = if payouts {
+        // Fail at start, not at the first payout, if the seed cannot be decrypted.
+        drop(crate::seed::load_phrase(c).context("payouts need the pool seed key")?);
+        Some(crate::payout::PayoutCfg::from_env()?)
+    } else {
+        None
+    };
     let mut client = None;
     let mut backoff = 5u64;
     loop {
@@ -130,7 +164,7 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool) -> anyhow::Result
                 client = Some(c.connect().await?);
             }
             let cl = client.as_mut().expect("set above");
-            let rep = sync::sync(c.params(), cl, &mut db).await?;
+            let rep = sync::sync(c.params(), cl, &mut db, &cover_cfg).await?;
             if !rep.complete {
                 warn!(
                     tip = rep.tip,
@@ -138,7 +172,7 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool) -> anyhow::Result
                 );
                 return Ok(());
             }
-            let counts = apply_wallet_notes(c, &ledger, &key, rep.tip).await?;
+            let counts = apply_wallet_notes(c, &db, &ledger, &key, rep.tip).await?;
             let changed: BTreeMap<String, usize> = counts
                 .iter()
                 .filter(|(k, _)| **k != Observed::Unchanged)
@@ -148,11 +182,28 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool) -> anyhow::Result
                 tip = rep.tip,
                 scanned = rep.scanned_blocks,
                 enhanced = rep.enhanced_txs,
+                cover_txs = rep.cover.fetched,
+                cover_failed = rep.cover.failed,
+                cover_kib = rep.cover.bytes / 1024,
                 notes = counts.values().sum::<usize>(),
                 changes = ?changed,
                 ms = started.elapsed().as_millis() as u64,
                 "scan pass"
             );
+            if let Some(pc) = &payout_cfg {
+                let cl = client.as_mut().expect("set above");
+                let p = crate::payout::run(c, pc, &mut db, cl, &ledger, rep.tip, policy.confirmations).await?;
+                if p.sent + p.confirmed + p.failed > 0 || p.requeued > 0 {
+                    info!(
+                        sent = p.sent,
+                        confirmed = p.confirmed,
+                        requeued = p.requeued,
+                        failed = p.failed,
+                        waiting = p.waiting,
+                        "payouts"
+                    );
+                }
+            }
             Ok(())
         }
         .await;

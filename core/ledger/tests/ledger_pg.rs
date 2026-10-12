@@ -23,6 +23,7 @@ const POLICY: Policy = Policy {
     confirmations: 3,
     min_deposit_zat: 100_000,
     min_action_zat: 50_000,
+    credit_jitter: 0,
 };
 const T0: u64 = 1_800_000_000;
 
@@ -98,6 +99,7 @@ fn note(i: u32, amount: u64, h: Option<u32>, tip: u32, memo: MemoInput) -> NoteO
         tip,
         block_time: Some(T0),
         memo,
+        public_source: false,
     }
 }
 
@@ -615,5 +617,217 @@ async fn buy_sell_withdraw_settlement() {
         .await;
     assert_eq!(l.detach_old_jobs().await.unwrap(), 5);
     assert_eq!(l.action_view(&me, &r.id).await.unwrap().unwrap().solana_tx, None);
+    db.drop_schema().await;
+}
+
+fn withdraw_zec(amount: u64, fee: u64) -> NewAction {
+    NewAction {
+        payout: Some(unzeen_ledger::NewPayout {
+            to_ua: "utest1dummy".into(),
+            amount_zat: amount,
+            delay_secs: 0.0,
+        }),
+        rate: None,
+        ..action("withdraw_zec", amount, fee, None, vec![])
+    }
+}
+
+#[tokio::test]
+async fn zec_payouts_lifecycle() {
+    let Some(db) = setup().await else { return };
+    let l = &db.ledger;
+    fund(l, 1, 0, 1_000_000).await;
+    fund(l, 2, 1, 1_000_000).await;
+    let me = pk(1);
+    let a1 = l
+        .submit(&me, &[1; 16], &[1; 32], &withdraw_zec(200_000, 15_000))
+        .await
+        .unwrap();
+    let a2 = l
+        .submit(&me, &[2; 16], &[2; 32], &withdraw_zec(300_000, 15_000))
+        .await
+        .unwrap();
+    let a3 = l
+        .submit(&pk(2), &[3; 16], &[3; 32], &withdraw_zec(100_000, 15_000))
+        .await
+        .unwrap();
+    assert_eq!(l.balance(&me).await.unwrap().unwrap().held_zat, 530_000);
+
+    let ready = l.ready_payouts(10).await.unwrap();
+    assert_eq!(ready.len(), 3);
+    let ids: Vec<i64> = ready.iter().map(|p| p.id).collect();
+    // Batch of the first two in one tx; written before broadcast.
+    let tx1 = [0xAA; 32];
+    assert_eq!(l.mark_payouts_sent(&ids[..2], &tx1).await.unwrap(), 2);
+    // Already sent rows cannot be marked again (all-or-nothing).
+    assert_eq!(l.mark_payouts_sent(&ids[..3], &[0xBB; 32]).await.unwrap(), 0);
+    assert_eq!(l.ready_payouts(10).await.unwrap().len(), 1);
+    let inflight = l.inflight_payouts().await.unwrap();
+    assert_eq!(inflight.len(), 1);
+    assert_eq!(inflight[0].ids, ids[..2].to_vec());
+
+    // Expired unmined -> back to the queue (no double payout: new tx only after this).
+    assert_eq!(l.requeue_payouts(&tx1, 0.0).await.unwrap(), 2);
+    assert_eq!(l.ready_payouts(10).await.unwrap().len(), 3);
+    let tx2 = [0xCC; 32];
+    assert_eq!(l.mark_payouts_sent(&ids[..2], &tx2).await.unwrap(), 2);
+
+    // Confirmed: holds spent, recipient + txid erased, actions executed with fill.
+    assert_eq!(l.confirm_payouts(&tx2).await.unwrap(), 2);
+    assert_eq!(l.confirm_payouts(&tx2).await.unwrap(), 0, "idempotent");
+    let b = l.balance(&me).await.unwrap().unwrap();
+    assert_eq!((b.available_zat, b.held_zat), (470_000, 0));
+    let v = l.action_view(&me, &a1.id).await.unwrap().unwrap();
+    assert_eq!(v.status, "executed");
+    assert_eq!(v.fill.unwrap()["zecSpent"], "215000");
+    assert_eq!(l.action_view(&me, &a2.id).await.unwrap().unwrap().status, "executed");
+    assert_eq!(
+        db.scalar_i64(
+            "SELECT count(*) FROM zec_payouts WHERE to_ua IS NOT NULL OR txid IS NOT NULL AND status = 'confirmed'"
+        )
+        .await,
+        1,
+        "only the pending payout keeps its recipient"
+    );
+
+    // Permanent failure: hold released.
+    assert_eq!(l.fail_payouts(&ids[2..], "bad_request").await.unwrap(), 1);
+    let b = l.balance(&pk(2)).await.unwrap().unwrap();
+    assert_eq!((b.available_zat, b.held_zat), (1_000_000, 0));
+    assert_eq!(
+        l.action_view(&pk(2), &a3.id).await.unwrap().unwrap().error.as_deref(),
+        Some("bad_request")
+    );
+    assert_eq!(
+        db.scalar_i64("SELECT count(*) FROM zec_payouts WHERE to_ua IS NOT NULL")
+            .await,
+        0
+    );
+    db.drop_schema().await;
+}
+
+#[tokio::test]
+async fn janitor_scrubs_amounts_and_journals() {
+    let Some(db) = setup().await else { return };
+    let l = &db.ledger;
+    fund(l, 1, 0, 1_000_000).await;
+    let me = pk(1);
+    let r = l
+        .submit(
+            &me,
+            &[1; 16],
+            &[1; 32],
+            &action("buy", 200_000, 0, None, vec![buy_job("M1", 2_000_000)]),
+        )
+        .await
+        .unwrap();
+    db.sql(
+        "UPDATE relayer_jobs SET status = 'confirmed', signature = 'S1', out_token_amount = 777, out_lamports = 2000000",
+    )
+    .await;
+    assert_eq!(l.settle_ready(10).await.unwrap(), 1);
+    // R-core-4: the execution mode is erased at settlement.
+    assert_eq!(db.scalar_i64("SELECT count(exec_mode) FROM relayer_jobs").await, 0);
+    // Settled jobs keep hour-precision times only.
+    assert_eq!(
+        db.scalar_i64(
+            "SELECT count(*) FROM relayer_jobs WHERE created_at <> date_trunc('hour', created_at)
+               OR not_before <> date_trunc('hour', not_before) OR settled_at <> date_trunc('hour', settled_at)"
+        )
+        .await,
+        0
+    );
+    // Fresh: nothing scrubbed yet.
+    let j = l.janitor().await.unwrap();
+    assert_eq!((j.detached, j.scrubbed, j.journal_deleted), (0, 0, 0));
+    assert!(l.action_view(&me, &r.id).await.unwrap().unwrap().fill.is_some());
+
+    // Two days later.
+    db.sql("UPDATE relayer_jobs SET settled_at = now() - interval '49 hours'")
+        .await;
+    db.sql("UPDATE actions SET updated_at = now() - interval '3 days'")
+        .await;
+    db.sql("UPDATE ledger_ops SET created_at = now() - interval '3 days'")
+        .await;
+    db.sql("UPDATE token_ops SET created_at = now() - interval '3 days'")
+        .await;
+    let j = l.janitor().await.unwrap();
+    assert_eq!(j.detached, 1);
+    assert_eq!(j.scrubbed, 1);
+    assert!(j.journal_deleted >= 3, "{j:?}");
+    assert_eq!(
+        db.scalar_i64(
+            "SELECT count(*) FROM actions WHERE amount_zat <> 0 OR hold_zat <> 0 OR fee_zat <> 0
+               OR rate_lamports_per_zec IS NOT NULL OR token_mint IS NOT NULL OR fill IS NOT NULL"
+        )
+        .await,
+        0
+    );
+    assert_eq!(db.scalar_i64("SELECT count(*) FROM ledger_ops").await, 0);
+    assert_eq!(db.scalar_i64("SELECT count(*) FROM token_ops").await, 0);
+    assert_eq!(
+        db.scalar_i64("SELECT count(*) FROM relayer_jobs WHERE action_id IS NOT NULL")
+            .await,
+        0
+    );
+    // Balances survive.
+    let b = l.balance(&me).await.unwrap().unwrap();
+    assert_eq!((b.available_zat, b.held_zat), (800_000, 0));
+    assert_eq!(l.token_holdings(&me).await.unwrap()[0].available, 777);
+    // Idempotent.
+    assert_eq!(l.janitor().await.unwrap().scrubbed, 0);
+    db.drop_schema().await;
+}
+
+#[tokio::test]
+async fn not_before_only_increases_until_settled() {
+    let Some(db) = setup().await else { return };
+    let l = &db.ledger;
+    fund(l, 1, 0, 1_000_000).await;
+    l.submit(
+        &pk(1),
+        &[1; 16],
+        &[1; 32],
+        &action("buy", 200_000, 0, None, vec![buy_job("M1", 2_000_000)]),
+    )
+    .await
+    .unwrap();
+    // Relayer backoff: later is fine.
+    assert_eq!(
+        db.sql("UPDATE relayer_jobs SET not_before = not_before + interval '30 seconds'")
+            .await,
+        1
+    );
+    // Earlier is refused (timing privacy).
+    let err = db
+        .admin
+        .execute(
+            &format!(
+                "UPDATE {}.relayer_jobs SET not_before = not_before - interval '1 second'",
+                db.schema
+            ),
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().map(|c| c.code()), Some("23514"));
+    db.drop_schema().await;
+}
+
+#[tokio::test]
+async fn public_source_flag_is_stored() {
+    let Some(db) = setup().await else { return };
+    let l = &db.ledger;
+    let memo = MemoInput::Text(deposit_memo(1, T0 as u32 + 3600, Target::None));
+    let mut n = note(0, 1_000_000, Some(100), 105, memo.clone());
+    n.public_source = true;
+    assert_eq!(l.observe_note(&n, T0).await.unwrap(), Observed::Credited);
+    l.observe_note(&note(1, 1_000_000, Some(100), 105, memo), T0)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.scalar_i64("SELECT count(*) FROM deposits WHERE public_source").await,
+        1
+    );
     db.drop_schema().await;
 }

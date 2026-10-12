@@ -46,8 +46,10 @@ pub struct NewJob {
     pub meta: Option<Value>,
     pub dest: Option<String>,
     pub gas_lamports: Option<u64>,
-    /// Execution delay from now (jitter), seconds.
+    /// Execution delay from now (epoch boundary / withdrawal delay), seconds.
     pub delay_secs: f64,
+    /// `now` | `delayed` | `max` (relayer_jobs.exec_mode).
+    pub exec_mode: &'static str,
 }
 
 impl NewJob {
@@ -63,6 +65,7 @@ impl NewJob {
             dest: None,
             gas_lamports: None,
             delay_secs,
+            exec_mode: "delayed",
         }
     }
 }
@@ -108,6 +111,44 @@ pub struct ActionView {
     pub fill: Option<Value>,
 }
 
+/// What one janitor run did (counters only).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JanitorReport {
+    pub detached: u64,
+    pub scrubbed: u64,
+    pub journal_deleted: u64,
+    pub payouts_deleted: u64,
+}
+
+/// Columns 0..=6 of an owner view (see [`view_from_row`]). Status `sent` while a tx is in
+/// flight (signature written by the relayer / payout broadcast).
+const VIEW_COLS: &str = "CASE WHEN a.status = 'queued' AND (
+        EXISTS (SELECT 1 FROM relayer_jobs j WHERE j.action_id = a.id AND j.status IN ('sent', 'confirmed'))
+     OR EXISTS (SELECT 1 FROM zec_payouts p WHERE p.action_id = a.id AND p.status = 'sent'))
+    THEN 'sent' ELSE a.status END,
+    a.error, a.rate_lamports_per_zec, a.rate_source,
+    (extract(epoch FROM a.rate_ts) * 1000)::bigint, a.fill,
+    (SELECT j.signature FROM relayer_jobs j
+      WHERE j.action_id = a.id AND j.status = 'confirmed' ORDER BY j.part LIMIT 1)";
+
+fn view_from_row(r: &tokio_postgres::Row) -> ActionView {
+    ActionView {
+        status: r.get(0),
+        error: r.get(1),
+        rate: read_rate(r, 2, 3, 4),
+        fill: r.get(5),
+        solana_tx: r.get(6),
+    }
+}
+
+/// An action of the owner's list: `ActionStatus & { id, kind }`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActionBrief {
+    pub id: [u8; 16],
+    pub kind: String,
+    pub view: ActionView,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenHolding {
     pub mint: String,
@@ -123,6 +164,8 @@ pub struct DepositRow {
     pub status: String,
     /// Unix ms, rounded down to the UTC day (N5).
     pub ts_ms: u64,
+    /// D3: the deposit's amount is public on chain (transparent / Sapling / legacy Orchard source).
+    pub public_source: bool,
 }
 
 fn opt_i64(v: Option<u64>) -> Result<Option<i64>> {
@@ -251,9 +294,9 @@ impl Ledger {
             let part = i16::try_from(part).map_err(|_| LedgerError::Range)?;
             tx.execute(
                 "INSERT INTO relayer_jobs (action_id, part, op, venue, mint, lamports_in, token_amount,
-                                           min_out, meta, dest, gas_lamports, network, not_before)
+                                           min_out, meta, dest, gas_lamports, network, not_before, exec_mode)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                         now() + make_interval(secs => $13))",
+                         now() + make_interval(secs => $13), $14)",
                 &[
                     &id_s,
                     &part,
@@ -268,6 +311,7 @@ impl Ledger {
                     &opt_i64(j.gas_lamports)?,
                     &a.network,
                     &j.delay_secs.max(0.0),
+                    &j.exec_mode,
                 ],
             )
             .await?;
@@ -289,27 +333,42 @@ impl Ledger {
         })
     }
 
+    /// Last `limit` actions of a key with their owner view (R-core-6: the client polls the
+    /// portfolio instead of per-action URLs). Queued first, then most recent day.
+    pub async fn recent_actions(&self, pk: &[u8; 32], limit: i64) -> Result<Vec<ActionBrief>> {
+        let pk_s: &[u8] = pk;
+        let c = self.pool.get().await?;
+        let rows = c
+            .query(
+                &format!(
+                    "SELECT {VIEW_COLS}, a.id, a.kind FROM actions a
+                     WHERE a.anon_pubkey = $1
+                     ORDER BY (a.status = 'queued') DESC, a.created_at DESC, a.id LIMIT $2"
+                ),
+                &[&pk_s, &limit],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ActionBrief {
+                view: view_from_row(&r),
+                id: r.get::<_, Vec<u8>>(7).try_into().unwrap_or([0; 16]),
+                kind: r.get(8),
+            })
+            .collect())
+    }
+
     /// Owner view of an action; `None` if it does not exist or belongs to another key.
     pub async fn action_view(&self, pk: &[u8; 32], id: &[u8; 16]) -> Result<Option<ActionView>> {
         let (pk_s, id_s): (&[u8], &[u8]) = (pk, id);
         let c = self.pool.get().await?;
         let r = c
             .query_opt(
-                "SELECT a.status, a.error, a.rate_lamports_per_zec, a.rate_source,
-                        (extract(epoch FROM a.rate_ts) * 1000)::bigint, a.fill,
-                        (SELECT j.signature FROM relayer_jobs j
-                          WHERE j.action_id = a.id AND j.status = 'confirmed' ORDER BY j.part LIMIT 1)
-                 FROM actions a WHERE a.id = $1 AND a.anon_pubkey = $2",
+                &format!("SELECT {VIEW_COLS} FROM actions a WHERE a.id = $1 AND a.anon_pubkey = $2"),
                 &[&id_s, &pk_s],
             )
             .await?;
-        Ok(r.map(|r| ActionView {
-            status: r.get(0),
-            error: r.get(1),
-            rate: read_rate(&r, 2, 3, 4),
-            fill: r.get(5),
-            solana_tx: r.get(6),
-        }))
+        Ok(r.map(|r| view_from_row(&r)))
     }
 
     pub async fn token_holdings(&self, pk: &[u8; 32]) -> Result<Vec<TokenHolding>> {
@@ -342,7 +401,8 @@ impl Ledger {
                         (floor(extract(epoch FROM COALESCE(
                             (SELECT min(o.created_at) FROM ledger_ops o
                               WHERE o.deposit_id = d.id AND o.kind = 'deposit_credit'),
-                            d.updated_at)) / 86400) * 86400000)::bigint AS ts
+                            d.updated_at)) / 86400) * 86400000)::bigint AS ts,
+                        d.public_source
                  FROM deposits d
                  WHERE d.anon_pubkey = $1 AND d.status IN ('credited', 'refund_pending')
                  ORDER BY ts DESC, d.id DESC LIMIT $2",
@@ -356,6 +416,7 @@ impl Ledger {
                 status: r.get(1),
                 id: r.get::<_, Vec<u8>>(2).try_into().unwrap_or([0; 16]),
                 ts_ms: to_u64(r.get(3)),
+                public_source: r.get(4),
             })
             .collect())
     }
@@ -575,26 +636,63 @@ impl Ledger {
         Ok(true)
     }
 
-    /// M9: 24 h after settlement, drop the `action_id` ↔ signature link; later also the fill
-    /// summary and the exact rate time.
+    /// Janitor (M9 + D1), run periodically by the API:
+    /// - 24 h after settlement: drop the `action_id` ↔ signature link and the recipient;
+    /// - closed actions older than 24–48 h (their `updated_at` is day-truncated): erase
+    ///   amounts, fee, rate, token hold and fill, i.e. everything that matches public
+    ///   Solana amounts;
+    /// - journals (`ledger_ops`, `token_ops`) older than 48 h are deleted: balances live in
+    ///   `balances` / `token_balances`, history is not kept;
+    /// - final ZEC payouts older than 48 h are deleted.
+    ///
+    /// Returns the number of jobs detached.
     pub async fn detach_old_jobs(&self) -> Result<u64> {
+        Ok(self.janitor().await?.detached)
+    }
+
+    pub async fn janitor(&self) -> Result<JanitorReport> {
         let c = self.pool.get().await?;
-        let n = c
+        let detached = c
             .execute(
                 "UPDATE relayer_jobs SET action_id = NULL, dest = NULL
                  WHERE action_id IS NOT NULL AND settled_at < now() - interval '24 hours'",
                 &[],
             )
             .await?;
-        c.execute(
-            // actions.updated_at is truncated to the UTC day, so 48 h = 24..48 h real age.
-            "UPDATE actions SET fill = NULL, rate_ts = NULL
-             WHERE (fill IS NOT NULL OR rate_ts IS NOT NULL) AND status <> 'queued'
-               AND updated_at < now() - interval '48 hours'",
-            &[],
-        )
-        .await?;
-        Ok(n)
+        let scrubbed = c
+            .execute(
+                "UPDATE actions SET amount_zat = 0, fee_zat = 0, hold_zat = 0, rate_lamports_per_zec = NULL,
+                        rate_source = NULL, rate_ts = NULL, token_mint = NULL, token_hold = 0, fill = NULL
+                 WHERE status <> 'queued' AND updated_at < now() - interval '48 hours'
+                   AND (amount_zat <> 0 OR fee_zat <> 0 OR hold_zat <> 0 OR rate_lamports_per_zec IS NOT NULL
+                        OR token_mint IS NOT NULL OR fill IS NOT NULL OR rate_ts IS NOT NULL)",
+                &[],
+            )
+            .await?;
+        let journal_deleted = c
+            .execute(
+                "DELETE FROM ledger_ops WHERE created_at < now() - interval '48 hours'",
+                &[],
+            )
+            .await?
+            + c.execute(
+                "DELETE FROM token_ops WHERE created_at < now() - interval '48 hours'",
+                &[],
+            )
+            .await?;
+        let payouts_deleted = c
+            .execute(
+                "DELETE FROM zec_payouts WHERE status IN ('confirmed', 'failed')
+                   AND updated_at < now() - interval '48 hours'",
+                &[],
+            )
+            .await?;
+        Ok(JanitorReport {
+            detached,
+            scrubbed,
+            journal_deleted,
+            payouts_deleted,
+        })
     }
 
     /// Value stored by the scanner in `pool_meta` (e.g. `pool_ua`, `network`).
@@ -617,9 +715,20 @@ impl Ledger {
     }
 }
 
+/// D1: once settled, a job keeps only hour-precision times (the relayer no longer needs
+/// them) and no launch image.
 async fn mark_settled<C: GenericClient>(tx: &C, ids: &[i64]) -> Result<()> {
     tx.execute(
-        "UPDATE relayer_jobs SET settled_at = now(), updated_at = now() WHERE id = ANY($1)",
+        "UPDATE relayer_jobs SET
+                settled_at  = date_trunc('hour', now()),
+                updated_at  = date_trunc('hour', now()),
+                created_at  = date_trunc('hour', created_at),
+                not_before  = date_trunc('hour', not_before),
+                claimed_at  = date_trunc('hour', claimed_at),
+                lease_until = date_trunc('hour', lease_until),
+                meta        = CASE WHEN meta ? 'image' THEN meta - 'image' ELSE meta END,
+                exec_mode   = NULL
+         WHERE id = ANY($1)",
         &[&ids],
     )
     .await?;

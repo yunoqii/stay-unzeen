@@ -15,6 +15,10 @@ pub struct Policy {
     pub min_deposit_zat: u64,
     /// Smallest hold a balance action may place.
     pub min_action_zat: u64,
+    /// R-core-7: a deposit is credited at K + extra confirmations, extra in 0..=credit_jitter,
+    /// fixed per note (derived from its keyed note_ref), so the crediting moment is not
+    /// exactly "mined height + K". 3 in production, 0 in tests.
+    pub credit_jitter: u32,
 }
 
 /// The memo of a note as known by the wallet.
@@ -38,9 +42,22 @@ pub struct NoteObs {
     /// Header time of the mining block (unix seconds); `expiry` is checked against it.
     pub block_time: Option<u64>,
     pub memo: MemoInput,
+    /// D3: the deposit tx had transparent inputs or unshielded value from Sapling / legacy
+    /// Orchard, so its amount is public on chain. `false` when unknown.
+    pub public_source: bool,
 }
 
 impl NoteObs {
+    /// Confirmations this note needs before it is acted on: K + a per-note extra.
+    pub fn required(&self, p: &Policy) -> u32 {
+        let extra = if p.credit_jitter == 0 {
+            0
+        } else {
+            u32::from(self.note_ref[31]) % (p.credit_jitter + 1)
+        };
+        p.confirmations.max(1) + extra
+    }
+
     pub fn confirmations(&self) -> u32 {
         match self.mined_height {
             Some(h) if self.tip >= h => self.tip - h + 1,
@@ -80,7 +97,7 @@ pub fn evaluate(obs: &NoteObs, p: &Policy, fallback_now: u64) -> Stage {
     if obs.mined_height.is_none() {
         return Stage::Unmined;
     }
-    if obs.confirmations() < p.confirmations.max(1) {
+    if obs.confirmations() < obs.required(p) {
         return Stage::Seen;
     }
     if obs.amount_zat < p.min_deposit_zat {
@@ -141,6 +158,7 @@ mod tests {
         confirmations: 3,
         min_deposit_zat: 100_000,
         min_action_zat: 100_000,
+        credit_jitter: 0,
     };
     const T0: u64 = 1_800_000_000;
 
@@ -176,7 +194,28 @@ mod tests {
             tip,
             block_time: Some(T0),
             memo,
+            public_source: false,
         }
+    }
+
+    #[test]
+    fn credit_jitter_is_per_note_and_bounded() {
+        let pj = Policy { credit_jitter: 3, ..P };
+        let m = MemoInput::Text(memo(Op::Deposit, T0 as u32 + 60, Target::None));
+        let mut seen = std::collections::BTreeSet::new();
+        for b in 0u8..=255 {
+            let mut o = obs(1_000_000, Some(100), 100, m.clone());
+            o.note_ref[31] = b;
+            let need = o.required(&pj);
+            assert!((3..=6).contains(&need));
+            seen.insert(need);
+            // Exactly `need` confirmations finalize; one less does not.
+            o.tip = 100 + need - 1;
+            assert!(matches!(evaluate(&o, &pj, T0), Stage::Final(_)));
+            o.tip -= 1;
+            assert_eq!(evaluate(&o, &pj, T0), Stage::Seen);
+        }
+        assert_eq!(seen.len(), 4, "all of K..K+3 occur");
     }
 
     #[test]

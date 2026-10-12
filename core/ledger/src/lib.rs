@@ -12,15 +12,19 @@
 pub mod actions;
 pub mod decide;
 mod migrate;
+pub mod payouts;
 
 use deadpool_postgres::{GenericClient, Manager, ManagerConfig, Pool, RecyclingMethod};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use tokio_postgres::NoTls;
 
-pub use actions::{ActionView, DepositRow, JobOp, NewAction, NewJob, NewPayout, RateUsed, TokenHolding};
+pub use actions::{
+    ActionBrief, ActionView, DepositRow, JanitorReport, JobOp, NewAction, NewJob, NewPayout, RateUsed, TokenHolding,
+};
 pub use deadpool_postgres;
 pub use decide::{MemoInput, NoteObs, Outcome, Policy, Stage, evaluate};
+pub use payouts::{InflightPayout, PayoutRow};
 pub use tokio_postgres;
 pub use tokio_postgres::Config as PgConfig;
 
@@ -338,6 +342,13 @@ impl Ledger {
                 finalize(&tx, id, amount, height, outcome).await?
             }
         };
+        if obs.public_source {
+            tx.execute(
+                "UPDATE deposits SET public_source = TRUE WHERE note_ref = $1 AND NOT public_source",
+                &[&note_ref],
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(out)
     }
@@ -378,37 +389,10 @@ impl Ledger {
     }
 
     async fn close_action(&self, id: &[u8; 16], ok: bool, error: Option<&str>) -> Result<()> {
-        let id_s: &[u8] = id;
         let mut c = self.pool.get().await?;
         let tx = c.transaction().await?;
-        let status = if ok { "executed" } else { "failed" };
-        let r = tx
-            .query_opt(
-                "UPDATE actions SET status = $2, error = $3, updated_at = now()
-                 WHERE id = $1 AND status = 'queued' RETURNING anon_pubkey, hold_zat",
-                &[&id_s, &status, &error],
-            )
-            .await?
-            .ok_or(LedgerError::NotFound)?;
-        let pk: Vec<u8> = r.get(0);
-        let hold: i64 = r.get(1);
-        if hold > 0 {
-            if ok {
-                tx.execute(
-                    "UPDATE balances SET held_zat = held_zat - $2, updated_at = now() WHERE anon_pubkey = $1",
-                    &[&pk, &hold],
-                )
-                .await?;
-                journal(&tx, &pk, "settle", 0, -hold, None, Some(id_s)).await?;
-            } else {
-                tx.execute(
-                    "UPDATE balances SET held_zat = held_zat - $2, available_zat = available_zat + $2,
-                            updated_at = now() WHERE anon_pubkey = $1",
-                    &[&pk, &hold],
-                )
-                .await?;
-                journal(&tx, &pk, "release", hold, -hold, None, Some(id_s)).await?;
-            }
+        if !payouts::close_in(&tx, id, ok, error).await? {
+            return Err(LedgerError::NotFound);
         }
         tx.commit().await?;
         Ok(())

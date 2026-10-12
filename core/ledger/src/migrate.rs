@@ -6,6 +6,22 @@ use deadpool_postgres::Client;
 const MIGRATIONS: &[(i32, &str, &str)] = &[
     (1, "0001_ledger", include_str!("../../migrations/0001_ledger.sql")),
     (2, "0002_relayer", include_str!("../../migrations/0002_relayer.sql")),
+    (
+        3,
+        "0003_payouts_epochs",
+        include_str!("../../migrations/0003_payouts_epochs.sql"),
+    ),
+    (
+        4,
+        "0004_relayer_state",
+        include_str!("../../migrations/0004_relayer_state.sql"),
+    ),
+    (5, "0005_exec_mode", include_str!("../../migrations/0005_exec_mode.sql")),
+    (
+        6,
+        "0006_exec_mode_scrub",
+        include_str!("../../migrations/0006_exec_mode_scrub.sql"),
+    ),
 ];
 
 /// Arbitrary constant for `pg_advisory_xact_lock` so concurrent starters serialize.

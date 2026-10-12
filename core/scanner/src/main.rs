@@ -13,8 +13,10 @@
 
 mod blocks;
 mod config;
+mod cover;
 mod deposits;
 mod memo;
+mod payout;
 mod seed;
 mod send;
 mod service;
@@ -70,6 +72,9 @@ enum Cmd {
         /// Run a single pass and exit.
         #[arg(long)]
         once: bool,
+        /// Also execute `withdraw_zec` payouts (needs the seed key; mainnet gated).
+        #[arg(long, env = "UNZEEN_PAYOUTS")]
+        payouts: bool,
     },
     /// DEV: sync and print incoming notes (with memos).
     Sync {
@@ -95,10 +100,12 @@ enum Cmd {
     },
     /// DEV: fetch a tx from lightwalletd and decrypt it with the pool keys (prints memos).
     InspectTx { txid: String },
-    /// Read-only check: parse recent full shielded txs from lightwalletd (no wallet needed).
+    /// Read-only H1 probe: fetch ALL shielded txs of the last N blocks like the scanner does
+    /// and print traffic/time counters (no wallet needed, no txids printed).
     Probe {
-        #[arg(long, default_value_t = 200)]
+        #[arg(long, default_value_t = 20)]
         blocks: u32,
+        /// How many of the fetched txs to parse as a consensus check.
         #[arg(long, default_value_t = 5)]
         max_txs: usize,
     },
@@ -132,6 +139,18 @@ enum Cmd {
         expiry_mins: u64,
         #[arg(long)]
         nonce: Option<u64>,
+    },
+    /// DEV: sign an API request with an anon key file; prints `-H` arguments for curl.
+    SignRequest {
+        #[arg(long)]
+        anon_key: PathBuf,
+        #[arg(long, default_value = "GET")]
+        method: String,
+        /// Raw request-target, e.g. /api/portfolio
+        #[arg(long)]
+        path: String,
+        #[arg(long, default_value = "")]
+        body: String,
     },
     /// DEV: print the ledger balance of an anon pubkey (base58).
     Balance { pubkey: String },
@@ -228,7 +247,11 @@ async fn run() -> anyhow::Result<()> {
                 println!("ufvk:     {}", out.ufvk);
             }
         }
-        Cmd::Serve { interval, once } => service::serve(c, interval, once).await?,
+        Cmd::Serve {
+            interval,
+            once,
+            payouts,
+        } => service::serve(c, interval, once, payouts).await?,
         Cmd::Sync { watch, all, json } => {
             dev_only(c, "sync")?;
             let db_path = c.wallet_db_path();
@@ -242,12 +265,13 @@ async fn run() -> anyhow::Result<()> {
                 deposits::list(&db_path)?.iter().map(Deposit::print_key).collect()
             };
             let mut backoff = 5;
+            let cover_cfg = cover::CoverCfg::from_env()?;
             loop {
                 let res: anyhow::Result<u32> = async {
                     if client.is_none() {
                         client = Some(c.connect().await?);
                     }
-                    let rep = sync::sync(c.params(), client.as_mut().expect("set"), &mut db).await?;
+                    let rep = sync::sync(c.params(), client.as_mut().expect("set"), &mut db, &cover_cfg).await?;
                     tracing::info!(
                         tip = rep.tip,
                         scanned = rep.scanned_blocks,
@@ -309,10 +333,29 @@ async fn run() -> anyhow::Result<()> {
         }
         Cmd::Probe { blocks, max_txs } => {
             let mut client = c.connect().await?;
-            let (found, ok) = sync::probe(c.params(), &mut client, blocks.max(1), max_txs).await?;
-            println!("probe: {ok}/{found} shielded txs parsed OK ({})", c.network.as_str());
-            if ok < found {
-                bail!("some transactions failed to parse");
+            let cfg = cover::CoverCfg::from_env()?;
+            let r = sync::probe(c.params(), &mut client, blocks.max(1), max_txs, &cfg).await?;
+            let cv = &r.cover;
+            println!("network:        {}", c.network.as_str());
+            println!("blocks:         {} (tip {})", r.blocks, r.tip);
+            println!("txs (all):      {}", r.all_txs);
+            println!("compact blocks: {} bytes in {} ms", r.compact_bytes, r.compact_ms);
+            println!(
+                "cover fetch:    {} shielded txs, fetched {}, failed {}, retries {}",
+                cv.candidates, cv.fetched, cv.failed, cv.retries
+            );
+            println!(
+                "cover traffic:  {} bytes ({:.1} KiB/block, {:.1} KiB/tx) in {} ms (concurrency {}, {} rps)",
+                cv.bytes,
+                cv.bytes as f64 / 1024.0 / r.blocks.max(1) as f64,
+                cv.bytes as f64 / 1024.0 / cv.fetched.max(1) as f64,
+                cv.ms,
+                cfg.concurrency,
+                cfg.rps
+            );
+            println!("parse check:    {}/{} OK", r.parsed_ok, r.parsed);
+            if r.parsed_ok < r.parsed || cv.failed > 0 {
+                bail!("some transactions failed to fetch or parse");
             }
         }
         Cmd::Deposits { json } => {
@@ -381,6 +424,35 @@ async fn run() -> anyhow::Result<()> {
             .sign(&sk, policy.chain);
             println!("anon pubkey: {}", pubkey_to_b58(&m.body.anon_pubkey));
             println!("memo:        {}", m.encode());
+        }
+        Cmd::SignRequest {
+            anon_key,
+            method,
+            path,
+            body,
+        } => {
+            dev_only(c, "sign-request")?;
+            let hexs = Zeroizing::new(std::fs::read_to_string(&anon_key).context("reading anon key")?);
+            let sk: [u8; 32] = hex::decode(hexs.trim())
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .ok_or_else(|| anyhow!("anon key file must hold 32 bytes hex"))?;
+            let sk = SigningKey::from_bytes(&sk);
+            let chain = service::policy_from_env(c)?.chain;
+            let ts = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+            let h = unzeen_protocol::api_auth::sign_request(
+                chain,
+                &sk,
+                &method.to_uppercase(),
+                &path,
+                body.as_bytes(),
+                rand::random(),
+                ts,
+            );
+            println!(
+                "-H x-unzeen-pubkey:{} -H x-unzeen-nonce:{} -H x-unzeen-ts:{} -H x-unzeen-sig:{}",
+                h.pubkey, h.nonce, h.ts, h.sig
+            );
         }
         Cmd::Balance { pubkey } => {
             dev_only(c, "balance")?;

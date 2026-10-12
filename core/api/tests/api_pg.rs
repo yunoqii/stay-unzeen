@@ -52,8 +52,10 @@ fn config(url: &str) -> Config {
             confirmations: 3,
             min_deposit_zat: 100_000,
             min_action_zat: 100_000,
+            credit_jitter: 0,
         },
         pool_address: None,
+        media_dir: std::env::temp_dir().join("unzeen-media-test"),
         rate: RateConfig {
             fixed_lamports_per_zec: Some(RATE),
             oneclick_url: "http://127.0.0.1:9".into(),
@@ -63,14 +65,18 @@ fn config(url: &str) -> Config {
             spread_bps: 0,
         },
         exec: ExecConfig {
-            jitter_min_secs: 3.0,
-            jitter_max_secs: 20.0,
+            epoch_min_secs: 30.0,
+            epoch_max_secs: 60.0,
+            max_epoch_min_secs: 300.0,
+            max_epoch_max_secs: 900.0,
             withdraw_token_delay_min_secs: 30.0,
             withdraw_token_delay_max_secs: 300.0,
             zec_payout_delay_min_secs: 60.0,
             zec_payout_delay_max_secs: 600.0,
         },
+        create_enabled: true,
         fees: Fees {
+            now_fee_zat: 500,
             create_fee_zat: 100_000,
             withdraw_zec_fee_zat: 15_000,
             withdraw_token_gas_lamports: 2_000_000,
@@ -147,6 +153,7 @@ struct Resp {
     status: StatusCode,
     headers: reqwest::header::HeaderMap,
     body: Value,
+    raw_len: usize,
 }
 
 impl Env {
@@ -181,8 +188,14 @@ impl Env {
         let status = r.status();
         let headers = r.headers().clone();
         let text = r.text().await.unwrap();
+        let raw_len = text.len();
         let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-        Resp { status, headers, body }
+        Resp {
+            status,
+            headers,
+            body,
+            raw_len,
+        }
     }
 
     fn sign(&self, sk: &SigningKey, method: &str, path: &str, body: &str) -> api_auth::SignedHeaders {
@@ -219,6 +232,7 @@ impl Env {
             tip: 10,
             block_time: Some(now_ms() / 1000),
             memo: MemoInput::Text(memo),
+            public_source: false,
         };
         self.ledger.observe_note(&obs, now_ms() / 1000).await.unwrap();
     }
@@ -229,7 +243,8 @@ fn code(r: &Resp) -> &str {
 }
 
 fn buy_body(zec_in: u64) -> String {
-    json!({"op":"buy","venue":"pumpfun","mint":MINT,"zecIn":zec_in.to_string(),"minOut":"1"}).to_string()
+    json!({"op":"buy","venue":"pumpfun","mint":MINT,"zecIn":zec_in.to_string(),"minOut":"1","exec":"delayed"})
+        .to_string()
 }
 
 #[tokio::test]
@@ -241,10 +256,23 @@ async fn pool_info() {
     e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
     let r = e.get("/api/pool").await;
     assert_eq!(r.status, StatusCode::OK);
+    let mut b = r.body.clone();
+    let rate = b
+        .as_object_mut()
+        .unwrap()
+        .remove("rate")
+        .expect("fixed devnet rate is public");
+    assert_eq!(rate["lamportsPerZec"], RATE.to_string());
+    assert_eq!(rate["source"], "fixed");
+    assert_eq!(rate["lamportsPerZecBuy"], rate["lamportsPerZec"], "spread 0 in tests");
     assert_eq!(
-        r.body,
+        b,
         json!({"address":"utest1example","network":"test","chainId":"0202",
-               "minDepositZat":"100000","minActionZat":"100000","confirmations":3})
+               "minDepositZat":"100000","minActionZat":"100000","confirmations":3,
+               "createEnabled":true,
+               "fees":{"createFeeZat":"100000","withdrawZecFeeZat":"15000",
+                       "withdrawTokenGasLamports":"2000000","withdrawTokenCostLamports":"2100000",
+                       "nowFeeZat":"500"}})
     );
     assert!(r.headers.get("set-cookie").is_none());
     // A pool published for another network is never served.
@@ -330,7 +358,8 @@ async fn buy_flow_hold_retry_settle() {
         (r.status, code(&r)),
         (StatusCode::UNPROCESSABLE_ENTITY, "insufficient_balance")
     );
-    let mbody = json!({"op":"buy","venue":"meteora-dbc","mint":MINT,"zecIn":"200000","minOut":"1"}).to_string();
+    let mbody = json!({"op":"buy","venue":"meteora-dbc","mint":MINT,"zecIn":"200000","minOut":"1","exec":"delayed"})
+        .to_string();
     let r = e.signed(&me, "POST", "/api/actions", &mbody).await;
     assert_eq!(
         (r.status, code(&r)),
@@ -338,8 +367,8 @@ async fn buy_flow_hold_retry_settle() {
     );
     for bad in [
         "not json",
-        r#"{"op":"buy","venue":"pumpfun","mint":"x","zecIn":"200000","minOut":"1"}"#,
-        r#"{"op":"buy","venue":"pumpfun","mint":"So11111111111111111111111111111111111111112","zecIn":"0200000","minOut":"1"}"#,
+        r#"{"op":"buy","venue":"pumpfun","mint":"x","zecIn":"200000","minOut":"1","exec":"delayed"}"#,
+        r#"{"op":"buy","venue":"pumpfun","mint":"So11111111111111111111111111111111111111112","zecIn":"0200000","minOut":"1","exec":"delayed"}"#,
         r#"{"op":"claim"}"#,
     ] {
         let r = e.signed(&me, "POST", "/api/actions", bad).await;
@@ -373,19 +402,32 @@ async fn buy_flow_hold_retry_settle() {
     let r3 = e.raw("POST", "/api/actions", &other, Some(&h3)).await;
     assert_eq!((r3.status, code(&r3)), (StatusCode::CONFLICT, "replay"));
 
+    // D10: 0.04 SOL shaved 0-1 % and rounded down to 0.001 SOL -> 0.039 SOL (0.040 only if
+    // the shave is exactly 0); the user is charged only that (10 SOL/ZEC -> 390_000 zat).
+    let lamports = e
+        .one_i64(&format!(
+            "SELECT lamports_in FROM {}.relayer_jobs WHERE status = 'queued' AND network = 'devnet'",
+            e.schema
+        ))
+        .await;
+    assert!(lamports == 39_000_000 || lamports == 40_000_000, "{lamports}");
+    let held = lamports / 100;
     let p = e.signed(&me, "GET", "/api/portfolio", "").await;
     assert_eq!(
         (p.body["zecBalance"].as_str(), p.body["zecHeld"].as_str()),
-        (Some("600000"), Some("400000"))
+        (
+            Some((1_000_000 - held).to_string().as_str()),
+            Some(held.to_string().as_str())
+        )
     );
+    // D2: not_before is an epoch boundary 0..60 s ahead.
     assert_eq!(
         e.one_i64(&format!(
-            "SELECT lamports_in FROM {}.relayer_jobs WHERE status = 'queued'
-              AND not_before >= now() + interval '2 seconds' AND network = 'devnet'",
+            "SELECT count(*) FROM {}.relayer_jobs WHERE not_before > now() AND not_before <= now() + interval '61 seconds'",
             e.schema
         ))
         .await,
-        40_000_000
+        1
     );
     // The relayer's tables carry no anon key.
     assert_eq!(
@@ -408,10 +450,19 @@ async fn buy_flow_hold_retry_settle() {
         StatusCode::NOT_FOUND
     );
 
+    // Relayer wrote the signature before broadcast -> owner sees "sent".
+    e.sql(&format!(
+        "UPDATE {}.relayer_jobs SET status = 'sent', signature = 'SIGBUY'",
+        e.schema
+    ))
+    .await;
+    let s = e.signed(&me, "GET", &path, "").await;
+    assert_eq!(s.body["status"], "sent");
+
     // Relayer confirms; the background settler closes the hold.
     e.sql(&format!(
         "UPDATE {}.relayer_jobs SET status = 'confirmed', signature = 'SIGBUY', out_token_amount = 123456,
-                out_lamports = 40000000",
+                out_lamports = lamports_in",
         e.schema
     ))
     .await;
@@ -434,8 +485,10 @@ async fn buy_flow_hold_retry_settle() {
     );
 
     // Sell more than held -> insufficient; graduated token -> 409.
-    let sell =
-        |amt: &str| json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":amt,"minZecOut":"100000"}).to_string();
+    let sell = |amt: &str| {
+        json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":amt,"minZecOut":"100000","exec":"delayed"})
+            .to_string()
+    };
     let r = e.signed(&me, "POST", "/api/actions", &sell("999999")).await;
     assert_eq!(code(&r), "insufficient_balance");
     e.sql(&format!(
@@ -448,7 +501,8 @@ async fn buy_flow_hold_retry_settle() {
 
     // Frozen balance: every action -> 423.
     e.sql(&format!("UPDATE {}.balances SET frozen = TRUE", e.schema)).await;
-    let b2 = json!({"op":"buy","venue":"pumpfun","mint":MINT2,"zecIn":"100000","minOut":"1"}).to_string();
+    let b2 =
+        json!({"op":"buy","venue":"pumpfun","mint":MINT2,"zecIn":"100000","minOut":"1","exec":"delayed"}).to_string();
     let r = e.signed(&me, "POST", "/api/actions", &b2).await;
     assert_eq!((r.status, code(&r)), (StatusCode::LOCKED, "balance_frozen"));
     e.drop_schema().await;
@@ -509,14 +563,13 @@ async fn withdrawals_and_create() {
     .to_string();
     let r = e.signed(&me, "POST", "/api/actions", &c).await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
-    assert_eq!(
-        e.one_i64(&format!(
+    let l = e
+        .one_i64(&format!(
             "SELECT lamports_in FROM {}.relayer_jobs WHERE op = 'create' AND meta->>'symbol' = 'PUNZ'",
             e.schema
         ))
-        .await,
-        20_000_000
-    );
+        .await;
+    assert!(l == 19_000_000 || l == 20_000_000, "{l}");
     let bad = json!({"op":"create","venue":"pumpfun","meta":{"name":"x","symbol":"$$$"}}).to_string();
     assert_eq!(code(&e.signed(&me, "POST", "/api/actions", &bad).await), "bad_request");
 
@@ -528,7 +581,7 @@ async fn withdrawals_and_create() {
     ))
     .await;
     let dests = [MINT, "11111111111111111111111111111112"];
-    let wt = json!({"op":"withdraw_token","mint":MINT2,"amount":"1000","to":dests,
+    let wt = json!({"op":"withdraw_token","mint":MINT2,"amount":"1000","to":dests,"exec":"delayed",
                     "smart":{"parts":2,"maxDelayMin":5}})
     .to_string();
     let r = e.signed(&me, "POST", "/api/actions", &wt).await;
@@ -551,7 +604,7 @@ async fn withdrawals_and_create() {
         .await,
         82_000
     );
-    let mismatch = json!({"op":"withdraw_token","mint":MINT2,"amount":"10","to":[MINT],
+    let mismatch = json!({"op":"withdraw_token","mint":MINT2,"amount":"10","to":[MINT],"exec":"delayed",
                           "smart":{"parts":2,"maxDelayMin":5}})
     .to_string();
     assert_eq!(
@@ -681,6 +734,101 @@ async fn mainnet_actions_disabled_by_default() {
     assert_eq!(
         (r.status, code(&r)),
         (StatusCode::SERVICE_UNAVAILABLE, "venue_unavailable")
+    );
+    e.drop_schema().await;
+}
+
+#[tokio::test]
+async fn media_by_hash_only() {
+    let Some(e) = setup().await else { return };
+    let dir = std::env::temp_dir().join("unzeen-media-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let name = format!("{}.png", "ab".repeat(20));
+    std::fs::write(dir.join(&name), b"\x89PNG").unwrap();
+    let r = e.raw("GET", &format!("/media/{name}"), "", None).await;
+    assert_eq!(r.status, StatusCode::OK);
+    for bad in [
+        "/media/",
+        "/media/..%2Fx.png",
+        "/media/ABAB.png",
+        &format!("/media/{}.svg", "ab".repeat(20)),
+        &format!("/media/{}.png", "cd".repeat(20)),
+    ] {
+        assert_eq!(e.raw("GET", bad, "", None).await.status, StatusCode::NOT_FOUND, "{bad}");
+    }
+    e.drop_schema().await;
+}
+
+#[tokio::test]
+async fn create_without_executor_is_unavailable() {
+    // D6: until a relayer executes `create`, the API refuses it and holds nothing.
+    let Some(e) = setup_with(|c| c.create_enabled = false).await else {
+        return;
+    };
+    let me = user(7);
+    e.fund(7, 0, 2_000_000).await;
+    let c = json!({"op":"create","venue":"pumpfun","meta":{"name":"Nope","symbol":"NOPE"},"initialBuyZec":"200000"})
+        .to_string();
+    let r = e.signed(&me, "POST", "/api/actions", &c).await;
+    assert_eq!(
+        (r.status, code(&r)),
+        (StatusCode::SERVICE_UNAVAILABLE, "venue_unavailable")
+    );
+    assert_eq!(
+        e.one_i64(&format!("SELECT held_zat FROM {}.balances", e.schema)).await,
+        0
+    );
+    e.drop_schema().await;
+}
+
+#[tokio::test]
+async fn exec_now_runs_at_once_and_charges_the_fee() {
+    let Some(e) = setup().await else { return };
+    let me = user(8);
+    e.fund(8, 0, 2_000_000).await;
+    let body = json!({"op":"buy","venue":"pumpfun","mint":MINT,"zecIn":"400000","minOut":"1","exec":"now"}).to_string();
+    let r = e.signed(&me, "POST", "/api/actions", &body).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {}.relayer_jobs WHERE exec_mode = 'now' AND not_before <= now()",
+            e.schema
+        ))
+        .await,
+        1
+    );
+    // Flat now fee (500 zat in tests) on top of the buy.
+    assert_eq!(
+        e.one_i64(&format!("SELECT fee_zat FROM {}.actions", e.schema)).await,
+        500
+    );
+    // Withdrawals refuse `now`; `pad` is accepted and ignored.
+    let wz = json!({"op":"withdraw_zec","to":"utest1x","amount":"100000","exec":"now"}).to_string();
+    assert_eq!(code(&e.signed(&me, "POST", "/api/actions", &wz).await), "bad_request");
+    let padded =
+        json!({"op":"buy","venue":"pumpfun","mint":MINT,"zecIn":"400000","minOut":"1","pad":"      "}).to_string();
+    let r = e.signed(&me, "POST", "/api/actions", &padded).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(r.raw_len % 1024, 0, "padded response");
+    // Portfolio lists own action statuses, padded to a fixed bucket.
+    let p = e.signed(&me, "GET", "/api/portfolio", "").await;
+    assert_eq!(p.body["actions"].as_array().unwrap().len(), 2);
+    assert_eq!(p.body["actions"][0]["status"], "queued");
+    assert_eq!(p.raw_len % 4096, 0);
+    // `max`: epoch 5..15 min ahead, mode recorded for the relayer.
+    let body = json!({"op":"buy","venue":"pumpfun","mint":MINT,"zecIn":"400000","minOut":"1","exec":"max"}).to_string();
+    assert_eq!(
+        e.signed(&me, "POST", "/api/actions", &body).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {}.relayer_jobs WHERE exec_mode = 'max'
+               AND not_before > now() AND not_before <= now() + interval '901 seconds'",
+            e.schema
+        ))
+        .await,
+        1
     );
     e.drop_schema().await;
 }

@@ -4,7 +4,7 @@
 //!
 //! Flow mirrors zcash-devtool `wallet sync` + `wallet enhance`, minus TUI/transparent.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use anyhow::anyhow;
 use futures_util::TryStreamExt;
@@ -29,7 +29,11 @@ use zcash_protocol::consensus::{BlockHeight, BranchId};
 
 use zcash_protocol::consensus::Network;
 
-use crate::{blocks::MemBlocks, wallet::Db};
+use crate::{
+    blocks::MemBlocks,
+    cover::{self, CoverCfg, CoverStats},
+    wallet::Db,
+};
 
 type Client = CompactTxStreamerClient<Channel>;
 
@@ -46,17 +50,20 @@ pub struct SyncReport {
     /// look un-mined only because their blocks were rewound and not rescanned yet, so the
     /// ledger must not be fed from this pass (review-day3 N4).
     pub complete: bool,
+    /// H1 cover-fetch counters (no txids).
+    pub cover: CoverStats,
 }
 
-pub async fn sync(net: Network, client: &mut Client, db: &mut Db) -> anyhow::Result<SyncReport> {
+pub async fn sync(net: Network, client: &mut Client, db: &mut Db, cfg: &CoverCfg) -> anyhow::Result<SyncReport> {
     update_subtree_roots(client, db).await?;
+    let mut cover = CoverStats::default();
 
     let mut scanned_blocks = 0u64;
     let mut restarts = 0u32;
     let mut complete = true;
     let tip = loop {
         let tip = update_chain_tip(client, db).await?;
-        let restart = scan_all(net, client, db, tip, &mut scanned_blocks).await?;
+        let restart = scan_all(net, client, db, cfg, &mut cover, tip, &mut scanned_blocks).await?;
         if !restart {
             break tip;
         }
@@ -69,12 +76,14 @@ pub async fn sync(net: Network, client: &mut Client, db: &mut Db) -> anyhow::Res
         }
     };
 
-    let enhanced_txs = enhance(net, client, db, tip).await?;
+    let leftover = enhance_leftovers(net, client, db, cfg, tip, complete).await?;
+    cover.add(&leftover);
     Ok(SyncReport {
         tip: u32::from(tip),
         scanned_blocks,
-        enhanced_txs,
+        enhanced_txs: cover.kept,
         complete,
+        cover,
     })
 }
 
@@ -157,6 +166,8 @@ async fn scan_all(
     net: Network,
     client: &mut Client,
     db: &mut Db,
+    cfg: &CoverCfg,
+    stats: &mut CoverStats,
     tip: BlockHeight,
     scanned: &mut u64,
 ) -> anyhow::Result<bool> {
@@ -173,7 +184,7 @@ async fn scan_all(
                 }
             };
             cur = rest;
-            if scan_batch(net, client, db, &batch, tip).await? {
+            if scan_batch(net, client, db, cfg, stats, &batch, tip).await? {
                 return Ok(true);
             }
             *scanned += batch.len() as u64;
@@ -186,6 +197,8 @@ async fn scan_batch(
     net: Network,
     client: &mut Client,
     db: &mut Db,
+    cfg: &CoverCfg,
+    stats: &mut CoverStats,
     range: &ScanRange,
     tip: BlockHeight,
 ) -> anyhow::Result<bool> {
@@ -205,6 +218,7 @@ async fn scan_batch(
         pool_types: Default::default(),
     };
     let blocks: Vec<_> = client.get_block_range(req).await?.into_inner().try_collect().await?;
+    let candidates = cover::shielded_txids(&blocks);
     let source = MemBlocks::new(blocks);
 
     let prior = start - 1;
@@ -219,6 +233,10 @@ async fn scan_batch(
 
     match scan_cached_blocks(&net, &source, db, start, &chain_state, source.len()) {
         Ok(_) => {
+            drop(source);
+            // H1: fetch ALL shielded txs of these blocks; keep only the ones the wallet wants.
+            let st = enhance_from(net, client, db, cfg, candidates, tip).await?;
+            stats.add(&st);
             let latest = db.suggest_scan_ranges()?;
             Ok(latest.first().is_some_and(|r| r.priority() > range.priority()))
         }
@@ -246,42 +264,105 @@ fn rewind(db: &mut Db, at: BlockHeight, tip: BlockHeight) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Fetch full transactions the wallet asked for (to recover memos / statuses).
-async fn enhance(net: Network, client: &mut Client, db: &mut Db, tip: BlockHeight) -> anyhow::Result<usize> {
-    let mut done = BTreeSet::new();
-    let mut enhanced = 0;
-    loop {
-        let mut progressed = false;
-        for req in db.transaction_data_requests()? {
-            if !done.insert(req.clone()) {
-                continue;
+/// Txids the wallet wants full data for (memo recovery) and txids it wants a status for.
+fn wanted(db: &Db) -> anyhow::Result<(HashSet<TxId>, Vec<TxId>)> {
+    let mut enh = HashSet::new();
+    let mut status = Vec::new();
+    for r in db.transaction_data_requests()? {
+        match r {
+            TransactionDataRequest::Enhancement(t) => {
+                enh.insert(t);
             }
-            progressed = true;
-            match &req {
-                TransactionDataRequest::GetStatus(txid) => {
-                    let status = fetch_tx(net, client, tip, *txid)
-                        .await?
-                        .map_or(TransactionStatus::TxidNotRecognized, |(_, h)| {
-                            h.map_or(TransactionStatus::NotInMainChain, TransactionStatus::Mined)
-                        });
-                    db.set_transaction_status(*txid, status)?;
-                }
-                TransactionDataRequest::Enhancement(txid) => match fetch_tx(net, client, tip, *txid).await? {
-                    None => db.set_transaction_status(*txid, TransactionStatus::TxidNotRecognized)?,
-                    Some((tx, h)) => {
-                        decrypt_and_store_transaction(&net, db, &tx, h)?;
-                        enhanced += 1;
-                    }
-                },
-                #[allow(unreachable_patterns)]
-                _ => {}
-            }
-        }
-        if !progressed {
-            break;
+            TransactionDataRequest::GetStatus(t) => status.push(t),
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
     }
-    Ok(enhanced)
+    Ok((enh, status))
+}
+
+/// H1: fetch every candidate (all shielded txs of some blocks), store the wanted ones.
+async fn enhance_from(
+    net: Network,
+    client: &mut Client,
+    db: &mut Db,
+    cfg: &CoverCfg,
+    candidates: Vec<TxId>,
+    tip: BlockHeight,
+) -> anyhow::Result<CoverStats> {
+    let (want, _) = wanted(db)?;
+    if candidates.is_empty() {
+        return Ok(CoverStats::default());
+    }
+    let (kept, st) = cover::fetch_all(client, cfg, candidates, &want).await;
+    for k in kept {
+        let tx = Transaction::read(&k.raw[..], BranchId::for_height(&net, k.height.unwrap_or(tip)))?;
+        decrypt_and_store_transaction(&net, db, &tx, k.height)?;
+    }
+    debug!(
+        candidates = st.candidates,
+        failed = st.failed,
+        retries = st.retries,
+        bytes = st.bytes,
+        ms = st.ms,
+        "cover fetch"
+    );
+    Ok(st)
+}
+
+/// Requests left after the per-batch cover fetch (e.g. a fetch that failed in an earlier
+/// pass). Never a lone `GetTransaction` for our txid:
+/// - `Enhancement` of a mined tx: cover-fetch its whole block again;
+/// - `GetStatus`: our own txs are found by the compact scan (they spend our nullifiers),
+///   so a tx still unmined after a complete scan is answered locally as not in the main chain.
+async fn enhance_leftovers(
+    net: Network,
+    client: &mut Client,
+    db: &mut Db,
+    cfg: &CoverCfg,
+    tip: BlockHeight,
+    complete: bool,
+) -> anyhow::Result<CoverStats> {
+    let mut total = CoverStats::default();
+    let (want, status) = wanted(db)?;
+    // Only a complete scan up to `tip` proves "not mined".
+    for t in status.into_iter().filter(|_| complete) {
+        match db.get_tx_height(t)? {
+            Some(h) => db.set_transaction_status(t, TransactionStatus::Mined(h))?,
+            None => db.set_transaction_status(t, TransactionStatus::NotInMainChain)?,
+        }
+    }
+    let mut heights = BTreeSet::new();
+    let mut unknown = 0usize;
+    for t in &want {
+        match db.get_tx_height(*t)? {
+            Some(h) => {
+                heights.insert(u32::from(h));
+            }
+            None => unknown += 1,
+        }
+    }
+    if unknown > 0 {
+        // Unmined and not ours to broadcast: wait until the compact scan sees it mined.
+        debug!(unknown, "enhancement requests without a mined height deferred");
+    }
+    for h in heights {
+        let req = service::BlockRange {
+            start: Some(service::BlockId {
+                height: u64::from(h),
+                hash: vec![],
+            }),
+            end: Some(service::BlockId {
+                height: u64::from(h),
+                hash: vec![],
+            }),
+            pool_types: Default::default(),
+        };
+        let blocks: Vec<_> = client.get_block_range(req).await?.into_inner().try_collect().await?;
+        let st = enhance_from(net, client, db, cfg, cover::shielded_txids(&blocks), tip).await?;
+        total.add(&st);
+    }
+    Ok(total)
 }
 
 async fn fetch_tx(
@@ -304,11 +385,17 @@ async fn fetch_tx(
     Ok(Some((tx, mined)))
 }
 
-/// Read-only health check: fetch the last `n` compact blocks, pick txs with Orchard/Ironwood
-/// actions, download the full txs and parse them with the network's consensus branch id.
-/// Proves the memo path (`GetTransaction` → `Transaction::read`) works on the current chain.
-/// Returns (shielded txs found, txs parsed OK). Prints no addresses/values.
-pub async fn probe(net: Network, client: &mut Client, n: u32, max_txs: usize) -> anyhow::Result<(usize, usize)> {
+/// Read-only probe of the H1 cover fetch: take the last `n` compact blocks, fetch ALL their
+/// Orchard/Ironwood txs exactly as the scanner does (shuffled, paced, backoff) and parse a
+/// sample of `parse_sample` of them with the network's branch id. No wallet needed; prints
+/// counters only (no txids, no addresses, no values).
+pub async fn probe(
+    net: Network,
+    client: &mut Client,
+    n: u32,
+    parse_sample: usize,
+    cfg: &CoverCfg,
+) -> anyhow::Result<ProbeReport> {
     let tip = u32::try_from(
         client
             .get_latest_block(service::ChainSpec::default())
@@ -327,40 +414,42 @@ pub async fn probe(net: Network, client: &mut Client, n: u32, max_txs: usize) ->
         }),
         pool_types: Default::default(),
     };
+    let t0 = std::time::Instant::now();
     let blocks: Vec<_> = client.get_block_range(req).await?.into_inner().try_collect().await?;
-    let mut found = 0;
-    let mut ok = 0;
-    for b in blocks.iter().rev() {
-        for ctx in &b.vtx {
-            if ctx.actions.is_empty() && ctx.ironwood_actions.is_empty() {
-                continue;
-            }
-            found += 1;
-            if found > max_txs {
-                return Ok((found - 1, ok));
-            }
-            let mut id = [0u8; 32];
-            id.copy_from_slice(&ctx.txid);
-            let txid = TxId::from_bytes(id);
-            match fetch_tx(net, client, BlockHeight::from_u32(tip), txid).await {
-                Ok(Some((tx, h))) => {
-                    ok += 1;
-                    println!(
-                        "OK  height={} txid={} version={:?} branch={:?} orchard_actions={} ironwood_actions={}",
-                        h.map_or(0, u32::from),
-                        txid,
-                        tx.version(),
-                        tx.consensus_branch_id(),
-                        tx.orchard_bundle().map_or(0, |bd| bd.actions().len()),
-                        tx.ironwood_bundle().map_or(0, |bd| bd.actions().len()),
-                    );
-                }
-                Ok(None) => println!("??  txid={txid} not found by server"),
-                Err(e) => println!("ERR height={} txid={txid}: {e:#}", b.height),
-            }
+    let compact_ms = t0.elapsed().as_millis() as u64;
+    let compact_bytes: u64 = blocks.iter().map(|b| prost::Message::encoded_len(b) as u64).sum();
+    let all_txs: usize = blocks.iter().map(|b| b.vtx.len()).sum();
+    let candidates = cover::shielded_txids(&blocks);
+    let sample: HashSet<TxId> = candidates.iter().take(parse_sample).copied().collect();
+    let (kept, cover) = cover::fetch_all(client, cfg, candidates, &sample).await;
+    let mut parsed_ok = 0;
+    for k in &kept {
+        let br = BranchId::for_height(&net, k.height.unwrap_or(BlockHeight::from_u32(tip)));
+        if Transaction::read(&k.raw[..], br).is_ok() {
+            parsed_ok += 1;
         }
     }
-    Ok((found, ok))
+    Ok(ProbeReport {
+        tip,
+        blocks: blocks.len(),
+        all_txs,
+        compact_bytes,
+        compact_ms,
+        cover,
+        parsed: kept.len(),
+        parsed_ok,
+    })
+}
+
+pub struct ProbeReport {
+    pub tip: u32,
+    pub blocks: usize,
+    pub all_txs: usize,
+    pub compact_bytes: u64,
+    pub compact_ms: u64,
+    pub cover: CoverStats,
+    pub parsed: usize,
+    pub parsed_ok: usize,
 }
 
 /// Fetch a full transaction from lightwalletd and trial-decrypt it with the wallet's

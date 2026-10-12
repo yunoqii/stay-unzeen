@@ -87,7 +87,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         cluster = cfg.cluster,
         chain_id = cfg.policy.chain.to_hex(),
         rate = if cfg.rate.fixed_lamports_per_zec.is_some() { "fixed" } else { "near-1click" },
-        jitter_s = format!("{}..{}", cfg.exec.jitter_min_secs, cfg.exec.jitter_max_secs),
+        epoch_s = format!("{}..{}", cfg.exec.epoch_min_secs, cfg.exec.epoch_max_secs),
         venues = cfg.venues.join(","),
         %bind,
         "unzeen-api starting"

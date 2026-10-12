@@ -20,8 +20,12 @@ pub struct Config {
     pub policy: Policy,
     /// Overrides the UA published by the scanner in `pool_meta`.
     pub pool_address: Option<String>,
+    /// Relayer-published token media (`UNZEEN_MEDIA_DIR`, default `$UNZEEN_HOME/<cluster>/media`).
+    pub media_dir: std::path::PathBuf,
     pub rate: RateConfig,
     pub exec: ExecConfig,
+    /// `create` accepted only when a relayer executes it (UNZEEN_CREATE_ENABLED=1). D6.
+    pub create_enabled: bool,
     pub fees: Fees,
     pub venues: Vec<String>,
     /// Mainnet actions are refused unless UNZEEN_ALLOW_MAINNET_ACTIONS=1 (lead approval).
@@ -44,9 +48,13 @@ pub struct RateConfig {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ExecConfig {
-    /// Per-action execution jitter (API.md: batches + random 0–20 s). On by default.
-    pub jitter_min_secs: f64,
-    pub jitter_max_secs: f64,
+    /// D2: buy/sell/create run in epochs. Boundaries are spaced uniformly at random in
+    /// [epoch_min, epoch_max] seconds (default 30..60), independent of request arrivals.
+    pub epoch_min_secs: f64,
+    pub epoch_max_secs: f64,
+    /// "Max privacy" epochs (default 300..900 s = 5..15 min).
+    pub max_epoch_min_secs: f64,
+    pub max_epoch_max_secs: f64,
     pub withdraw_token_delay_min_secs: f64,
     pub withdraw_token_delay_max_secs: f64,
     pub zec_payout_delay_min_secs: f64,
@@ -55,6 +63,8 @@ pub struct ExecConfig {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Fees {
+    /// `exec: "now"`: flat fee for the priority lane (pool-wide quantized priority fee; no Jito), zat.
+    pub now_fee_zat: u64,
     pub create_fee_zat: u64,
     pub withdraw_zec_fee_zat: u64,
     /// SOL dropped to every withdraw_token recipient for its own fees.
@@ -158,6 +168,7 @@ impl Config {
             confirmations: num::<u32>("UNZEEN_CONFIRMATIONS", 3)?.max(1),
             min_deposit_zat: num("MIN_DEPOSIT_ZAT", 100_000)?,
             min_action_zat: num("MIN_ACTION_ZAT", 100_000)?,
+            credit_jitter: num::<u32>("UNZEEN_CONFIRMATIONS_JITTER", 3)?.min(10),
         };
 
         let fixed = match (solana, var("DEVNET_ZEC_SOL_RATE")) {
@@ -170,11 +181,20 @@ impl Config {
             (SolanaCluster::MainnetBeta, Some(_)) => bail!("DEVNET_ZEC_SOL_RATE is not allowed on mainnet-beta"),
             _ => None,
         };
-        let jmin: f64 = num("UNZEEN_EXEC_JITTER_MIN_SECS", 3.0)?;
-        let jmax: f64 = num("UNZEEN_EXEC_JITTER_MAX_SECS", 20.0)?;
-        if !(0.0..=3600.0).contains(&jmin) || jmax < jmin || jmax > 3600.0 {
-            bail!("UNZEEN_EXEC_JITTER_MIN_SECS/MAX_SECS: need 0 <= min <= max <= 3600");
-        }
+        let range = |kmin: &str, dmin: f64, kmax: &str, dmax: f64| -> anyhow::Result<(f64, f64)> {
+            let (a, b): (f64, f64) = (num(kmin, dmin)?, num(kmax, dmax)?);
+            if !(1.0..=7200.0).contains(&a) || b < a || b > 7200.0 {
+                bail!("{kmin}/{kmax}: need 1 <= min <= max <= 7200");
+            }
+            Ok((a, b))
+        };
+        let (emin, emax) = range("UNZEEN_EPOCH_MIN_SECS", 30.0, "UNZEEN_EPOCH_MAX_SECS", 60.0)?;
+        let (mmin, mmax) = range(
+            "UNZEEN_MAX_PRIVACY_EPOCH_MIN_SECS",
+            300.0,
+            "UNZEEN_MAX_PRIVACY_EPOCH_MAX_SECS",
+            900.0,
+        )?;
         let cfg = Config {
             bind: var("API_BIND")
                 .unwrap_or_else(|| "127.0.0.1:8080".into())
@@ -185,23 +205,37 @@ impl Config {
             cluster,
             policy,
             pool_address: var("UNZEEN_POOL_ADDRESS"),
+            media_dir: match var("UNZEEN_MEDIA_DIR") {
+                Some(d) => d.into(),
+                None => {
+                    let home = var("UNZEEN_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| {
+                        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".unzeen")
+                    });
+                    home.join(cluster).join("media")
+                }
+            },
             rate: RateConfig {
                 fixed_lamports_per_zec: fixed,
                 oneclick_url: var("ONECLICK_URL").unwrap_or_else(|| "https://1click.chaindefuser.com".into()),
                 oneclick_jwt: var("ONECLICK_JWT"),
                 cache_secs: num("RATE_CACHE_SECS", 45)?,
-                max_stale_secs: num("RATE_MAX_STALE_SECS", 300)?,
+                max_stale_secs: num("RATE_MAX_STALE_SECS", 120)?,
                 spread_bps: num::<u64>("UNZEEN_RATE_SPREAD_BPS", 50)?.min(2_000),
             },
             exec: ExecConfig {
-                jitter_min_secs: jmin,
-                jitter_max_secs: jmax,
+                epoch_min_secs: emin,
+                epoch_max_secs: emax,
+                max_epoch_min_secs: mmin,
+                max_epoch_max_secs: mmax,
                 withdraw_token_delay_min_secs: num("WITHDRAW_TOKEN_DELAY_MIN_SECS", 30.0)?,
                 withdraw_token_delay_max_secs: num("WITHDRAW_TOKEN_DELAY_MAX_SECS", 300.0)?,
                 zec_payout_delay_min_secs: num("ZEC_PAYOUT_DELAY_MIN_SECS", 60.0)?,
                 zec_payout_delay_max_secs: num("ZEC_PAYOUT_DELAY_MAX_SECS", 600.0)?,
             },
+            create_enabled: var("UNZEEN_CREATE_ENABLED").as_deref() == Some("1"),
             fees: Fees {
+                // Flat; pays for the pool's priority lane, not for one tx's exact fee.
+                now_fee_zat: num("UNZEEN_NOW_FEE_ZAT", 5_000)?,
                 create_fee_zat: num("CREATE_FEE_ZAT", 100_000)?,
                 withdraw_zec_fee_zat: num("WITHDRAW_ZEC_FEE_ZAT", 15_000)?,
                 withdraw_token_gas_lamports: num("WITHDRAW_TOKEN_GAS_LAMPORTS", 2_000_000)?,
