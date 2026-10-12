@@ -43,6 +43,8 @@ const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event
       transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1], layout: { type: "spring", bounce: 0, duration: 0.4 } }}
       className="group relative"
     >
+      {/* Hover: a yellow edge marks the row, and the full signature surfaces from the blur. */}
+      <span aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-px origin-top scale-y-0 bg-zec/70 transition-transform duration-300 ease-shadow group-hover:scale-y-100 motion-reduce:transition-none" />
       <div
         className={cn(
           "flex items-start gap-3 border-b border-border/60 transition-colors duration-150 hover:bg-feed-row-hover sm:gap-4",
@@ -96,6 +98,9 @@ const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event
               aria-label="View transaction on Solscan"
             >
               {event.solanaTx.slice(0, 6)}
+              <span className="hidden max-w-0 overflow-hidden whitespace-nowrap opacity-0 blur-[3px] transition-[max-width,opacity,filter] duration-300 ease-shadow group-hover:max-w-40 group-hover:opacity-100 group-hover:blur-none motion-reduce:transition-none sm:inline-block">
+                {event.solanaTx.slice(6, 14)}…{event.solanaTx.slice(-6)}
+              </span>
               <ArrowUpRight size={11} weight="light" />
             </a>
           </div>

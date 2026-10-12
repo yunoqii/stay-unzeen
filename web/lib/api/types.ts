@@ -1,4 +1,4 @@
-// Mirrors docs/API.md v0.4 (plus the token-intel DRAFT at the bottom). Do not diverge: change the contract first.
+// Mirrors docs/API.md v0.5 (token intel block at the bottom). Do not diverge: change the contract first.
 //
 // Units (docs/API.md "Единицы сумм"):
 //   - spendable amounts: integer strings in BASE units (token base units, lamports, zatoshis)
@@ -84,6 +84,15 @@ export interface PoolInfo {
     withdrawTokenGasLamports?: Lamports;
     withdrawTokenCostLamports?: Lamports;
     nowFeeLamports?: Lamports;
+  };
+  /** v0.5: what the server has switched on (not a build-time flag of the front). */
+  features?: { fullTrades: boolean };
+  /** v0.5: creator rules of Unzeen launches, enforced by the ledger. 0 = rule off. */
+  launchRules?: {
+    lockSecs: number;
+    capBps: number;
+    /** Max first buy of `create`, lamports (after rounding). */
+    maxInitialBuyLamports: Lamports;
   };
   /** v0.4: public rate from the background cache. Absent = no rate (actions -> 503). */
   rate?: {
@@ -194,6 +203,8 @@ export interface ActionStatus {
   solanaTx?: string;
   error?: ErrorCode;
   rate?: RateUsed;
+  /** v0.5: execution time, unix ms rounded DOWN to the minute; only while `fill` is kept. */
+  executedAt?: number;
   /** After execution, kept 24-48 h. */
   fill?: {
     tokenAmount: TokenBaseUnits;
@@ -262,15 +273,16 @@ export type ErrorCode =
   | "slippage"
   | "rate_limited"
   | "venue_unavailable"
+  | "feature_disabled"
+  | "creator_locked"
+  | "creator_cap"
   | "internal";
 
 export interface ApiErrorBody {
   error: { code: ErrorCode; message: string; details?: unknown };
 }
 
-// ---- token intel: DRAFT (docs/analysis/token-intel.md §5), not in docs/API.md yet ----
-// Everything the safety panel, the trade filters and the CA search need from the backend lives here,
-// so the final contract can be applied in one place.
+// ---- token intel (docs/API.md v0.5, "Безопасность токена и лента сделок") ----
 
 /** 202 body of GET /api/tokens/:mint/safety and of GET /api/tokens/:mint for a cold (unknown) mint. */
 export interface PendingResponse {

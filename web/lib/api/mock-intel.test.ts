@@ -67,6 +67,6 @@ describe("mock token intel (DRAFT contract)", () => {
     const pepe = list.find((t) => t.symbol === "PEPE")!;
     const trades = await get<TokenTrade[]>(`/api/tokens/${pepe.mint}/trades?filter=all&limit=20`);
     expect(trades.every((t) => t.trader === "unzeen" && Array.isArray(t.tags) && !t.tags.includes("dev"))).toBe(true);
-    await expect(get(`/api/tokens/${pepe.mint}/trades?filter=whales`)).rejects.toMatchObject({ code: "bad_request" });
+    await expect(get(`/api/tokens/${pepe.mint}/trades?filter=whales`)).rejects.toMatchObject({ code: "feature_disabled" });
   });
 });

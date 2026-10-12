@@ -1,6 +1,8 @@
 import { cn } from "@/lib/utils";
 
 interface Props {
+  /** Redaction-hatch band between the header and the content (default on). */
+  hatch?: boolean;
   eyebrow?: string;
   title: string;
   lead?: React.ReactNode;
@@ -8,7 +10,7 @@ interface Props {
   className?: string;
 }
 
-export function PageShell({ eyebrow, title, lead, children, className }: Props) {
+export function PageShell({ eyebrow, title, lead, children, className, hatch = true }: Props) {
   return (
     <div className={cn("mx-auto w-full max-w-6xl px-4 pt-10 sm:px-6 sm:pt-14", className)}>
       <header className="max-w-2xl">
@@ -16,7 +18,8 @@ export function PageShell({ eyebrow, title, lead, children, className }: Props) 
         <h1 className="text-3xl font-medium tracking-tight text-balance sm:text-4xl">{title}</h1>
         {lead && <p className="mt-3 text-base text-pretty text-muted-foreground">{lead}</p>}
       </header>
-      <div className="mt-10">{children}</div>
+      {hatch && <div aria-hidden className="hatch mt-8 h-3" />}
+      <div className={hatch ? "mt-6" : "mt-10"}>{children}</div>
     </div>
   );
 }

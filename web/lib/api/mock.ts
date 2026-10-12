@@ -329,14 +329,18 @@ function poolAddress(network: Network): string {
   return out;
 }
 
+/** launchRules.maxInitialBuyLamports of the mock: about 5% of supply on a fresh curve. */
+const MOCK_MAX_INITIAL_BUY_LAMPORTS = BigInt(1_500_000_000);
+
 /** Flat fee of exec "now" (field name pending in docs/API.md). Shown in quotes; the mock does not charge it. */
 const NOW_FEE_ZAT = "5000";
 
 export function mockPool(network: Network): PoolInfo {
+  const extra = { features: { fullTrades: FULL_FEED }, launchRules: { lockSecs: 86_400, capBps: 500, maxInitialBuyLamports: MOCK_MAX_INITIAL_BUY_LAMPORTS.toString() } };
   const rate = { lamportsPerZec: MID_LAMPORTS_PER_ZEC.toString(), lamportsPerZecBuy: mockRate(true).lamportsPerZec, lamportsPerZecSell: mockRate(false).lamportsPerZec, spreadBps: Number(SPREAD_BPS), source: "fixed" as const, ts: Math.floor(Date.now() / 60_000) * 60_000 };
   return network === "mainnet"
-    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT }, rate }
-    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT }, rate };
+    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT }, rate, ...extra }
+    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT }, rate, ...extra };
 }
 
 interface MockAccount {
@@ -632,6 +636,7 @@ function accept(network: Network, pubkey: string, action: SignedAction): Omit<Mo
       const initial = action.initialBuyZec === undefined ? N0 : amountOf(action.initialBuyZec, "initialBuyZec", false);
       if (action.venue === "jupiter") throw new ApiError("bad_request", "create: jupiter is not a launchpad", 400);
       if (initial > N0 && initial < minAction) throw new ApiError("below_minimum", "initialBuyZec below PoolInfo.minActionZat", 422);
+      if ((initial * BigInt(mockRate(true).lamportsPerZec)) / ZAT > MOCK_MAX_INITIAL_BUY_LAMPORTS) throw new ApiError("creator_cap", "initial buy above launchRules.maxInitialBuyLamports", 422);
       const total = initial + CREATE_FEE_ZAT;
       if (a.zecBalance < total) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
       a.zecBalance -= total;
@@ -719,7 +724,7 @@ function execute(act: MockAction) {
     s.price *= 1 + sol / Math.max(30, s.price * s.supply) / 2;
     syncTokenFields();
     publish({ id: b58(16), kind: "buy", venue: s.token.venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
-    act.status = { status: "executed", solanaTx: tx, rate, fill: { tokenAmount: out.toString(), solAmount: lamports.toString(), zecSpent: x.zecIn } };
+    act.status = { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, solanaTx: tx, rate, fill: { tokenAmount: out.toString(), solAmount: lamports.toString(), zecSpent: x.zecIn } };
   } else if (x.op === "sell") {
     const s = findToken(x.mint);
     const amount = BigInt(x.amount);
@@ -732,7 +737,7 @@ function execute(act: MockAction) {
     s.price *= 1 - sol / Math.max(30, s.price * s.supply) / 2;
     syncTokenFields();
     publish({ id: b58(16), kind: "sell", venue: s.token.venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: amount.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
-    act.status = { status: "executed", solanaTx: tx, rate, fill: { tokenAmount: amount.toString(), solAmount: lamports.toString(), zecCredited: zec.toString() } };
+    act.status = { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, solanaTx: tx, rate, fill: { tokenAmount: amount.toString(), solAmount: lamports.toString(), zecCredited: zec.toString() } };
   } else if (x.op === "create") {
     const initial = act.holdZat - CREATE_FEE_ZAT;
     const lamports = (initial * BigInt(rate!.lamportsPerZec)) / ZAT;
@@ -751,12 +756,12 @@ function execute(act: MockAction) {
     releaseZat(a, act, act.holdZat);
     if (out > N0) holdingOf(a, s.token.mint).amount = out.toString();
     publish({ id: b58(16), kind: "create", venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
-    act.status = { status: "executed", solanaTx: tx, rate, fill: { tokenAmount: out.toString(), solAmount: lamports.toString(), zecSpent: initial.toString(), mint: s.token.mint } };
+    act.status = { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, solanaTx: tx, rate, fill: { tokenAmount: out.toString(), solAmount: lamports.toString(), zecSpent: initial.toString(), mint: s.token.mint } };
   } else if (x.op === "withdraw_token") {
     // Separate transfers from another vault; not a trade, so nothing in the feed.
     releaseZat(a, act, act.holdZat);
     releaseTokens(a, act, act.holdToken!.amount);
-    act.status = { status: "executed", solanaTx: tx, rate, fill: { tokenAmount: x.amount } };
+    act.status = { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, solanaTx: tx, rate, fill: { tokenAmount: x.amount } };
   } else if (x.op === "withdraw_zec") {
     releaseZat(a, act, act.holdZat);
     act.status = { status: "executed" };
@@ -882,7 +887,7 @@ export async function handle(
 // ---- token intel (DRAFT, docs/analysis/token-intel.md §5) ----
 
 /** Mock twin of the backend flag: dev history, first blocks and the full trade feed after the Helius upgrade. */
-const FULL_FEED = process.env.NEXT_PUBLIC_FEATURE_FULL_TRADES === "1";
+const FULL_FEED = process.env.NEXT_PUBLIC_MOCK_FULL_TRADES === "1";
 /** Tokens launched through Unzeen ("rules enforced"). GHOST is one from the start. */
 const unzeenLaunches = new Set<string>();
 /** Cold mints from CA searches, waiting for the next tick. mint -> tick it resolves at. */
@@ -1023,7 +1028,7 @@ function tokenTrades(s: MockTokenState, filter: string, before: string | null, l
   if (!["all", "unzeen", "whales", "dev"].includes(filter)) throw new ApiError("bad_request", "filter: all | unzeen | whales | dev", 400);
   if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new ApiError("bad_request", "limit must be 1..200", 400);
   const f = filter as TradeFilter;
-  if (!FULL_FEED && (f === "whales" || f === "dev")) throw new ApiError("bad_request", "filter needs the full trade feed", 400);
+  if (!FULL_FEED && (f === "whales" || f === "dev")) throw new ApiError("feature_disabled", "filter needs the full trade feed", 400);
   const ours: TokenTrade[] = history
     .filter((e) => e.mint === s.token.mint)
     .map((e) => ({ ...e, trader: "unzeen", tags: BigInt(e.solAmount) >= WHALE_LAMPORTS ? (["whale"] as TradeTag[]) : [] }));

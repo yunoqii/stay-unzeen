@@ -44,8 +44,8 @@ function PortfolioView() {
   };
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)] lg:items-start">
-      <div className="space-y-4">
+    <div className="ledger lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)] lg:items-start">
+      <div className="ledger-col self-stretch">
         {error && (
           <p role="alert" className="flex items-center gap-2 rounded-xl border border-border bg-surface-1 px-4 py-3 text-sm text-muted-foreground">
             <WarningCircle size={16} weight="light" className="shrink-0 text-zec" aria-hidden />
@@ -54,8 +54,9 @@ function PortfolioView() {
         )}
         <BalanceCard portfolio={portfolio} onWithdraw={() => open("zec")} />
         <HoldingsList holdings={portfolio?.holdings ?? null} tokens={tokens} onWithdraw={(m) => open("token", m)} />
+        <div aria-hidden className="min-h-0 flex-1" />
       </div>
-      <div className="space-y-4">
+      <div className="ledger-col self-stretch">
         <AnimatePresence initial={false}>
           {withdraw && portfolio && (
             <motion.div
@@ -82,6 +83,7 @@ function PortfolioView() {
         <SessionActivity actions={actions} />
         <DepositsList deposits={portfolio?.deposits ?? null} confirmations={pool?.confirmations} />
         <SettingsCard />
+        <div aria-hidden className="min-h-0 flex-1" />
       </div>
     </div>
   );

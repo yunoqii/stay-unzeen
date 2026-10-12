@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { use, useMemo } from "react";
-import { ArrowLeft, Copy } from "@phosphor-icons/react";
-import { toast } from "sonner";
+import { ArrowLeft } from "@phosphor-icons/react";
+import { CopyButton } from "@/components/ui/copy-button";
 import { api } from "@/lib/api/client";
 import { fillsOf } from "@/lib/history/reduce";
 import { useHistory } from "@/lib/history/store";
@@ -93,15 +93,6 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
     safety.state !== "ready" ? null : safety.data.market.status === "graduated" ? 100 : safety.data.market.curveProgressPct ? Number(safety.data.market.curveProgressPct) : null;
   const ownFills = useMemo(() => fillsOf(history.entries, token.mint), [history.entries, token.mint]);
 
-  const copyMint = async () => {
-    try {
-      await navigator.clipboard.writeText(token.mint);
-      toast("Mint address copied");
-    } catch {
-      toast.error("Clipboard unavailable");
-    }
-  };
-
   return (
     <Frame>
       <header className="flex flex-wrap items-start gap-4">
@@ -126,14 +117,9 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
             <span className="text-faint-foreground">
               {token.status === "graduated" ? "graduated" : curve === null ? "on bonding curve" : <span className="tabular">curve {curve}%</span>}
             </span>
-            <button
-              onClick={copyMint}
-              className="inline-flex items-center gap-1 font-mono text-faint-foreground transition-colors hover:text-muted-foreground"
-              aria-label="Copy mint address"
-            >
+            <CopyButton value={token.mint} label="Copy mint address" className="font-mono">
               {shortAddr(token.mint, 5, 5)}
-              <Copy size={12} weight="light" />
-            </button>
+            </CopyButton>
           </div>
         </div>
       </header>

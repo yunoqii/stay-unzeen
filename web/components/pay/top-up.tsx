@@ -163,6 +163,8 @@ function DepositRequest({
           progress={progress}
           state={ringState}
           dimmed={!uri || phase.step === "credited"}
+          ticks={pool.confirmations}
+          lit={phase.step === "credited" ? pool.confirmations : phase.step === "seen" ? (phase.confirmations ?? 0) : 0}
           label={`Zcash payment request: ${amount} ZEC to the Unzeen pool`}
         />
 

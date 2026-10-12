@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { FeedStatus } from "@/lib/api/client";
 import type { FeedEvent } from "@/lib/api/types";
 import { useNow } from "@/hooks/use-now";
@@ -56,17 +56,29 @@ function FeedSkeleton({ dense }: { dense?: boolean }) {
   );
 }
 
-export function FeedStatusDot({ status }: { status: FeedStatus }) {
+/** Connection state; while live, every new event sends one ring out of the dot (`beat` = latest event id). */
+export function FeedStatusDot({ status, beat }: { status: FeedStatus; beat?: string }) {
   const label = status === "live" ? "Live" : status === "connecting" ? "Connecting" : "Reconnecting";
+  const reduce = useReducedMotion();
   return (
     <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-      <span
-        aria-hidden
-        className={cn(
-          "size-1.5 rounded-full",
-          status === "live" ? "live-dot bg-zec" : status === "connecting" ? "bg-white/40" : "bg-sell",
+      <span aria-hidden className="relative grid size-1.5 place-items-center">
+        {status === "live" && beat && !reduce && (
+          <motion.span
+            key={beat}
+            className="absolute size-1.5 rounded-full border border-zec"
+            initial={{ scale: 1, opacity: 0.9 }}
+            animate={{ scale: 4, opacity: 0 }}
+            transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1] }}
+          />
         )}
-      />
+        <span
+          className={cn(
+            "size-1.5 rounded-full",
+            status === "live" ? "live-dot bg-zec" : status === "connecting" ? "bg-white/40" : "bg-sell",
+          )}
+        />
+      </span>
       {label}
     </span>
   );

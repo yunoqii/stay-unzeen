@@ -356,3 +356,42 @@ Adapted for unzeen: recoloured to Zcash yellow + fog, thinner strokes, reduced-m
     stroke-dasharray: 40 400;
   }
 }
+
+/* Busy: hatch runs across a button while an order is being signed / sent. State, not decoration. */
+@keyframes uz-hatch-run {
+  to { transform: translate3d(16.97px, 0, 0); } /* one stripe period: 12px * sqrt(2) */
+}
+.busy-hatch {
+  position: relative;
+  overflow: hidden;
+}
+.busy-hatch::after {
+  content: "";
+  position: absolute;
+  inset: 0 -34px;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(135deg, rgb(6 6 7 / 0.22) 0 6px, transparent 6px 12px);
+  animation: uz-hatch-run 0.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .busy-hatch::after {
+    animation: none;
+  }
+}
+
+/* A ledger column: stacked cells with 1px gutters. Cards placed inside lose their own frame and
+   become cells (unlayered on purpose, so it wins over the cards' utility classes). */
+.ledger-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--border);
+  min-width: 0;
+}
+.ledger-col > *,
+.ledger-col > div > section,
+.ledger-flat > * {
+  border-width: 0;
+  border-radius: 0;
+  background-color: var(--background);
+}

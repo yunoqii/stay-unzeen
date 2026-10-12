@@ -4,12 +4,12 @@ import { useEffect, useId, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { api, errorText } from "@/lib/api/client";
 import type { TokenTrade, TradeFilter } from "@/lib/api/types";
-import { FULL_TRADES } from "@/lib/features";
 import { formatCompact, formatSol, lamportsToSol, shortAddr, timeAgo, unitsToNumber } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
 import { cn } from "@/lib/utils";
 import type { LiveFeed as LiveFeedState } from "@/hooks/use-live-feed";
 import { useNow } from "@/hooks/use-now";
+import { usePool } from "@/hooks/use-pool";
 import { EmptyState } from "@/components/layout/page-shell";
 import { FeedStatusDot, LiveFeed } from "@/components/feed/live-feed";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -25,11 +25,13 @@ const SOON = "Needs the full on-chain trade feed. Coming soon.";
 
 /**
  * Trades of one token with the All / unzeen / Whales / Dev filters. Until the full feed is switched on
- * (lib/features.ts), the backend only knows unzeen trades: All = unzeen, Whales and Dev are disabled.
+ * (PoolInfo.features.fullTrades), the backend only knows unzeen trades: All = unzeen, Whales and Dev are disabled.
  */
 export function TokenTrades({ mint, feed }: { mint: string; feed: LiveFeedState }) {
   const [filter, setFilter] = useState<TradeFilter>("all");
   const id = useId();
+  const { pool } = usePool();
+  const FULL_TRADES = pool?.features?.fullTrades === true;
   const usesFull = FULL_TRADES && filter !== "unzeen";
 
   return (
@@ -64,7 +66,7 @@ export function TokenTrades({ mint, feed }: { mint: string; feed: LiveFeedState 
               );
             })}
           </div>
-          <FeedStatusDot status={feed.status} />
+          <FeedStatusDot status={feed.status} beat={feed.events[0]?.id} />
         </div>
       </header>
 

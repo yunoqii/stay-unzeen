@@ -14,7 +14,7 @@ const PLAN: Record<ExecMode, { times: number[]; x: string[]; duration: number; c
   max: { x: ["0%", "46%", "46%", "92%", "92%"], times: [0, 0.12, 0.78, 0.9, 1], duration: 4.6, crowd: 5 },
 };
 
-export function ExecLane({ mode }: { mode: ExecMode }) {
+export function ExecLane({ mode, gateLabel = "batch", endLabel = "on-chain" }: { mode: ExecMode; gateLabel?: string; endLabel?: string }) {
   const reduce = useReducedMotion();
   const p = PLAN[mode];
   const loop = { duration: p.duration, times: p.times, ease: "easeInOut" as const, repeat: Infinity, repeatDelay: 0.4 };
@@ -47,8 +47,8 @@ export function ExecLane({ mode }: { mode: ExecMode }) {
       </div>
       <div className="mt-0.5 flex justify-between font-mono text-[10px] text-faint-foreground">
         <span>signed</span>
-        {mode !== "now" && <span className="-ml-6">batch</span>}
-        <span>on-chain</span>
+        {mode !== "now" && <span className="-ml-6">{gateLabel}</span>}
+        <span>{endLabel}</span>
       </div>
     </div>
   );

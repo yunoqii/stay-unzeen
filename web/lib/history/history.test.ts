@@ -92,6 +92,11 @@ describe("history updates from the portfolio poll", () => {
     expect(JSON.stringify(out)).not.toContain("SIG");
   });
 
+  it("uses executedAt for the marker time when the server sends it", () => {
+    const out = applyStatuses([pending()], [{ id: "a".repeat(32), status: "executed", executedAt: 1_759_999_980_000, fill: { tokenAmount: "5", zecSpent: "7" } }], 1_760_000_050_000);
+    expect(out[0].fill?.ts).toBe(1_759_999_980_000);
+  });
+
   it("create learns its mint from the fill", () => {
     const out = applyStatuses([pending({ kind: "create", mint: undefined })], [{ id: "a".repeat(32), status: "executed", fill: { tokenAmount: "5", zecSpent: "7", mint: MINT } }], 9_000);
     expect(out[0].mint).toBe(MINT);

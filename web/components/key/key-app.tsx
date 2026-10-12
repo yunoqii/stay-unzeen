@@ -110,6 +110,7 @@ export function KeyApp() {
           {view}
         </motion.div>
       </AnimatePresence>
+      <div aria-hidden className="hatch h-3" />
     </div>
   );
 }
@@ -118,7 +119,7 @@ export function KeyApp() {
 
 function Card({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <section className={cn("relative overflow-hidden rounded-2xl border border-border bg-card/60 p-5 sm:p-7", className)}>
+    <section className={cn("relative overflow-hidden border border-border bg-card/60 p-5 sm:p-7", className)}>
       {children}
     </section>
   );
@@ -192,7 +193,7 @@ function BackLink({ onClick, children = "Back" }: { onClick: () => void; childre
 
 function Choice({ onCreate, onRestore }: { onCreate: () => void; onRestore: () => void }) {
   return (
-    <div className="grid gap-3 sm:grid-cols-2">
+    <div className="ledger ledger-flat sm:grid-cols-2">
       <ChoiceButton
         icon={<Plus size={22} weight="light" />}
         title="Create a new key"
@@ -228,8 +229,7 @@ function ChoiceButton({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative flex flex-col items-start gap-6 overflow-hidden rounded-2xl border p-5 text-left transition-colors duration-200 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none sm:min-h-48",
-        primary ? "border-zec/30 hover:border-zec/60" : "border-border hover:border-border-strong",
+        "group relative flex flex-col items-start gap-6 overflow-hidden p-5 text-left transition-colors duration-200 hover:bg-surface-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset sm:min-h-48",
       )}
     >
       <span
@@ -239,6 +239,7 @@ function ChoiceButton({
           primary ? "bg-zec/15 opacity-60 group-hover:opacity-100" : "bg-white/5 opacity-0 group-hover:opacity-100",
         )}
       />
+      <span aria-hidden className="absolute inset-x-0 top-0 h-px origin-left scale-x-0 bg-zec/70 transition-transform duration-300 ease-shadow group-hover:scale-x-100 motion-reduce:transition-none" />
       <span className={cn("relative", primary ? "text-zec" : "text-muted-foreground")}>{icon}</span>
       <span className="relative mt-auto">
         <span className="flex items-center gap-1.5 font-medium">

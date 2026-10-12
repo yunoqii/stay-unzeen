@@ -16,6 +16,9 @@ const CODES: readonly ErrorCode[] = [
   "slippage",
   "rate_limited",
   "venue_unavailable",
+  "feature_disabled",
+  "creator_locked",
+  "creator_cap",
   "internal",
 ];
 
@@ -86,6 +89,9 @@ const UI_TEXT: Record<ErrorCode | ClientErrorCode, string> = {
   slippage: "Price moved past your limit. Adjust slippage and try again.",
   rate_limited: "Too many requests. Wait a moment and try again.",
   venue_unavailable: "The launchpad is not responding right now. Try again shortly.",
+  feature_disabled: "This isn't switched on yet.",
+  creator_locked: "Your launch buy is locked for now. The lock ends 24 hours after launch; tokens you bought later are free to move.",
+  creator_cap: "As the creator you can hold at most 5% of supply through the pool. Try a smaller amount.",
   internal: "Something went wrong on our side. Try again.",
   network: "Can't reach Unzeen. Check your connection.",
   locked: "Unlock your anon key to continue.",

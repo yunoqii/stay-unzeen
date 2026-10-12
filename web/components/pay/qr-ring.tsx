@@ -16,7 +16,13 @@ export function QrRing({
   state,
   dimmed,
   label,
+  ticks = 0,
+  lit = 0,
 }: {
+  /** K confirmations: one notch per block around the ring. */
+  ticks?: number;
+  /** Confirmations so far: lit notches. */
+  lit?: number;
   value: string | null;
   /** 0..1 */
   progress: number;
@@ -41,6 +47,24 @@ export function QrRing({
           animate={{ pathLength: progress, opacity: progress > 0 ? 1 : 0 }}
           transition={{ type: "spring", bounce: 0, duration: 0.6 }}
         />
+        {Array.from({ length: ticks }).map((_, i) => {
+          // Notches sit just outside the ring, spread over the circle; each one lights up with its block.
+          const a = (i / ticks) * 2 * Math.PI + Math.PI / ticks;
+          const on = i < lit;
+          return (
+            <motion.circle
+              key={i}
+              cx={50 + Math.cos(a) * 49.4}
+              cy={50 + Math.sin(a) * 49.4}
+              r={0.9}
+              className={on ? "fill-zec" : "fill-border-strong"}
+              initial={false}
+              animate={{ scale: on ? [1, 1.8, 1] : 1, opacity: on ? 1 : 0.6 }}
+              transition={{ duration: 0.45, ease: "easeOut" }}
+              style={{ transformBox: "fill-box", transformOrigin: "center" }}
+            />
+          );
+        })}
       </svg>
 
       <div className="absolute inset-[13%] overflow-hidden rounded-2xl bg-foreground p-3 shadow-[0_0_80px_-20px_rgb(244_183_40/0.35)]">

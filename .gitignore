@@ -13,3 +13,4 @@ design-refs/
 # local demo recordings (too large for git)
 docs/screenshots/**/*.mp4
 docs/screenshots/**/*.webm
+docs/screenshots/design-review/10-key-reveal.png

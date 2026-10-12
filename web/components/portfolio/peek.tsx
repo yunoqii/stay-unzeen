@@ -3,6 +3,7 @@
 import { createContext, useContext, useState } from "react";
 import { Eye, EyeSlash } from "@phosphor-icons/react";
 import { cn } from "@/lib/utils";
+import { DecryptText } from "@/components/motion/decrypt-text";
 
 /** Privacy mode: amounts are veiled by default, shown only while the user peeks. Never persisted. */
 const PeekContext = createContext<{ shown: boolean; toggle: () => void }>({ shown: false, toggle: () => {} });
@@ -16,9 +17,13 @@ export function usePeek() {
   return useContext(PeekContext);
 }
 
-/** An amount behind the veil. Screen readers hear "hidden" instead of the number until peeked. */
+/**
+ * An amount behind the veil. Screen readers hear "hidden" instead of the number until peeked. On Peek a
+ * plain text amount "decrypts" from shade glyphs (feedback that it was hidden, now shown).
+ */
 export function Veiled({ children, className }: { children: React.ReactNode; className?: string }) {
   const { shown } = usePeek();
+  const text = typeof children === "string" || typeof children === "number" ? String(children) : null;
   return (
     <span className={cn("relative inline-block", className)}>
       <span
@@ -28,7 +33,7 @@ export function Veiled({ children, className }: { children: React.ReactNode; cla
           shown ? "opacity-100 blur-none select-auto" : "opacity-70 blur-veil",
         )}
       >
-        {children}
+        {shown && text !== null ? <DecryptText text={text} /> : children}
       </span>
       {!shown && <span className="sr-only">hidden</span>}
     </span>

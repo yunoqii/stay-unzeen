@@ -66,7 +66,7 @@ export function HomeClient() {
                 What unzeen is doing
                 <span className="font-mono text-[10px] font-normal tracking-wider text-faint-foreground uppercase">public · on-chain</span>
               </h2>
-              <FeedStatusDot status={feed.status} />
+              <FeedStatusDot status={feed.status} beat={feed.events[0]?.id} />
             </header>
             <LiveFeed events={feed.events} fresh={feed.fresh} loading={feed.loading} error={feed.error} />
           </section>

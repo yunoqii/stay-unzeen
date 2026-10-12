@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { ListChecks, Scales, TreeStructure } from "@phosphor-icons/react/ssr";
 import { EmptyState, PageShell } from "@/components/layout/page-shell";
+import { MerkleTrace } from "@/components/verify/merkle-trace";
 
 export const metadata: Metadata = { title: "Verify" };
 
@@ -29,9 +30,9 @@ export default function VerifyPage() {
       title="Don't trust. Verify."
       lead="Unzeen hides who trades, not what the pool does. Here is how to check it is honest."
     >
-      <ol className="grid gap-3 sm:grid-cols-3">
+      <ol className="ledger sm:grid-cols-3">
         {STEPS.map(({ icon: Icon, title, body }, i) => (
-          <li key={title} className="rounded-2xl border border-border p-5">
+          <li key={title} className="p-5">
             <div className="flex items-center justify-between">
               <Icon size={22} weight="thin" className="text-muted-foreground" />
               <span className="font-mono text-xs text-faint-foreground">0{i + 1}</span>
@@ -41,6 +42,11 @@ export default function VerifyPage() {
           </li>
         ))}
       </ol>
+      <h2 className="mt-12 mb-3 text-sm font-medium">What a proof looks like</h2>
+      <div className="border border-border">
+        <MerkleTrace />
+      </div>
+      <div aria-hidden className="hatch h-3" />
       <EmptyState title="Verification tools are on their way" className="mt-6">
         Your Merkle-sum proof, the public vault list and the reserve check will appear here.
       </EmptyState>

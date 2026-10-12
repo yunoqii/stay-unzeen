@@ -1,8 +1,8 @@
 "use client";
 
 import { AnimatePresence, motion } from "motion/react";
-import { Check, CircleNotch, Copy, X } from "@phosphor-icons/react";
-import { toast } from "sonner";
+import { Check, CircleNotch, X } from "@phosphor-icons/react";
+import { CopyButton } from "@/components/ui/copy-button";
 import { ApiError, errorText } from "@/lib/api/client";
 import type { TrackedAction } from "@/lib/activity";
 import { queuedLabel } from "@/lib/exec";
@@ -42,16 +42,6 @@ export function ActionStatusCard({ action, className }: { action: TrackedAction;
       ? { key: "failed", label: "Failed", detail: errorText(new ApiError(st.error ?? "internal", "")) + " Your balance was returned." }
       : { key: "done", label: action.op.startsWith("withdraw") ? "Sent" : "Confirmed on Solana", detail: done ? <FillLine action={action} /> : undefined },
   ];
-
-  const copy = async () => {
-    if (!st.solanaTx) return;
-    try {
-      await navigator.clipboard.writeText(st.solanaTx);
-      toast("Signature copied", { description: "Paste it into an explorer later, ideally over Tor." });
-    } catch {
-      toast.error("Clipboard unavailable");
-    }
-  };
 
   return (
     <div className={cn("rounded-2xl border border-border bg-surface-1 p-4", className)} aria-live="polite">
@@ -102,15 +92,15 @@ export function ActionStatusCard({ action, className }: { action: TrackedAction;
       {st.solanaTx && (
         <div className="mt-4 flex items-center justify-between gap-3 border-t border-border/60 pt-3 text-xs">
           <span className="text-faint-foreground">Signature</span>
-          <button
-            type="button"
-            onClick={copy}
-            className="inline-flex items-center gap-1.5 rounded-md font-mono text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-            aria-label="Copy transaction signature"
+          <CopyButton
+            value={st.solanaTx}
+            label="Copy transaction signature"
+            toastText="Signature copied"
+            toastDescription="Paste it into an explorer later, ideally over Tor."
+            className="gap-1.5 font-mono"
           >
             {shortAddr(st.solanaTx, 6, 6)}
-            <Copy size={12} weight="light" />
-          </button>
+          </CopyButton>
         </div>
       )}
     </div>

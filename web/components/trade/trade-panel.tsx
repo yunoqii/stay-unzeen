@@ -315,7 +315,8 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
       <Button
         onClick={() => submit()}
         disabled={!canSubmit}
-        className="h-12 w-full rounded-full text-[15px]"
+        aria-busy={busy}
+        className={cn("h-12 w-full rounded-full text-[15px]", busy && "busy-hatch disabled:opacity-90")}
       >
         {busy ? "Signing…" : `${isBuy ? "Buy" : "Sell"} $${token.symbol}`}
       </Button>

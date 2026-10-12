@@ -8,6 +8,7 @@ import type { PoolInfo, Portfolio, SignedAction, Token } from "@/lib/api/types";
 import { lastRate, recentBuyAmounts, submitAction, useAction, useActivityVersion } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, shortAddr, unitsToNumber, ZEC_DECIMALS } from "@/lib/format";
+import { ExecLane } from "@/components/trade/exec-lane";
 import { WITHDRAW_EXEC_DEFAULT, withExec, type WithdrawExecMode } from "@/lib/exec";
 import { useNetwork } from "@/lib/network";
 import { amountsMatch, isSolanaAddress, WITHDRAW_ZEC_FEE_ZAT, withdrawTokenFee } from "@/lib/trade";
@@ -364,6 +365,7 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
           <span className="mt-0.5 block text-xs text-pretty text-faint-foreground">
             Withdrawals are never instant: a quick one right after a buy would tie the two together on-chain.
           </span>
+          <ExecLane mode={exec} gateLabel="random delay" endLabel="your address" />
         </span>
       </label>
 
@@ -385,7 +387,7 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
 
       {error && <ErrorBox error={error} />}
 
-      <Button onClick={submit} disabled={busy || portfolio.frozen} className="h-12 w-full rounded-full text-[15px]">
+      <Button onClick={submit} disabled={busy || portfolio.frozen} aria-busy={busy} className={cn("h-12 w-full rounded-full text-[15px]", busy && "busy-hatch disabled:opacity-90")}>
         <ArrowUpRight weight="bold" />
         {busy ? "Signing…" : `Withdraw $${token.symbol}`}
       </Button>
@@ -521,7 +523,7 @@ function ZecWithdraw({ portfolio, pool }: { portfolio: Portfolio; pool: PoolInfo
 
       {error && <ErrorBox error={error} />}
 
-      <Button onClick={submit} disabled={busy || portfolio.frozen} className="h-12 w-full rounded-full text-[15px]">
+      <Button onClick={submit} disabled={busy || portfolio.frozen} aria-busy={busy} className={cn("h-12 w-full rounded-full text-[15px]", busy && "busy-hatch disabled:opacity-90")}>
         <ArrowUpRight weight="bold" />
         {busy ? "Signing…" : "Withdraw ZEC"}
       </Button>

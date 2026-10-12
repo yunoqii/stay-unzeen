@@ -14,8 +14,8 @@ export const HISTORY_KINDS: ReadonlySet<ActionKind> = new Set<ActionKind>(["buy"
 type Polled = ActionStatus & { id: string };
 
 /**
- * Settle pending entries with what the poll returned. Executed + fill -> executed (fill kept, observed
- * at `now`); failed -> dropped (nothing moved); gone from the list or executed without fill after
+ * Settle pending entries with what the poll returned. Executed + fill -> executed (fill kept, at
+ * `executedAt`, or at `now` if the server did not send it); failed -> dropped (nothing moved); gone from the list or executed without fill after
  * EXPIRE_MS -> expired. Returns the same array when nothing changed.
  */
 export function applyStatuses(entries: HistoryEntry[], polled: readonly Polled[] | undefined, now: number): HistoryEntry[] {
@@ -34,7 +34,8 @@ export function applyStatuses(entries: HistoryEntry[], polled: readonly Polled[]
     }
     if (hit?.status === "executed" && hit.fill) {
       const f = hit.fill;
-      const fill: Fill = { kind: e.kind, ts: now, tokenAmount: f.tokenAmount };
+      // executedAt (v0.5) is rounded to the minute by the server; older servers: when we saw it.
+      const fill: Fill = { kind: e.kind, ts: typeof hit.executedAt === "number" ? hit.executedAt : now, tokenAmount: f.tokenAmount };
       if (f.solAmount !== undefined) fill.solAmount = f.solAmount;
       if (f.zecSpent !== undefined) fill.zecSpent = f.zecSpent;
       if (f.zecCredited !== undefined) fill.zecCredited = f.zecCredited;

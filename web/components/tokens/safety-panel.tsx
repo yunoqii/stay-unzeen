@@ -8,6 +8,8 @@ import type { RiskyExtension, TokenSafety, UnzeenRule } from "@/lib/api/types";
 import { shortAddr, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { usePending, type PendingState } from "@/hooks/use-pending";
+import { usePool } from "@/hooks/use-pool";
+import { ruleText, RULES_SCOPE } from "@/lib/launch-rules";
 import { useNow } from "@/hooks/use-now";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Analyzing } from "./analyzing";
@@ -15,12 +17,6 @@ import { LeaveLink, normalizeExternal } from "./leave-link";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 
-/** Rule copy for the "rules enforced" badge. Unknown rule ids are skipped, never shown raw. */
-export const RULE_TEXT: Record<string, string> = {
-  creator_initial_buy_locked_24h: "Creator's initial buy locked for 24h",
-  initial_buy_cap_5pct: "Creator capped at 5% of supply",
-  authorities_revoked: "Mint & freeze authority revoked",
-};
 const DEFAULT_RULES: UnzeenRule[] = ["creator_initial_buy_locked_24h", "initial_buy_cap_5pct", "authorities_revoked"];
 
 const EXTENSION_TEXT: Record<RiskyExtension, string> = {
@@ -262,7 +258,8 @@ function Meter({ pct, label, warn }: { pct: number; label: string; warn?: boolea
 function UnzeenBadge({ rules }: { rules: UnzeenRule[] }) {
   const [open, setOpen] = useState(false);
   const id = useId();
-  const shown = rules.filter((r) => RULE_TEXT[r]);
+  const { pool } = usePool();
+  const shown = rules.map((r) => ({ r, text: ruleText(r, pool?.launchRules) })).filter((x) => x.text !== null);
   return (
     <div className="border-b border-border/60 px-4 py-3">
       <button
@@ -290,15 +287,15 @@ function UnzeenBadge({ rules }: { rules: UnzeenRule[] }) {
             style={{ overflow: "hidden" }}
           >
             <ul className="space-y-1.5 px-1 pt-3 text-sm">
-              {shown.map((r) => (
+              {shown.map(({ r, text }) => (
                 <li key={r} className="flex items-start gap-2">
                   <Check size={13} weight="bold" className="mt-[3px] shrink-0 text-zec" aria-hidden />
-                  {RULE_TEXT[r]}
+                  {text}
                 </li>
               ))}
             </ul>
             <p className="px-1 pt-2 text-[11px] text-pretty text-faint-foreground">
-              Enforced by the pool&apos;s ledger, not promised. The creator stays anonymous: no history, no numbers.
+              {RULES_SCOPE} Enforced by the pool&apos;s ledger, not promised. The creator stays anonymous: no history, no numbers.
             </p>
           </motion.div>
         )}
