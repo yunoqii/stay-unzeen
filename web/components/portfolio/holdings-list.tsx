@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { Ghost } from "@phosphor-icons/react";
+import { AnimatePresence, motion } from "motion/react";
+import { ArrowUpRight, Ghost } from "@phosphor-icons/react";
+import { captureShared, sharedProps } from "@/components/motion/shared-element";
 import type { Portfolio, Token } from "@/lib/api/types";
 import { formatCompact, formatSol, shortAddr, unitsToNumber } from "@/lib/format";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -9,7 +11,15 @@ import { TokenGlyph } from "@/components/tokens/token-glyph";
 import { VenueTag } from "@/components/tokens/venue-tag";
 import { Veiled } from "./peek";
 
-export function HoldingsList({ holdings, tokens }: { holdings: Portfolio["holdings"] | null; tokens: Token[] | null }) {
+export function HoldingsList({
+  holdings,
+  tokens,
+  onWithdraw,
+}: {
+  holdings: Portfolio["holdings"] | null;
+  tokens: Token[] | null;
+  onWithdraw?: (mint: string) => void;
+}) {
   const bySymbol = new Map((tokens ?? []).map((t) => [t.mint, t]));
 
   return (
@@ -42,21 +52,34 @@ export function HoldingsList({ holdings, tokens }: { holdings: Portfolio["holdin
           </Link>
         </div>
       ) : (
-        <ul className="mt-3 divide-y divide-border/60">
+        <ul className="relative mt-3">
+          <AnimatePresence initial={false} mode="popLayout">
           {holdings.map((h) => {
             const t = bySymbol.get(h.mint);
             const amount = t ? unitsToNumber(h.amount, t.decimals) : null;
             const valueSol = t && amount !== null ? amount * Number(t.priceSol) : null;
             const held = t && /^[1-9]\d*$/.test(h.held) ? unitsToNumber(h.held, t.decimals) : null;
             return (
-              <li key={h.mint}>
+              <motion.li
+                key={h.mint}
+                layout="position"
+                // Withdrawn in full: the row dissolves (FRONTEND.md moment 7).
+                exit={{ opacity: 0, filter: "blur(12px)", scale: 0.9, transition: { duration: 0.5, ease: [0.16, 1, 0.3, 1] } }}
+                transition={{ layout: { type: "spring", bounce: 0, duration: 0.35 } }}
+                className="flex items-center gap-1 border-b border-border/60 last:border-b-0"
+              >
                 <Link
                   href={`/token/${encodeURIComponent(h.mint)}`}
-                  className="-mx-2 flex items-center gap-3 rounded-xl px-2 py-3 transition-colors duration-150 hover:bg-feed-row-hover focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                  onClick={(e) => captureShared(e.currentTarget)}
+                  className="-mx-2 flex min-w-0 flex-1 items-center gap-3 rounded-xl px-2 py-3 transition-colors duration-150 hover:bg-feed-row-hover focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
                 >
-                  <TokenGlyph symbol={t?.symbol ?? "?"} image={t?.image} />
+                  <span {...sharedProps(`glyph-${h.mint}`)} className="shrink-0">
+                    <TokenGlyph symbol={t?.symbol ?? "?"} image={t?.image} />
+                  </span>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">{t ? `$${t.symbol}` : shortAddr(h.mint)}</p>
+                    <p className="truncate text-sm font-medium">
+                      <span {...sharedProps(`ticker-${h.mint}`)}>{t ? `$${t.symbol}` : shortAddr(h.mint)}</span>
+                    </p>
                     {t ? <VenueTag venue={t.venue} className="text-xs" /> : <p className="text-xs text-faint-foreground">Loading…</p>}
                   </div>
                   <div className="text-right text-sm tabular">
@@ -73,9 +96,20 @@ export function HoldingsList({ holdings, tokens }: { holdings: Portfolio["holdin
                     )}
                   </div>
                 </Link>
-              </li>
+                {onWithdraw && h.amount !== "0" && (
+                  <button
+                    type="button"
+                    onClick={() => onWithdraw(h.mint)}
+                    aria-label={`Withdraw ${t ? "$" + t.symbol : "token"}`}
+                    className="grid size-9 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors duration-150 hover:bg-surface-2 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                  >
+                    <ArrowUpRight size={16} weight="light" />
+                  </button>
+                )}
+              </motion.li>
             );
           })}
+          </AnimatePresence>
         </ul>
       )}
     </section>

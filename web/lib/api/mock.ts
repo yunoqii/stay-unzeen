@@ -6,7 +6,10 @@
 // It also simulates the chain side of a Top up (`mockPay`): the "wallet" pays a ZIP-321 URI and the
 // "scanner" applies the same rules as core/ (unz1 verdict, chain_id, K confirmations, minimum).
 
-import { HEADER_NONCE, verifyRequest, type SignedHeaders } from "@/lib/crypto/sign";
+import { base58 } from "@scure/base";
+import { bodyHash, HEADER_NONCE, verifyRequest, type SignedHeaders } from "@/lib/crypto/sign";
+import { isSolanaAddress } from "@/lib/trade";
+import { checkWithdrawUa } from "@/lib/zcash/ua";
 import { checkUnz1, decodeUnz1, type ChainId } from "@/lib/crypto/unz1";
 import type { Network } from "@/lib/network";
 import { memoText, parseZip321 } from "@/lib/zip321";
@@ -21,6 +24,7 @@ import type {
   PlatformStats,
   PoolInfo,
   Portfolio,
+  RateUsed,
   SignedAction,
   Token,
   TokenWithTrades,
@@ -47,10 +51,13 @@ function seeded(seed: string): () => number {
   };
 }
 
+/** A valid Solana address (base58 of 32 bytes), stable per symbol. */
 function mintFor(venue: Venue, symbol: string): string {
-  const rnd = seeded("unzeen-mock:" + symbol);
-  // pump.fun vanity mints end with "pump"; Meteora DBC mints are plain base58.
-  return venue === "pumpfun" ? b58(40, rnd) + "pump" : b58(44, rnd);
+  const rnd = seeded(`unzeen-mock:${venue}:${symbol}`);
+  const bytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) bytes[i] = Math.floor(rnd() * 256);
+  bytes[0] |= 1; // no leading-zero "1" prefix
+  return base58.encode(bytes);
 }
 
 const rand = (min: number, max: number) => min + Math.random() * (max - min);
@@ -58,6 +65,13 @@ const logRand = (min: number, max: number) => Math.exp(rand(Math.log(min), Math.
 
 function trimDecimals(n: number, digits: number): string {
   return n.toFixed(digits).replace(/\.?0+$/, "");
+}
+
+/** `sig` significant digits as a plain decimal string (never e-notation, as core sends). */
+function plain(n: number, sig: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  const digits = Math.min(100, Math.max(0, sig - 1 - Math.floor(Math.log10(n))));
+  return trimDecimals(n, digits);
 }
 
 // pump.fun = 6 decimals; Meteora DBC mocks use 9 so the UI is forced to honour `decimals`.
@@ -104,7 +118,6 @@ const SUPPLY = 1_000_000_000;
 let state: MockTokenState[] | null = null;
 let history: FeedEvent[] = [];
 let newTokenCursor = 0;
-const actions = new Map<string, { createdAt: number; action: SignedAction; pubkey: string }>();
 const seenNonces = new Map<string, number>(); // `${pubkey}:${nonce}` -> expiry
 
 function init(now: number) {
@@ -139,7 +152,7 @@ function init(now: number) {
 
 function syncTokenFields() {
   for (const s of state!) {
-    s.token.priceSol = s.price.toPrecision(4);
+    s.token.priceSol = plain(s.price, 4);
     s.token.marketCapSol = trimDecimals(s.price * s.supply, 2);
   }
 }
@@ -260,10 +273,10 @@ function candles(s: MockTokenState, tf: CandleTimeframe, from: number | undefine
     if (!empty) {
       bars.push({
         time: t,
-        open: open.toPrecision(6),
-        high: high.toPrecision(6),
-        low: low.toPrecision(6),
-        close: close.toPrecision(6),
+        open: plain(open, 6),
+        high: plain(high, 6),
+        low: plain(low, 6),
+        close: plain(close, 6),
         volume: toLamports(logRand(0.2, 40) * Math.sqrt(step / 60)),
       });
     }
@@ -274,6 +287,14 @@ function candles(s: MockTokenState, tf: CandleTimeframe, from: number | undefine
 
 // ---- auth (same checks as core/) ----
 
+function verify(network: Network, method: string, path: string, body: string | undefined, headers: Partial<SignedHeaders>) {
+  const now = Date.now();
+  const res = verifyRequest(headers, { chainId: mockPool(network).chainId, method, pathWithQuery: path, body }, now);
+  if (!res.ok) throw new ApiError("unauthorized", `signature ${res.reason}`, 401);
+  for (const [k, exp] of seenNonces) if (exp < now) seenNonces.delete(k);
+  return { pubkey: res.pubkey, nonceKey: `${network}:${res.pubkey}:${headers[HEADER_NONCE]}`, now };
+}
+
 function authorize(
   network: Network,
   method: string,
@@ -281,20 +302,15 @@ function authorize(
   body: string | undefined,
   headers: Partial<SignedHeaders>,
 ): string {
-  const now = Date.now();
-  const res = verifyRequest(headers, { chainId: mockPool(network).chainId, method, pathWithQuery: path, body }, now);
-  if (!res.ok) throw new ApiError("unauthorized", `signature ${res.reason}`, 401);
-  for (const [k, exp] of seenNonces) if (exp < now) seenNonces.delete(k);
-  const key = `${res.pubkey}:${headers[HEADER_NONCE]}`;
-  if (seenNonces.has(key)) throw new ApiError("replay", "nonce already used", 409);
-  seenNonces.set(key, now + 120_000);
-  return res.pubkey;
+  const { pubkey, nonceKey, now } = verify(network, method, path, body, headers);
+  if (seenNonces.has(nonceKey)) throw new ApiError("replay", "nonce already used", 409);
+  seenNonces.set(nonceKey, now + 120_000);
+  return pubkey;
 }
 
 // ---- pool and accounts (per network) ----
 
 const hex16 = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (x) => x.toString(16).padStart(2, "0")).join("");
-const MOCK_RATE = () => ({ lamportsPerZec: "248000000000", source: "fixed" as const, ts: Date.now() });
 const UNSUPPORTED_OPS = new Set(["claim", "order_create", "order_cancel", "chat"]);
 
 function poolAddress(network: Network): string {
@@ -460,6 +476,283 @@ function stats(): PlatformStats {
   };
 }
 
+// ---- actions from the balance (rules of docs/API.md "Правила исполнения действий" and core/api) ----
+
+/** Mid rate, SOL per ZEC (devnet "fixed" source); the pool spread is applied per side. */
+const MID_LAMPORTS_PER_ZEC = BigInt(1_800_000_000);
+const SPREAD_BPS = BigInt(50);
+const ZAT = BigInt(100_000_000);
+const N0 = BigInt(0);
+const CREATE_FEE_ZAT = BigInt(100_000);
+const WITHDRAW_ZEC_FEE_ZAT = BigInt(15_000);
+const WITHDRAW_TOKEN_LAMPORTS_PER_PART = BigInt(2_000_000 + 2_100_000);
+
+function mockRate(buy: boolean): RateUsed {
+  const v = (MID_LAMPORTS_PER_ZEC * (BigInt(10_000) + (buy ? -SPREAD_BPS : SPREAD_BPS))) / BigInt(10_000);
+  return { lamportsPerZec: v.toString(), source: "fixed", ts: Date.now() };
+}
+
+/**
+ * Execution delays, compressed for the demo (core: buy/sell 3-20 s, withdraw_token 30 s-5 min or up to
+ * maxDelayMin per part, withdraw_zec 1-10 min). Order and states are the same.
+ */
+const EXEC_DELAY_MS: Record<string, [number, number]> = {
+  buy: [3_000, 8_000],
+  sell: [3_000, 8_000],
+  create: [5_000, 10_000],
+  withdraw_token: [8_000, 16_000],
+  withdraw_zec: [12_000, 24_000],
+};
+
+interface MockAction {
+  id: string;
+  network: Network;
+  pubkey: string;
+  nonceKey: string;
+  bodyHash: string;
+  action: SignedAction;
+  receipt: ActionReceipt;
+  status: ActionStatus;
+  /** What is reserved until execution. */
+  holdZat: bigint;
+  holdToken?: { mint: string; amount: bigint };
+}
+
+const actions = new Map<string, MockAction>();
+const byNonce = new Map<string, string>(); // nonceKey -> action id
+
+const isUint = (v: unknown): v is string => typeof v === "string" && /^(0|[1-9]\d{0,18})$/.test(v);
+function amountOf(v: unknown, field: string, positive = true): bigint {
+  if (!isUint(v)) throw new ApiError("bad_request", `${field}: expected an integer string in base units`, 400);
+  const b = BigInt(v);
+  if (positive && b === N0) throw new ApiError("bad_request", `${field} must be > 0`, 400);
+  return b;
+}
+
+function holdingOf(a: MockAccount, mint: string) {
+  let h = a.holdings.find((x) => x.mint === mint);
+  if (!h) {
+    h = { mint, amount: "0", held: "0" };
+    a.holdings.push(h);
+  }
+  return h;
+}
+
+function tidyHoldings(a: MockAccount) {
+  a.holdings = a.holdings.filter((h) => h.amount !== "0" || h.held !== "0");
+}
+
+function tradeToken(mint: string, venue: string): MockTokenState {
+  if (!["pumpfun", "meteora-dbc", "jupiter"].includes(venue)) throw new ApiError("bad_request", "venue: expected pumpfun | meteora-dbc | jupiter", 400);
+  if (!isSolanaAddress(mint)) throw new ApiError("bad_request", "mint: not a Solana address", 400);
+  const s = findToken(mint);
+  if (venue !== "jupiter" && s.token.venue !== venue) throw new ApiError("bad_request", `token trades on ${s.token.venue}, not ${venue}`, 400);
+  if (s.token.status === "graduated" && venue !== "jupiter") throw new ApiError("graduated", "token left the bonding curve", 409);
+  return s;
+}
+
+/** Validate and reserve. Throws exactly where core/ would answer non-2xx; nothing is held then. */
+function accept(network: Network, pubkey: string, action: SignedAction): Omit<MockAction, "id" | "nonceKey" | "bodyHash"> {
+  const pool = mockPool(network);
+  const minAction = BigInt(pool.minActionZat);
+  const a = account(network, pubkey);
+  if (a.frozen) throw new ApiError("balance_frozen", "balance frozen", 423);
+  const base = { network, pubkey, action, holdZat: N0 } as const;
+  const queued = (rate?: RateUsed): { receipt: ActionReceipt; status: ActionStatus } => ({
+    receipt: { id: "", status: "queued", ...(rate ? { rate } : {}) },
+    status: { status: "queued", ...(rate ? { rate } : {}) },
+  });
+
+  switch (action.op) {
+    case "buy": {
+      const zecIn = amountOf(action.zecIn, "zecIn");
+      amountOf(action.minOut, "minOut", false);
+      if (zecIn < minAction) throw new ApiError("below_minimum", "zecIn below PoolInfo.minActionZat", 422);
+      tradeToken(action.mint, action.venue);
+      if (a.zecBalance < zecIn) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
+      a.zecBalance -= zecIn;
+      a.zecHeld += zecIn;
+      return { ...base, holdZat: zecIn, ...queued(mockRate(true)) };
+    }
+    case "sell": {
+      const amount = amountOf(action.amount, "amount");
+      const minZecOut = amountOf(action.minZecOut, "minZecOut", false);
+      const s = tradeToken(action.mint, action.venue);
+      const rate = mockRate(false);
+      const est = (BigInt(Math.floor(Number(formatUnitsNum(amount, s.token.decimals)) * s.price * 1e9)) * ZAT) / BigInt(rate.lamportsPerZec);
+      if (minZecOut < minAction && est < minAction)
+        throw new ApiError("below_minimum", "sell value below PoolInfo.minActionZat (raise amount or minZecOut)", 422);
+      const h = holdingOf(a, action.mint);
+      if (BigInt(h.amount) < amount) throw new ApiError("insufficient_balance", "not enough tokens", 422);
+      h.amount = (BigInt(h.amount) - amount).toString();
+      h.held = (BigInt(h.held) + amount).toString();
+      return { ...base, holdToken: { mint: action.mint, amount }, ...queued(rate) };
+    }
+    case "create": {
+      const initial = action.initialBuyZec === undefined ? N0 : amountOf(action.initialBuyZec, "initialBuyZec", false);
+      if (action.venue === "jupiter") throw new ApiError("bad_request", "create: jupiter is not a launchpad", 400);
+      if (initial > N0 && initial < minAction) throw new ApiError("below_minimum", "initialBuyZec below PoolInfo.minActionZat", 422);
+      const total = initial + CREATE_FEE_ZAT;
+      if (a.zecBalance < total) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
+      a.zecBalance -= total;
+      a.zecHeld += total;
+      return { ...base, holdZat: total, ...queued(mockRate(true)) };
+    }
+    case "withdraw_zec": {
+      const v = checkWithdrawUa(String(action.to ?? ""), network);
+      if (!v.ok) throw new ApiError("bad_request", `to: ${v.reason}`, 400);
+      const amount = amountOf(action.amount, "amount");
+      if (amount < minAction) throw new ApiError("below_minimum", "amount below PoolInfo.minActionZat", 422);
+      const total = amount + WITHDRAW_ZEC_FEE_ZAT;
+      if (a.zecBalance < total) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
+      a.zecBalance -= total;
+      a.zecHeld += total;
+      return { ...base, holdZat: total, ...queued() };
+    }
+    case "withdraw_token": {
+      if (!isSolanaAddress(action.mint)) throw new ApiError("bad_request", "mint: not a Solana address", 400);
+      const amount = amountOf(action.amount, "amount");
+      const dests = Array.isArray(action.to) ? action.to : [action.to];
+      const parts = action.smart ? action.smart.parts : 1;
+      if (action.smart && (!(parts >= 2 && parts <= 5) || !(action.smart.maxDelayMin >= 1 && action.smart.maxDelayMin <= 1440)))
+        throw new ApiError("bad_request", "smart: parts 2..5, maxDelayMin 1..1440", 400);
+      if (dests.length !== parts) throw new ApiError("bad_request", "to: one address per part (length of `to` = smart.parts)", 400);
+      if (dests.some((d) => typeof d !== "string" || !isSolanaAddress(d))) throw new ApiError("bad_request", "to: not a Solana address", 400);
+      if (new Set(dests).size !== dests.length) throw new ApiError("bad_request", "to: addresses must be distinct", 400);
+      if (amount < BigInt(parts)) throw new ApiError("bad_request", "amount smaller than the number of parts", 400);
+      const rate = mockRate(true);
+      const lamports = BigInt(parts) * WITHDRAW_TOKEN_LAMPORTS_PER_PART;
+      const fee = (lamports * ZAT + BigInt(rate.lamportsPerZec) - BigInt(1)) / BigInt(rate.lamportsPerZec);
+      const h = a.holdings.find((x) => x.mint === action.mint);
+      if (!h || BigInt(h.amount) < amount) throw new ApiError("insufficient_balance", "not enough tokens", 422);
+      if (a.zecBalance < fee) throw new ApiError("insufficient_balance", "not enough ZEC for gas", 422);
+      a.zecBalance -= fee;
+      a.zecHeld += fee;
+      h.amount = (BigInt(h.amount) - amount).toString();
+      h.held = (BigInt(h.held) + amount).toString();
+      return { ...base, holdZat: fee, holdToken: { mint: action.mint, amount }, ...queued(rate) };
+    }
+    default:
+      throw new ApiError("bad_request", "op not supported yet", 400);
+  }
+}
+
+const formatUnitsNum = (v: bigint, decimals: number) => Number(v) / 10 ** decimals;
+
+function releaseZat(a: MockAccount, act: MockAction, spent: bigint) {
+  a.zecHeld -= act.holdZat;
+  a.zecBalance += act.holdZat - spent;
+}
+
+function releaseTokens(a: MockAccount, act: MockAction, consumed: bigint) {
+  if (!act.holdToken) return;
+  const h = holdingOf(a, act.holdToken.mint);
+  h.held = (BigInt(h.held) - act.holdToken.amount).toString();
+  h.amount = (BigInt(h.amount) + act.holdToken.amount - consumed).toString();
+}
+
+function fail(act: MockAction, a: MockAccount, error: ActionStatus["error"]) {
+  releaseZat(a, act, N0);
+  releaseTokens(a, act, N0);
+  act.status = { status: "failed", error, rate: act.status.rate };
+}
+
+/** The relayer: executes one queued action and publishes the trade like any other vault trade. */
+function execute(act: MockAction) {
+  if (act.status.status !== "queued") return;
+  const a = account(act.network, act.pubkey);
+  const x = act.action;
+  const tx = b58(88);
+  const rate = act.status.rate;
+  const now = Date.now();
+
+  if (x.op === "buy") {
+    const s = findToken(x.mint);
+    const lamports = (BigInt(x.zecIn) * BigInt(rate!.lamportsPerZec)) / ZAT;
+    const sol = Number(lamports) / 1e9;
+    const out = BigInt(toBaseUnits(sol / s.price, s.token.decimals));
+    if (out < BigInt(x.minOut)) return fail(act, a, "slippage");
+    releaseZat(a, act, act.holdZat);
+    const h = holdingOf(a, x.mint);
+    h.amount = (BigInt(h.amount) + out).toString();
+    s.price *= 1 + sol / Math.max(30, s.price * s.supply) / 2;
+    syncTokenFields();
+    publish({ id: b58(16), kind: "buy", venue: s.token.venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
+    act.status = { status: "executed", solanaTx: tx, rate, fill: { tokenAmount: out.toString(), solAmount: lamports.toString(), zecSpent: x.zecIn } };
+  } else if (x.op === "sell") {
+    const s = findToken(x.mint);
+    const amount = BigInt(x.amount);
+    const sol = formatUnitsNum(amount, s.token.decimals) * s.price;
+    const lamports = BigInt(Math.floor(sol * 1e9));
+    const zec = (lamports * ZAT) / BigInt(rate!.lamportsPerZec);
+    if (zec < BigInt(x.minZecOut)) return fail(act, a, "slippage");
+    releaseTokens(a, act, amount);
+    a.zecBalance += zec;
+    s.price *= 1 - sol / Math.max(30, s.price * s.supply) / 2;
+    syncTokenFields();
+    publish({ id: b58(16), kind: "sell", venue: s.token.venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: amount.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
+    act.status = { status: "executed", solanaTx: tx, rate, fill: { tokenAmount: amount.toString(), solAmount: lamports.toString(), zecCredited: zec.toString() } };
+  } else if (x.op === "create") {
+    const initial = act.holdZat - CREATE_FEE_ZAT;
+    const lamports = (initial * BigInt(rate!.lamportsPerZec)) / ZAT;
+    const venue: Venue = x.venue;
+    const price = 2.8e-8;
+    const s: MockTokenState = {
+      token: { mint: mintFor(venue, x.meta.symbol + ":" + act.id), symbol: x.meta.symbol, name: x.meta.name, image: x.meta.image, venue, status: "curve", decimals: DECIMALS[venue], priceSol: "0", marketCapSol: "0", createdAt: now },
+      price,
+      supply: SUPPLY,
+      heat: 3,
+    };
+    state!.push(s);
+    syncTokenFields();
+    const out = lamports > N0 ? BigInt(toBaseUnits(Number(lamports) / 1e9 / price, s.token.decimals)) : N0;
+    releaseZat(a, act, act.holdZat);
+    if (out > N0) holdingOf(a, s.token.mint).amount = out.toString();
+    publish({ id: b58(16), kind: "create", venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
+    act.status = { status: "executed", solanaTx: tx, rate, fill: { tokenAmount: out.toString(), solAmount: lamports.toString(), zecSpent: initial.toString(), mint: s.token.mint } };
+  } else if (x.op === "withdraw_token") {
+    // Separate transfers from another vault; not a trade, so nothing in the feed.
+    releaseZat(a, act, act.holdZat);
+    releaseTokens(a, act, act.holdToken!.amount);
+    act.status = { status: "executed", solanaTx: tx, rate, fill: { tokenAmount: x.amount } };
+  } else if (x.op === "withdraw_zec") {
+    releaseZat(a, act, act.holdZat);
+    act.status = { status: "executed" };
+  }
+  tidyHoldings(a);
+}
+
+function submit(network: Network, method: "POST", path: string, body: string | undefined, headers: Partial<SignedHeaders>): ActionReceipt {
+  const { pubkey, nonceKey, now } = verify(network, method, path, body, headers);
+  const hash = bodyHash(body);
+  const prior = byNonce.get(nonceKey);
+  if (prior) {
+    // Same signed request again (retry after a timeout): the original receipt. Other body: replay.
+    const act = actions.get(prior)!;
+    if (act.bodyHash !== hash) throw new ApiError("replay", "nonce already used", 409);
+    return act.receipt;
+  }
+  if (seenNonces.has(nonceKey)) throw new ApiError("replay", "nonce already used", 409);
+  let action: SignedAction | null = null;
+  try {
+    action = body ? (JSON.parse(body) as SignedAction) : null;
+  } catch {
+    /* handled below */
+  }
+  if (!action?.op) throw new ApiError("bad_request", "op required", 400);
+  if (UNSUPPORTED_OPS.has(action.op)) throw new ApiError("bad_request", "op not supported yet", 400);
+  // Rejected actions do not burn the nonce (docs/API.md).
+  const accepted = accept(network, pubkey, action);
+  seenNonces.set(nonceKey, now + 120_000);
+  const id = hex16(); // 128 random bits, hex (docs/API.md)
+  const act: MockAction = { ...accepted, id, nonceKey, bodyHash: hash, receipt: { ...accepted.receipt, id } };
+  actions.set(id, act);
+  byNonce.set(nonceKey, id);
+  const [lo, hi] = EXEC_DELAY_MS[action.op] ?? [5_000, 10_000];
+  setTimeout(() => execute(act), rand(lo, hi));
+  return act.receipt;
+}
+
 // ---- router ----
 
 /** Emulates one HTTP round-trip. Throws ApiError exactly where core/ would answer non-2xx. */
@@ -477,7 +770,6 @@ export async function handle(
   const p = url.pathname;
   const q = url.searchParams;
   let m: RegExpMatchArray | null;
-  const json = () => (body ? (JSON.parse(body) as unknown) : null);
 
   if (method === "GET") {
     if (p === "/api/feed") return history.slice(0, Math.min(Number(q.get("limit") ?? 50), 200));
@@ -513,10 +805,8 @@ export async function handle(
     if ((m = p.match(/^\/api\/actions\/([^/]+)$/))) {
       const pub = authorize(network, method, pathWithQuery, body, headers);
       const a = actions.get(decodeURIComponent(m[1]));
-      if (!a || a.pubkey !== pub) throw new ApiError("not_found", "unknown action", 404);
-      const res: ActionStatus =
-        Date.now() - a.createdAt < 4_000 ? { status: "queued" } : { status: "executed", solanaTx: b58(88) };
-      return res;
+      if (!a || a.pubkey !== pub || a.network !== network) throw new ApiError("not_found", "unknown action", 404);
+      return structuredClone(a.status);
     }
     if (p === "/api/portfolio") {
       // pubkey comes only from the signed header, never from the path.
@@ -529,17 +819,7 @@ export async function handle(
   }
 
   if (method === "POST") {
-    if (p === "/api/actions") {
-      const pub = authorize(network, method, pathWithQuery, body, headers);
-      const action = json() as SignedAction | null;
-      if (!action?.op) throw new ApiError("bad_request", "op required", 400);
-      if (UNSUPPORTED_OPS.has(action.op)) throw new ApiError("bad_request", "op not supported yet", 400);
-      if (account(network, pub).frozen) throw new ApiError("balance_frozen", "balance frozen", 423);
-      const id = hex16(); // 128 random bits, hex (docs/API.md)
-      actions.set(id, { createdAt: Date.now(), action, pubkey: pub });
-      const res: ActionReceipt = { id, status: "queued", rate: MOCK_RATE() };
-      return res;
-    }
+    if (p === "/api/actions") return { ...submit(network, method, pathWithQuery, body, headers) };
   }
 
   throw new ApiError("not_found", `${method} ${p}`, 404);
@@ -547,10 +827,23 @@ export async function handle(
 
 // ---- WS /ws/feed[?mint=] (simulated) ----
 
+const feedSubs = new Set<(e: FeedEvent) => void>();
+
+/** A trade made by the mock relayer: into history and out to every open socket. */
+function publish(ev: FeedEvent) {
+  history.unshift(ev);
+  if (history.length > 1000) history.length = 1000;
+  feedSubs.forEach((f) => f(ev));
+}
+
 export function subscribeFeed(onEvent: (e: FeedEvent) => void, mint?: string): () => void {
   init(Date.now());
   let timer: ReturnType<typeof setTimeout>;
   let stopped = false;
+  const own = (e: FeedEvent) => {
+    if (!stopped && (!mint || e.mint === mint)) onEvent(e);
+  };
+  feedSubs.add(own);
   const schedule = () => {
     // Bursty: mostly 1.5-4.5 s apart, sometimes a quick double.
     const wait = Math.random() < 0.15 ? rand(300, 900) : rand(1500, 4500);
@@ -564,6 +857,7 @@ export function subscribeFeed(onEvent: (e: FeedEvent) => void, mint?: string): (
   schedule();
   return () => {
     stopped = true;
+    feedSubs.delete(own);
     clearTimeout(timer);
   };
 }

@@ -29,7 +29,7 @@ function useGain(zat: string | undefined) {
   return gain;
 }
 
-export function BalanceCard({ portfolio }: { portfolio: Portfolio | null }) {
+export function BalanceCard({ portfolio, onWithdraw }: { portfolio: Portfolio | null; onWithdraw?: () => void }) {
   const gain = useGain(portfolio?.zecBalance);
   const held = portfolio ? BigInt(portfolio.zecHeld) > BigInt(0) : false;
 
@@ -107,12 +107,12 @@ export function BalanceCard({ portfolio }: { portfolio: Portfolio | null }) {
         <Button
           variant="outline"
           size="lg"
-          className="h-11 flex-1 rounded-full text-sm"
-          disabled
-          title="Withdrawals arrive with the relayer"
+          className="h-11 flex-1 rounded-full border-border bg-surface-1 text-sm hover:border-border-strong hover:bg-surface-2"
+          onClick={onWithdraw}
+          disabled={!portfolio}
         >
           <ArrowUpRight weight="light" />
-          Withdraw <span className="text-faint-foreground">· soon</span>
+          Withdraw
         </Button>
       </div>
     </section>

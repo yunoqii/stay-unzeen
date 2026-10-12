@@ -2,17 +2,20 @@
 
 import Link from "next/link";
 import { use, useEffect, useState } from "react";
-import { ArrowLeft, ChartLineUp, Copy, ShieldCheck } from "@phosphor-icons/react";
+import { ArrowLeft, Copy } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { api, errorText } from "@/lib/api/client";
 import { useNetwork } from "@/lib/network";
-import type { TokenWithTrades } from "@/lib/api/types";
+import type { FeedEvent, TokenWithTrades } from "@/lib/api/types";
 import { formatCompact, formatPrice, shortAddr, timeAgo } from "@/lib/format";
 import { useLiveFeed } from "@/hooks/use-live-feed";
 import { useNow } from "@/hooks/use-now";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/layout/page-shell";
 import { FeedStatusDot, LiveFeed } from "@/components/feed/live-feed";
+import { SharedTarget } from "@/components/motion/shared-element";
+import { TradePanel } from "@/components/trade/trade-panel";
+import { PriceChart } from "./price-chart";
 import { TokenGlyph } from "./token-glyph";
 import { VenueTag } from "./venue-tag";
 
@@ -55,6 +58,7 @@ export function TokenView({ params }: { params: Promise<{ mint: string }> }) {
 function TokenLoaded({ token }: { token: TokenWithTrades }) {
   const feed = useLiveFeed({ mint: token.mint, initial: token.trades, limit: 100 });
   const now = useNow(1000);
+  const priceSol = useLivePrice(token, feed.events);
 
   const copyMint = async () => {
     try {
@@ -68,10 +72,14 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
   return (
     <Frame>
       <header className="flex flex-wrap items-start gap-4">
-        <TokenGlyph symbol={token.symbol} image={token.image} className="size-14 rounded-xl text-sm" />
+        <SharedTarget id={`glyph-${token.mint}`} className="shrink-0">
+          <TokenGlyph symbol={token.symbol} image={token.image} className="size-14 rounded-xl text-sm" />
+        </SharedTarget>
         <div className="min-w-0 flex-1">
           <h1 className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="text-3xl font-medium tracking-tight">${token.symbol}</span>
+            <SharedTarget id={`ticker-${token.mint}`} className="inline-block">
+              <span className="text-3xl font-medium tracking-tight">${token.symbol}</span>
+            </SharedTarget>
             <span className="text-lg text-muted-foreground">{token.name}</span>
           </h1>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
@@ -90,40 +98,36 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
       </header>
 
       <dl className="mt-8 grid grid-cols-3 gap-px overflow-hidden rounded-2xl border border-border bg-border">
-        <Stat label="Price" value={formatPrice(token.priceSol)} unit="SOL" />
+        <Stat label="Price" value={formatPrice(priceSol)} unit="SOL" />
         <Stat label="Market cap" value={formatCompact(Number(token.marketCapSol))} unit="SOL" />
         <Stat label="Created" value={now === null ? "" : timeAgo(token.createdAt, now)} unit="ago" />
       </dl>
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
-        <div className="min-w-0 space-y-6">
-          <EmptyState icon={<ChartLineUp size={28} weight="thin" />} title="Chart" className="h-64 border-solid">
-            Candles arrive with the token page build (days 6–8).
-          </EmptyState>
-
-          <section aria-labelledby="trades-title" className="rounded-2xl border border-border">
-            <header className="flex items-center justify-between border-b border-border/60 px-4 py-3">
-              <h2 id="trades-title" className="text-sm font-medium">
-                unzeen trades
-              </h2>
-              <FeedStatusDot status={feed.status} />
-            </header>
-            <LiveFeed
-              events={feed.events}
-              fresh={feed.fresh}
-              loading={feed.loading}
-              error={feed.error}
-              dense
-              emptyText="No unzeen trades on this token yet."
-            />
-          </section>
+      <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:grid-rows-[auto_1fr]">
+        <div className="min-w-0">
+          <PriceChart mint={token.mint} trades={feed.events} />
         </div>
 
-        <aside className="lg:sticky lg:top-[calc(var(--header-h)+var(--banner-h)+1.5rem)] lg:self-start">
-          <EmptyState icon={<ShieldCheck size={28} weight="thin" />} title="Buy or sell privately" className="border-solid">
-            Pay with shielded ZEC from ZODL by QR. Coming next.
-          </EmptyState>
+        <aside className="lg:col-start-2 lg:row-span-2 lg:row-start-1">
+          <TradePanel token={token} priceSol={priceSol} />
         </aside>
+
+        <section aria-labelledby="trades-title" className="min-w-0 rounded-2xl border border-border">
+          <header className="flex items-center justify-between border-b border-border/60 px-4 py-3">
+            <h2 id="trades-title" className="text-sm font-medium">
+              unzeen trades
+            </h2>
+            <FeedStatusDot status={feed.status} />
+          </header>
+          <LiveFeed
+            events={feed.events}
+            fresh={feed.fresh}
+            loading={feed.loading}
+            error={feed.error}
+            dense
+            emptyText="No unzeen trades on this token yet."
+          />
+        </section>
       </div>
     </Frame>
   );
@@ -170,4 +174,15 @@ export function TokenViewSkeleton() {
       <Skeleton className="mt-6 h-64 rounded-2xl bg-skeleton" />
     </div>
   );
+}
+
+/** Price of the latest trade we saw on the socket, else the token's own priceSol. Plain decimal string. */
+function useLivePrice(token: TokenWithTrades, events: FeedEvent[]): string {
+  const e = events.find((x) => x.kind !== "create");
+  if (!e || token.trades.some((t) => t.id === e.id)) return token.priceSol;
+  const tokens = Number(e.tokenAmount) / 10 ** e.decimals;
+  const sol = Number(e.solAmount) / 1e9;
+  if (!(tokens > 0) || !(sol > 0)) return token.priceSol;
+  const p = sol / tokens;
+  return p.toFixed(Math.min(20, Math.max(0, 5 - Math.floor(Math.log10(p)))));
 }

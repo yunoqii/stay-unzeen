@@ -229,6 +229,14 @@ function DepositRequest({
           </div>
         </div>
 
+        <div role="note" className="flex gap-2.5 rounded-xl border border-zec/30 bg-zec-soft px-3.5 py-3 text-xs text-pretty">
+          <WarningCircle size={16} weight="light" className="mt-px shrink-0 text-zec" aria-hidden />
+          <p className="text-zec/85">
+            <span className="font-medium text-zec">Pay from a shielded wallet only</span> (ZODL, Ironwood balance). Not from an
+            exchange and not from a t-address: there the source and amount are public, and an exchange learns you pay Unzeen.
+          </p>
+        </div>
+
         {uri && phase.step === "waiting" && (
           <Button asChild size="lg" className="h-12 w-full rounded-full text-sm md:hidden">
             <a href={uri}>

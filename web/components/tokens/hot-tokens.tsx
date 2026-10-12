@@ -9,6 +9,8 @@ import { formatCompact } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/layout/page-shell";
+import { captureShared, sharedProps } from "@/components/motion/shared-element";
+import { Tilt } from "@/components/motion/tilt";
 import { TokenGlyph } from "./token-glyph";
 import { VenueTag } from "./venue-tag";
 
@@ -58,15 +60,21 @@ export function HotTokens({ tokens, events, now, limit = 6 }: Props) {
     <ol className="p-2">
       {ranked.map(({ token, trades }, i) => (
         <motion.li key={token.mint} layout="position" transition={{ type: "spring", bounce: 0, duration: 0.4 }}>
+          <Tilt>
           <Link
             href={`/token/${token.mint}`}
+            onClick={(e) => captureShared(e.currentTarget)}
             className="group flex items-center gap-3 rounded-xl border border-transparent p-2.5 transition-colors duration-200 hover:border-border hover:bg-surface-1 focus-visible:border-ring focus-visible:outline-none"
           >
             <span className="tabular w-4 shrink-0 text-right font-mono text-[11px] text-faint-foreground">{i + 1}</span>
-            <TokenGlyph symbol={token.symbol} image={token.image} />
+            <span {...sharedProps(`glyph-${token.mint}`)} className="shrink-0">
+              <TokenGlyph symbol={token.symbol} image={token.image} />
+            </span>
             <div className="min-w-0 flex-1">
               <p className="flex items-baseline gap-2">
-                <span className="font-medium">${token.symbol}</span>
+                <span {...sharedProps(`ticker-${token.mint}`)} className="font-medium">
+                  ${token.symbol}
+                </span>
                 <span className="truncate text-xs text-faint-foreground">{token.name}</span>
               </p>
               <p className="mt-0.5 flex items-center gap-2 text-xs">
@@ -89,6 +97,7 @@ export function HotTokens({ tokens, events, now, limit = 6 }: Props) {
               </p>
             </div>
           </Link>
+          </Tilt>
         </motion.li>
       ))}
     </ol>

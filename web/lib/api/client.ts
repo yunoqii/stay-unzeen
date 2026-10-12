@@ -90,6 +90,8 @@ interface Call {
   path: string; // path + query, exactly as signed and sent
   body?: unknown;
   signer?: Signer;
+  /** Resend the exact same signed bytes this many times after a network failure (idempotent by nonce). */
+  retries?: number;
 }
 
 function prepare(call: Call): { body: string | undefined; headers: Record<string, string> } {
@@ -101,21 +103,30 @@ function prepare(call: Call): { body: string | undefined; headers: Record<string
   return { body, headers };
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function httpCall<T>(call: Call): Promise<T> {
+  // Signed once: a retry after a timeout sends the same nonce and body, so the backend answers with
+  // the original receipt instead of creating a second action (docs/API.md, POST /api/actions).
   const { body, headers } = prepare(call);
-  let res: Response;
-  try {
-    res = await fetch(networkConfig().apiUrl + call.path, {
-      method: call.method,
-      body,
-      headers,
-      // No cookies, no referrer: the backend must not learn more than the request itself.
-      credentials: "omit",
-      referrerPolicy: "no-referrer",
-      cache: "no-store",
-    });
-  } catch {
-    throw new ApiError("network", `${call.method} ${call.path}: network error`);
+  const url = networkConfig().apiUrl + call.path;
+  let res: Response | null = null;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await fetch(url, {
+        method: call.method,
+        body,
+        headers,
+        // No cookies, no referrer: the backend must not learn more than the request itself.
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+        cache: "no-store",
+      });
+      break;
+    } catch {
+      if (attempt >= (call.retries ?? 0)) throw new ApiError("network", `${call.method} ${call.path}: network error`);
+      await sleep(700 * (attempt + 1));
+    }
   }
   if (!res.ok) throw await errorFromResponse(res, `${call.method} ${call.path}`);
   return (await res.json()) as T;
@@ -128,7 +139,8 @@ async function mockCall<T>(call: Call): Promise<T> {
 
 function makeApi(send: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscribeFeed"]): Api {
   const get = <T>(path: string, signer?: Signer) => send<T>({ method: "GET", path, signer });
-  const post = <T>(path: string, body: unknown, signer?: Signer) => send<T>({ method: "POST", path, body, signer });
+  const post = <T>(path: string, body: unknown, signer?: Signer, retries?: number) =>
+    send<T>({ method: "POST", path, body, signer, retries });
 
   return {
     getFeed: (limit = 50) => get(`/api/feed${qs({ limit })}`),
@@ -146,7 +158,7 @@ function makeApi(send: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscr
     getPool: () => get("/api/pool"),
     // The anon pubkey never goes into a URL path or query (access logs = IP <-> key). Header only.
     getPortfolio: (signer) => get("/api/portfolio", signer),
-    postAction: (signer, action) => post("/api/actions", action, signer),
+    postAction: (signer, action) => post("/api/actions", action, signer, 2),
     getAction: (signer, id) => get(`/api/actions/${enc(id)}`, signer),
     getOrders: (signer) => get("/api/orders", signer),
     getCreator: (signer) => get("/api/creator", signer),

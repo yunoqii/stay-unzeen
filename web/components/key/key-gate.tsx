@@ -10,7 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/layout/page-shell";
 
 /** Pages that act for the anon key render only when it is unlocked; otherwise they lead to /key. */
-export function KeyGate({ next, children }: { next: "/portfolio" | "/pay"; children: React.ReactNode }) {
+export function KeyGate({ next, children }: { next: "/portfolio" | "/pay" | `/token/${string}`; children: React.ReactNode }) {
   const state = useKeyState();
   if (state.status === "loading")
     return (

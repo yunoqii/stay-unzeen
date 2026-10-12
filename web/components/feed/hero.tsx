@@ -1,17 +1,69 @@
+"use client";
+
+import dynamic from "next/dynamic";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowRight } from "@phosphor-icons/react";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
-/**
- * Static eclipse: the reduced-motion / low-power fallback of the WebGL hero
- * (FRONTEND.md moment 2). The shader lands on top of this later.
- */
+/** Can this device afford the WebGL eclipse? Otherwise the static one stays (FRONTEND.md moment 2). */
+function webglAllowed(): boolean {
+  if (new URLSearchParams(window.location.search).get("eclipse") === "static") return false;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
+  const nav = navigator as Navigator & { deviceMemory?: number; connection?: { saveData?: boolean } };
+  if (nav.connection?.saveData) return false;
+  if ((nav.hardwareConcurrency ?? 8) < 4 || (nav.deviceMemory ?? 8) < 4) return false;
+  try {
+    const c = document.createElement("canvas");
+    return !!(c.getContext("webgl2") ?? c.getContext("webgl"));
+  } catch {
+    return false;
+  }
+}
+
+const EclipseGL = dynamic(() => import("./eclipse-gl"), { ssr: false });
+
+/** Static eclipse (CSS) under a lazily loaded WebGL one; the static one is also the fallback. */
 function Eclipse() {
+  const [gl, setGl] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [visible, setVisible] = useState(true);
+  const box = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const decide = () => setGl(webglAllowed());
+    // Off the critical path: decide after the feed had its first paint.
+    const idle = window.requestIdleCallback ? window.requestIdleCallback(decide, { timeout: 1500 }) : window.setTimeout(decide, 300);
+    mq.addEventListener("change", decide);
+    return () => {
+      mq.removeEventListener("change", decide);
+      if (window.cancelIdleCallback) window.cancelIdleCallback(idle as number);
+      else clearTimeout(idle as number);
+    };
+  }, []);
+
+  useEffect(() => {
+    const el = box.current;
+    if (!el || !gl) return;
+    const io = new IntersectionObserver(([e]) => setVisible(e.isIntersecting));
+    io.observe(el);
+    return () => io.disconnect();
+  }, [gl]);
+
   return (
-    <div aria-hidden className="pointer-events-none absolute -top-40 right-[-12rem] size-[30rem] sm:-top-44 sm:right-[-6rem] lg:right-0">
-      <div className="absolute inset-0 rounded-full bg-[radial-gradient(closest-side,transparent_88%,rgb(244_183_40/0.35)_95%,transparent)] blur-2xl" />
-      <div className="absolute inset-[6%] rounded-full shadow-[0_0_0_1px_rgb(244_183_40/0.55),0_0_60px_6px_rgb(244_183_40/0.18)]" />
-      <div className="absolute inset-[6%] translate-x-[3%] translate-y-[-2%] rounded-full bg-[radial-gradient(circle_at_65%_35%,#121215,#060607_60%)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.04)]" />
+    <div ref={box} aria-hidden className="pointer-events-none absolute -top-40 right-[-12rem] size-[30rem] sm:-top-44 sm:right-[-6rem] lg:right-0">
+      <div className={cn("absolute inset-0 transition-opacity duration-700", ready && "opacity-0")}>
+        <div className="absolute inset-0 rounded-full bg-[radial-gradient(closest-side,transparent_88%,rgb(244_183_40/0.35)_95%,transparent)] blur-2xl" />
+        <div className="absolute inset-[6%] rounded-full shadow-[0_0_0_1px_rgb(244_183_40/0.55),0_0_60px_6px_rgb(244_183_40/0.18)]" />
+        <div className="absolute inset-[6%] translate-x-[3%] translate-y-[-2%] rounded-full bg-[radial-gradient(circle_at_65%_35%,#121215,#060607_60%)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.04)]" />
+      </div>
+      {gl && (
+        <div className={cn("absolute inset-[-16.667%] opacity-0 transition-opacity duration-700", ready && "opacity-100")}>
+          <EclipseGL active={visible} onReady={() => setReady(true)} />
+        </div>
+      )}
     </div>
   );
 }
@@ -21,7 +73,7 @@ export function Hero({ onBuy }: { onBuy?: () => void }) {
     <section className="relative overflow-hidden border-b border-border/60">
       <Eclipse />
       <div className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-b from-transparent to-background" aria-hidden />
-      <div className="relative mx-auto max-w-6xl px-4 pt-10 pb-10 sm:px-6 sm:pt-14 sm:pb-12">
+      <div className="relative mx-auto max-w-6xl px-4 pt-8 pb-8 sm:px-6 sm:pt-12 sm:pb-10">
         <p className="mb-4 font-mono text-xs tracking-wider text-faint-foreground uppercase">
           Private trading for Solana launchpads · paid in shielded ZEC
         </p>

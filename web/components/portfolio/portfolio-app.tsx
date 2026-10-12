@@ -1,6 +1,11 @@
 "use client";
 
+import { useRef, useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { WarningCircle } from "@phosphor-icons/react";
+import { useActions } from "@/lib/activity";
+import { useKeyState } from "@/lib/crypto/session";
+import { useNetwork } from "@/lib/network";
 import { usePool } from "@/hooks/use-pool";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { useTokens } from "@/hooks/use-tokens";
@@ -9,6 +14,8 @@ import { BalanceCard } from "./balance-card";
 import { DepositsList } from "./deposits-list";
 import { HoldingsList } from "./holdings-list";
 import { PeekProvider } from "./peek";
+import { SessionActivity } from "./session-activity";
+import { WithdrawPanel, type WithdrawTab } from "./withdraw-panel";
 
 export function PortfolioApp() {
   return (
@@ -24,6 +31,16 @@ function PortfolioView() {
   const { portfolio, error } = usePortfolio(10_000);
   const { pool } = usePool();
   const { tokens } = useTokens();
+  const [withdraw, setWithdraw] = useState<{ tab: WithdrawTab; mint: string | null } | null>(null);
+  const panel = useRef<HTMLElement>(null);
+  const key = useKeyState();
+  const network = useNetwork();
+  const actions = useActions(network, key.status === "unlocked" ? key.pubkey : null);
+
+  const open = (tab: WithdrawTab, mint: string | null = null) => {
+    setWithdraw({ tab, mint });
+    requestAnimationFrame(() => panel.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  };
 
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)] lg:items-start">
@@ -34,10 +51,36 @@ function PortfolioView() {
             {error}
           </p>
         )}
-        <BalanceCard portfolio={portfolio} />
-        <HoldingsList holdings={portfolio?.holdings ?? null} tokens={tokens} />
+        <BalanceCard portfolio={portfolio} onWithdraw={() => open("zec")} />
+        <HoldingsList holdings={portfolio?.holdings ?? null} tokens={tokens} onWithdraw={(m) => open("token", m)} />
       </div>
-      <DepositsList deposits={portfolio?.deposits ?? null} confirmations={pool?.confirmations} />
+      <div className="space-y-4">
+        <AnimatePresence initial={false}>
+          {withdraw && portfolio && (
+            <motion.div
+              key="withdraw"
+              initial={{ opacity: 0, y: 12, filter: "blur(8px)" }}
+              animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+              exit={{ opacity: 0, y: 8, filter: "blur(8px)", transition: { duration: 0.2 } }}
+              transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+            >
+              <WithdrawPanel
+                ref={panel}
+                tab={withdraw.tab}
+                onTab={(tab) => setWithdraw((w) => (w ? { ...w, tab } : w))}
+                mint={withdraw.mint}
+                onMint={(mint) => setWithdraw((w) => (w ? { ...w, mint } : w))}
+                portfolio={portfolio}
+                tokens={tokens}
+                pool={pool}
+                onClose={() => setWithdraw(null)}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+        <SessionActivity actions={actions} />
+        <DepositsList deposits={portfolio?.deposits ?? null} confirmations={pool?.confirmations} />
+      </div>
     </div>
   );
 }

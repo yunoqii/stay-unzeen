@@ -41,7 +41,10 @@ const NEXT_PATHS = ["/portfolio", "/pay"] as const;
 
 function nextPath(): string | null {
   const n = new URLSearchParams(window.location.search).get("next");
-  return n && (NEXT_PATHS as readonly string[]).includes(n) ? n : null;
+  if (!n) return null;
+  if ((NEXT_PATHS as readonly string[]).includes(n)) return n;
+  // Back to a token page: base58 mint only, so the path can't point anywhere else.
+  return /^\/token\/[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(n) ? n : null;
 }
 
 export function KeyApp() {
