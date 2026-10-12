@@ -12,6 +12,7 @@
     "keys:gen": "tsx scripts/gen-keys.ts",
     "e2e:devnet": "tsx scripts/e2e-devnet.ts",
     "relayer:devnet": "tsx scripts/relayer-devnet.ts",
+    "relayer:lanes:devnet": "tsx scripts/relayer-lanes-devnet.ts",
     "keys:encrypt": "tsx scripts/keys-encrypt.ts",
     "relayer:run": "tsx scripts/relayer-run.ts",
     "media:serve": "tsx scripts/media-serve.ts"

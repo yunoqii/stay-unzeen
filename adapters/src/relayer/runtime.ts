@@ -1,9 +1,11 @@
 import os from "node:os";
 import path from "node:path";
+import { PUMP_PROGRAM_ID } from "@pump-fun/pump-sdk";
 import type { Connection, Keypair } from "@solana/web3.js";
 import pg from "pg";
 import type { AdapterConfig } from "../config";
 import { CreatorKeyring, FileCreatorIndexCounter, type CreatorIndexCounter } from "../keys";
+import { priorityFeeCacheFromConfig, type PriorityFeeCache } from "../fees";
 import { KeyStore, ageCipher, resolveAgeIdentity } from "../keystore";
 import { metadataStoreFromEnv, type MetadataStore } from "../metadata";
 import { PumpFunAdapter } from "../pumpfun";
@@ -108,6 +110,8 @@ export interface RelayerRuntimeOptions {
   creatorCounter?: CreatorIndexCounter;
   metadata?: MetadataStore | null;
   leaseMs?: number;
+  /** Pool-wide compute unit price; default: background cache from cfg (not started). */
+  fees?: PriorityFeeCache;
 }
 
 export interface RelayerRuntime {
@@ -117,7 +121,15 @@ export interface RelayerRuntime {
   queue: PostgresJobQueue;
   mintVaults: MintVaults;
   metadata: MetadataStore | null;
+  /**
+   * ONE compute unit price for all pool tx (R-relayer-2). Call
+   * `await fees.refresh(); fees.start()` before running, `fees.stop()` after.
+   */
+  fees: PriorityFeeCache;
 }
+
+/** Venue programs the fee estimate is asked for (programs only: no vault, mint or user). */
+export const FEE_ESTIMATE_PROGRAMS: readonly string[] = [PUMP_PROGRAM_ID.toBase58()];
 
 export function defaultMediaDir(cfg: AdapterConfig, env: NodeJS.ProcessEnv = process.env): string {
   const home = env.UNZEEN_HOME?.trim() || path.join(os.homedir(), ".unzeen");
@@ -141,13 +153,14 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   const metadata = o.metadata !== undefined ? o.metadata : metadataStoreFromEnv(defaultMediaDir(o.cfg, env), env);
   if (!metadata) o.warn("no metadata store (UNZEEN_METADATA_BASE_URL or PINATA_JWT): create jobs will retry and fail");
 
+  const fees = o.fees ?? priorityFeeCacheFromConfig(o.cfg, o.connection, FEE_ESTIMATE_PROGRAMS);
   const adapter = new PumpFunAdapter({
     connection: o.connection,
     defaultVault: vaults[0]!,
     vaults,
     creators: new CreatorKeyring(o.keys.creatorSeed, counter),
     stateDir: o.cfg.keysDir,
-    priorityMicroLamports: o.cfg.priorityMicroLamports,
+    priorityMicroLamports: fees,
   });
   const probe = new RpcChainProbe(o.connection);
   const queue = new PostgresJobQueue({ pool: o.db, network: o.network, probe });
@@ -161,7 +174,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     executors: {
       trade: { pumpfun: new PumpFunTradeExecutor(adapter, metadata) },
       withdraw: new WithdrawExecutor(
-        new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: o.cfg.priorityMicroLamports }),
+        new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: fees }),
         cryptoRng,
       ),
     },
@@ -170,7 +183,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     ...(o.leaseMs ? { leaseMs: o.leaseMs } : {}),
     ...(o.onEvent ? { onEvent: o.onEvent } : {}),
   });
-  return { relayer, adapter, pool, queue, mintVaults, metadata };
+  return { relayer, adapter, pool, queue, mintVaults, metadata, fees };
 }
 
 export function makePools(url: string, vaultCount: number, schema?: string): { db: pg.Pool; lockDb: pg.Pool } {

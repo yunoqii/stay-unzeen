@@ -5,7 +5,7 @@ import type { SignedTx } from "../tx";
 import type { VenueId } from "../types";
 import type { ChainProbe, JobExecutor } from "./executors";
 import { cryptoRng, retryNotBefore, type Rng } from "./random";
-import { LeaseLostError, type ClaimedJob, type Execution, type JobQueue, type JobResult, type JobSpec, type SentAttempt } from "./types";
+import { LeaseLostError, type ClaimedJob, type Execution, type JobQueue, type JobResult, type JobSpec, type Lane, type SentAttempt } from "./types";
 import type { MintVaults } from "./mint-vaults";
 import { VaultsBusyError, type VaultPool, type VaultRequest } from "./vaults";
 
@@ -86,9 +86,18 @@ export class Relayer {
     };
   }
 
-  /** Claims and processes one due job. Returns false when nothing was due. */
-  async tick(): Promise<boolean> {
-    const job = await this.o.queue.claim({ workerId: this.o.workerId, now: this.o.clock.now(), leaseMs: this.o.leaseMs });
+  /**
+   * Claims and processes one due job (of `lane`, if given). Returns false when
+   * nothing was due. The lane only selects WHICH job is claimed: the job is
+   * then processed exactly the same way (same executor, same fee, same tx).
+   */
+  async tick(lane?: Lane): Promise<boolean> {
+    const job = await this.o.queue.claim({
+      workerId: this.o.workerId,
+      now: this.o.clock.now(),
+      leaseMs: this.o.leaseMs,
+      ...(lane ? { lane } : {}),
+    });
     if (!job) return false;
     let result: JobResult;
     try {
@@ -112,12 +121,25 @@ export class Relayer {
     return true;
   }
 
+  /**
+   * R-relayer-1: two independent loops in one process. The now lane polls
+   * often and is never stuck behind an epoch being executed by the batch lane.
+   * Errors are reported without the lane (R-relayer-6: no exec_mode in logs).
+   */
+  async runLanes(
+    signal: AbortSignal,
+    idle: { nowMs: number; batchMs: number } = { nowMs: 300, batchMs: 1_000 },
+    onError?: (e: unknown) => void,
+  ): Promise<void> {
+    await Promise.all([this.run(signal, idle.nowMs, onError, "now"), this.run(signal, idle.batchMs, onError, "batch")]);
+  }
+
   /** Runs until `signal` aborts; sleeps `idleMs` when nothing is due. */
-  async run(signal: AbortSignal, idleMs = 1_000, onError?: (e: unknown) => void): Promise<void> {
+  async run(signal: AbortSignal, idleMs = 1_000, onError?: (e: unknown) => void, lane?: Lane): Promise<void> {
     while (!signal.aborted) {
       let worked = false;
       try {
-        worked = await this.tick();
+        worked = await this.tick(lane);
       } catch (e) {
         // DB / RPC trouble in claim or report (D7): nothing is failed here. A
         // job whose report was lost keeps its recorded signature; its lease

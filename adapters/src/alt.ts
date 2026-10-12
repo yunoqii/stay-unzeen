@@ -8,6 +8,7 @@ import {
   type Signer,
   type TransactionInstruction,
 } from "@solana/web3.js";
+import { priceOf, type PriorityPrice } from "./fees";
 import { sendAndConfirm } from "./tx";
 
 /**
@@ -24,7 +25,7 @@ export class LookupTables {
   constructor(
     private readonly connection: Connection,
     private readonly stateDir: string,
-    private readonly priorityMicroLamports = 0,
+    private readonly priority: number | PriorityPrice = 0,
   ) {}
 
   /** Returns an active table of `vault` holding at least `addresses`. */
@@ -117,7 +118,7 @@ export class LookupTables {
   }
 
   private opts() {
-    return { computeUnits: 50_000, priorityMicroLamports: this.priorityMicroLamports };
+    return { computeUnits: 50_000, priorityMicroLamports: priceOf(this.priority) };
   }
 }
 

@@ -1,11 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { actionNotBefore, cryptoRng, type ActionJitter, type Rng } from "./random";
-import { LeaseLostError, type ClaimedJob, type Job, type JobQueue, type JobResult, type JobSpec, type SentAttempt } from "./types";
+import { LeaseLostError, type ClaimedJob, type ExecMode, type Job, type JobQueue, type JobResult, type JobSpec, type Lane, type SentAttempt } from "./types";
 
 type State = "queued" | "executed" | "failed";
 
 interface Row extends Job {
   state: State;
+  execMode: ExecMode;
   leaseId: string | null;
   leaseUntil: number;
   result: JobResult | null;
@@ -32,7 +33,7 @@ export class InMemoryJobQueue implements JobQueue {
    * Adds a job. Without `notBefore` a random action delay is applied
    * (API.md: epoch 3–10 s + 0–20 s jitter).
    */
-  enqueue(spec: JobSpec, opts: { notBefore?: number; now?: number; id?: string } = {}): JobSnapshot {
+  enqueue(spec: JobSpec, opts: { notBefore?: number; now?: number; id?: string; execMode?: ExecMode } = {}): JobSnapshot {
     const now = opts.now ?? Date.now();
     const id = opts.id ?? randomBytes(16).toString("hex");
     if (this.rows.has(id)) throw new Error("duplicate job id");
@@ -43,6 +44,7 @@ export class InMemoryJobQueue implements JobQueue {
       claims: 0,
       attempts: [],
       state: "queued",
+      execMode: opts.execMode ?? "delayed",
       leaseId: null,
       leaseUntil: 0,
       result: null,
@@ -51,14 +53,21 @@ export class InMemoryJobQueue implements JobQueue {
     return snapshot(row);
   }
 
-  async claim(opts: { workerId: string; now: number; leaseMs: number }): Promise<ClaimedJob | null> {
-    let best: Row | null = null;
+  /**
+   * Same order as the Postgres queue: earliest `notBefore`; ties (one epoch)
+   * in random order for the batch lane, FIFO for the now lane.
+   */
+  async claim(opts: { workerId: string; now: number; leaseMs: number; lane?: Lane }): Promise<ClaimedJob | null> {
+    let due: Row[] = [];
     for (const r of this.rows.values()) {
       if (r.state !== "queued" || r.notBefore > opts.now) continue;
       if (r.leaseId !== null && r.leaseUntil > opts.now) continue;
-      if (!best || r.notBefore < best.notBefore) best = r;
+      if (opts.lane !== undefined && (opts.lane === "now") !== (r.execMode === "now")) continue;
+      if (due.length === 0 || r.notBefore < due[0]!.notBefore) due = [r];
+      else if (r.notBefore === due[0]!.notBefore) due.push(r);
     }
-    if (!best) return null;
+    if (due.length === 0) return null;
+    const best = opts.lane === "now" ? due[0]! : due[this.rng.int(0, due.length - 1)]!;
     best.leaseId = randomBytes(8).toString("hex");
     best.leaseUntil = opts.now + opts.leaseMs;
     best.claims += 1;

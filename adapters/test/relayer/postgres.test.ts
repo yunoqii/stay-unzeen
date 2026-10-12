@@ -340,4 +340,53 @@ describe.skipIf(!DB)("PostgresJobQueue (live Postgres, temp schema)", () => {
     expect(await new PgCreatorIndexCounter(pool, "devnet", 0).next()).toBe(15);
     expect(await new PgCreatorIndexCounter(pool, "mainnet-beta").next()).toBe(0);
   });
+
+  it("R-relayer-1: now lane takes exec_mode='now' at once, past the epoch; lanes are disjoint", async () => {
+    await pool.query(`DELETE FROM relayer_jobs`);
+    const epoch = new Date(Date.now() + 45_000);
+    const d = await insert({ ...buyJob, exec_mode: "delayed", not_before: epoch });
+    const m = await insert({ ...buyJob, exec_mode: "max", not_before: epoch });
+    const n = await insert({ ...buyJob, exec_mode: "now" });
+    const lane = (l: "now" | "batch") => q.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000, lane: l });
+    expect(await lane("batch")).toBeNull(); // epoch not reached
+    expect((await lane("now"))!.id).toBe(n);
+    expect(await lane("now")).toBeNull();
+    await pool.query(`UPDATE relayer_jobs SET not_before = now() - interval '1 second' WHERE id IN ($1, $2)`, [d, m]);
+    expect(await lane("now")).toBeNull(); // due delayed/max never enter the now lane
+    const got = [(await lane("batch"))!.id, (await lane("batch"))!.id].sort();
+    expect(got).toEqual([d, m].sort());
+    // Without a lane (legacy single loop) everything is claimable.
+    await pool.query(`DELETE FROM relayer_jobs`);
+    await insert({ ...buyJob, exec_mode: "now" });
+    expect(await claim()).not.toBeNull();
+  });
+
+  it("N-4: jobs of one epoch are claimed in random order (statistical)", async () => {
+    const K = 5;
+    const TRIALS = 150;
+    const firstPos = new Array(K).fill(0);
+    const posOfFirstInserted = new Array(K).fill(0);
+    let fifo = 0;
+    for (let trial = 0; trial < TRIALS; trial++) {
+      await pool.query(`DELETE FROM relayer_jobs`);
+      const epoch = new Date(Date.now() - 1_000);
+      const ids: string[] = [];
+      for (let i = 0; i < K; i++) ids.push(await insert({ ...buyJob, exec_mode: i % 2 ? "max" : "delayed", not_before: epoch }));
+      const order: number[] = [];
+      for (;;) {
+        const c = await q.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000, lane: "batch" });
+        if (!c) break;
+        order.push(ids.indexOf(c.id));
+      }
+      expect([...order].sort()).toEqual([0, 1, 2, 3, 4]);
+      firstPos[order[0]!]++;
+      posOfFirstInserted[order.indexOf(0)]++;
+      if (order.every((v, i) => v === i)) fifo++;
+    }
+    const chi = (c: number[]) => c.reduce((s, x) => s + (x - TRIALS / K) ** 2 / (TRIALS / K), 0);
+    // df = 4: p = 1e-4 at 23.5. The old ORDER BY not_before gave FIFO (chi = 600).
+    expect(chi(firstPos)).toBeLessThan(23.5);
+    expect(chi(posOfFirstInserted)).toBeLessThan(23.5);
+    expect(fifo / TRIALS).toBeLessThan(0.05); // 1/120 expected
+  });
 });

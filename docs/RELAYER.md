@@ -91,12 +91,14 @@ UPDATE relayer_jobs j
  WHERE j.id IN (
        SELECT id FROM relayer_jobs
         WHERE status = 'queued' AND not_before <= now() AND network = $2
-        ORDER BY not_before
-        LIMIT $3
+          AND <lane>   -- now: exec_mode = 'now'; batch: exec_mode IN ('delayed','max')
+        ORDER BY not_before, <tiebreak>   -- now: id (FIFO); batch: random()
+        LIMIT 1
         FOR UPDATE SKIP LOCKED)
 RETURNING j.id, j.part, j.op, j.venue, j.mint, j.lamports_in, j.token_amount, j.min_out,
-          j.meta, j.dest, j.gas_lamports, j.attempts, j.exec_mode;
+          j.meta, j.dest, j.gas_lamports, j.attempts;
 ```
+Релейер держит две независимые полосы (Now — опрос ~300 мс, пачка — по эпохам). `exec_mode` используется только в WHERE: не возвращается, не передаётся исполнителю, не логируется. Внутри эпохи пачка исполняется в случайном порядке (N-4). Исполнение в обеих полосах побайтно одинаковое (один CU price из фонового кэша, без Jito).
 `$1` — id инстанса релейера (не hostname с IP), `$2` — сеть релейера, `$3` — размер батча (≥ ожидаемого размера эпохи, например 50). Опрос раз в 1–3 с. Задания одного батча (= одной эпохи core) исполнять в случайном порядке.
 
 ### 2. Перед отправкой tx — записать подпись

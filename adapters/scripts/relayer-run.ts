@@ -38,7 +38,7 @@ async function main(): Promise<void> {
     throw new Error("mint_vaults (core 0003) is missing or not writable for this role; grant it or set RELAYER_MINT_VAULTS=file");
   }
 
-  const { relayer } = buildRelayer({
+  const { relayer, fees } = buildRelayer({
     cfg,
     connection: makeConnection(cfg),
     network,
@@ -51,11 +51,17 @@ async function main(): Promise<void> {
 
   const ac = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => ac.abort());
-  console.error(`[relayer] running with ${keys.vaults.length} vault(s)`);
-  await relayer.run(ac.signal, 1_000 + Math.floor(Math.random() * 2_000), (e) =>
+  // Pool-wide priority fee: one estimate now, then the background loop (10–20 s).
+  // Signing only reads this cache (R-relayer-5). Value is not logged.
+  await fees.refresh();
+  fees.start();
+  console.error(`[relayer] running with ${keys.vaults.length} vault(s), fee source ${cfg.priorityFeeSource}`);
+  // Two lanes (R-relayer-1); no lane / exec_mode in any log line (R-relayer-6).
+  await relayer.runLanes(ac.signal, { nowMs: 300, batchMs: 1_000 + Math.floor(Math.random() * 1_000) }, (e) =>
     // Message only, redacted: DB/RPC errors may carry URLs; never row data (SQLSTATE detail is not printed).
     console.error(`[relayer] loop error: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 200)}`),
   );
+  fees.stop();
   await db.end();
   await lockDb.end();
 }

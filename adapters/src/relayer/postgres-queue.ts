@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { ApiErrorCode } from "../errors";
 import type { VenueId } from "../types";
-import { LeaseLostError, type ClaimedJob, type CreateExecution, type JobQueue, type JobResult, type JobSpec, type SentAttempt } from "./types";
+import { LeaseLostError, type ClaimedJob, type CreateExecution, type JobQueue, type JobResult, type JobSpec, type Lane, type SentAttempt } from "./types";
 
 /**
  * JobQueue over `relayer_jobs` (core/migrations/0002_relayer.sql), protocol of
@@ -14,6 +14,12 @@ import { LeaseLostError, type ClaimedJob, type CreateExecution, type JobQueue, t
  * - claim: in-flight rows whose lease ran out (`claimed`/`sent`) are taken
  *   first (restart recovery), then `queued` rows with `not_before <= now()`.
  *   Only ops this relayer executes (buy/sell/create/transfer) and only its network.
+ * - lanes (R-relayer-1, 0005 exec_mode): the "now" lane takes only
+ *   exec_mode = 'now' rows (FIFO), the "batch" lane everything else. Inside an
+ *   epoch (same not_before) the batch order is random (`random()`, N-4), so
+ *   the on-chain order does not follow the order of the requests. Without the
+ *   column (DB before 0005) everything is batch and the now lane is empty.
+ *   exec_mode is used only in WHERE: it is not returned, logged or passed on.
  * - lease token: `claimed_by` = "<worker>:<random>" per claim.
  * - a `transfer` row is the generic `withdraw` spec.
  * - retry: the relayer may not touch `not_before`, so the backoff is the lease:
@@ -63,6 +69,7 @@ export class PostgresJobQueue implements JobQueue {
   private readonly network: SolanaNetwork;
   private readonly probe: PostgresJobQueueOptions["probe"];
   private leaseMs = 10 * 60_000;
+  private execModeColumn: Promise<boolean> | null = null;
 
   constructor(o: PostgresJobQueueOptions) {
     this.pool = o.pool;
@@ -70,9 +77,40 @@ export class PostgresJobQueue implements JobQueue {
     this.probe = o.probe;
   }
 
-  async claim(opts: { workerId: string; now: number; leaseMs: number }): Promise<ClaimedJob | null> {
+  /** Whether relayer_jobs has exec_mode (core 0005) in the current search_path. Cached. */
+  private hasExecMode(): Promise<boolean> {
+    if (!this.execModeColumn) {
+      this.execModeColumn = this.pool
+        .query<{ ok: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = current_schema() AND table_name = 'relayer_jobs'
+                             AND column_name = 'exec_mode') AS ok`,
+        )
+        .then((r) => r.rows[0]?.ok === true)
+        .catch((e) => {
+          this.execModeColumn = null; // retry on the next claim
+          throw e;
+        });
+    }
+    return this.execModeColumn;
+  }
+
+  async claim(opts: { workerId: string; now: number; leaseMs: number; lane?: Lane }): Promise<ClaimedJob | null> {
     this.leaseMs = opts.leaseMs;
     const leaseId = `${opts.workerId}:${randomBytes(6).toString("hex")}`;
+    let laneSql = "";
+    if (opts.lane !== undefined) {
+      if (await this.hasExecMode()) {
+        laneSql =
+          opts.lane === "now"
+            ? `AND exec_mode IS NOT DISTINCT FROM 'now'`
+            : `AND exec_mode IS DISTINCT FROM 'now'`;
+      } else if (opts.lane === "now") {
+        return null; // before 0005 every job is 'delayed'
+      }
+    }
+    // Now lane: FIFO. Batch: random order inside an epoch (N-4).
+    const tieBreak = opts.lane === "now" ? "id" : "random()";
     // DB clock (not opts.now): all relayers and core agree on time.
     const res = await this.pool.query<JobRow>(
       `WITH c AS (
@@ -80,7 +118,8 @@ export class PostgresJobQueue implements JobQueue {
           WHERE network = $2 AND settled_at IS NULL AND op = ANY($4::text[])
             AND ((status = 'queued' AND not_before <= now())
               OR (status IN ('claimed', 'sent') AND lease_until < now()))
-          ORDER BY (status = 'queued'), not_before
+            ${laneSql}
+          ORDER BY (status = 'queued'), not_before, ${tieBreak}
           LIMIT 1
           FOR UPDATE SKIP LOCKED)
        UPDATE relayer_jobs j

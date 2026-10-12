@@ -13,3 +13,4 @@ export * from "./env";
 export { signatureState, type SignatureState, type SignedTx } from "./tx";
 export { TokenWithdrawer, parseRecipient, MIN_GAS_DROP, type PreparedWithdraw, type WithdrawResult } from "./withdraw";
 export * as relayer from "./relayer";
+export * from "./fees";

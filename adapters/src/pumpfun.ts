@@ -37,6 +37,7 @@ import { AdapterError, classifyError, type ProgramErrorInfo } from "./errors";
 import { extractCreateEvents, extractTradeEvents, lamportDelta, tokenDelta } from "./events";
 import type { CreatorKeyring } from "./keys";
 import { formatUnits, spotPriceSol, toBN, toBig } from "./math";
+import { fixedPrice, type PriorityPrice } from "./fees";
 import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SendFailure, type SignedTx } from "./tx";
 import type {
   CreateOptions,
@@ -75,7 +76,8 @@ export interface PumpFunAdapterOptions {
   creators: CreatorKeyring;
   /** Where per-vault lookup table addresses are remembered (e.g. keys dir). */
   stateDir: string;
-  priorityMicroLamports?: number;
+  /** Pool-wide compute unit price (src/fees.ts cache); a number = fixed. Read at signing, never estimated per tx. */
+  priorityMicroLamports?: number | PriorityPrice;
 }
 
 interface MintInfo {
@@ -132,7 +134,7 @@ export class PumpFunAdapter implements LaunchpadAdapter {
   private readonly defaultVault: Signer;
   private readonly vaultKeys: Set<string>;
   private readonly creators: CreatorKeyring;
-  private readonly priority: number;
+  private readonly priority: PriorityPrice;
   private readonly alts: LookupTables;
   private params: { at: number; global: Global; feeConfig: FeeConfig } | null = null;
 
@@ -142,7 +144,8 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     this.defaultVault = o.defaultVault;
     this.vaultKeys = new Set([o.defaultVault, ...(o.vaults ?? [])].map((v) => v.publicKey.toBase58()));
     this.creators = o.creators;
-    this.priority = o.priorityMicroLamports ?? 0;
+    const p = o.priorityMicroLamports ?? 0;
+    this.priority = typeof p === "number" ? fixedPrice(p) : p;
     this.alts = new LookupTables(o.connection, o.stateDir, this.priority);
   }
 
@@ -499,7 +502,7 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     try {
       return await signTx(this.connection, ixs, payer, extra, {
         computeUnits: cu,
-        priorityMicroLamports: this.priority,
+        priorityMicroLamports: this.priority.microLamports(),
         ...(lookupTables ? { lookupTables } : {}),
       });
     } catch (e) {

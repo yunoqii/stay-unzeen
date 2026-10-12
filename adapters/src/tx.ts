@@ -42,6 +42,21 @@ export interface SignedTx {
   lastValidBlockHeight: number;
 }
 
+/**
+ * Compute budget prefix of EVERY pool transaction: limit, then price, always
+ * both and always in this order (R-relayer-2: no tx shape that tells one
+ * execution mode from another). The price is the pool-wide quantized value.
+ */
+export function computeBudget(opts: Pick<SendOptions, "computeUnits" | "priorityMicroLamports">): TransactionInstruction[] {
+  if (!Number.isSafeInteger(opts.priorityMicroLamports) || opts.priorityMicroLamports < 0) {
+    throw new RangeError("bad compute unit price");
+  }
+  return [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: opts.computeUnits }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: opts.priorityMicroLamports }),
+  ];
+}
+
 /** Signs a transaction with a fresh blockhash. Nothing is sent. */
 export async function signTx(
   connection: Connection,
@@ -50,10 +65,7 @@ export async function signTx(
   extraSigners: Signer[],
   opts: SendOptions,
 ): Promise<SignedTx> {
-  const budget: TransactionInstruction[] = [ComputeBudgetProgram.setComputeUnitLimit({ units: opts.computeUnits })];
-  if (opts.priorityMicroLamports > 0) {
-    budget.push(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: opts.priorityMicroLamports }));
-  }
+  const budget = computeBudget(opts);
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
   const raw = buildSigned([...budget, ...instructions], feePayer, extraSigners, blockhash, lastValidBlockHeight, opts);
   return { signature: signatureOf(raw), raw, blockhash, lastValidBlockHeight };

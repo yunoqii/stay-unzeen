@@ -10,6 +10,7 @@ import {
 import { PublicKey, SystemProgram, type Connection, type Signer } from "@solana/web3.js";
 import { AdapterError, classifyError } from "./errors";
 import { lamportDelta, tokenDelta } from "./events";
+import { fixedPrice, type PriorityPrice } from "./fees";
 import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SignedTx } from "./tx";
 
 /** One withdraw part = one transaction: SOL gas drop + recipient ATA + token transfer. */
@@ -48,7 +49,8 @@ const FEE_HEADROOM = 100_000n;
 
 export interface WithdrawerOptions {
   connection: Connection;
-  priorityMicroLamports?: number;
+  /** Pool-wide compute unit price (src/fees.ts cache); a number = fixed. */
+  priorityMicroLamports?: number | PriorityPrice;
 }
 
 /**
@@ -58,11 +60,12 @@ export interface WithdrawerOptions {
  */
 export class TokenWithdrawer {
   private readonly connection: Connection;
-  private readonly priority: number;
+  private readonly priority: PriorityPrice;
 
   constructor(o: WithdrawerOptions) {
     this.connection = o.connection;
-    this.priority = o.priorityMicroLamports ?? 0;
+    const p = o.priorityMicroLamports ?? 0;
+    this.priority = typeof p === "number" ? fixedPrice(p) : p;
   }
 
   /** Pre-checks (address, holdings, SOL) and signs one withdraw part. Sends nothing. */
@@ -122,7 +125,7 @@ export class TokenWithdrawer {
     try {
       signed = await signTx(this.connection, ixs, p.vault, [], {
         computeUnits: CU_WITHDRAW,
-        priorityMicroLamports: this.priority,
+        priorityMicroLamports: this.priority.microLamports(),
       });
     } catch (e) {
       throw toAdapterError(e);

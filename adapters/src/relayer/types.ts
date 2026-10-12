@@ -166,13 +166,30 @@ export type JobResult =
   /** Transient: put back with a new `notBefore`. Recorded attempts are kept. */
   | { status: "retry"; code: ApiErrorCode; message: string; notBefore: number };
 
+/**
+ * relayer_jobs.exec_mode (core 0005). Lives only in the queue layer: it never
+ * reaches a JobSpec, an executor (no instruction differs by mode, R-relayer-3)
+ * or a log line (R-relayer-6).
+ */
+export type ExecMode = "now" | "delayed" | "max";
+
+/**
+ * Claim lane (R-relayer-1):
+ * - "now": only exec_mode = 'now', taken as soon as due, by its own worker
+ *   (never queued behind an epoch batch);
+ * - "batch": delayed/max, random order among jobs of the same epoch
+ *   (same not_before), N-4.
+ * Omitted: any job (tests, single-loop tools).
+ */
+export type Lane = "now" | "batch";
+
 /** Storage of relayer jobs (in-memory now, Postgres per docs/RELAYER.md later). */
 export interface JobQueue {
   /**
    * Leases the next due job (`notBefore <= now`, queued or lease expired),
    * increments `claims`. Null when nothing is due.
    */
-  claim(opts: { workerId: string; now: number; leaseMs: number }): Promise<ClaimedJob | null>;
+  claim(opts: { workerId: string; now: number; leaseMs: number; lane?: Lane }): Promise<ClaimedJob | null>;
   /**
    * Durably records a signed tx of the job. Called BEFORE broadcasting it;
    * throws LeaseLostError (then nothing must be sent).
