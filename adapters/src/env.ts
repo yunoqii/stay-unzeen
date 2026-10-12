@@ -38,7 +38,7 @@ export function loadRepoEnv(
 
 export type RpcCluster = "devnet" | "testnet" | "mainnet-beta" | "localnet";
 
-const PUBLIC_RPC: Record<RpcCluster, string> = {
+export const PUBLIC_RPC_URL: Record<RpcCluster, string> = {
   devnet: "https://api.devnet.solana.com",
   testnet: "https://api.testnet.solana.com",
   "mainnet-beta": "https://api.mainnet-beta.solana.com",
@@ -64,7 +64,7 @@ export function resolveRpcUrl(cluster: RpcCluster, env: NodeJS.ProcessEnv = proc
   }
   const generic = env.SOLANA_RPC_URL?.trim();
   if (generic) return { url: generic, source: "SOLANA_RPC_URL" };
-  return { url: PUBLIC_RPC[cluster], source: "public" };
+  return { url: PUBLIC_RPC_URL[cluster], source: "public" };
 }
 
 /**
@@ -100,7 +100,24 @@ export function redactSecrets(text: string, secrets: readonly string[] = knownSe
 
 /** Secret-bearing env values that must never reach logs. */
 export function knownSecretUrls(env: NodeJS.ProcessEnv = process.env): string[] {
-  return ["SOLANA_RPC_URL_DEVNET", "SOLANA_RPC_URL_MAINNET", "SOLANA_RPC_URL", "DATABASE_URL", "DATABASE_URL_RELAYER", "PINATA_JWT"]
+  return [
+    "SOLANA_RPC_URL_DEVNET",
+    "SOLANA_RPC_URL_MAINNET",
+    "SOLANA_RPC_URL",
+    "SOLANA_READ_RPC_URL_DEVNET",
+    "SOLANA_READ_RPC_URL_MAINNET",
+    "SOLANA_READ_WS_URL_DEVNET",
+    "SOLANA_READ_WS_URL_MAINNET",
+    "SOLANA_INDEX_RPC_URL_DEVNET",
+    "SOLANA_INDEX_RPC_URL_MAINNET",
+    "SOLANA_PRIORITY_FEE_URL",
+    "SOLANA_SENDER_URL",
+    "SHYFT_API_KEY",
+    "DATABASE_URL",
+    "DATABASE_URL_RELAYER",
+    "DATABASE_URL_INDEXER",
+    "PINATA_JWT",
+  ]
     .map((k) => env[k]?.trim() ?? "")
     .filter((v) => v.length > 0);
 }

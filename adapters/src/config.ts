@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { Connection, type Commitment } from "@solana/web3.js";
 import { PKG_ROOT, maskUrl, resolveRpcUrl, type ResolvedRpc } from "./env";
+import { SWQOS_MIN_TIP_LAMPORTS, senderUrl } from "./sender";
 
 export type SolanaCluster = "devnet" | "testnet" | "mainnet-beta" | "localnet";
 
@@ -21,6 +22,18 @@ export interface AdapterConfig {
   priorityFeeSource: "helius" | "rpc" | "fixed";
   /** Clamp, µlamports per CU (SOLANA_PRIORITY_MAX_MICROLAMPORTS). */
   priorityMaxMicroLamports: number;
+  /**
+   * URL for `getPriorityFeeEstimate` (SOLANA_PRIORITY_FEE_URL, default
+   * SOLANA_RPC_URL_MAINNET on mainnet). Independent of the main RPC: moving
+   * reads elsewhere never silently switches the fee estimate (rpc-providers P5).
+   */
+  priorityFeeUrl: string | null;
+  /** Mainnet: Helius Sender URL (SOLANA_SENDER_URL, default SWQOS-only + api key of SOLANA_RPC_URL_MAINNET); null elsewhere. */
+  senderUrl: string | null;
+  /** Pool-wide Sender tip, lamports (SOLANA_SENDER_TIP_LAMPORTS, default and minimum 5000). */
+  senderTipLamports: bigint;
+  /** Min interval between sends (SOLANA_SEND_MIN_INTERVAL_MS, default 1000: Helius Free 1 tx/s). */
+  sendMinIntervalMs: number;
   commitment: Commitment;
 }
 
@@ -46,8 +59,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdapterConfig 
   const rpc = resolveRpcUrl(cluster, env);
   const keysDir = solanaKeysDir(cluster, env);
   const priorityMicroLamports = Number(env.SOLANA_PRIORITY_MICROLAMPORTS ?? 0) || 0;
-  const priorityFeeSource = feeSource(cluster, rpc.url, env.SOLANA_PRIORITY_FEE_SOURCE);
+  const priorityFeeUrl = env.SOLANA_PRIORITY_FEE_URL?.trim() || (cluster === "mainnet-beta" ? env.SOLANA_RPC_URL_MAINNET?.trim() || null : null);
+  const priorityFeeSource = feeSource(cluster, priorityFeeUrl, env.SOLANA_PRIORITY_FEE_SOURCE);
   const priorityMaxMicroLamports = Number(env.SOLANA_PRIORITY_MAX_MICROLAMPORTS ?? 0) || 1_000_000;
+  const senderTipLamports = BigInt(env.SOLANA_SENDER_TIP_LAMPORTS?.trim() || SWQOS_MIN_TIP_LAMPORTS);
+  if (senderTipLamports < SWQOS_MIN_TIP_LAMPORTS) throw new Error(`SOLANA_SENDER_TIP_LAMPORTS must be >= ${SWQOS_MIN_TIP_LAMPORTS}`);
+  const interval = env.SOLANA_SEND_MIN_INTERVAL_MS?.trim();
+  const sendMinIntervalMs = interval ? Number(interval) : 1_000;
+  if (!Number.isFinite(sendMinIntervalMs) || sendMinIntervalMs < 0) throw new Error("SOLANA_SEND_MIN_INTERVAL_MS must be >= 0");
   return {
     cluster,
     rpcUrl: rpc.url,
@@ -56,28 +75,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdapterConfig 
     priorityMicroLamports,
     priorityFeeSource,
     priorityMaxMicroLamports,
+    priorityFeeUrl,
+    senderUrl: cluster === "mainnet-beta" ? senderUrl(env.SOLANA_SENDER_URL, env.SOLANA_RPC_URL_MAINNET) : null,
+    senderTipLamports,
+    sendMinIntervalMs,
     commitment: "confirmed",
   };
 }
 
 /**
- * helius: Helius RPC on mainnet (getPriorityFeeEstimate is not served on
- * Helius devnet); rpc: standard getRecentPrioritizationFees; fixed: constant.
+ * helius: getPriorityFeeEstimate on `priorityFeeUrl` (mainnet only: Helius
+ * devnet answers "Method not found"); rpc: standard
+ * getRecentPrioritizationFees; fixed: constant. Chosen from the fee URL
+ * itself, never from the host of the main RPC (rpc-providers P5).
  */
-function feeSource(cluster: SolanaCluster, rpcUrl: string, explicit: string | undefined): AdapterConfig["priorityFeeSource"] {
+function feeSource(cluster: SolanaCluster, feeUrl: string | null, explicit: string | undefined): AdapterConfig["priorityFeeSource"] {
   const v = explicit?.trim();
   if (v) {
     if (v !== "helius" && v !== "rpc" && v !== "fixed") throw new Error(`SOLANA_PRIORITY_FEE_SOURCE must be helius|rpc|fixed, got "${v}"`);
+    if (v === "helius" && !feeUrl) throw new Error("SOLANA_PRIORITY_FEE_SOURCE=helius needs SOLANA_PRIORITY_FEE_URL (or SOLANA_RPC_URL_MAINNET)");
     return v;
   }
-  let host = "";
-  try {
-    host = new URL(rpcUrl).host;
-  } catch {
-    /* invalid URL fails later in Connection */
-  }
   if (cluster === "localnet") return "fixed";
-  return cluster === "mainnet-beta" && host.endsWith("helius-rpc.com") ? "helius" : "rpc";
+  return cluster === "mainnet-beta" && feeUrl ? "helius" : "rpc";
 }
 
 export function solanaKeysDir(cluster: SolanaCluster, env: NodeJS.ProcessEnv = process.env): string {

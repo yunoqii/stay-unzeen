@@ -1,7 +1,7 @@
 import type { Connection, Signer } from "@solana/web3.js";
 import { AdapterError } from "../errors";
 import type { PumpFunAdapter } from "../pumpfun";
-import { fetchTx, signatureState, type SignatureState, type SignedTx } from "../tx";
+import { fetchTx, signatureState, type Broadcaster, type SignatureState, type SignedTx } from "../tx";
 import type { MetadataStore } from "../metadata";
 import type { TokenWithdrawer } from "../withdraw";
 import { DEFAULT_GAS_DROP, pickGasDrop, type GasDropRange, type Rng } from "./random";
@@ -36,11 +36,19 @@ export interface ChainProbe {
 }
 
 export class RpcChainProbe implements ChainProbe {
-  constructor(private readonly connection: Connection) {}
+  constructor(
+    private readonly connection: Connection,
+    /** Same broadcaster as first sends (Sender on mainnet), rate-gated. */
+    private readonly broadcaster?: Broadcaster,
+  ) {}
   state(signature: string, lastValidBlockHeight: number): Promise<SignatureState> {
     return signatureState(this.connection, signature, lastValidBlockHeight);
   }
   async rebroadcast(raw: Uint8Array): Promise<void> {
+    if (this.broadcaster) {
+      await this.broadcaster.trySend(raw).catch(() => undefined);
+      return;
+    }
     await this.connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => undefined);
   }
   async logs(signature: string): Promise<string[] | null> {

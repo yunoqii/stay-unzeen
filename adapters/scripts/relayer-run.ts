@@ -38,7 +38,7 @@ async function main(): Promise<void> {
     throw new Error("mint_vaults (core 0003) is missing or not writable for this role; grant it or set RELAYER_MINT_VAULTS=file");
   }
 
-  const { relayer, fees } = buildRelayer({
+  const { relayer, fees, pipeline } = buildRelayer({
     cfg,
     connection: makeConnection(cfg),
     network,
@@ -55,7 +55,10 @@ async function main(): Promise<void> {
   // Signing only reads this cache (R-relayer-5). Value is not logged.
   await fees.refresh();
   fees.start();
-  console.error(`[relayer] running with ${keys.vaults.length} vault(s), fee source ${cfg.priorityFeeSource}`);
+  console.error(
+    `[relayer] running with ${keys.vaults.length} vault(s), fee source ${cfg.priorityFeeSource}, send via ${pipeline.broadcaster.name}` +
+      `${pipeline.tip ? ` (pool tip ${pipeline.tip.lamports} lamports on every tx)` : ""}, >= ${cfg.sendMinIntervalMs} ms between sends`,
+  );
   // Two lanes (R-relayer-1); no lane / exec_mode in any log line (R-relayer-6).
   await relayer.runLanes(ac.signal, { nowMs: 300, batchMs: 1_000 + Math.floor(Math.random() * 1_000) }, (e) =>
     // Message only, redacted: DB/RPC errors may carry URLs; never row data (SQLSTATE detail is not printed).

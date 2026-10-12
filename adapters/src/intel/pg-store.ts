@@ -1,0 +1,187 @@
+import type pg from "pg";
+import type { CreatorPubkeyFile } from "../keys";
+import type { IntelStore, OffchainInfo, TickCommit, TokenSafety, WarmEntry } from "./types";
+
+/**
+ * IntelStore on core's tables (docs/INTEL.md v1, migration 0007), role
+ * `unzeen_indexer` (infra/indexer-role.sql) via DATABASE_URL_INDEXER.
+ * - one instance per DB: session advisory lock 0x756e7a65656e0007 on a
+ *   dedicated connection held for the process lifetime;
+ * - refuses to start with excess rights (creator_tokens SELECT or tokens INSERT);
+ * - every write of a tick in ONE transaction (commitTick);
+ * - never writes tokens / trades (the role cannot either).
+ */
+
+export const INTEL_LOCK_KEY = "8461835325787734023"; // 0x756e7a65656e0007
+
+type Network = "devnet" | "mainnet-beta";
+
+export class PgIntelStore implements IntelStore {
+  private lockClient: pg.PoolClient | null = null;
+
+  constructor(
+    private readonly db: pg.Pool,
+    private readonly network: Network,
+    /** Public creator list written by the relayer (T1 race); null = DB only. */
+    private readonly creators: CreatorPubkeyFile | null = null,
+    /** Extra public vault addresses (adapters config), merged with the DB list. */
+    private readonly extraVaults: readonly string[] = [],
+  ) {}
+
+  /** Role check + advisory lock. Throws if another indexer runs or the role is over-privileged. */
+  async start(): Promise<void> {
+    const r = await this.db.query<{ bad: boolean }>(
+      `SELECT has_table_privilege('creator_tokens', 'SELECT') OR has_table_privilege('tokens', 'INSERT') AS bad`,
+    );
+    if (r.rows[0]?.bad !== false) throw new Error("this DB role can read creator_tokens or write tokens: use unzeen_indexer (DATABASE_URL_INDEXER)");
+    const c = await this.db.connect();
+    const l = await c.query<{ ok: boolean }>("SELECT pg_try_advisory_lock($1::bigint) AS ok", [INTEL_LOCK_KEY]);
+    if (l.rows[0]?.ok !== true) {
+      c.release();
+      throw new Error("another indexer holds the intel lock");
+    }
+    this.lockClient = c;
+  }
+
+  async stop(): Promise<void> {
+    if (!this.lockClient) return;
+    await this.lockClient.query("SELECT pg_advisory_unlock($1::bigint)", [INTEL_LOCK_KEY]).catch(() => undefined);
+    this.lockClient.release();
+    this.lockClient = null;
+  }
+
+  async warmSet(): Promise<WarmEntry[]> {
+    const r = await this.db.query<{ mint: string; hot: boolean; as_of: string | null }>(
+      `SELECT w.mint, w.hot, (extract(epoch FROM s.as_of) * 1000)::bigint::text AS as_of
+         FROM intel_warm w LEFT JOIN token_safety s ON s.mint = w.mint
+        WHERE w.pinned OR w.expires_at > now()`,
+    );
+    return r.rows.map((x) => ({ mint: x.mint, hot: x.hot, asOf: x.as_of === null ? null : Number(x.as_of) }));
+  }
+
+  async peekLookups(max: number): Promise<string[]> {
+    const r = await this.db.query<{ mint: string }>("SELECT mint FROM intel_requests ORDER BY queued_at, random() LIMIT $1", [max]);
+    return r.rows.map((x) => x.mint);
+  }
+
+  async unzeenLaunches(): Promise<Set<string>> {
+    const r = await this.db.query<{ mint: string }>("SELECT DISTINCT mint FROM trades WHERE kind = 'create'");
+    return new Set(r.rows.map((x) => x.mint));
+  }
+
+  async poolCreators(): Promise<Set<string>> {
+    try {
+      return this.creators ? this.creators.read() : new Set();
+    } catch {
+      return new Set();
+    }
+  }
+
+  async poolVaults(): Promise<Set<string>> {
+    const r = await this.db.query<{ vault: string }>(
+      `SELECT vault FROM relayer_vault_usage WHERE network = $1 UNION SELECT vault FROM mint_vaults WHERE network = $1`,
+      [this.network],
+    );
+    return new Set([...r.rows.map((x) => x.vault), ...this.extraVaults]);
+  }
+
+  async offchain(mint: string): Promise<OffchainInfo | null> {
+    const r = await this.db.query<{ socials: TokenSafety["socials"] | null; image: string | null; as_of: string }>(
+      `SELECT data->'socials' AS socials, data->>'image' AS image, (extract(epoch FROM as_of) * 1000)::bigint::text AS as_of
+         FROM token_safety WHERE mint = $1 AND NOT missing`,
+      [mint],
+    );
+    const x = r.rows[0];
+    if (!x || (!x.socials && !x.image)) return null;
+    return { ...(x.socials ? { socials: x.socials } : {}), ...(x.image ? { image: x.image } : {}), fetchedAt: Number(x.as_of), ok: true };
+  }
+
+  async commitTick(t: TickCommit): Promise<void> {
+    const c = await this.db.connect();
+    try {
+      await c.query("BEGIN");
+      const asOf = t.asOf / 1000;
+      for (const row of t.rows) {
+        await c.query(
+          `INSERT INTO token_safety (mint, as_of, missing, data) VALUES ($1, to_timestamp($2), FALSE, $3::jsonb)
+           ON CONFLICT (mint) DO UPDATE SET as_of = EXCLUDED.as_of, missing = FALSE, data = EXCLUDED.data`,
+          [row.mint, asOf, JSON.stringify(safetyData(row))],
+        );
+      }
+      for (const m of t.missing) {
+        await c.query(
+          `INSERT INTO token_safety (mint, as_of, missing, data) VALUES ($1, to_timestamp($2), TRUE, NULL)
+           ON CONFLICT (mint) DO UPDATE SET as_of = EXCLUDED.as_of, missing = TRUE, data = NULL`,
+          [m, asOf],
+        );
+      }
+      for (const card of t.cards) {
+        await c.query(
+          `INSERT INTO intel_tokens (mint, venue, symbol, name, image, decimals, status, price_sol, market_cap_sol, created_at, as_of)
+           SELECT $1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, to_timestamp($10), to_timestamp($11)
+            WHERE NOT EXISTS (SELECT 1 FROM tokens WHERE mint = $1)
+           ON CONFLICT (mint) DO UPDATE SET venue = EXCLUDED.venue, symbol = EXCLUDED.symbol, name = EXCLUDED.name,
+             image = EXCLUDED.image, decimals = EXCLUDED.decimals, status = EXCLUDED.status, price_sol = EXCLUDED.price_sol,
+             market_cap_sol = EXCLUDED.market_cap_sol, as_of = EXCLUDED.as_of`,
+          [card.mint, card.venue, card.symbol, card.name, card.image, card.decimals, card.status, card.priceSol, card.marketCapSol, card.createdAt / 1000, asOf],
+        );
+      }
+      if (t.batch.length > 0) {
+        await c.query(
+          `INSERT INTO intel_warm (mint, expires_at) SELECT unnest($1::text[]), now() + interval '7 days'
+           ON CONFLICT (mint) DO UPDATE SET expires_at = GREATEST(intel_warm.expires_at, EXCLUDED.expires_at)`,
+          [t.batch],
+        );
+      }
+      if (t.consumed.length > 0) await c.query("DELETE FROM intel_requests WHERE mint = ANY($1::text[])", [t.consumed]);
+      for (const u of t.curveUpdates) {
+        // Live curve state since the last snapshot; written only now, with the tick's minute.
+        await c.query(
+          `UPDATE token_safety SET as_of = to_timestamp($2),
+             data = jsonb_set(jsonb_set(data, '{market,status}', to_jsonb($3::text)), '{market,curveProgressPct}', to_jsonb($4::text))
+           WHERE mint = $1 AND NOT missing AND data IS NOT NULL`,
+          [u.mint, asOf, u.graduated ? "graduated" : "curve", u.progressPct],
+        );
+        await c.query(
+          `UPDATE intel_tokens SET status = $2, price_sol = $3::numeric, market_cap_sol = $4::numeric, as_of = to_timestamp($5) WHERE mint = $1`,
+          [u.mint, u.graduated ? "graduated" : "curve", u.priceSol, u.marketCapSol, asOf],
+        );
+      }
+      await c.query("DELETE FROM intel_subscriptions");
+      for (const s of t.subscriptions) {
+        await c.query("INSERT INTO intel_subscriptions (account, mint, kind) VALUES ($1, $2, $3) ON CONFLICT (account) DO NOTHING", [s.account, s.mint, s.kind]);
+      }
+      await c.query(
+        `INSERT INTO intel_meta (key, value, updated_at) VALUES ('next_tick_at', $1, now()), ('last_tick_at', $2, now())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+        [String(t.nextTickAt), String(t.tickStartedAt)],
+      );
+      await c.query("COMMIT");
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => undefined);
+      throw e;
+    } finally {
+      c.release();
+    }
+  }
+}
+
+/** token_safety.data: TokenSafety without mint / asOf / unzeen (core sets them) and without holders.asOf. */
+export function safetyData(row: TokenSafety): Record<string, unknown> {
+  const market: Record<string, unknown> = {
+    venue: row.market.venue ?? "jupiter",
+    status: row.market.status === "curve" ? "curve" : "graduated",
+  };
+  if (row.market.curveProgressPct !== undefined) market.curveProgressPct = row.market.curveProgressPct;
+  if (row.market.lpBurnedPct !== undefined) market.lpBurnedPct = row.market.lpBurnedPct;
+  const d: Record<string, unknown> = { program: row.program, authorities: row.authorities, market };
+  if (row.holders) {
+    const { asOf: _asOf, ...h } = row.holders;
+    d.holders = row.unzeen ? { ...h, devPct: null } : h;
+  }
+  if (row.socials) d.socials = row.socials;
+  if (row.image) d.image = row.image;
+  if (row.dev && !row.unzeen) d.dev = row.dev;
+  if (row.firstBlocks) d.firstBlocks = row.firstBlocks;
+  return d;
+}

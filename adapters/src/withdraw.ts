@@ -11,6 +11,7 @@ import { PublicKey, SystemProgram, type Connection, type Signer } from "@solana/
 import { AdapterError, classifyError } from "./errors";
 import { lamportDelta, tokenDelta } from "./events";
 import { fixedPrice, type PriorityPrice } from "./fees";
+import type { TxPipeline } from "./sender";
 import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SignedTx } from "./tx";
 
 /** One withdraw part = one transaction: SOL gas drop + recipient ATA + token transfer. */
@@ -51,6 +52,8 @@ export interface WithdrawerOptions {
   connection: Connection;
   /** Pool-wide compute unit price (src/fees.ts cache); a number = fixed. */
   priorityMicroLamports?: number | PriorityPrice;
+  /** Pool tip + broadcaster (src/sender.ts); default plain RPC, no tip. */
+  pipeline?: TxPipeline | null;
 }
 
 /**
@@ -61,9 +64,11 @@ export interface WithdrawerOptions {
 export class TokenWithdrawer {
   private readonly connection: Connection;
   private readonly priority: PriorityPrice;
+  private readonly pipeline: TxPipeline | null;
 
   constructor(o: WithdrawerOptions) {
     this.connection = o.connection;
+    this.pipeline = o.pipeline ?? null;
     const p = o.priorityMicroLamports ?? 0;
     this.priority = typeof p === "number" ? fixedPrice(p) : p;
   }
@@ -126,6 +131,7 @@ export class TokenWithdrawer {
       signed = await signTx(this.connection, ixs, p.vault, [], {
         computeUnits: CU_WITHDRAW,
         priorityMicroLamports: this.priority.microLamports(),
+        tip: this.pipeline?.tip ?? null,
       });
     } catch (e) {
       throw toAdapterError(e);
@@ -143,7 +149,7 @@ export class TokenWithdrawer {
 
   async submit(p: SignedTx): Promise<{ signature: string; slot: number }> {
     try {
-      return await broadcastAndConfirm(this.connection, p);
+      return await broadcastAndConfirm(this.connection, p, this.pipeline?.broadcaster);
     } catch (e) {
       throw toAdapterError(e);
     }

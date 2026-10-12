@@ -15,7 +15,10 @@
     "relayer:lanes:devnet": "tsx scripts/relayer-lanes-devnet.ts",
     "keys:encrypt": "tsx scripts/keys-encrypt.ts",
     "relayer:run": "tsx scripts/relayer-run.ts",
-    "media:serve": "tsx scripts/media-serve.ts"
+    "media:serve": "tsx scripts/media-serve.ts",
+    "intel:run": "tsx scripts/intel-run.ts",
+    "intel:probe": "tsx scripts/intel-probe.ts",
+    "keys:creators-pub": "tsx scripts/creators-pub.ts"
   },
   "engines": {
     "node": ">=20"

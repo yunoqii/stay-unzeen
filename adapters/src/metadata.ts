@@ -149,6 +149,12 @@ export class LocalMetadataStore extends BaseMetadataStore {
     if (!/^https?:\/\//.test(baseUrl)) throw new Error("UNZEEN_METADATA_BASE_URL must be an http(s) URL");
   }
 
+  /** Public put for already-sanitized media (token intel: third-party images re-encoded by the indexer). */
+  putMedia(name: string, bytes: Buffer): Promise<string> {
+    if (!/^[0-9a-f]{40}\.(?:png|jpg)$/.test(name)) throw new Error("media name must be <sha40>.(png|jpg)");
+    return this.put(name, bytes);
+  }
+
   protected async put(name: string, bytes: Buffer): Promise<string> {
     if (!fs.existsSync(this.dir)) fs.mkdirSync(this.dir, { recursive: true, mode: 0o755 });
     const file = path.join(this.dir, name);

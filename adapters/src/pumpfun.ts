@@ -38,6 +38,7 @@ import { extractCreateEvents, extractTradeEvents, lamportDelta, tokenDelta } fro
 import type { CreatorKeyring } from "./keys";
 import { formatUnits, spotPriceSol, toBN, toBig } from "./math";
 import { fixedPrice, type PriorityPrice } from "./fees";
+import type { TxPipeline } from "./sender";
 import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SendFailure, type SignedTx } from "./tx";
 import type {
   CreateOptions,
@@ -78,6 +79,8 @@ export interface PumpFunAdapterOptions {
   stateDir: string;
   /** Pool-wide compute unit price (src/fees.ts cache); a number = fixed. Read at signing, never estimated per tx. */
   priorityMicroLamports?: number | PriorityPrice;
+  /** Pool tip + broadcaster (src/sender.ts): the same tip on EVERY pool tx. Default plain RPC, no tip. */
+  pipeline?: TxPipeline | null;
 }
 
 interface MintInfo {
@@ -136,6 +139,7 @@ export class PumpFunAdapter implements LaunchpadAdapter {
   private readonly creators: CreatorKeyring;
   private readonly priority: PriorityPrice;
   private readonly alts: LookupTables;
+  private readonly pipeline: TxPipeline | null;
   private params: { at: number; global: Global; feeConfig: FeeConfig } | null = null;
 
   constructor(o: PumpFunAdapterOptions) {
@@ -146,7 +150,8 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     this.creators = o.creators;
     const p = o.priorityMicroLamports ?? 0;
     this.priority = typeof p === "number" ? fixedPrice(p) : p;
-    this.alts = new LookupTables(o.connection, o.stateDir, this.priority);
+    this.pipeline = o.pipeline ?? null;
+    this.alts = new LookupTables(o.connection, o.stateDir, this.priority, this.pipeline);
   }
 
   // -------------------------------------------------------------------------
@@ -389,7 +394,7 @@ export class PumpFunAdapter implements LaunchpadAdapter {
    */
   async submit(p: SignedTx): Promise<{ signature: string; slot: number }> {
     try {
-      return await broadcastAndConfirm(this.connection, p);
+      return await broadcastAndConfirm(this.connection, p, this.pipeline?.broadcaster);
     } catch (e) {
       throw this.sendError(e);
     }
@@ -503,6 +508,7 @@ export class PumpFunAdapter implements LaunchpadAdapter {
       return await signTx(this.connection, ixs, payer, extra, {
         computeUnits: cu,
         priorityMicroLamports: this.priority.microLamports(),
+        tip: this.pipeline?.tip ?? null,
         ...(lookupTables ? { lookupTables } : {}),
       });
     } catch (e) {

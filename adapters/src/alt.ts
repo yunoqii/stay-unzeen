@@ -9,6 +9,7 @@ import {
   type TransactionInstruction,
 } from "@solana/web3.js";
 import { priceOf, type PriorityPrice } from "./fees";
+import type { TxPipeline } from "./sender";
 import { sendAndConfirm } from "./tx";
 
 /**
@@ -26,6 +27,8 @@ export class LookupTables {
     private readonly connection: Connection,
     private readonly stateDir: string,
     private readonly priority: number | PriorityPrice = 0,
+    /** Pool tip + broadcaster (src/sender.ts); null = plain RPC, no tip. */
+    private readonly pipeline: TxPipeline | null = null,
   ) {}
 
   /** Returns an active table of `vault` holding at least `addresses`. */
@@ -63,7 +66,7 @@ export class LookupTables {
         recentSlot,
       });
       try {
-        await sendAndConfirm(this.connection, [ix], vault, [], this.opts());
+        await sendAndConfirm(this.connection, [ix], vault, [], this.opts(), this.pipeline?.broadcaster);
       } catch (e) {
         lastErr = e;
         if (!isNotRecentSlotError(e)) throw e;
@@ -97,7 +100,7 @@ export class LookupTables {
         payer: vault.publicKey,
         addresses: addrs.slice(i, i + 25),
       });
-      await sendAndConfirm(this.connection, [ix], vault, [], this.opts());
+      await sendAndConfirm(this.connection, [ix], vault, [], this.opts(), this.pipeline?.broadcaster);
     }
     return this.waitActive(table, before + addrs.length);
   }
@@ -118,7 +121,7 @@ export class LookupTables {
   }
 
   private opts() {
-    return { computeUnits: 50_000, priorityMicroLamports: priceOf(this.priority) };
+    return { computeUnits: 50_000, priorityMicroLamports: priceOf(this.priority), tip: this.pipeline?.tip ?? null };
   }
 }
 

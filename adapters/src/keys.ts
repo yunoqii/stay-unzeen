@@ -176,11 +176,50 @@ export class MemoryCreatorIndexCounter implements CreatorIndexCounter {
  * `new CreatorKeyring(seed, counter)` with a seed from the (encrypted)
  * KeyStore; `new CreatorKeyring(keysDir)` = legacy plaintext dir (tests, dev).
  */
+/**
+ * PUBLIC list of creator addresses of pool launches (`creator-pubkeys.json`
+ * in the keys dir, 0644 inside the 0700 dir). Written when an address is
+ * derived, i.e. BEFORE the create transaction is signed, so the token
+ * indexer recognizes an Unzeen launch even before the relayer records the
+ * create in `trades` (T1 race, docs/INTEL.md rule 7). Only public keys: the
+ * indexer never gets the creator master seed (it would let it derive the
+ * private keys that collect creator fees). Creator addresses are public on
+ * chain anyway (pump.fun `creator`); the file maps nothing to users.
+ */
+export class CreatorPubkeyFile {
+  private cache: Set<string> | null = null;
+  constructor(readonly file: string) {}
+
+  static inDir(keysDir: string): CreatorPubkeyFile {
+    return new CreatorPubkeyFile(path.join(keysDir, "creator-pubkeys.json"));
+  }
+
+  read(): Set<string> {
+    if (!fs.existsSync(this.file)) return new Set();
+    const j = JSON.parse(fs.readFileSync(this.file, "utf8")) as { pubkeys?: unknown };
+    return new Set(Array.isArray(j.pubkeys) ? j.pubkeys.filter((x): x is string => typeof x === "string") : []);
+  }
+
+  /** Adds addresses (atomic rename). Sync: called right before signing a create. */
+  record(...pubkeys: string[]): void {
+    const cur = this.cache ?? this.read();
+    const before = cur.size;
+    for (const k of pubkeys) cur.add(k);
+    this.cache = cur;
+    if (cur.size === before && fs.existsSync(this.file)) return;
+    const tmp = `${this.file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ pubkeys: [...cur].sort() }), { mode: 0o644 });
+    fs.renameSync(tmp, this.file);
+  }
+}
+
 export class CreatorKeyring {
   private readonly seed: Buffer;
   private readonly counter: CreatorIndexCounter;
+  /** Public creator list for the indexer (T1); null = not recorded (tests). */
+  readonly registry: CreatorPubkeyFile | null;
 
-  constructor(keysDirOrSeed: string | Uint8Array, counter?: CreatorIndexCounter) {
+  constructor(keysDirOrSeed: string | Uint8Array, counter?: CreatorIndexCounter, registry?: CreatorPubkeyFile | null) {
     if (typeof keysDirOrSeed === "string") {
       const keysDir = keysDirOrSeed;
       refuseEncrypted(keysDir);
@@ -195,6 +234,8 @@ export class CreatorKeyring {
       this.counter = counter;
     }
     if (this.seed.length !== 64) throw new Error("creator master seed: expected 64 bytes");
+    this.registry =
+      registry !== undefined ? registry : typeof keysDirOrSeed === "string" ? CreatorPubkeyFile.inDir(keysDirOrSeed) : null;
   }
 
   /** Reserves the next unused index (persisted before it is returned). */
@@ -206,7 +247,10 @@ export class CreatorKeyring {
     return deriveCreatorKeypair(this.seed, index);
   }
 
+  /** Derives the creator address; records it in the public list BEFORE it is used in a create. */
   publicKey(index: number): PublicKey {
-    return this.keypair(index).publicKey;
+    const pk = this.keypair(index).publicKey;
+    this.registry?.record(pk.toBase58());
+    return pk;
   }
 }

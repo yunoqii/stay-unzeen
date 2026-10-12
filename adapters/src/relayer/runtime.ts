@@ -4,11 +4,12 @@ import { PUMP_PROGRAM_ID } from "@pump-fun/pump-sdk";
 import type { Connection, Keypair } from "@solana/web3.js";
 import pg from "pg";
 import type { AdapterConfig } from "../config";
-import { CreatorKeyring, FileCreatorIndexCounter, type CreatorIndexCounter } from "../keys";
+import { CreatorKeyring, CreatorPubkeyFile, FileCreatorIndexCounter, type CreatorIndexCounter } from "../keys";
 import { priorityFeeCacheFromConfig, type PriorityFeeCache } from "../fees";
 import { KeyStore, ageCipher, resolveAgeIdentity } from "../keystore";
 import { metadataStoreFromEnv, type MetadataStore } from "../metadata";
 import { PumpFunAdapter } from "../pumpfun";
+import { txPipeline, type TxPipeline } from "../sender";
 import { TokenWithdrawer } from "../withdraw";
 import { Relayer, type RelayerEvent } from "./engine";
 import { PumpFunTradeExecutor, RpcChainProbe, WithdrawExecutor } from "./executors";
@@ -112,6 +113,10 @@ export interface RelayerRuntimeOptions {
   leaseMs?: number;
   /** Pool-wide compute unit price; default: background cache from cfg (not started). */
   fees?: PriorityFeeCache;
+  /** Public creator list (T1); default creator-pubkeys.json in the keys dir; null = off (tests). */
+  creatorRegistry?: CreatorPubkeyFile | null;
+  /** Tip + broadcaster; default from cfg (mainnet: Helius Sender, same tip on every tx; devnet: RPC, no tip). */
+  pipeline?: TxPipeline;
 }
 
 export interface RelayerRuntime {
@@ -126,12 +131,14 @@ export interface RelayerRuntime {
    * `await fees.refresh(); fees.start()` before running, `fees.stop()` after.
    */
   fees: PriorityFeeCache;
+  /** How every pool tx is tipped and sent (one instance shared by all builders). */
+  pipeline: TxPipeline;
 }
 
 /** Venue programs the fee estimate is asked for (programs only: no vault, mint or user). */
 export const FEE_ESTIMATE_PROGRAMS: readonly string[] = [PUMP_PROGRAM_ID.toBase58()];
 
-export function defaultMediaDir(cfg: AdapterConfig, env: NodeJS.ProcessEnv = process.env): string {
+export function defaultMediaDir(cfg: Pick<AdapterConfig, "cluster">, env: NodeJS.ProcessEnv = process.env): string {
   const home = env.UNZEEN_HOME?.trim() || path.join(os.homedir(), ".unzeen");
   return path.resolve(home.replace(/^~(?=\/|$)/, os.homedir()), cfg.cluster, "media");
 }
@@ -154,15 +161,19 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   if (!metadata) o.warn("no metadata store (UNZEEN_METADATA_BASE_URL or PINATA_JWT): create jobs will retry and fail");
 
   const fees = o.fees ?? priorityFeeCacheFromConfig(o.cfg, o.connection, FEE_ESTIMATE_PROGRAMS);
+  // ONE pipeline for all builders: buy/sell/create (+ lookup tables) and withdraw get the same tip.
+  const pipeline = o.pipeline ?? txPipeline(o.cfg, o.connection);
   const adapter = new PumpFunAdapter({
     connection: o.connection,
     defaultVault: vaults[0]!,
     vaults,
-    creators: new CreatorKeyring(o.keys.creatorSeed, counter),
+    // creator-pubkeys.json next to the keys: public creator list for the token indexer (T1 race).
+    creators: new CreatorKeyring(o.keys.creatorSeed, counter, o.creatorRegistry !== undefined ? o.creatorRegistry : CreatorPubkeyFile.inDir(o.cfg.keysDir)),
     stateDir: o.cfg.keysDir,
     priorityMicroLamports: fees,
+    pipeline,
   });
-  const probe = new RpcChainProbe(o.connection);
+  const probe = new RpcChainProbe(o.connection, pipeline.broadcaster);
   const queue = new PostgresJobQueue({ pool: o.db, network: o.network, probe });
   const pool = new VaultPool(vaults, new RpcVaultInventory(o.connection), cryptoRng, {
     usage,
@@ -174,7 +185,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     executors: {
       trade: { pumpfun: new PumpFunTradeExecutor(adapter, metadata) },
       withdraw: new WithdrawExecutor(
-        new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: fees }),
+        new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: fees, pipeline }),
         cryptoRng,
       ),
     },
@@ -183,7 +194,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     ...(o.leaseMs ? { leaseMs: o.leaseMs } : {}),
     ...(o.onEvent ? { onEvent: o.onEvent } : {}),
   });
-  return { relayer, adapter, pool, queue, mintVaults, metadata, fees };
+  return { relayer, adapter, pool, queue, mintVaults, metadata, fees, pipeline };
 }
 
 export function makePools(url: string, vaultCount: number, schema?: string): { db: pg.Pool; lockDb: pg.Pool } {

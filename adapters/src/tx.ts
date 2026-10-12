@@ -1,6 +1,8 @@
 import bs58 from "bs58";
 import {
   ComputeBudgetProgram,
+  PublicKey,
+  SystemProgram,
   MessageV0,
   SendTransactionError,
   Transaction,
@@ -17,6 +19,32 @@ export interface SendOptions {
   priorityMicroLamports: number;
   /** When set, a v0 transaction is built with these lookup tables. */
   lookupTables?: AddressLookupTableAccount[];
+  /**
+   * Pool-wide Sender tip (mainnet). When set, EVERY pool transaction carries
+   * the same transfer right after the compute budget (R4 / P4): same amount,
+   * tip account picked uniformly at random. null/undefined = no tip (devnet).
+   */
+  tip?: SenderTip | null;
+}
+
+/** One tip policy for the whole pool (src/sender.ts builds it from config). */
+export interface SenderTip {
+  lamports: bigint;
+  accounts: readonly PublicKey[];
+  /** Uniform index in [0, n); CSPRNG in production. */
+  pick: (n: number) => number;
+}
+
+/**
+ * Sends signed bytes. `preflight: true` = first send (simulate, reject
+ * without forwarding on simulation failure); false = rebroadcast of the
+ * same bytes. `trySend` is a best-effort rebroadcast that is dropped when the
+ * send rate limit is busy (never delays a first send).
+ */
+export interface Broadcaster {
+  readonly name: string;
+  send(raw: Uint8Array, o: { preflight: boolean }): Promise<void>;
+  trySend(raw: Uint8Array): Promise<void>;
 }
 
 export interface SendFailure {
@@ -57,6 +85,27 @@ export function computeBudget(opts: Pick<SendOptions, "computeUnits" | "priority
   ];
 }
 
+/**
+ * Prefix of EVERY pool transaction: compute limit, compute price and, when a
+ * pool tip is configured, the tip transfer from the fee payer. Same order and
+ * amount for buy, sell, create, withdraw and lookup-table transactions.
+ */
+export function poolPrefix(
+  opts: Pick<SendOptions, "computeUnits" | "priorityMicroLamports" | "tip">,
+  feePayer: PublicKey,
+): TransactionInstruction[] {
+  const ixs = computeBudget(opts);
+  const tip = opts.tip;
+  if (tip) {
+    if (tip.lamports <= 0n || tip.accounts.length === 0) throw new RangeError("bad sender tip");
+    const i = tip.pick(tip.accounts.length);
+    const to = tip.accounts[i];
+    if (!to) throw new RangeError("tip account index out of range");
+    ixs.push(SystemProgram.transfer({ fromPubkey: feePayer, toPubkey: to, lamports: tip.lamports }));
+  }
+  return ixs;
+}
+
 /** Signs a transaction with a fresh blockhash. Nothing is sent. */
 export async function signTx(
   connection: Connection,
@@ -65,7 +114,7 @@ export async function signTx(
   extraSigners: Signer[],
   opts: SendOptions,
 ): Promise<SignedTx> {
-  const budget = computeBudget(opts);
+  const budget = poolPrefix(opts, feePayer.publicKey);
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
   const raw = buildSigned([...budget, ...instructions], feePayer, extraSigners, blockhash, lastValidBlockHeight, opts);
   return { signature: signatureOf(raw), raw, blockhash, lastValidBlockHeight };
@@ -79,18 +128,17 @@ export async function signTx(
 export async function broadcastAndConfirm(
   connection: Connection,
   tx: SignedTx,
+  broadcaster: Broadcaster = new RpcBroadcaster(connection),
 ): Promise<{ signature: string; slot: number }> {
   const { raw, signature, blockhash, lastValidBlockHeight } = tx;
   try {
-    await connection.sendRawTransaction(raw, {
-      skipPreflight: false,
-      preflightCommitment: "confirmed",
-      maxRetries: 5,
-    });
+    await broadcaster.send(raw, { preflight: true });
   } catch (error) {
     let logs: string[] | null = null;
     if (error instanceof SendTransactionError) {
       logs = error.logs ?? (await error.getLogs(connection).catch(() => null));
+    } else if (Array.isArray((error as { logs?: unknown })?.logs)) {
+      logs = (error as { logs: string[] }).logs; // Sender preflight (src/sender.ts)
     }
     // A simulation failure is final for these bytes: the RPC did not forward
     // them. A transport error (timeout, 5xx) may still have forwarded them.
@@ -105,7 +153,7 @@ export async function broadcastAndConfirm(
     while (!done) {
       await new Promise((r) => setTimeout(r, 2000));
       if (done) break;
-      await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => undefined);
+      await broadcaster.trySend(raw).catch(() => undefined);
     }
   })();
   let res: Awaited<ReturnType<Connection["confirmTransaction"]>>;
@@ -141,9 +189,75 @@ export async function sendAndConfirm(
   feePayer: Signer,
   extraSigners: Signer[],
   opts: SendOptions,
+  broadcaster?: Broadcaster,
 ): Promise<{ signature: string; slot: number }> {
   const signed = await signTx(connection, instructions, feePayer, extraSigners, opts);
-  return broadcastAndConfirm(connection, signed);
+  return broadcastAndConfirm(connection, signed, broadcaster);
+}
+
+/**
+ * Serial send gate: at most one send per `minIntervalMs` (Helius Free
+ * sendTransaction 1/s, Sender keyless 1/s). FIFO for first sends; `tryRun`
+ * runs only when the gate is idle and the interval has passed (rebroadcasts
+ * never push a first send back).
+ */
+export class SendGate {
+  private tail: Promise<void> = Promise.resolve();
+  private last = -Infinity;
+  private waiting = 0;
+  constructor(
+    readonly minIntervalMs: number,
+    private readonly now: () => number = Date.now,
+    private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  ) {
+    if (!(minIntervalMs >= 0)) throw new RangeError("minIntervalMs must be >= 0");
+  }
+
+  run<T>(f: () => Promise<T>): Promise<T> {
+    this.waiting++;
+    const p = this.tail.then(async () => {
+      const wait = this.last + this.minIntervalMs - this.now();
+      if (wait > 0) await this.sleep(wait);
+      this.last = this.now();
+      this.waiting--;
+      return f();
+    });
+    this.tail = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    return p;
+  }
+
+  async tryRun(f: () => Promise<void>): Promise<boolean> {
+    if (this.waiting > 0 || this.now() - this.last < this.minIntervalMs) return false;
+    await this.run(f);
+    return true;
+  }
+}
+
+/** Standard `sendTransaction` on the given RPC (devnet; mainnet fallback), rate-gated. */
+export class RpcBroadcaster implements Broadcaster {
+  readonly name = "rpc";
+  constructor(
+    private readonly connection: Pick<Connection, "sendRawTransaction">,
+    private readonly gate: SendGate = new SendGate(0),
+  ) {}
+
+  async send(raw: Uint8Array, o: { preflight: boolean }): Promise<void> {
+    await this.gate.run(() =>
+      this.connection.sendRawTransaction(
+        raw,
+        o.preflight ? { skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 5 } : { skipPreflight: true, maxRetries: 0 },
+      ),
+    );
+  }
+
+  async trySend(raw: Uint8Array): Promise<void> {
+    await this.gate.tryRun(async () => {
+      await this.connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => undefined);
+    });
+  }
 }
 
 /** On-chain state of a signature relative to its blockhash validity. */

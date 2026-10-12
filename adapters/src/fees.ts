@@ -234,13 +234,19 @@ export class FixedFeeSource implements PriorityFeeSource {
  * startup, then `start()`.
  */
 export function priorityFeeCacheFromConfig(
-  cfg: { cluster: string; rpcUrl: string; priorityMicroLamports: number; priorityFeeSource: "helius" | "rpc" | "fixed"; priorityMaxMicroLamports: number },
+  cfg: {
+    cluster: string;
+    priorityFeeUrl: string | null;
+    priorityMicroLamports: number;
+    priorityFeeSource: "helius" | "rpc" | "fixed";
+    priorityMaxMicroLamports: number;
+  },
   connection: Pick<Connection, "getRecentPrioritizationFees">,
   programs: readonly string[],
 ): PriorityFeeCache {
   const source: PriorityFeeSource =
     cfg.priorityFeeSource === "helius"
-      ? new HeliusPriorityFeeSource(cfg.rpcUrl, programs)
+      ? new HeliusPriorityFeeSource(requireUrl(cfg.priorityFeeUrl), programs)
       : cfg.priorityFeeSource === "rpc"
         ? new RpcRecentFeesSource(connection, programs)
         : new FixedFeeSource(cfg.priorityMicroLamports);
@@ -248,4 +254,9 @@ export function priorityFeeCacheFromConfig(
     max: cfg.priorityMaxMicroLamports,
     initial: cfg.priorityMicroLamports > 0 ? cfg.priorityMicroLamports : null,
   });
+}
+
+function requireUrl(u: string | null): string {
+  if (!u) throw new Error("helius fee source without SOLANA_PRIORITY_FEE_URL");
+  return u;
 }
