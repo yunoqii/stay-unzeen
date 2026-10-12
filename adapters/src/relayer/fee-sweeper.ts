@@ -342,6 +342,12 @@ export interface FeeSweeperOptions {
   now?: () => number;
   /** Counts / totals only (never mint + amount + signature together in production logs). */
   log?: (msg: string) => void;
+  /**
+   * RELAYER v4: true while a Verify snapshot freezes the pool. The sweep moves
+   * SOL between pool addresses outside relayer_jobs; it stops for the rest of
+   * the run (the next run picks the targets up).
+   */
+  paused?: () => Promise<boolean>;
   /** Detail sink for devnet scripts (explorer links); not used by the daemon. */
   onTx?: (e: { target: FeeTarget; signature: string; lamports: bigint | null; vault: string; ok: boolean; error?: string }) => void;
 }
@@ -362,7 +368,7 @@ export interface SweepReport {
 const SIGNATURES_PER_FEE_TX = 2; // vault + one authority
 
 export class FeeSweeper {
-  private readonly o: Required<Omit<FeeSweeperOptions, "onTx">> & Pick<FeeSweeperOptions, "onTx">;
+  private readonly o: Required<Omit<FeeSweeperOptions, "onTx" | "paused">> & Pick<FeeSweeperOptions, "onTx" | "paused">;
 
   constructor(o: FeeSweeperOptions) {
     this.o = {
@@ -401,6 +407,10 @@ export class FeeSweeper {
       if (signal?.aborted) break;
       if (i > 0) await this.o.sleep(this.o.rng.int(this.o.schedule.pauseMinMs, this.o.schedule.pauseMaxMs), signal);
       if (signal?.aborted) break;
+      if (this.o.paused && (await this.o.paused().catch(() => true))) {
+        report.skipped += targets.length - i;
+        break;
+      }
       const r = await this.sweepOne(targets[i]!);
       if (r === "skipped") {
         report.skipped++;

@@ -51,7 +51,7 @@ function setup(dbcConfig: PublicKey | null) {
   for (const f of [FX.config, FX.pool, FX.mint]) reader.accounts.set(f.address, acc(f));
   reader.recent = Array.from({ length: 20 }, () => Keypair.generate().publicKey.toBase58());
   store.enqueue(MINT);
-  const idx = new IntelIndexer({ store, reader, rng: seededRng(5), dbcConfig });
+  const idx = new IntelIndexer({ store, reader, sleep: noSleep, rng: seededRng(5), dbcConfig });
   return { store, reader, idx };
 }
 
@@ -110,3 +110,5 @@ describe("intel: Meteora DBC launches", () => {
     expect(dbcLockedLpPct({ partnerPermanentLockedLiquidityPercentage: 10, creatorPermanentLockedLiquidityPercentage: 0 })).toBe("10.00");
   });
 });
+
+const noSleep = async (): Promise<void> => undefined;

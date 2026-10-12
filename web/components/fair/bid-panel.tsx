@@ -75,8 +75,18 @@ export function BidForm({ launch, pool, portfolio, isCreator, onSealed }: { laun
         (await import("@/lib/api/mock-fair")).mockFairHint(ciphertext, amountZat);
       }
       setPhase("sending");
-      await postFair(network, { op: "fl_bid", launchId: launch.id, holdZat: check.holdZat.toString(), ciphertext });
-      await saveLocalBid(network, signer.pubkey, { launchId: launch.id, amountZat: amountZat.toString(), holdZat: check.holdZat.toString(), ciphertext });
+      // Kept locally BEFORE the POST (review F12): a tab closed mid-request still has its amount and
+      // ciphertext. Refused -> removed; accepted -> no longer pending.
+      const local = { launchId: launch.id, amountZat: amountZat.toString(), holdZat: check.holdZat.toString(), ciphertext };
+      await saveLocalBid(network, signer.pubkey, { ...local, pending: true });
+      try {
+        await postFair(network, { op: "fl_bid", launchId: launch.id, holdZat: check.holdZat.toString(), ciphertext });
+      } catch (e) {
+        // A network failure may still have landed: keep the pending copy then (pruned later if not).
+        if (e instanceof ApiError && e.code !== "network") await removeLocalBid(network, signer.pubkey, launch.id);
+        throw e;
+      }
+      await saveLocalBid(network, signer.pubkey, local);
       setAmount("");
       setHold(null);
       onSealed();

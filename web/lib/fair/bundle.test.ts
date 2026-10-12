@@ -4,8 +4,9 @@
 //   - initial chunks of every route (client reference manifests + root main files) carry no marker;
 //   - markers appear only in lazy chunks (react-loadable manifests), i.e. code requested only when
 //     the server reports the feature on;
-//   - with NEXT_PUBLIC_FAIR_LAUNCH_BUILD=0 at build time and CHECK_SEALED_STRICT=1 here: no chunk at all.
-// Run after a build: `pnpm test:bundle`. Skipped when there is no build. Run it with the same
+//   - built without NEXT_PUBLIC_FAIR_LAUNCH_BUILD=1 (the default) and CHECK_SEALED_STRICT=1 here: no chunk
+//     at all. `pnpm build:public` runs exactly that and fails the deploy build on any hit.
+// Run after a build: `pnpm test:bundle` (feature compiled in, lazy-only check). Skipped when there is no build. Run it with the same
 // NEXT_PUBLIC_MOCK_FAIR_LAUNCH as the build.
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -15,7 +16,7 @@ import { describe, expect, it } from "vitest";
 const NEXT = path.resolve(import.meta.dirname, "../../.next");
 const built = existsSync(path.join(NEXT, "build-manifest.json")) && existsSync(path.join(NEXT, "server/app"));
 
-const MARKERS = ["drand", "tlock", "age-encryption", "/api/launches", "fl_create", "fl_bid", "fl_cancel", "launch_closed", "already_bid", "bad_ciphertext", "Fair launch", "Sealed-bid", "sealed bid", "Seal bid", "UZFL"];
+const MARKERS = ["drand", "tlock", "age-encryption", "/api/launches", "fl_create", "fl_bid", "fl_cancel", "launch_closed", "already_bid", "bad_ciphertext", "Fair launch", "Sealed-bid", "sealed bid", "Seal bid", "UZFL", "fairLaunch", "fairBids", "holdTiers", "creatorMaxLamports"];
 
 function walk(dir: string, match: (f: string) => boolean, out: string[] = []): string[] {
   for (const n of readdirSync(dir)) {
@@ -32,10 +33,15 @@ const read = (rel: string) => readFileSync(path.join(NEXT, rel), "utf8");
 // A mock build with NEXT_PUBLIC_MOCK_FAIR_LAUNCH=1 (never a public deploy) routes /api/launches and
 // fl_* in the in-browser mock itself; only those two route strings are tolerated there.
 const MOCK_ON = process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1";
-const ROUTER_ONLY = new Set(["/api/launches", "fl_create", "fl_bid", "fl_cancel"]);
+const ROUTER_ONLY = new Set(["/api/launches", "fl_create", "fl_bid", "fl_cancel", "fairLaunch", "fairBids", "creatorMaxLamports"]);
+// With the feature compiled in (NEXT_PUBLIC_FAIR_LAUNCH_BUILD=1, not strict), the runtime gate itself
+// reads PoolInfo.features.fairLaunch and Portfolio.fairBids in initial chunks: those keys are tolerated there. A strict
+// (public) build carries none of it.
+const STRICT = process.env.CHECK_SEALED_STRICT === "1";
+const GATE_ONLY = new Set(["fairLaunch", "fairBids"]);
 const markersIn = (rel: string, initialChunk = false) => {
   const s = read(rel);
-  return MARKERS.filter((m) => s.includes(m) && !(initialChunk && MOCK_ON && ROUTER_ONLY.has(m)));
+  return MARKERS.filter((m) => s.includes(m) && !(initialChunk && ((MOCK_ON && ROUTER_ONLY.has(m)) || (!STRICT && GATE_ONLY.has(m)))));
 };
 
 describe.skipIf(!built)("sealed-bid launch stays out of the main bundle (.next)", () => {

@@ -1,5 +1,6 @@
 import type { Connection, Signer } from "@solana/web3.js";
 import type { Attester } from "../attest";
+import { attestSigMessage, signDetached } from "../ed25519";
 import { AdapterError } from "../errors";
 import type { CreateResult, PreparedCreate, PreparedTrade } from "../pumpfun";
 import type { CreateOptions, CurveStatus, TokenMeta, TradeOptions, TxResult } from "../types";
@@ -28,9 +29,9 @@ export interface JobExecutor<S extends JobSpec = JobSpec> {
   classify(err: unknown, logs?: readonly string[] | null): AdapterError;
   /**
    * When set, the job is signed by this key instead of a pool vault (attest:
-   * the attestation key). The engine then takes no vault lease.
+   * the attestation key of the job's purpose). The engine then takes no vault lease.
    */
-  ownSigner?(): Signer;
+  ownSigner?(spec: S): Signer;
 }
 
 /** Chain access used to resolve recorded attempts. */
@@ -246,31 +247,44 @@ export class WithdrawExecutor implements JobExecutor<Extract<JobSpec, { kind: "w
  * confirmed transaction.
  */
 export class AttestExecutor implements JobExecutor<Extract<JobSpec, { kind: "attest" }>> {
-  constructor(private readonly attester: Attester) {}
+  /** F14: one attester per purpose (Verify operator key, fair-launch key). */
+  private readonly by: Record<"verify" | "fair", Attester>;
+
+  constructor(attesters: Attester | { verify: Attester; fair: Attester }) {
+    this.by = "verify" in attesters && "fair" in attesters ? attesters : { verify: attesters, fair: attesters };
+  }
+
+  private of(spec: Extract<JobSpec, { kind: "attest" }>): Attester {
+    return this.by[spec.purpose];
+  }
 
   vaultRequest(): VaultRequest {
     return { minSol: 0n };
   }
 
-  ownSigner(): Signer {
-    return this.attester.key;
+  ownSigner(spec: Extract<JobSpec, { kind: "attest" }>): Signer {
+    return this.of(spec).key;
   }
 
   prepare(spec: Extract<JobSpec, { kind: "attest" }>): Promise<SignedTx> {
-    return this.attester.prepare(spec.memo);
+    return this.of(spec).prepare(spec.memo);
   }
 
   async submit(tx: SignedTx): Promise<void> {
-    await this.attester.submit(tx);
+    // Sending does not depend on the key (the tx is already signed).
+    await this.by.verify.submit(tx);
   }
 
-  async result(_spec: Extract<JobSpec, { kind: "attest" }>, a: SentAttempt): Promise<Execution | null> {
-    const r = await this.attester.result(a.signature);
+  async result(spec: Extract<JobSpec, { kind: "attest" }>, a: SentAttempt): Promise<Execution | null> {
+    const attester = this.of(spec);
+    const r = await attester.result(a.signature);
     if (!r) return null;
-    return { kind: "attest", signature: r.signature, slot: r.slot, vault: r.signer, memo: r.memo, networkFee: r.networkFee, blockTime: r.blockTime };
+    // v4 out_sig: over the job's memo (= what core compares against), never over chain data.
+    const outSig = signDetached(attester.key, attestSigMessage(spec.memo));
+    return { kind: "attest", signature: r.signature, slot: r.slot, vault: r.signer, memo: r.memo, networkFee: r.networkFee, blockTime: r.blockTime, outSig };
   }
 
   classify(err: unknown, logs: readonly string[] | null = null): AdapterError {
-    return this.attester.classify(err, logs);
+    return this.by.verify.classify(err, logs);
   }
 }

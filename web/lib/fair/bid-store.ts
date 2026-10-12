@@ -9,6 +9,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { base64 } from "@scure/base";
 import { getHistoryKey, useKeyState } from "@/lib/crypto/session";
 import { historySlot } from "@/lib/history/crypto";
+import type { FairBid } from "@/lib/api/types";
 import type { Network } from "@/lib/network";
 
 export interface LocalBid {
@@ -18,6 +19,8 @@ export interface LocalBid {
   /** Exactly the string sent in fl_bid: its sha256 is the commitment leaf. */
   ciphertext: string;
   sealedAt: number;
+  /** Written before fl_bid is sent; cleared when the server accepted it, removed when it refused (review F12). */
+  pending?: boolean;
 }
 
 const V = 1;
@@ -146,6 +149,48 @@ export function saveLocalBid(network: Network, pubkey: string, input: Omit<Local
 
 export function removeLocalBid(network: Network, pubkey: string, launchId: string) {
   return mutate(network, pubkey, (b) => b.filter((x) => x.launchId !== launchId));
+}
+
+/** A pending copy whose fl_bid never showed up in the portfolio after this long is dropped. */
+const PENDING_TTL_MS = 10 * 60_000;
+/** A bid the portfolio no longer lists (it keeps the last 20) is dropped after this long. */
+const STALE_MS = 48 * 3_600_000;
+/** Server states after which the local amount and ciphertext have no use left (reveal, withdraw, fail). */
+const DONE: ReadonlySet<FairBid["status"]> = new Set(["cancelled", "invalid", "revealed", "settled", "released"]);
+
+/** Which local copies to drop, given the key's bids as the server reports them. */
+export function bidsToPrune(local: LocalBid[], server: FairBid[], now: number): string[] {
+  const byId = new Map(server.map((b) => [b.launchId, b]));
+  return local
+    .filter((l) => {
+      const s = byId.get(l.launchId);
+      if (s) return DONE.has(s.status);
+      return now - l.sealedAt > (l.pending ? PENDING_TTL_MS : STALE_MS);
+    })
+    .map((l) => l.launchId);
+}
+
+/**
+ * After reveal / withdraw / a failed launch the ciphertext would reveal the amount to anyone holding the
+ * history key: delete it (review F12). Call with Portfolio.fairBids whenever it refreshes.
+ */
+export function pruneLocalBids(network: Network, pubkey: string, server: FairBid[]) {
+  const s = slots.get(slotOf(network, pubkey));
+  if (!s || s.status !== "ready") return;
+  const drop = new Set(bidsToPrune(s.bids, server, Date.now()));
+  if (drop.size === 0) return;
+  return mutate(network, pubkey, (b) => b.filter((x) => !drop.has(x.launchId)));
+}
+
+/** Prune on every portfolio refresh of the unlocked key. */
+export function usePruneLocalBids(server: FairBid[] | undefined) {
+  const key = useKeyState();
+  const ready = useLocalBids().status === "ready";
+  const pubkey = key.status === "unlocked" ? key.pubkey : null;
+  const network = key.status === "unlocked" ? key.network : null;
+  useEffect(() => {
+    if (pubkey && network && server && ready) void pruneLocalBids(network, pubkey, server);
+  }, [pubkey, network, server, ready]);
 }
 
 const LOCKED = { status: "locked" as Status, bids: [] as LocalBid[] };

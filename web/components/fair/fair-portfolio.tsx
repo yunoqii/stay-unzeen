@@ -6,6 +6,7 @@ import { ArrowRight, LockSimple } from "@phosphor-icons/react";
 import type { FairBid, FairLaunch, OwnFairLaunch } from "@/lib/api/types";
 import "@/lib/fair/api";
 import { getLaunches } from "@/lib/fair/api";
+import { usePruneLocalBids } from "@/lib/fair/bid-store";
 import { formatZec } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
 import { Veiled } from "@/components/portfolio/peek";
@@ -41,6 +42,7 @@ function useLaunchNames(): Map<string, FairLaunch["meta"]> {
 
 /** Portfolio: own sealed bids and own sealed-bid launches (Portfolio.fairBids / fairLaunches). */
 export default function FairPortfolio({ bids, launches }: { bids: FairBid[]; launches: OwnFairLaunch[] }) {
+  usePruneLocalBids(bids);
   const names = useLaunchNames();
   if (bids.length === 0 && launches.length === 0) return null;
   const label = (id: string) => {

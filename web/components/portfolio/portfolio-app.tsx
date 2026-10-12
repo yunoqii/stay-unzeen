@@ -23,7 +23,7 @@ import { WithdrawPanel, type WithdrawTab } from "./withdraw-panel";
 
 // On-demand block, only when the server reports the feature (and the build carries it).
 const Sealed =
-  process.env.NEXT_PUBLIC_FAIR_LAUNCH_BUILD !== "0"
+  process.env.NEXT_PUBLIC_FAIR_LAUNCH_BUILD === "1"
     ? dynamic<{ bids: FairBid[]; launches: OwnFairLaunch[] }>(() => import("@/components/fair/fair-portfolio"), { ssr: false })
     : null;
 

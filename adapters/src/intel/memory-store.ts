@@ -15,6 +15,8 @@ export class MemoryIntelStore implements IntelStore {
   readonly missing = new Set<string>();
   readonly cards = new Map<string, TokenCard>();
   readonly curves = new Map<string, CurveUpdate>();
+  /** intel_prices: current + previous value per mint (no history). */
+  readonly prices = new Map<string, { priceSol: string; status: string; tickAt: number; prevPriceSol: string | null; prevTickAt: number | null }>();
   readonly commits: TickCommit[] = [];
   subscriptions: TickCommit["subscriptions"] = [];
   meta: { nextTickAt: number; lastTickAt: number } | null = null;
@@ -35,7 +37,7 @@ export class MemoryIntelStore implements IntelStore {
     const now = this.now();
     return [...this.warm]
       .filter(([, w]) => w.pinned || (w.expiresAt ?? 0) > now)
-      .map(([mint, w]) => ({ mint, hot: w.hot, asOf: this.safety.get(mint)?.asOf ?? null }));
+      .map(([mint, w]) => ({ mint, hot: w.hot, pinned: w.pinned, asOf: this.safety.get(mint)?.asOf ?? null }));
   }
 
   async peekLookups(max: number): Promise<string[]> {
@@ -81,6 +83,17 @@ export class MemoryIntelStore implements IntelStore {
       if (i >= 0) this.lookups.splice(i, 1);
     }
     for (const u of t.curveUpdates) this.curves.set(u.mint, u);
+    for (const p of t.prices ?? []) {
+      const cur = this.prices.get(p.mint);
+      if (cur && cur.tickAt >= t.tickStartedAt) continue;
+      this.prices.set(p.mint, {
+        priceSol: p.priceSol,
+        status: p.status,
+        tickAt: t.tickStartedAt,
+        prevPriceSol: cur?.priceSol ?? null,
+        prevTickAt: cur?.tickAt ?? null,
+      });
+    }
     this.subscriptions = t.subscriptions;
     this.meta = { nextTickAt: t.nextTickAt, lastTickAt: t.tickStartedAt };
   }

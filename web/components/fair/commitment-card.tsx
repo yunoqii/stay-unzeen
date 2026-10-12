@@ -13,8 +13,8 @@ import { CopyButton } from "@/components/ui/copy-button";
 const EASE = [0.16, 1, 0.3, 1] as const;
 
 /**
- * Commitment root of all sealed bids, fixed at window close (before the drand round: nobody could
- * read a bid then) and anchored in a Solana memo-tx. The memo signature is copy-only: a link to an
+ * Commitment root of all sealed bids, fixed at window close and anchored in a Solana memo-tx. "Before
+ * the drand round" is claimed only when attestation.beforeRound === true (review F2). The memo signature is copy-only: a link to an
  * explorer would tell the explorer "this IP looked at this launch".
  */
 export function CommitmentCard({ launch, bid, local }: { launch: FairLaunch; bid: FairBid | undefined; local: LocalBid | undefined }) {
@@ -34,7 +34,8 @@ export function CommitmentCard({ launch, bid, local }: { launch: FairLaunch; bid
           Commitment root
         </h3>
         <p className="mt-1 text-xs text-pretty text-muted-foreground">
-          A Merkle root over every sealed bid, fixed when the window closed, before the round, while no bid could be read. The set of bids cannot change after it.
+          A Merkle root over every sealed bid, fixed when the window closed. The set of bids cannot change after it.
+          {a?.beforeRound === true && " Its anchor landed before the round, while no bid could be read."}
         </p>
         <div className="mt-3 flex items-center gap-2 rounded-xl bg-surface-1 px-3 py-2">
           <code className="min-w-0 flex-1 font-mono text-[11px] break-all text-foreground/90">{c.root}</code>
@@ -46,7 +47,10 @@ export function CommitmentCard({ launch, bid, local }: { launch: FairLaunch; bid
         {a ? (
           <>
             <div className="flex items-center justify-between gap-3">
-              <span className="text-xs text-muted-foreground">Anchored on Solana (memo)</span>
+              <span className="text-xs text-muted-foreground">
+                {/* Timing is claimed only when the backend proved it (review F2); otherwise stay neutral. */}
+                {a.beforeRound === true ? "Anchored on Solana before the round" : `Anchored on Solana at slot ${a.slot.toLocaleString("en-US")}`}
+              </span>
               {a.matches ? (
                 <span className="flex items-center gap-1 text-[11px] text-zec">
                   <CheckCircle size={12} weight="fill" aria-hidden /> memo = root
@@ -65,7 +69,7 @@ export function CommitmentCard({ launch, bid, local }: { launch: FairLaunch; bid
                     value={a.solanaTx}
                     label="Copy memo transaction signature"
                     toastText="Signature copied"
-                    toastDescription="Look it up in an explorer later, ideally over Tor. Its memo is exactly the root, its slot is before the round."
+                    toastDescription="Look it up in an explorer later, ideally over Tor. Its memo is exactly the root."
                     className="gap-1.5 font-mono"
                   >
                     {shortAddr(a.solanaTx, 6, 6)}
@@ -85,6 +89,9 @@ export function CommitmentCard({ launch, bid, local }: { launch: FairLaunch; bid
                 </dd>
               </div>
             </dl>
+            {a.beforeRound === false && (
+              <p className="mt-3 text-xs text-pretty text-faint-foreground">Anchored after the round: inclusion is still checkable, the timing is not proven.</p>
+            )}
             {!a.matches && (
               <p role="alert" className="mt-3 rounded-xl bg-sell/10 p-3 text-xs text-sell">
                 The memo read back from Solana does not match this root. Treat this launch with caution and verify the memo yourself.

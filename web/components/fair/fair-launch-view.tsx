@@ -8,7 +8,7 @@ import { errorText } from "@/lib/api/client";
 import type { FairBid, FairLaunch, PoolInfo } from "@/lib/api/types";
 import { useKeyState } from "@/lib/crypto/session";
 import { getLaunch, LAUNCH_POLL_MS, postFair } from "@/lib/fair/api";
-import { useLocalBids } from "@/lib/fair/bid-store";
+import { useLocalBids, usePruneLocalBids } from "@/lib/fair/bid-store";
 import { formatZec } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
 import { useNow } from "@/hooks/use-now";
@@ -88,6 +88,7 @@ function Launch({ launch, pool, now, isCreator }: { launch: FairLaunch; pool: Po
   const key = useKeyState();
   const { portfolio, refresh } = usePortfolio();
   const local = useLocalBids().bids.find((b) => b.launchId === launch.id);
+  usePruneLocalBids(portfolio?.fairBids);
   const bid = pickBid(portfolio?.fairBids, launch.id);
   const open = launch.status === "open" && now < launch.closeAt;
   const sealed = bid?.status === "sealed";

@@ -9,7 +9,8 @@
  * 1. launch_curves from the pump Global (as the relayer does at start / every 10 min)
  * 2. fair_create: mint keypair generated here as core does (mint_secret), one
  *    atomic v0 create + buy; checks out_mint = pubkey of mint_secret, pin, feed
- * 3. attest: SPL Memo with a 64-hex root from the attestation key; out_memo read
+ * 3. attest (meta.purpose = "fair"): SPL Memo with a 64-hex root from the
+ *    FAIR-LAUNCH attestation key (F14, not the public Verify key); out_memo read
  *    back from the confirmed tx (skipped when the key is not funded: it is never
  *    topped up from a vault)
  *
@@ -26,6 +27,7 @@ import { describeConfig, explorerAddressUrl, explorerTxUrl, loadConfig, makeConn
 import { loadRepoEnv, redactSecrets } from "../src/env";
 import { toBN, toBig } from "../src/math";
 import { LocalMetadataStore } from "../src/metadata";
+import { verifyDetached } from "../src/ed25519";
 import { FileMintVaults, buildRelayer, defaultMediaDir, makePools, openKeys, relayerNetwork } from "../src/relayer";
 
 loadRepoEnv();
@@ -75,8 +77,12 @@ async function main(): Promise<void> {
   const c = await admin.connect();
   try {
     await c.query(`SET search_path = ${schema}`);
-    await c.query(`ALTER TABLE relayer_jobs DROP CONSTRAINT IF EXISTS relayer_jobs_op_check`);
-    await c.query(jobs);
+    // public.relayer_jobs already at 0008+ (core applied it): LIKE copied the v3+ columns and op check.
+    const has = await c.query(`SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'relayer_jobs' AND column_name = 'mint_secret'`);
+    if (has.rowCount === 0) {
+      await c.query(`ALTER TABLE relayer_jobs DROP CONSTRAINT IF EXISTS relayer_jobs_op_check`);
+      await c.query(jobs);
+    }
     await c.query(curves);
   } finally {
     c.release();
@@ -150,14 +156,17 @@ async function main(): Promise<void> {
     // ---- [3] attest
     const memo = createHash("sha256").update(`devnet-root-${mint.publicKey.toBase58()}`).digest("hex");
     console.log(`\n[3] attest: memo ${memo}`);
-    const bal = await conn.getBalance(rt.attester.publicKey, "confirmed");
-    console.log(`  attestation key ${rt.attester.publicKey.toBase58()} balance ${bal} lamports`);
+    const fairKey = rt.fairAttester.publicKey;
+    const bal = await conn.getBalance(fairKey, "confirmed");
+    console.log(`  fair-launch attestation key ${fairKey.toBase58()} balance ${bal} lamports`);
     if (bal < 100_000) {
-      console.log("  SKIPPED: attestation key not funded (devnet faucet refused; it is never topped up from a vault)");
+      console.log("  SKIPPED: fair-launch attestation key not funded (the owner funds it; never topped up from a vault)");
     } else {
-      const a = await runUntil(await insert({ op: "attest", meta: { memo } }));
+      const a = await runUntil(await insert({ op: "attest", meta: { memo, purpose: "fair" } }));
       console.log(`  tx: ${txUrl(a.signature!)}  slot ${a.slot}`);
-      console.log(`  out_memo from the confirmed tx = root: ${a.out_memo === memo}; signer = attestation key: ${a.vault === rt.attester.publicKey.toBase58()}`);
+      console.log(`  out_memo from the confirmed tx = root: ${a.out_memo === memo}; signer = fair attestation key: ${a.vault === fairKey.toBase58()}`);
+      const extra = (await db.query(`SELECT out_sig, out_block_time FROM relayer_jobs WHERE signature = $1`, [a.signature])).rows[0];
+      console.log(`  out_sig valid over hex_decode(memo): ${verifyDetached(fairKey.toBase58(), Buffer.from(memo, "hex"), extra.out_sig)}; out_block_time ${extra.out_block_time}`);
       console.log(`  feed rows for attest: ${(await db.query(`SELECT count(*)::int AS n FROM trades WHERE signature = $1`, [a.signature])).rows[0].n}`);
     }
   } finally {

@@ -8,8 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:bundle": "next build && vitest run lib/fair/bundle.test.ts",
-    "test:bundle:strict": "NEXT_PUBLIC_FAIR_LAUNCH_BUILD=0 next build && CHECK_SEALED_STRICT=1 vitest run lib/fair/bundle.test.ts"
+    "test:bundle": "NEXT_PUBLIC_FAIR_LAUNCH_BUILD=1 next build && vitest run lib/fair/bundle.test.ts",
+    "test:bundle:strict": "NEXT_PUBLIC_FAIR_LAUNCH_BUILD= NEXT_PUBLIC_MOCK_FAIR_LAUNCH= next build && CHECK_SEALED_STRICT=1 vitest run lib/fair/bundle.test.ts",
+    "build:public": "pnpm test:bundle:strict"
   },
   "dependencies": {
     "@noble/curves": "^2.4.0",

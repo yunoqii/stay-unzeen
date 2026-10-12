@@ -62,7 +62,7 @@ describe("mock fair-launch: flag off", () => {
     const call = caller(m);
     await fund(m, call);
     const pool = await call<PoolInfo>("GET", "/api/pool");
-    expect(pool.features?.fairLaunch).toBe(false);
+    expect(pool.features).not.toHaveProperty("fairLaunch"); // v0.7: absent = off
     expect(pool).not.toHaveProperty("fairLaunch");
     expect(await code(call("GET", "/api/launches"))).toBe("not_found");
     expect(await code(call("GET", "/api/launches/" + "00".repeat(16)))).toBe("not_found");

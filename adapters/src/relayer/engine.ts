@@ -217,7 +217,7 @@ export class Relayer {
     for (let i = 0; i < this.o.maxSendAttempts; i++) {
       let vault: Signer;
       let pinFor: string | null;
-      const own = ex.ownSigner?.() ?? null;
+      const own = ex.ownSigner?.(job.spec) ?? null;
       try {
         if (own) {
           vault = own; // attest: the attestation key signs and pays; no vault lease

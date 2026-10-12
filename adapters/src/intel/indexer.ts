@@ -15,7 +15,7 @@ import { deriveDbcPoolAddress, deriveDbcPoolAuthority, type PoolConfig, type Vir
 import { DBC_PROGRAM_ID, dbcCoder, dbcPoolVaults, dbcPriceAndCap, dbcProgressPct, dbcStatus } from "../meteora";
 import { PublicKey, type AccountInfo, type Connection } from "@solana/web3.js";
 import { priceAndCap } from "../pumpfun";
-import type { Rng } from "../relayer/random";
+import { cryptoRng, type Rng } from "../relayer/random";
 import type { FullIntel } from "./full";
 import {
   METAPLEX_METADATA_PROGRAM_ID,
@@ -31,7 +31,7 @@ import {
 import { fetchOffchain, type OffchainDeps } from "./offchain";
 import { isMintAddress, type ChainReader } from "./reader";
 import { BATCH_SIZE, MAX_REAL_PER_BATCH, SubscriptionPlanner, assembleBatch, nextTickDelay, pickWarmDue, tickBoundary } from "./schedule";
-import type { CurveUpdate, IntelStore, OffchainInfo, TickCommit, TokenCard, TokenSafety } from "./types";
+import type { CurveUpdate, IntelStore, OffchainInfo, PriceRow, TickCommit, TokenCard, TokenSafety } from "./types";
 
 /**
  * Intel indexer (pnpm intel:run), contract: docs/INTEL.md v1.
@@ -153,6 +153,16 @@ export interface IndexerOptions {
    * read in the same call: progress / graduated / locked LP for DBC launches.
    */
   dbcConfig?: PublicKey | null;
+  /**
+   * INTEL v2 price pass: the read of all pinned curves happens at a uniformly
+   * random moment in [0, this] ms after the tick start (orders.md §3: a tick
+   * time is public, the sampling moment is not). Capped so the tick still
+   * commits well before the next one. Default 20 000.
+   */
+  priceMaxDelayMs?: number;
+  /** Randomness of the price sampling moment (default: CSPRNG, independent of the tick rng). */
+  priceRng?: Rng;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** Counts only: nothing here tells a request from a decoy. */
@@ -165,6 +175,8 @@ export interface TickReport {
   subsAdded: number;
   subsRemoved: number;
   errors: number;
+  /** Pinned mints priced on this tick. */
+  priced: number;
   ms: number;
   nextInMs: number;
 }
@@ -218,7 +230,7 @@ export class IntelIndexer {
     const asOf = tickBoundary(started);
     const nextInMs = nextTickDelay(this.o.rng);
     this.ticks++;
-    const report: TickReport = { tick: this.ticks, batch: 0, warm: 0, saved: 0, missing: 0, subsAdded: 0, subsRemoved: 0, errors: 0, ms: 0, nextInMs };
+    const report: TickReport = { tick: this.ticks, batch: 0, warm: 0, saved: 0, missing: 0, subsAdded: 0, subsRemoved: 0, errors: 0, priced: 0, ms: 0, nextInMs };
     const commit: TickCommit = {
       asOf,
       tickStartedAt: started,
@@ -231,6 +243,7 @@ export class IntelIndexer {
       curveUpdates: [],
       subscriptions: [],
     };
+    let pricing: Promise<PriceRow[]> = Promise.resolve([]);
     try {
       const [warm, launches, vaults, creators] = await Promise.all([
         this.o.store.warmSet(),
@@ -239,6 +252,17 @@ export class IntelIndexer {
         this.o.store.poolCreators(),
       ]);
       const pool: PoolSets = { launches, vaults, creators };
+      // 0. Price pass (INTEL v2): ALL pinned mints, every tick, at a random moment inside the
+      // tick. The set depends on nothing but `pinned` (orders never cause a read).
+      const pinned = warm.filter((w) => w.pinned).map((w) => w.mint);
+      const priceDelay = (this.o.priceRng ?? cryptoRng).int(0, Math.max(0, Math.min(this.o.priceMaxDelayMs ?? 20_000, nextInMs - 25_000)));
+      pricing = (async () => {
+        await (this.o.sleep ?? defaultSleep)(priceDelay);
+        return this.prices(pinned);
+      })().catch(() => {
+        report.errors++;
+        return [] as PriceRow[]; // whole pass failed: intel_prices untouched this tick
+      });
       if ((this.ticks - 1) % (this.o.decoyRefreshTicks ?? 10) === 0 || this.recent.length < 2 * BATCH_SIZE) {
         await this.refreshDecoyPool().catch(() => report.errors++);
       }
@@ -293,6 +317,8 @@ export class IntelIndexer {
     } catch {
       report.errors++;
     }
+    commit.prices = await pricing;
+    report.priced = commit.prices.length;
     // 4. One transaction. Even when everything failed, next_tick_at is published.
     try {
       await this.o.store.commitTick(commit);
@@ -318,6 +344,55 @@ export class IntelIndexer {
     }
     for (const id of this.subIds.values()) await this.o.watcher?.unsubscribe(id);
     this.subIds.clear();
+  }
+
+  /**
+   * Price of every given mint from its curve: pump.fun bonding curve or
+   * Unzeen's DBC pool, read with getMultipleAccounts (mint + curve PDAs, ≤ 100
+   * keys per call). A mint that is on neither curve, or cannot be decoded, gets
+   * no row (its old price stays). Throws only when the read itself fails.
+   */
+  async prices(mints: readonly string[]): Promise<PriceRow[]> {
+    const valid = mints.filter(isMintAddress);
+    if (valid.length === 0) return [];
+    const dbcCfg = this.o.dbcConfig ?? null;
+    const per = valid.map((m) => {
+      const mint = new PublicKey(m);
+      return { key: m, mint, curve: bondingCurvePda(mint), dbc: dbcCfg ? deriveDbcPoolAddress(NATIVE_MINT, mint, dbcCfg) : null };
+    });
+    const shared = dbcCfg ? [dbcCfg] : [];
+    const stride = dbcCfg ? 3 : 2;
+    const accs = await this.o.reader.getMultipleAccounts([...shared, ...per.flatMap((p) => [p.mint, p.curve, ...(p.dbc ? [p.dbc] : [])])]);
+    const ca = dbcCfg ? accs[0] : null;
+    if (ca && ca.owner.equals(DBC_PROGRAM_ID)) this.dbcConfigState = safe(() => dbcCoder().accounts.decode("poolConfig", ca.data) as PoolConfig) ?? this.dbcConfigState;
+    const out: PriceRow[] = [];
+    per.forEach((p, i) => {
+      const a = (k: number) => accs[shared.length + i * stride + k] ?? null;
+      const facts = mintFacts(p.mint, a(0));
+      if (!facts) return;
+      const ci = a(1);
+      const curve = ci && ci.owner.equals(PUMP_PROGRAM_ID) ? safe(() => PUMP_SDK.decodeBondingCurveNullable(ci as AccountInfo<Buffer>)) : null;
+      let row: PriceRow | null = null;
+      if (curve && toBigSafe(curve.virtualTokenReserves) > 0n) {
+        row = {
+          mint: p.key,
+          priceSol: priceAndCap(curve, facts.decimals).priceSol,
+          status: curve.complete || isBondingCurveMigrated(curve) ? "graduated" : "curve",
+        };
+      } else if (p.dbc) {
+        const di = a(2);
+        const st = di && di.owner.equals(DBC_PROGRAM_ID) ? safe(() => (dbcCoder().accounts.decode("virtualPool", di.data) as VirtualPool).poolState) : null;
+        if (st && st.baseMint.equals(p.mint) && this.dbcConfigState) {
+          row = {
+            mint: p.key,
+            priceSol: dbcPriceAndCap(st.sqrtPrice, facts.supply, facts.decimals).priceSol,
+            status: dbcStatus(st, this.dbcConfigState) === "curve" ? "curve" : "graduated",
+          };
+        }
+      }
+      if (row && isPositiveDecimal(row.priceSol)) out.push(row);
+    });
+    return out;
   }
 
   private async refreshDecoyPool(): Promise<void> {
@@ -665,6 +740,23 @@ export class IntelIndexer {
       slot,
     });
   }
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve();
+}
+
+function toBigSafe(v: { toString(): string }): bigint {
+  try {
+    return BigInt(v.toString());
+  } catch {
+    return 0n;
+  }
+}
+
+/** intel_prices.price_sol CHECK (> 0): a plain positive decimal string. */
+export function isPositiveDecimal(s: string): boolean {
+  return /^\d+(\.\d+)?$/.test(s) && /[1-9]/.test(s);
 }
 
 function safe<T>(f: () => T): T | null {

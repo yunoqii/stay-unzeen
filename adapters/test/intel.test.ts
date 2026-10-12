@@ -102,7 +102,7 @@ describe("tick and decoys (docs/INTEL.md)", () => {
     const reader = new FakeReader();
     reader.recent = Array.from({ length: 20 }, keyS);
     const store = new MemoryIntelStore();
-    const idx = new IntelIndexer({ store, reader, rng: seededRng(1) });
+    const idx = new IntelIndexer({ store, reader, sleep: noSleep, rng: seededRng(1) });
     const ac = new AbortController();
     const done = idx.run(ac.signal);
     await vi.advanceTimersByTimeAsync(0); // first tick
@@ -123,7 +123,7 @@ describe("tick and decoys (docs/INTEL.md)", () => {
     const reader = new FakeReader();
     reader.recent = Array.from({ length: 20 }, keyS);
     const store = new MemoryIntelStore();
-    const idx = new IntelIndexer({ store, reader, rng: seededRng(2) });
+    const idx = new IntelIndexer({ store, reader, sleep: noSleep, rng: seededRng(2) });
     const r = await idx.tick();
     expect(r.batch).toBe(8);
     const reads = reader.calls.filter((c) => c.method === "getMultipleAccounts");
@@ -140,7 +140,7 @@ describe("tick and decoys (docs/INTEL.md)", () => {
     const store = new MemoryIntelStore();
     const real = mints.slice(0, 6).map((m) => m.toBase58());
     real.forEach((m) => store.enqueue(m));
-    const idx = new IntelIndexer({ store, reader, rng: seededRng(7) });
+    const idx = new IntelIndexer({ store, reader, sleep: noSleep, rng: seededRng(7) });
     const r = await idx.tick();
     expect(r.batch).toBe(8);
     const largest = reader.calls.filter((c) => c.method === "getTokenLargestAccounts").map((c) => c.keys[0]);
@@ -158,8 +158,8 @@ describe("tick and decoys (docs/INTEL.md)", () => {
     reader.recent = Array.from({ length: 20 }, keyS);
     const store = new MemoryIntelStore();
     store.enqueue(keyS());
-    const r = await new IntelIndexer({ store, reader, rng: seededRng(3) }).tick();
-    expect(Object.keys(r).sort()).toEqual(["batch", "errors", "missing", "ms", "nextInMs", "saved", "subsAdded", "subsRemoved", "tick", "warm"]);
+    const r = await new IntelIndexer({ store, reader, sleep: noSleep, rng: seededRng(3) }).tick();
+    expect(Object.keys(r).sort()).toEqual(["batch", "errors", "missing", "ms", "nextInMs", "priced", "saved", "subsAdded", "subsRemoved", "tick", "warm"]);
   });
 
   it("unknown account -> missing snapshot and the request is consumed", async () => {
@@ -168,7 +168,7 @@ describe("tick and decoys (docs/INTEL.md)", () => {
     const store = new MemoryIntelStore();
     const ca = keyS();
     store.enqueue(ca);
-    await new IntelIndexer({ store, reader, rng: seededRng(4) }).tick();
+    await new IntelIndexer({ store, reader, sleep: noSleep, rng: seededRng(4) }).tick();
     expect(store.missing.has(ca)).toBe(true);
     expect(store.lookups).toEqual([]);
   });
@@ -184,7 +184,7 @@ describe("tick and decoys (docs/INTEL.md)", () => {
     };
     const store = new MemoryIntelStore();
     store.enqueue(ca.toBase58());
-    const r = await new IntelIndexer({ store, reader, rng: seededRng(5) }).tick();
+    const r = await new IntelIndexer({ store, reader, sleep: noSleep, rng: seededRng(5) }).tick();
     expect(r.errors).toBe(1);
     expect(store.safety.has(ca.toBase58())).toBe(false);
     expect(store.lookups).toEqual([ca.toBase58()]);
@@ -264,7 +264,7 @@ describe("subscriptions change only on a tick, by a fixed number", () => {
       subscribe: (k, cb) => (subs.push({ key: k.toBase58(), cb }), subs.length),
       unsubscribe: async () => undefined,
     };
-    const idx = new IntelIndexer({ store, reader, rng: seededRng(9), watcher });
+    const idx = new IntelIndexer({ store, reader, sleep: noSleep, rng: seededRng(9), watcher });
     (idx as unknown as { global: unknown }).global = global;
     await idx.tick(); // snapshot (no asOf yet -> first), then subscribe
     const warmCurve = bondingCurvePda(warmMint).toBase58();
@@ -412,7 +412,7 @@ describe("T1: no dev data for Unzeen launches", () => {
     if (known === "vault") store.vaults.add(creator.toBase58());
     store.vaults.add(vault.toBase58());
     store.enqueue(mint.toBase58());
-    const idx = new IntelIndexer({ store, reader, rng: seededRng(11) });
+    const idx = new IntelIndexer({ store, reader, sleep: noSleep, rng: seededRng(11) });
     await idx.tick();
     return { row: store.safety.get(mint.toBase58())!, reader, creatorAta };
   }
@@ -506,5 +506,70 @@ describe("public creator list (T1 race)", () => {
     expect(text).not.toMatch(/seed|secret/i);
     expect(JSON.parse(text)).toEqual({ pubkeys: [pk] });
     fs.rmSync(dir, { recursive: true });
+  });
+});
+
+const noSleep = async (): Promise<void> => undefined;
+
+describe("INTEL v2 price pass (intel_prices)", () => {
+  it("every pinned mint on every tick, after a random in-tick delay; prev value rolls over; nothing else priced", async () => {
+    const reader = new FakeReader();
+    const store = new MemoryIntelStore();
+    const a = key(); // pinned, pump curve
+    const b = key(); // pinned, no curve
+    const c = key(); // warm, not pinned
+    for (const m of [a, b, c]) reader.accounts.set(m.toBase58(), mintAccount(1_000_000_000_000_000n));
+    reader.accounts.set(bondingCurvePda(a).toBase58(), await curveAccount(key()));
+    reader.accounts.set(bondingCurvePda(c).toBase58(), await curveAccount(key()));
+    reader.recent = Array.from({ length: 20 }, keyS);
+    store.pin(a.toBase58(), false);
+    store.pin(b.toBase58(), false);
+    store.warm.set(c.toBase58(), { hot: false, pinned: false, expiresAt: Date.now() + 3600_000 });
+    const delays: number[] = [];
+    let readAfterSleep = false;
+    const sleep = async (ms: number) => {
+      delays.push(ms);
+      readAfterSleep = true;
+    };
+    let t = 1_760_000_000_000;
+    const idx = new IntelIndexer({ store, reader, sleep, rng: seededRng(21), now: () => t });
+    const r1 = await idx.tick();
+    expect(readAfterSleep).toBe(true);
+    expect(delays).toHaveLength(1);
+    expect(delays[0]).toBeGreaterThanOrEqual(0);
+    expect(delays[0]).toBeLessThanOrEqual(20_000);
+    expect(r1.priced).toBe(1);
+    const p1 = store.prices.get(a.toBase58())!;
+    const expected = (Number(global.initialVirtualSolReserves.toString()) / 1e9) / (Number(global.initialVirtualTokenReserves.toString()) / 1e6);
+    expect(Number(p1.priceSol)).toBeCloseTo(expected, 12);
+    expect(p1).toMatchObject({ status: "curve", tickAt: t, prevPriceSol: null, prevTickAt: null });
+    expect(store.prices.has(b.toBase58())).toBe(false);
+    expect(store.prices.has(c.toBase58())).toBe(false);
+    expect(store.commits.at(-1)!.prices).toHaveLength(1);
+    // The price read itself: one call with exactly the pinned mints and their curve PDAs.
+    const priceCall = reader.calls.find(
+      (x) => x.method === "getMultipleAccounts" && x.keys.length === 4 && x.keys.includes(bondingCurvePda(b).toBase58()),
+    );
+    expect(new Set(priceCall!.keys)).toEqual(new Set([a, bondingCurvePda(a), b, bondingCurvePda(b)].map((k) => k.toBase58())));
+
+    t += 60_000;
+    await idx.tick();
+    expect(store.prices.get(a.toBase58())).toMatchObject({ tickAt: t, prevPriceSol: p1.priceSol, prevTickAt: t - 60_000 });
+  });
+
+  it("a failed price read writes no price but the tick still commits", async () => {
+    const reader = new FakeReader();
+    const store = new MemoryIntelStore();
+    const a = key();
+    store.pin(a.toBase58(), false);
+    const idx = new IntelIndexer({ store, reader, sleep: noSleep, rng: seededRng(22) });
+    idx.prices = async () => {
+      throw new Error("rpc down");
+    };
+    const r = await idx.tick();
+    expect(r.priced).toBe(0);
+    expect(r.errors).toBeGreaterThan(0);
+    expect(store.commits).toHaveLength(1);
+    expect(store.prices.size).toBe(0);
   });
 });

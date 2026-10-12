@@ -1,4 +1,4 @@
-// Mirrors docs/API.md v0.6 (token intel and fair-launch blocks at the bottom). Do not diverge: change the contract first.
+// Mirrors docs/API.md v0.7 (token intel, fair-launch and Verify blocks at the bottom). Do not diverge: change the contract first.
 //
 // Units (docs/API.md "Единицы сумм"):
 //   - spendable amounts: integer strings in BASE units (token base units, lamports, zatoshis)
@@ -451,6 +451,10 @@ export interface FairLaunch {
       slot: number;
       signer: string;
       matches: boolean;
+      /** Pending in docs/API.md (review F2): block time of the memo-tx, unix seconds. */
+      blockTime?: number;
+      /** Pending in docs/API.md (review F2): memo landed before the drand round (with a margin). Only `true` lets the UI say so. */
+      beforeRound?: boolean;
     };
   };
   /** launched only */
@@ -488,4 +492,94 @@ export interface OwnFairLaunch {
   status: "scheduled" | FairLaunchStatus;
   publishedAt: number;
   closeAt: number;
+}
+
+// ---- Verify (v0.7): proof of liabilities, public vaults, attested ZEC reserve ----
+
+/** "ZEC" or a base58 mint. In hashes: ZEC = 32 zero bytes, a mint = its 32 decoded bytes. */
+export type AssetId = "ZEC" | (string & {});
+
+export interface VerifyAnchor {
+  /** SPL Memo tx whose data is exactly the 64-hex rootsDigest. */
+  solanaTx: string;
+  slot: number;
+  /** Memo read back from the chain equals rootsDigest. false = incident. */
+  matches: boolean;
+}
+
+/** GET /api/verify/snapshots: root history, newest first. */
+export interface VerifySnapshotSummary {
+  id: number;
+  /** unix ms, floored to the minute (= takenAtSec * 1000). */
+  takenAt: number;
+  /** hex, 32 bytes */
+  rootsDigest: string;
+  /** Present once the memo-tx is confirmed. */
+  anchor?: VerifyAnchor;
+}
+
+export interface VerifyTree {
+  asset: AssetId;
+  decimals: number;
+  /** Rounding granule in base units (ZEC 100000 zat, a mint 10^decimals). */
+  granule: string;
+  /** hex, 32 bytes */
+  root: string;
+  /** Base units, integer string (u128). */
+  sum: string;
+}
+
+export interface VerifyVault {
+  /** base58, also the ed25519 pubkey that signed `sig`. */
+  address: string;
+  /** base58 ed25519 over utf8("unzeen/verify/v1/vault\n" + chainId + "\n" + snapshotId + "\n" + address). */
+  sig: string;
+  lamports: Lamports;
+  tokens: { mint: string; amount: TokenBaseUnits }[];
+}
+
+/** GET /api/verify, GET /api/verify/:id. */
+export interface VerifySnapshot extends VerifySnapshotSummary {
+  chainId: string;
+  /** N, the same for every tree of the snapshot. */
+  leaves: number;
+  solanaSlot: number;
+  zcashHeight: number;
+  /** Pool attestation key (base58) + its signature over the 32 digest bytes. Present once anchored. */
+  operator?: { pubkey: string; sig: string };
+  trees: VerifyTree[];
+  vaults: VerifyVault[];
+  /** SOL already promised to queued jobs: subtracted from the cover. */
+  committedLamports: Lamports;
+  /** Rate SOL counts towards the ZEC cover. Absent = there was no rate. */
+  rateLamportsPerZecSell?: Lamports;
+  /** Rounded DOWN to 0.01 ZEC. Stated by the operator, not proven. */
+  zecReserve: { amountZat: Zatoshis; height: number; attested: true };
+}
+
+export interface VerifyPathNode {
+  hash: string;
+  sum: string;
+}
+
+export interface VerifyProofPiece {
+  piece: number;
+  leafIndex: number;
+  /** Base units, a multiple of the granule. */
+  value: string;
+  /** hex, 32 bytes */
+  blind: string;
+  /** Siblings bottom-up; the sibling is on the right when the leafIndex bit at that level is 0. */
+  path: VerifyPathNode[];
+}
+
+/** GET /api/verify/proof (signed, owner only, always exactly 64 KiB on the wire). */
+export interface VerifyProof {
+  snapshotId: number;
+  /** Empty when the key held nothing at the snapshot. */
+  proofs: { asset: AssetId; decimals: number; pieces: VerifyProofPiece[] }[];
+  /** More than 12 assets: ZEC + 11 random ones. */
+  truncated: boolean;
+  /** Spaces: the response is always exactly 65536 bytes, its size says nothing about the assets. */
+  pad?: string;
 }

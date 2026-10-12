@@ -2,15 +2,17 @@ import os from "node:os";
 import path from "node:path";
 import { OnlinePumpSdk, PUMP_PROGRAM_ID } from "@pump-fun/pump-sdk";
 import { Attester, deriveAttestKeypair } from "../attest";
-import type { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Connection, type Keypair, type PublicKey } from "@solana/web3.js";
 import pg from "pg";
 import type { AdapterConfig } from "../config";
-import { CreatorKeyring, CreatorPubkeyFile, FileCreatorIndexCounter, type CreatorIndexCounter } from "../keys";
+import { CreatorKeyring, CreatorPubkeyFile, FileCreatorIndexCounter, deriveCreatorKeypair, type CreatorIndexCounter } from "../keys";
+import { FileMintSource, PgMintSource, creatorCount } from "./fee-sweeper";
+import { PgVerifySnapshotStore, RpcFinalizedReader, VaultSnapshotter, type SnapshotSigner } from "./verify-snapshot";
 import { priorityFeeCacheFromConfig, type PriorityFeeCache } from "../fees";
 import { KeyStore, ageCipher, resolveAgeIdentity } from "../keystore";
 import { metadataStoreFromEnv, type MetadataStore } from "../metadata";
 import { LookupTables } from "../alt";
-import { DBC_PROGRAM_ID, MeteoraDbcAdapter, dbcConfigAddress } from "../meteora";
+import { DBC_PROGRAM_ID, MeteoraDbcAdapter, dbcConfigAddress, derivePartnerKeypair } from "../meteora";
 import { PumpFunAdapter } from "../pumpfun";
 import { txPipeline, type TxPipeline } from "../sender";
 import { TokenWithdrawer } from "../withdraw";
@@ -126,6 +128,8 @@ export interface RelayerRuntimeOptions {
    * built-in devnet config; null = venue "meteora-dbc" not served here.
    */
   meteoraConfig?: PublicKey | null;
+  /** Count-only log lines of background jobs (Verify snapshot). */
+  log?: (m: string) => void;
 }
 
 export interface RelayerRuntime {
@@ -144,10 +148,49 @@ export interface RelayerRuntime {
   fees: PriorityFeeCache;
   /** How every pool tx is tipped and sent (one instance shared by all builders). */
   pipeline: TxPipeline;
-  /** RELAYER v3 attest: memo signer (own HD branch, not a vault / creator / partner). */
+  /** Verify attestation / operator key (own HD branch, not a vault / creator / partner); public on /verify. */
   attester: Attester;
+  /** F14: fair-launch attestation key (separate HD path, never listed in Verify before 28.10). */
+  fairAttester: Attester;
   /** RELAYER v3 launch_curves writer (pump Global); run it only when the table is writable. */
   launchCurves: LaunchCurveWriter;
+  /** RELAYER v4 Verify vault snapshot; run it only when `verifySnapshotsWritable`. */
+  snapshotter: VaultSnapshotter;
+}
+
+/**
+ * Read provider of the Verify snapshot (RELAYER v4 §2: Shyft, SOLANA_READ_RPC_URL_*).
+ * The addresses are public, so falling back to the main RPC leaks nothing new; warned.
+ */
+export function verifyReadConnection(cfg: AdapterConfig, main: Connection, env: NodeJS.ProcessEnv, warn: Warn): Connection {
+  const sfx = cfg.cluster === "mainnet-beta" ? "MAINNET" : "DEVNET";
+  const url = env[`SOLANA_READ_RPC_URL_${sfx}`]?.trim();
+  if (url) return new Connection(url, { commitment: "finalized" });
+  warn(`SOLANA_READ_RPC_URL_${sfx} not set: Verify snapshot reads go to the main RPC`);
+  return main;
+}
+
+/**
+ * Every address of the pool the relayer holds a key for (verify.md §4.1):
+ * vaults, attestation key, DBC partner (when a config is served) — always;
+ * creators — only if they hold something at the snapshot slot.
+ */
+export async function poolSnapshotSigners(o: {
+  keys: OpenedKeys;
+  attester: Attester;
+  meteora: boolean;
+  keysDir: string;
+  db: pg.Pool | null;
+  network: SolanaNetwork;
+}): Promise<SnapshotSigner[]> {
+  const out: SnapshotSigner[] = o.keys.vaults.map((key) => ({ key, always: true }));
+  // Verify operator key only: the fair-launch key stays out of the public list (F14).
+  out.push({ key: o.attester.key, always: true });
+  if (o.meteora) out.push({ key: derivePartnerKeypair(o.keys.creatorSeed), always: true });
+  const fileNext = new FileCreatorIndexCounter(path.join(o.keysDir, "creator-counter.json")).peek();
+  const n = await creatorCount(fileNext, o.db, o.network);
+  for (let i = 0; i < n; i++) out.push({ key: deriveCreatorKeypair(o.keys.creatorSeed, i), always: false });
+  return out;
 }
 
 /**
@@ -212,7 +255,8 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     : null;
   const trade: Partial<Record<"pumpfun" | "meteora-dbc", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
   if (meteora) trade["meteora-dbc"] = new VenueTradeExecutor(meteora, metadata);
-  const attester = new Attester(o.connection, deriveAttestKeypair(o.keys.creatorSeed), fees, pipeline);
+  const attester = new Attester(o.connection, deriveAttestKeypair(o.keys.creatorSeed, "verify"), fees, pipeline);
+  const fairAttester = new Attester(o.connection, deriveAttestKeypair(o.keys.creatorSeed, "fair"), fees, pipeline);
   const online = new OnlinePumpSdk(o.connection);
   const launchCurves = new LaunchCurveWriter(o.db, o.network, async () => [pumpLaunchCurve(await online.fetchGlobal())]);
   const probe = new RpcChainProbe(o.connection, pipeline.broadcaster);
@@ -220,6 +264,15 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   const pool = new VaultPool(vaults, new RpcVaultInventory(o.connection), cryptoRng, {
     usage,
     lock: new PgAdvisoryVaultLock(o.lockDb, o.network),
+  });
+  const snapshotter = new VaultSnapshotter({
+    store: new PgVerifySnapshotStore(o.db, o.network),
+    reader: new RpcFinalizedReader(verifyReadConnection(o.cfg, o.connection, env, o.warn)),
+    signers: () =>
+      poolSnapshotSigners({ keys: o.keys, attester, meteora: meteora !== null, keysDir: o.cfg.keysDir, db: o.db, network: o.network }),
+    // Fail closed: a mint source error aborts the snapshot (never under-report assets).
+    mints: pinsInFile ? new FileMintSource(path.join(o.cfg.keysDir, "mint-vaults.json")) : new PgMintSource(o.db, o.network),
+    ...(o.log ? { log: o.log } : {}),
   });
   const relayer = new Relayer({
     queue,
@@ -230,14 +283,14 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
         new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: fees, pipeline }),
         cryptoRng,
       ),
-      attest: new AttestExecutor(attester),
+      attest: new AttestExecutor({ verify: attester, fair: fairAttester }),
     },
     probe,
     mintVaults,
     ...(o.leaseMs ? { leaseMs: o.leaseMs } : {}),
     ...(o.onEvent ? { onEvent: o.onEvent } : {}),
   });
-  return { relayer, adapter, meteora, pool, queue, mintVaults, metadata, fees, pipeline, attester, launchCurves };
+  return { relayer, adapter, meteora, pool, queue, mintVaults, metadata, fees, pipeline, attester, fairAttester, launchCurves, snapshotter };
 }
 
 export function makePools(url: string, vaultCount: number, schema?: string): { db: pg.Pool; lockDb: pg.Pool } {

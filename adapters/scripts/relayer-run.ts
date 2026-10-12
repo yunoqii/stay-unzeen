@@ -15,6 +15,7 @@ import { loadRepoEnv, redactSecrets } from "../src/env";
 import { describeConfig, loadConfig, makeConnection } from "../src/config";
 import { buildFeeSweeper } from "../src/relayer/fee-runtime";
 import { launchCurvesWritable } from "../src/relayer/launch-curves";
+import { verifySnapshotsWritable } from "../src/relayer/verify-snapshot";
 import { buildRelayer, checkMintVaultsAccess, checkRelayerRole, makePools, openKeys, relayerDatabaseUrl, relayerNetwork } from "../src/relayer/runtime";
 
 loadRepoEnv();
@@ -41,7 +42,7 @@ async function main(): Promise<void> {
   }
 
   const connection = makeConnection(cfg);
-  const { relayer, fees, pipeline, pool, attester, launchCurves } = buildRelayer({
+  const { relayer, fees, pipeline, pool, attester, fairAttester, launchCurves, snapshotter } = buildRelayer({
     cfg,
     connection,
     network,
@@ -50,6 +51,7 @@ async function main(): Promise<void> {
     lockDb,
     warn,
     onEvent: (e) => console.error(`[relayer] ${e.event} ${e.kind}${e.code ? ` ${e.code}` : ""}`),
+    log: (m) => console.error(`[relayer] ${m}`),
   });
 
   const ac = new AbortController();
@@ -66,9 +68,15 @@ async function main(): Promise<void> {
   const curves = (await launchCurvesWritable(db))
     ? launchCurves.run(ac.signal, (e) => warn(`launch_curves: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 160)}`))
     : (warn("launch_curves (core 0008) missing or not writable: fair launch unavailable on this network"), Promise.resolve());
+  // RELAYER v4: Verify vault snapshot (poll 1-2 s; acts only while core collects).
+  const verify = (await verifySnapshotsWritable(db))
+    ? snapshotter.run(ac.signal, (e) => warn(`verify snapshot: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 160)}`))
+    : (warn("verify_vaults (core 0009) missing or not writable: Verify snapshots will time out on this network"), Promise.resolve());
   // Attestation key pays its own memo fees (never topped up from a vault).
-  const attestBalance = await connection.getBalance(attester.publicKey, "confirmed").catch(() => null);
-  if (attestBalance !== null && attestBalance < 1_000_000) warn("attestation key balance < 0.001 SOL: attest jobs will fail (fund it, not from a vault)");
+  for (const [name, k] of [["Verify", attester], ["fair-launch", fairAttester]] as const) {
+    const bal = await connection.getBalance(k.publicKey, "confirmed").catch(() => null);
+    if (bal !== null && bal < 1_000_000) warn(`${name} attestation key balance < 0.001 SOL: its attest jobs will fail (fund it, not from a vault)`);
+  }
   // Creator-fee sweep on its own random 6-12 h schedule (H7), same vault pool / locks / pipeline.
   const sweep =
     process.env.RELAYER_FEE_SWEEP?.trim() === "1"
@@ -85,6 +93,7 @@ async function main(): Promise<void> {
   );
   await sweep;
   await curves;
+  await verify;
   fees.stop();
   await db.end();
   await lockDb.end();

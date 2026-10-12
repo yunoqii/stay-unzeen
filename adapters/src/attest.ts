@@ -19,11 +19,22 @@ import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SendFailure, 
 
 export const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
-/** m/44'/501'/2147483645'/2' — next to the partner key (2147483646'/1'), never a creator index (< 2^31-2). */
+/**
+ * m/44'/501'/2147483645'/2' — next to the partner key (2147483646'/1'), never a creator index (< 2^31-2).
+ * Since F14 (lead, 12.10) this is the **Verify** attestation / operator key (public on /verify).
+ */
 export const ATTEST_PATH = [44, 501, 0x7ffffffd, 2] as const;
+/**
+ * F14: fair-launch commitment roots get their OWN key, so the public Verify
+ * operator key never links to fair-launch attestations (internal until 28.10).
+ * Path chosen by the relayer (core had not specified one yet): m/44'/501'/2147483645'/3'.
+ */
+export const FAIR_ATTEST_PATH = [44, 501, 0x7ffffffd, 3] as const;
 
-export function deriveAttestKeypair(creatorMasterSeed: Uint8Array): Keypair {
-  return Keypair.fromSeed(slip10DerivePath(creatorMasterSeed, ATTEST_PATH));
+export type AttestPurpose = "verify" | "fair";
+
+export function deriveAttestKeypair(creatorMasterSeed: Uint8Array, purpose: AttestPurpose = "verify"): Keypair {
+  return Keypair.fromSeed(slip10DerivePath(creatorMasterSeed, purpose === "fair" ? FAIR_ATTEST_PATH : ATTEST_PATH));
 }
 
 const ROOT_RE = /^[0-9a-f]{64}$/;

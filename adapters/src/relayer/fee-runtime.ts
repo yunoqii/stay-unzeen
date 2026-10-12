@@ -23,6 +23,7 @@ import {
 } from "./fee-sweeper";
 import type { SolanaNetwork } from "./postgres-queue";
 import { cryptoRng } from "./random";
+import { verifyFrozen } from "./verify-snapshot";
 import type { OpenedKeys } from "./runtime";
 import type { VaultPool } from "./vaults";
 
@@ -91,6 +92,7 @@ export async function buildFeeSweeper(o: FeeRuntimeOptions): Promise<{ sweeper: 
     schedule: { ...DEFAULT_SWEEP_SCHEDULE, ...o.schedule },
     log: o.log,
     ...(o.onTx ? { onTx: o.onTx } : {}),
+    ...(o.db ? { paused: () => verifyFrozen(o.db!, o.network) } : {}),
   });
   return { sweeper, store, venues, creators };
 }

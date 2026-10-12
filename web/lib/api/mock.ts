@@ -16,6 +16,7 @@ import type { Network } from "@/lib/network";
 import { memoText, parseZip321 } from "@/lib/zip321";
 import { ApiError } from "./errors";
 import type { FairHost, FairMock } from "./mock-fair";
+import type { VerifyMock } from "./mock-verify";
 import type {
   ActionReceipt,
   ActionStatus,
@@ -345,8 +346,11 @@ const CREATE_ENABLED = process.env.NEXT_PUBLIC_MOCK_CREATE_DISABLED !== "1";
 export function mockPool(network: Network): PoolInfo {
   const extra = {
     createEnabled: CREATE_ENABLED,
-    features: { fullTrades: FULL_FEED, fairLaunch: FAIR_ON },
-    ...(fair ? { fairLaunch: fair.params(network) } : {}),
+    // v0.7: with the flag off the key is absent altogether (absent = off). The condition is written on
+    // process.env directly so the build drops the whole branch, names included (review F3).
+    ...(process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1"
+      ? { features: { fullTrades: FULL_FEED, fairLaunch: true }, ...(fair ? { fairLaunch: fair.params(network) } : {}) }
+      : { features: { fullTrades: FULL_FEED } }),
     launchRules: {
       lockSecs: 86_400,
       capBps: 500,
@@ -905,6 +909,8 @@ export async function handle(
       // pubkey comes only from the signed header, never from the path.
       return portfolioOf(network, authorize(network, method, pathWithQuery, body, headers));
     }
+    // Verify (v0.7): its own chunk, loaded on the first call.
+    if (p === "/api/verify" || p.startsWith("/api/verify/")) return (await loadVerify()).get(network, pathWithQuery, headers);
     if (p === "/api/orders" || p === "/api/creator") {
       authorize(network, method, pathWithQuery, body, headers);
       return [];
@@ -1118,7 +1124,6 @@ export function subscribeFeed(onEvent: (e: FeedEvent) => void, mint?: string): (
 // The flag is inlined at build time: without it the import below is dead code and lib/api/mock-fair.ts
 // (and everything it pulls in) is not part of the bundle at all.
 
-const FAIR_ON = process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1";
 let fair: FairMock | null = null;
 let fairLoading: Promise<void> | null = null;
 
@@ -1166,3 +1171,33 @@ const fairHost: FairHost = {
     h.amount = (BigInt(h.amount) + amount).toString();
   },
 };
+
+// ---- Verify (v0.7): lazy chunk, real Merkle-sum trees over the mock accounts ----
+
+let verifyMock: Promise<VerifyMock> | null = null;
+
+function loadVerify(): Promise<VerifyMock> {
+  return (verifyMock ??= import("./mock-verify").then((m) =>
+    m.createVerifyMock({
+      chainId: (network) => mockPool(network).chainId as "0202" | "0101",
+      rateSell: () => BigInt(mockRate(false).lamportsPerZec),
+      accounts(network) {
+        const out: { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[] }[] = [];
+        for (const [key, a] of accounts) {
+          const [net, pubkey] = key.split(":");
+          if (net !== network) continue;
+          out.push({ pubkey, zat: a.zecBalance + a.zecHeld, tokens: a.holdings.map((h) => ({ mint: h.mint, amount: BigInt(h.amount) + BigInt(h.held) })) });
+        }
+        return out;
+      },
+      tokens: () => (state ?? []).map((s) => ({ mint: s.token.mint, decimals: s.token.decimals })),
+      authorize: (network, method, path, body, headers) => authorize(network, method, path, body, headers),
+    }),
+  ));
+}
+
+/** Mock of the devnet operator command `unzeen-api verify-snapshot`. Returns the new snapshot id. */
+export async function mockTakeSnapshot(network: Network): Promise<number> {
+  init(Date.now());
+  return (await loadVerify()).takeSnapshot(network);
+}

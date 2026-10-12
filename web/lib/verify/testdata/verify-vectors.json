@@ -1,0 +1,145 @@
+{
+  "_comment": "Verify vectors (API.md v0.7). Integers big-endian. Signing keys are ed25519 seeds of repeated bytes (TEST ONLY).",
+  "chainId": "0202",
+  "mintLeaf": {
+    "anonPubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "asset": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001",
+    "blind": "3333333333333333333333333333333333333333333333333333333333333333",
+    "leaf": "06ec298b95d8f5dcf9ca7d0016e3844abfe4ec714bae754cd8bf7cae5e6ff49b",
+    "mint": "So11111111111111111111111111111111111111112",
+    "piece": 2,
+    "value": "3000000"
+  },
+  "snapshot": {
+    "leaves": 8,
+    "operatorPubkey": "J2xccRtuG43drESLYznHhLhQkLTdfepcKYbiQ9BsJVaf",
+    "operatorSeed": "0909090909090909090909090909090909090909090909090909090909090909",
+    "operatorSig": "3U9PFui4XGonGRMqWhThupXwqmRCmwHncEqG1c162h7XStdK1WfyWVyfGyQ3gwt1sF9Hn99mZzbtSJRCfiExyEjV",
+    "rootsDigest": "51ce0b1c113dc30c6b63ffbd82d351b6633dd02276ff757d2d3b7ee5da058d9f",
+    "solanaSlot": 400000123,
+    "takenAtSec": 1791849600,
+    "trees": [
+      {
+        "asset": "0000000000000000000000000000000000000000000000000000000000000000",
+        "root": "18145119b423bf3d40074c1cb5676d7725e25d91295dfd00bf748051d96bfe41",
+        "sum": "1000000"
+      },
+      {
+        "asset": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001",
+        "root": "06ec298b95d8f5dcf9ca7d0016e3844abfe4ec714bae754cd8bf7cae5e6ff49b",
+        "sum": "3000000"
+      }
+    ],
+    "zcashHeight": 3100200,
+    "zecReserveZat": "1230000000"
+  },
+  "snapshotId": 7,
+  "vault": {
+    "address": "8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe",
+    "message": "unzeen/verify/v1/vault\n0202\n7\n8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe",
+    "seed": "0505050505050505050505050505050505050505050505050505050505050505",
+    "sig": "5j45pMqYgXGa4PDvsbyesx3aMX46ALhhtR7sEqgG8wvFEQL3DiYF8pf52XPZbxov3jnmtxXs2Yr6L94SLVa5WBCv"
+  },
+  "zecTree": {
+    "asset": "0000000000000000000000000000000000000000000000000000000000000000",
+    "leaves": [
+      {
+        "anonPubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "blind": "1010101010101010101010101010101010101010101010101010101010101010",
+        "dummy": false,
+        "index": 0,
+        "leaf": "451aaaf29899c4406b716b00eacd7d0836bdd863b79913c18c150bcfc7dcff66",
+        "piece": 0,
+        "value": "100000"
+      },
+      {
+        "anonPubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "blind": "1111111111111111111111111111111111111111111111111111111111111111",
+        "dummy": false,
+        "index": 1,
+        "leaf": "8808b45769bd09a464c730610fa5fd274e5e9dd4b3c60d4d8522e33089f8ff93",
+        "piece": 1,
+        "value": "200000"
+      },
+      {
+        "anonPubkey": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "blind": "1212121212121212121212121212121212121212121212121212121212121212",
+        "dummy": false,
+        "index": 2,
+        "leaf": "46421e30323d2b8ad24705f22683efb7f99500da7cf0a4e7e94e0b0161a8b623",
+        "piece": 0,
+        "value": "300000"
+      },
+      {
+        "anonPubkey": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "blind": "1313131313131313131313131313131313131313131313131313131313131313",
+        "dummy": false,
+        "index": 3,
+        "leaf": "0f19e8b9250368abe06bdae62538adefa9eb7582e34fbabf8c9e6822dc49f084",
+        "piece": 1,
+        "value": "400000"
+      },
+      {
+        "anonPubkey": "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+        "blind": "1414141414141414141414141414141414141414141414141414141414141414",
+        "dummy": true,
+        "index": 4,
+        "leaf": "de79bae0e0ccc427db9ed8b3a1afd5fae21a2d4fbe760b14b59c5ff65cd3f7a1",
+        "piece": 0,
+        "value": "0"
+      },
+      {
+        "anonPubkey": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+        "blind": "1515151515151515151515151515151515151515151515151515151515151515",
+        "dummy": true,
+        "index": 5,
+        "leaf": "24b249cf421d38322ef7f7f0e93f3aaa3e4ec4d2b9f7e43eb26fd9bd06f24725",
+        "piece": 0,
+        "value": "0"
+      },
+      {
+        "anonPubkey": "a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6",
+        "blind": "1616161616161616161616161616161616161616161616161616161616161616",
+        "dummy": true,
+        "index": 6,
+        "leaf": "0036664e33bc51204c131c7a3cfca89e2152efb6ffadada5aa8845a8b39a2254",
+        "piece": 0,
+        "value": "0"
+      },
+      {
+        "anonPubkey": "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+        "blind": "1717171717171717171717171717171717171717171717171717171717171717",
+        "dummy": true,
+        "index": 7,
+        "leaf": "84844db9dbead94672ab09a1c0e43a4254f9820331805dd432da254babe5120e",
+        "piece": 0,
+        "value": "0"
+      }
+    ],
+    "node01": {
+      "hash": "11857d37b48cc8188510ed9f27b932602fec632b6d951db74e7eac5f5df7b59c",
+      "sum": "300000"
+    },
+    "proof": {
+      "leafIndex": 5,
+      "path": [
+        {
+          "hash": "de79bae0e0ccc427db9ed8b3a1afd5fae21a2d4fbe760b14b59c5ff65cd3f7a1",
+          "sum": "0"
+        },
+        {
+          "hash": "1fc1c2157c55efad99b8f4d1fe5733ef3dada2d4df493201a08ebd28d70fd278",
+          "sum": "0"
+        },
+        {
+          "hash": "bb44d1ac7bf75d7eaa851242e1bdbe95d8eb498f7d0abf238ce8599548a0ef9c",
+          "sum": "1000000"
+        }
+      ]
+    },
+    "root": {
+      "hash": "18145119b423bf3d40074c1cb5676d7725e25d91295dfd00bf748051d96bfe41",
+      "sum": "1000000"
+    }
+  }
+}

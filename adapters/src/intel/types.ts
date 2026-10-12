@@ -69,6 +69,8 @@ export interface WarmEntry {
   mint: string;
   /** Hot: snapshot every 5 min; else every 30 min. */
   hot: boolean;
+  /** Pool token (core: in `tokens` / `mint_vaults`): priced on every tick (INTEL v2). */
+  pinned?: boolean;
   /** as_of of the current snapshot (unix ms), null = none yet. */
   asOf: number | null;
 }
@@ -105,6 +107,18 @@ export interface TickCommit {
   curveUpdates: CurveUpdate[];
   /** Current subscription set (real and decoy alike). */
   subscriptions: { account: string; mint: string; kind: "pump_curve" }[];
+  /**
+   * INTEL v2 price pass: one row per pinned mint read on this tick (`intel_prices`,
+   * tick_at = tickStartedAt). Empty when the pass failed (nothing written).
+   */
+  prices?: PriceRow[];
+}
+
+/** `intel_prices` row: SOL per 1 whole token (> 0), curve status. */
+export interface PriceRow {
+  mint: string;
+  priceSol: string;
+  status: "curve" | "graduated";
 }
 
 /**

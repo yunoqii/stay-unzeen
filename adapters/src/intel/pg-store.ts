@@ -51,12 +51,12 @@ export class PgIntelStore implements IntelStore {
   }
 
   async warmSet(): Promise<WarmEntry[]> {
-    const r = await this.db.query<{ mint: string; hot: boolean; as_of: string | null }>(
-      `SELECT w.mint, w.hot, (extract(epoch FROM s.as_of) * 1000)::bigint::text AS as_of
+    const r = await this.db.query<{ mint: string; hot: boolean; pinned: boolean; as_of: string | null }>(
+      `SELECT w.mint, w.hot, w.pinned, (extract(epoch FROM s.as_of) * 1000)::bigint::text AS as_of
          FROM intel_warm w LEFT JOIN token_safety s ON s.mint = w.mint
         WHERE w.pinned OR w.expires_at > now()`,
     );
-    return r.rows.map((x) => ({ mint: x.mint, hot: x.hot, asOf: x.as_of === null ? null : Number(x.as_of) }));
+    return r.rows.map((x) => ({ mint: x.mint, hot: x.hot, pinned: x.pinned, asOf: x.as_of === null ? null : Number(x.as_of) }));
   }
 
   async peekLookups(max: number): Promise<string[]> {
@@ -96,7 +96,28 @@ export class PgIntelStore implements IntelStore {
     return { ...(x.socials ? { socials: x.socials } : {}), ...(x.image ? { image: x.image } : {}), fetchedAt: Number(x.as_of), ok: true };
   }
 
+  private pricesWritable: Promise<boolean> | null = null;
+
+  /** intel_prices (core 0011) exists and this role may upsert it. Cached; before 0011 prices are dropped. */
+  private canWritePrices(): Promise<boolean> {
+    if (!this.pricesWritable) {
+      this.pricesWritable = this.db
+        .query<{ ok: boolean }>(
+          `SELECT to_regclass('intel_prices') IS NOT NULL
+                  AND has_table_privilege('intel_prices', 'INSERT')
+                  AND has_table_privilege('intel_prices', 'UPDATE') AS ok`,
+        )
+        .then((r) => r.rows[0]?.ok === true)
+        .catch((e) => {
+          this.pricesWritable = null;
+          throw e;
+        });
+    }
+    return this.pricesWritable;
+  }
+
   async commitTick(t: TickCommit): Promise<void> {
+    const prices = t.prices && t.prices.length > 0 && (await this.canWritePrices()) ? t.prices : [];
     const c = await this.db.connect();
     try {
       await c.query("BEGIN");
@@ -145,6 +166,17 @@ export class PgIntelStore implements IntelStore {
         await c.query(
           `UPDATE intel_tokens SET status = $2, price_sol = $3::numeric, market_cap_sol = $4::numeric, as_of = to_timestamp($5) WHERE mint = $1`,
           [u.mint, u.graduated ? "graduated" : "curve", u.priceSol, u.marketCapSol, asOf],
+        );
+      }
+      if (prices.length > 0) {
+        // INTEL v2: current + previous value; an older tick never overwrites a newer one.
+        await c.query(
+          `INSERT INTO intel_prices (mint, price_sol, status, tick_at)
+           SELECT m, p::numeric, s, $4::bigint FROM unnest($1::text[], $2::text[], $3::text[]) AS x(m, p, s)
+           ON CONFLICT (mint) DO UPDATE SET prev_price_sol = intel_prices.price_sol, prev_tick_at = intel_prices.tick_at,
+             price_sol = EXCLUDED.price_sol, status = EXCLUDED.status, tick_at = EXCLUDED.tick_at
+           WHERE intel_prices.tick_at < EXCLUDED.tick_at`,
+          [prices.map((p) => p.mint), prices.map((p) => p.priceSol), prices.map((p) => p.status), String(t.tickStartedAt)],
         );
       }
       await c.query("DELETE FROM intel_subscriptions");

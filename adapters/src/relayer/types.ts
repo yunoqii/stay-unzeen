@@ -76,6 +76,12 @@ export interface FairCreateJobSpec {
 export interface AttestJobSpec {
   kind: "attest";
   memo: string;
+  /**
+   * F14: which attestation key signs (`meta.purpose`): "verify" = the public
+   * Verify operator key, "fair" = the fair-launch key. Missing -> "fair", so a
+   * job without the marker never uses the public Verify key.
+   */
+  purpose: "verify" | "fair";
 }
 
 export type JobSpec = BuyJobSpec | SellJobSpec | CreateJobSpec | WithdrawJobSpec | FairCreateJobSpec | AttestJobSpec;
@@ -189,6 +195,12 @@ export interface AttestExecution {
   memo: string;
   networkFee: bigint;
   blockTime: number | null;
+  /**
+   * RELAYER v4 `out_sig`: base58 ed25519 of the attestation key over the 32
+   * bytes hex-decoded from the job's `meta.memo`. Core checks it against
+   * `vault` before publishing it as the operator signature.
+   */
+  outSig?: string;
 }
 
 /** fair_create executes like create (same feed rows); `CreateExecution.mint` = pubkey of `mint_secret`. */

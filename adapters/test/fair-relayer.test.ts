@@ -61,7 +61,7 @@ describe("rowToSpec v3", () => {
   });
 
   it("attest: only a bare 64-hex memo", () => {
-    expect(rowToSpec(row({ op: "attest", venue: null, meta: { memo: ROOT } }), "devnet")).toEqual({ kind: "attest", memo: ROOT });
+    expect(rowToSpec(row({ op: "attest", venue: null, meta: { memo: ROOT } }), "devnet")).toEqual({ kind: "attest", memo: ROOT, purpose: "fair" });
     for (const memo of ["unzeen:" + ROOT, ROOT.toUpperCase(), ROOT + "0", "", 42]) {
       expect(() => rowToSpec(row({ op: "attest", venue: null, meta: { memo } }), "devnet")).toThrow();
     }
@@ -156,7 +156,7 @@ function engine() {
 describe("relayer engine v3", () => {
   it("attest is signed by the attestation key, no vault is leased, memo from the landed tx", async () => {
     const t = engine();
-    const id = t.add({ kind: "attest", memo: ROOT }, t.attest);
+    const id = t.add({ kind: "attest", memo: ROOT, purpose: "fair" }, t.attest);
     expect(await t.relayer.tick()).toBe(true);
     const j = t.queue.get(id)!;
     expect(j.state).toBe("executed");
@@ -170,7 +170,7 @@ describe("relayer engine v3", () => {
     const t = engine();
     const queue = new InMemoryJobQueue(seededRng(1));
     const r = new Relayer({ queue, pool: new VaultPool(t.vs, new FakeInventory(), seededRng(1)), executors: { trade: {}, withdraw: t.trade }, probe: t.chain });
-    const j = queue.enqueue({ kind: "attest", memo: ROOT }, { notBefore: 0 });
+    const j = queue.enqueue({ kind: "attest", memo: ROOT, purpose: "fair" }, { notBefore: 0 });
     await r.tick();
     expect(queue.get(j.id)!.result).toMatchObject({ status: "failed", code: "venue_unavailable" });
     expect(queue.get(j.id)!.attempts).toEqual([]);
@@ -254,7 +254,7 @@ describe.skipIf(!DB)("PostgresJobQueue v3 + launch_curves (live Postgres, temp s
     )).rows[0]!.id;
     const b = (await q.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000 }))!;
     expect(b.id).toBe(id);
-    expect(b.spec).toEqual({ kind: "attest", memo: ROOT });
+    expect(b.spec).toEqual({ kind: "attest", memo: ROOT, purpose: "fair" });
     await q.reportSent(b, { signature: "sigM", lastValidBlockHeight: 9, vault: "AttestKey", sentAt: Date.now() });
     await q.reportResult(b, { status: "executed", execution: { kind: "attest", signature: "sigM", slot: 77, vault: "AttestKey", memo: ROOT, networkFee: 5000n, blockTime: 1 } });
     const r = (await pool.query(`SELECT status, out_memo, slot, vault, out_mint FROM relayer_jobs WHERE id = $1`, [id])).rows[0];

@@ -19,9 +19,9 @@ export interface LaunchModesProps {
 }
 
 // A second launch mode lives in its own chunk. It is requested only when the server reports it on
-// (PoolInfo.features), and is compiled out entirely with NEXT_PUBLIC_FAIR_LAUNCH_BUILD=0.
+// (PoolInfo.features), and is compiled in only with NEXT_PUBLIC_FAIR_LAUNCH_BUILD=1 (off by default until 28.10).
 const Modes =
-  process.env.NEXT_PUBLIC_FAIR_LAUNCH_BUILD !== "0"
+  process.env.NEXT_PUBLIC_FAIR_LAUNCH_BUILD === "1"
     ? dynamic<LaunchModesProps>(() => import("@/components/fair/launch-modes"), { ssr: false, loading: () => <Skeleton className="h-11 w-full max-w-md rounded-full" /> })
     : null;
 

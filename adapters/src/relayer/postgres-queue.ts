@@ -76,6 +76,8 @@ export class PostgresJobQueue implements JobQueue {
   private leaseMs = 10 * 60_000;
   private execModeColumn: Promise<boolean> | null = null;
   private v3Columns: Promise<boolean> | null = null;
+  private v4Schema: Promise<boolean> | null = null;
+  private blockTimeCol: Promise<{ name: string; ts: boolean } | null> | null = null;
 
   constructor(o: PostgresJobQueueOptions) {
     this.pool = o.pool;
@@ -119,6 +121,54 @@ export class PostgresJobQueue implements JobQueue {
     return this.v3Columns;
   }
 
+  /**
+   * Whether core 0009 is there (relayer_jobs.out_sig + verify_snapshots readable). Cached.
+   * The freeze needs SELECT on verify_snapshots (infra/relayer-role.sql v4).
+   */
+  private hasV4(): Promise<boolean> {
+    if (!this.v4Schema) {
+      this.v4Schema = this.pool
+        .query<{ ok: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = current_schema() AND table_name = 'relayer_jobs'
+                             AND column_name = 'out_sig')
+                  AND to_regclass('verify_snapshots') IS NOT NULL AS ok`,
+        )
+        .then((r) => r.rows[0]?.ok === true)
+        .catch((e) => {
+          this.v4Schema = null;
+          throw e;
+        });
+    }
+    return this.v4Schema;
+  }
+
+  /**
+   * F2 (lead 12.10): attest results carry the tx blockTime. Core adds the column;
+   * until then nothing is written. Accepts `out_block_time` (preferred) or
+   * `block_time`, as unix seconds (integer types) or timestamptz. Cached.
+   */
+  private blockTimeColumn(): Promise<{ name: string; ts: boolean } | null> {
+    if (!this.blockTimeCol) {
+      this.blockTimeCol = this.pool
+        .query<{ column_name: string; data_type: string }>(
+          `SELECT column_name, data_type FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'relayer_jobs'
+              AND column_name IN ('out_block_time', 'block_time')
+            ORDER BY column_name = 'out_block_time' DESC LIMIT 1`,
+        )
+        .then((r) => {
+          const c = r.rows[0];
+          return c ? { name: c.column_name, ts: c.data_type.startsWith("timestamp") } : null;
+        })
+        .catch((e) => {
+          this.blockTimeCol = null;
+          throw e;
+        });
+    }
+    return this.blockTimeCol;
+  }
+
   async claim(opts: { workerId: string; now: number; leaseMs: number; lane?: Lane }): Promise<ClaimedJob | null> {
     this.leaseMs = opts.leaseMs;
     const leaseId = `${opts.workerId}:${randomBytes(6).toString("hex")}`;
@@ -136,12 +186,21 @@ export class PostgresJobQueue implements JobQueue {
     // Now lane: FIFO. Batch: random order inside an epoch (N-4).
     const tieBreak = opts.lane === "now" ? "id" : "random()";
     const v3 = await this.hasV3();
+    // RELAYER v4 §1: while a Verify snapshot of this network is freezing/collecting,
+    // no NEW job is taken (both lanes, every op incl. fair_create / attest).
+    // In-flight rows (claimed/sent, lease ran out) are still driven to the end:
+    // core waits for exactly those before it reads the ledger.
+    const freeze = (await this.hasV4())
+      ? `AND NOT EXISTS (SELECT 1 FROM verify_snapshots v
+                          WHERE v.network = $2 AND v.status IN ('freezing', 'collecting')
+                            AND v.freeze_until > now())`
+      : "";
     // DB clock (not opts.now): all relayers and core agree on time.
     const res = await this.pool.query<JobRow>(
       `WITH c AS (
          SELECT id FROM relayer_jobs
           WHERE network = $2 AND settled_at IS NULL AND op = ANY($4::text[])
-            AND ((status = 'queued' AND not_before <= now())
+            AND ((status = 'queued' AND not_before <= now() ${freeze})
               OR (status IN ('claimed', 'sent') AND lease_until < now()))
             ${laneSql}
           ORDER BY (status = 'queued'), not_before, ${tieBreak}
@@ -239,10 +298,23 @@ export class PostgresJobQueue implements JobQueue {
     const e = r.execution;
     if (e.kind === "attest") {
       // No feed rows; the memo comes from the confirmed tx, not from the job.
+      // v4: + out_sig (attestation key over hex_decode(meta.memo)) when the column exists.
+      const v4 = e.outSig !== undefined && (await this.hasV4());
+      const bt = e.blockTime !== null ? await this.blockTimeColumn() : null;
+      const params: unknown[] = [job.id, e.slot, e.memo, e.networkFee.toString(), e.signature, job.leaseId];
+      let extra = "";
+      if (v4) {
+        params.push(e.outSig);
+        extra += `, out_sig = $${params.length}`;
+      }
+      if (bt) {
+        params.push(e.blockTime);
+        extra += `, ${bt.name} = ${bt.ts ? `to_timestamp($${params.length}::double precision)` : `$${params.length}`}`;
+      }
       const res = await this.pool.query(
-        `UPDATE relayer_jobs SET status = 'confirmed', slot = $2, out_memo = $3, network_fee = $4, updated_at = now()
+        `UPDATE relayer_jobs SET status = 'confirmed', slot = $2, out_memo = $3, network_fee = $4, updated_at = now()${extra}
           WHERE id = $1 AND status = 'sent' AND signature = $5 AND claimed_by = $6 AND settled_at IS NULL`,
-        [job.id, e.slot, e.memo, e.networkFee.toString(), e.signature, job.leaseId],
+        params,
       );
       if (res.rowCount !== 1) throw new LeaseLostError(job.id);
       return;
@@ -392,9 +464,13 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
       };
     }
     case "attest": {
-      const m = row.meta as { memo?: unknown } | null | undefined;
+      const m = row.meta as { memo?: unknown; purpose?: unknown } | null | undefined;
       if (!m || typeof m.memo !== "string" || !/^[0-9a-f]{64}$/.test(m.memo)) throw new Error(`job ${row.id}: meta.memo must be 64 hex`);
-      return { kind: "attest", memo: m.memo };
+      if (m.purpose !== undefined && m.purpose !== null && m.purpose !== "verify" && m.purpose !== "fair") {
+        throw new Error(`job ${row.id}: meta.purpose must be verify|fair`);
+      }
+      // F14: no marker -> the fair-launch key (never the public Verify key by accident).
+      return { kind: "attest", memo: m.memo, purpose: m.purpose === "verify" ? "verify" : "fair" };
     }
     case "transfer": {
       const mint = needMint();
