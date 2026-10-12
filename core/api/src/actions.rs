@@ -300,7 +300,7 @@ fn truncate_decimals(s: &str, n: usize) -> String {
     }
 }
 
-fn check_meta(m: &Meta) -> ApiResult<()> {
+pub fn check_meta(m: &Meta) -> ApiResult<()> {
     let n = m.name.trim();
     if n.is_empty() || n.chars().count() > 32 || n.chars().any(char::is_control) {
         return Err(ApiError::bad_request("meta.name: 1..32 printable characters"));
@@ -448,7 +448,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                 let lpw = crate::config::sol_to_lamports(&truncate_decimals(&p, 9))?;
                 crate::launch::tokens_at_spot(lamports, lpw, d)
             });
-            let gain = crate::launch::buy_gain_estimate(&st.cfg.launch.curve(), lamports, spot, min_out);
+            let gain = crate::launch::buy_gain_estimate(&crate::rules_curve(st, &v).await?.0, lamports, spot, min_out);
             NewAction {
                 gain: Some((mint.clone(), gain)),
                 amount_zat,
@@ -530,7 +530,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             // the answer is deterministic: initial buy within PoolInfo.launchRules.
             if initial > 0 && st.cfg.launch.cap_bps > 0 {
                 let full = zat_to_lamports(initial, applied);
-                if full - full % rate::LAMPORTS_STEP > crate::max_initial_buy_lamports(&st.cfg.launch) {
+                if full - full % rate::LAMPORTS_STEP > crate::max_initial_buy_for(st, &v).await? {
                     return Err(ApiError::creator_cap());
                 }
             }

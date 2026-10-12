@@ -11,6 +11,7 @@ pub mod actions;
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod fair;
 pub mod intel;
 pub mod launch;
 pub mod limit;
@@ -54,6 +55,7 @@ pub struct Inner {
     pub feed_tx: broadcast::Sender<Arc<market::FeedMsg>>,
     pub ws_slots: Arc<Semaphore>,
     pub epochs: actions::Epochs,
+    pub drand: fair::Drand,
 }
 
 impl std::ops::Deref for AppState {
@@ -73,6 +75,7 @@ impl AppState {
             key_limit: Limiter::new(l.key_per_min / 60.0, l.key_burst),
             ws_slots: Arc::new(Semaphore::new(l.max_ws)),
             epochs: actions::Epochs::new(&cfg.exec),
+            drand: fair::Drand::new(cfg.fair.drand_urls.clone()),
             feed_tx,
             ledger: ledger.with_creator_rules(cfg.launch.rules()),
             cfg,
@@ -95,6 +98,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/tokens/{mint}/trades", get(market::trades))
         .route("/api/tokens/{mint}/candles", get(market::candles))
         .route("/api/tokens/{mint}/safety", get(intel::safety))
+        .route("/api/launches", get(fair::list))
+        .route("/api/launches/{id}", get(fair::one))
         .route("/ws/feed", get(market::ws_feed))
         .route("/media/{name}", get(media))
         .fallback(|| async { ApiError::not_found() })
@@ -226,6 +231,10 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
         }
     };
     let p = &st.cfg.policy;
+    let mut by_venue = serde_json::Map::new();
+    for v in st.cfg.venues.iter().filter(|v| v.as_str() != "jupiter") {
+        by_venue.insert(v.clone(), json!(max_initial_buy_for(&st, v).await?.to_string()));
+    }
     let mut r = Json(json!({
         "address": address,
         "network": st.cfg.network,
@@ -241,14 +250,18 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
             "nowFeeZat": st.cfg.fees.now_fee_zat.to_string(),
         },
         "createEnabled": st.cfg.create_enabled,
-        "features": { "fullTrades": st.cfg.intel.full_trades },
+        "features": { "fullTrades": st.cfg.intel.full_trades, "fairLaunch": st.cfg.fair.enabled },
         "launchRules": {
             "lockSecs": st.cfg.launch.lock_secs,
             "capBps": st.cfg.launch.cap_bps,
-            "maxInitialBuyLamports": max_initial_buy_lamports(&st.cfg.launch).to_string(),
+            "maxInitialBuyLamports": max_initial_buy(&st).await?.to_string(),
+            "maxInitialBuyLamportsByVenue": by_venue,
         },
-    }))
-    .into_response();
+    }));
+    if let Some(fl) = fair::pool_block(&st).await? {
+        r.0["fairLaunch"] = fl;
+    }
+    let mut r = r.into_response();
     // Public rate from the timer cache (D14): never triggers a 1Click request.
     if let Ok(rate) = st.rate.get().await {
         let spread = if rate.stale {
@@ -284,6 +297,57 @@ pub fn max_initial_buy_lamports(l: &config::LaunchConfig) -> u64 {
     l.curve().max_lamports_within(l.cap_tokens())
 }
 
+/// Launch curve of `venue` for the creator rules: the network's curve written by the relayer
+/// (`launch_curves`, v0.6) or, until then, the pump.fun curve from env. Returns (curve, total
+/// supply, own row of this venue).
+pub async fn rules_curve(st: &AppState, venue: &str) -> ApiResult<(launch::Curve, u64, bool)> {
+    let row = match st.ledger.launch_curve(st.cfg.cluster, venue).await? {
+        Some(c) => Some((c, true)),
+        None => st
+            .ledger
+            .launch_curve(st.cfg.cluster, fair::VENUE)
+            .await?
+            .map(|c| (c, false)),
+    };
+    Ok(match row {
+        Some((c, own)) => (
+            launch::Curve {
+                virtual_sol: c.virtual_sol,
+                virtual_tokens: c.virtual_tokens,
+            },
+            c.total_supply,
+            own,
+        ),
+        None => (st.cfg.launch.curve(), st.cfg.launch.total_supply, venue == fair::VENUE),
+    })
+}
+
+/// Meteora DBC without its own curve row: its config is pump.fun-equivalent but charges 1 %
+/// instead of ~1.25 %, so 5 % of supply becomes ~5.013 %. Narrow the cap by 5/5.013.
+const DBC_CAP_NUM: u128 = 9_974;
+const DBC_CAP_DEN: u128 = 10_000;
+
+/// Max initial buy of `create` (lamports, 0.001 SOL steps) within the creator cap on `venue`.
+pub async fn max_initial_buy_for(st: &AppState, venue: &str) -> ApiResult<u64> {
+    let l = &st.cfg.launch;
+    if l.cap_bps == 0 {
+        return Ok(0);
+    }
+    let (curve, supply, own) = rules_curve(st, venue).await?;
+    let cap = ((supply as u128) * (l.cap_bps as u128) / 10_000) as u64;
+    let mut x = curve.max_lamports_within(cap);
+    if venue == "meteora-dbc" && !own {
+        x = ((x as u128) * DBC_CAP_NUM / DBC_CAP_DEN) as u64;
+        x -= x % rate::LAMPORTS_STEP;
+    }
+    Ok(x)
+}
+
+/// `PoolInfo.launchRules.maxInitialBuyLamports` (pump.fun, the default launch venue).
+pub async fn max_initial_buy(st: &AppState) -> ApiResult<u64> {
+    max_initial_buy_for(st, fair::VENUE).await
+}
+
 // ------------------------------------------------------------------ GET /api/portfolio
 
 async fn portfolio(State(st): State<AppState>, method: Method, uri: Uri, headers: HeaderMap) -> ApiResult<Response> {
@@ -292,6 +356,7 @@ async fn portfolio(State(st): State<AppState>, method: Method, uri: Uri, headers
     let holdings = st.ledger.token_holdings(&a.pubkey).await?;
     let deposits = st.ledger.recent_deposits(&a.pubkey, 20).await?;
     let actions = st.ledger.recent_actions(&a.pubkey, 20).await?;
+    let fl = fair::portfolio(&st, &a.pubkey).await?;
     let (avail, held, frozen) = b.map_or((0, 0, false), |b| (b.available_zat, b.held_zat, b.frozen));
     let v = json!({
         "zecBalance": avail.to_string(),
@@ -317,6 +382,11 @@ async fn portfolio(State(st): State<AppState>, method: Method, uri: Uri, headers
             o
         }).collect::<Vec<_>>(),
     });
+    let mut v = v;
+    if let Some((bids, launches)) = fl {
+        v["fairBids"] = bids;
+        v["fairLaunches"] = launches;
+    }
     Ok(padded(v, 4096))
 }
 
@@ -379,10 +449,18 @@ async fn submit_action(
     {
         return Err(ApiError::bad_request("pad: string up to 8192 bytes"));
     }
+    let request_hash: [u8; 32] = Sha256::digest(&body).into();
+    if fair::is_fl_op(&raw) {
+        // Flag off: exactly what an unknown op gets.
+        if !st.cfg.fair.enabled {
+            return Err(ApiError::bad_request("invalid action body"));
+        }
+        let v = fair::submit(&st, raw, &a.pubkey, &a.nonce, &request_hash).await?;
+        return Ok(padded(v, 1024));
+    }
     let parsed: actions::SignedAction =
         serde_json::from_value(raw).map_err(|_| ApiError::bad_request("invalid action body"))?;
     let new = actions::build(&st, parsed).await?;
-    let request_hash: [u8; 32] = Sha256::digest(&body).into();
     let receipt = st.ledger.submit(&a.pubkey, &a.nonce, &request_hash, &new).await?;
     let mut v = json!({ "id": hex::encode(receipt.id), "status": receipt.status });
     if receipt.rate.is_some() {
@@ -435,6 +513,9 @@ pub fn spawn_background(st: &AppState) {
             if let Err(e) = s.ledger.purge_api_nonces().await {
                 tracing::warn!(error = %e, "nonce purge failed");
             }
+            if let Err(e) = s.ledger.fl_janitor().await {
+                tracing::warn!(error = %e, "fair-launch janitor failed");
+            }
             match s.ledger.janitor().await {
                 Ok(r) => tracing::debug!(
                     detached = r.detached,
@@ -451,6 +532,9 @@ pub fn spawn_background(st: &AppState) {
     let s = st.clone();
     tokio::spawn(market::poll_trades(s));
     tokio::spawn(intel::warm_sync_loop(st.clone()));
+    if st.cfg.fair.enabled {
+        tokio::spawn(fair::scheduler_loop(st.clone()));
+    }
     // D14: ZEC/SOL quote on a timer, never on demand.
     tokio::spawn(st.rate.clone().refresh_loop());
 }

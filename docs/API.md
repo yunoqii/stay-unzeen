@@ -2,7 +2,16 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.5** (12.10, дни 6–7; реализовано в `core/api` + `core/ledger`). Изменения против v0.4:
+Статус: **v0.6** (12.10, fair-launch; реализуется в `core/fair` + `core/ledger` + `core/api`). **Внутренний раздел: до 28.10 23:59 UTC детали fair-launch не публиковать (CLAUDE.md).** Изменения против v0.5:
+- **Fair-launch (закрытые заявки drand tlock → одна атомарная create+buy).** Полный контракт — раздел «Fair-launch (v0.6)» ниже. Новые эндпоинты `GET /api/launches`, `GET /api/launches/:id`; новые операции `fl_create`, `fl_bid`, `fl_cancel`, `fl_cancel_launch` в `POST /api/actions`; `Portfolio.fairBids`, `Portfolio.fairLaunches`; `PoolInfo.features.fairLaunch`, `PoolInfo.fairLaunch`.
+- **Флаг.** `PoolInfo.features.fairLaunch = false` (по умолчанию, env `UNZEEN_FAIR_LAUNCH=1` включает): `GET /api/launches*` → `404 not_found` (как несуществующий путь), `fl_*` в `POST /api/actions` → `400 bad_request` (как неизвестная операция), в `Portfolio` нет `fairBids`/`fairLaunches`, в `PoolInfo` нет блока `fairLaunch`. Снаружи не отличить от сервера без фичи.
+- **`PoolInfo.launchRules.maxInitialBuyLamports`** теперь считается по кривой **сети** (параметры pump.fun Global, которые пишет релейер в `launch_curves`, RELAYER.md v3); env `UNZEEN_LAUNCH_*` — только запасной вариант, пока релейер их не записал. На devnet (1 SOL виртуальных резервов) значение в ~30 раз меньше mainnet.
+- `UnzeenRule` += `"fair_launch_sealed_bids"` (для токенов, запущенных через fair-launch).
+- **`PoolInfo.launchRules.maxInitialBuyLamportsByVenue`** — кап первой покупки `create` по площадке; `create` проверяется по кривой своей площадки (meteora-dbc уже, см. тип).
+- `TokenSafety.market.lpBurnedPct` для `meteora-dbc` означает «LP заблокирован навсегда» (позиция DAMM v2, а не mint).
+- Новые коды ошибок: `launch_closed` (409), `already_bid` (409), `bad_ciphertext` (400). `creator_cap` (422) — также для `fl_bid` создателя.
+
+Изменения v0.5 против v0.4:
 - **`GET /api/tokens/:mint/safety`** → `200 TokenSafety` | `202 PendingResponse` | `400 bad_request` (не base58 32 байта) | `404 not_found` (аккаунта mint нет в сети / это не mint). Публичный, без подписи и cookies, ответ одинаков для всех. Данные — снимки индексатора по фиксированному тику (`docs/INTEL.md`), запрос сам ничего не ускоряет.
 - **`GET /api/tokens/:mint` для неизвестного mint** → `202 PendingResponse` + mint ставится в очередь CA-запросов (вместо 404). После тика — `200` `Token & { trades: [] }` из снимка индексатора. **Найденный так mint в публичный `GET /api/tokens` НЕ попадает** (иначе видно, что кто-то искал): список строится только из токенов, которыми торговал пул. `404` — если индексатор выяснил, что такого mint нет.
 - **`GET /api/tokens/:mint/trades?filter=all|unzeen|whales|dev`.** Без `filter` — как раньше, `FeedEvent[]`. С `filter` — `TokenTrade[]`. Пока полной ленты нет (`PoolInfo.features.fullTrades = false`): `all` = `unzeen` (только сделки пула), `whales` и `dev` → `400 feature_disabled`.
@@ -61,6 +70,8 @@
 | POST | `/api/actions` (подписанный) | `SignedAction` → `ActionReceipt` — все действия только с баланса |
 | GET | `/api/actions/:id` (подписанный) | `ActionStatus` — только владельцу (pubkey заголовка = автор действия), иначе 404 |
 | GET | `/media/<sha40>.<png\|jpeg\|jpg\|webp\|json>` | картинка/метаданные токена. Только точное имя (40 hex + расширение), без листинга, `Cache-Control: immutable`, `nosniff`, без логов. Остальное — 404 |
+| GET | `/api/launches?status=&limit=50` | `FairLaunch[]` (v0.6, только при `features.fairLaunch`), см. «Fair-launch» |
+| GET | `/api/launches/:id` | `FairLaunch` \| 404 (v0.6) |
 
 Подписанные запросы — схема в разделе «Подпись запросов».
 
@@ -125,11 +136,15 @@ interface PoolInfo {
   createEnabled: boolean;   // v0.4: false → POST create вернёт 503 venue_unavailable
   features: {               // v0.5: что включено на сервере (не build-time флаг фронта)
     fullTrades: boolean;    // полная лента сделок по mint (чужие сделки, теги whale/dev/sniper); false → filter whales|dev = 400
+    fairLaunch: boolean;    // v0.6: false → весь fair-launch скрыт (UI не показывать), см. «Fair-launch»
   };
+  fairLaunch?: FairLaunchParams;  // v0.6: только при features.fairLaunch = true
   launchRules: {            // v0.5: правила создателя Unzeen-запуска, которые реестр применяет принудительно
     lockSecs: number;       // лок токенов первой покупки создателя (86400 = 24 ч); 0 — правило выключено
     capBps: number;         // кап позиции создателя через пул, б.п. саплая (500 = 5 %); 0 — выключено
-    maxInitialBuyLamports: string; // максимум первой покупки create в лампортах (после округления D10), из кривой площадки
+    maxInitialBuyLamports: string; // максимум первой покупки create в лампортах (после округления D10), из кривой площадки (pumpfun)
+    maxInitialBuyLamportsByVenue: Record<string, string>; // v0.6: то же по каждой включённой площадке-лаунчпаду
+                                   // (meteora-dbc: комиссия 1 % вместо ~1,25 % → кап сужен в 5/5,013 раза, пока у DBC нет своей строки кривой)
   };
   rate?: {                  // v0.4: из фонового кэша (обновление 30–60 с); нет поля → курса нет
     lamportsPerZec: string;     // mid
@@ -150,8 +165,10 @@ interface Portfolio {
   deposits: DepositInfo[];  // последние 20, новые первыми
   actions: (ActionStatus & {  // v0.4: последние 20 действий владельца (queued первыми)
     id: string;
-    kind: "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token";
+    kind: "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token";   // fl_* сюда НЕ попадают (v0.6)
   })[];
+  fairBids?: FairBid[];          // v0.6: только при features.fairLaunch; последние 20 заявок ключа
+  fairLaunches?: OwnFairLaunch[];// v0.6: только при features.fairLaunch; запуски, созданные этим ключом (кабинет создателя)
   pad: string;              // v0.4: пробелы, выравнивают ответ до кратного 4096 байт; игнорировать
 }
 
@@ -248,7 +265,9 @@ interface PendingResponse {
 }
 
 type RiskyExtension = "permanentDelegate" | "transferHook" | "transferFee" | "defaultFrozen" | "mintClose" | "pausable";
-type UnzeenRule = "creator_initial_buy_locked_24h" | "initial_buy_cap_5pct" | "authorities_revoked" | string;
+type UnzeenRule = "creator_initial_buy_locked_24h" | "initial_buy_cap_5pct" | "authorities_revoked"
+  | "fair_launch_sealed_bids"   // v0.6: токен запущен через fair-launch
+  | string;
 
 interface TokenSafety {
   mint: string;
@@ -277,7 +296,7 @@ interface TokenSafety {
   market: {
     venue: Venue; status: "curve" | "graduated";
     curveProgressPct?: string;   // только на кривой
-    lpBurnedPct?: string;        // после миграции
+    lpBurnedPct?: string;        // после миграции; для meteora-dbc — доля LP, заблокированного навсегда (позиция DAMM v2, а не сожжённый LP-mint)
   };
   socials?: { twitter?: string; telegram?: string; website?: string };  // только https
   image?: string;           // только наш URL `…/media/<sha40>.<ext>`, никогда внешний
@@ -321,6 +340,164 @@ interface TokenTrade extends FeedEvent {
 - `withdraw_zec`: выплата shielded ZEC, с задержкой/батчингом; пул не хранит outgoing viewing data (OVK discard).
 - `create.meta.image`: файл идёт только на наш бэкенд; сервер удаляет метаданные (EXIF), перекодирует и заливает сам.
 - `id` действий/ордеров — 128 бит случайных, hex (32 символа).
+
+## Fair-launch (v0.6)
+
+**Внутреннее до 28.10 23:59 UTC.** Спека: `docs/analysis/fair-launch.md`. Суть: создатель открывает окно заявок; участники шлют сумму, зашифрованную **drand tlock** на раунд `R` (позже закрытия окна); до раунда сумм не знает никто, включая оператора (у него только номинал hold). В момент раунда сервер получает подпись раунда, **проверяет её** и расшифровывает заявки; пул делает **одну атомарную tx create+buy** на сумму всех заявок; токены делятся пропорционально, одна цена для всех. v1: только `pumpfun`, без Jito.
+
+Всё ниже существует только при `PoolInfo.features.fairLaunch = true`. При `false`: `GET /api/launches*` → `404 not_found`, `fl_*` → `400 bad_request` (как неизвестная op), полей `fairBids`/`fairLaunches`/`fairLaunch` нет.
+
+### Типы
+
+```ts
+interface FairLaunchParams {          // PoolInfo.fairLaunch
+  windowsSecs: number[];              // допустимые окна заявок, сек (по умолчанию [120, 300, 600, 1800]; 120 — для демо)
+  holdTiersZat: string[];             // номиналы hold, зат, по возрастанию. mainnet: 0.05/0.1/0.25/0.5/1/2.5/5/10 ZEC;
+                                      // devnet: 0.001/0.0025/0.005/0.01/0.025/0.05 TAZ (кривая devnet в 30 раз дешевле)
+  maxTotalBps: number;                // кап общей покупки, б.п. саплая (2500 = 25 %)
+  maxTotalLamports: string | null;    // кап общей покупки в лампортах по кривой ЭТОЙ сети; null — параметры кривой
+                                      // ещё неизвестны (fl_create → 503 venue_unavailable)
+  creatorMaxLamports: string | null;  // кап заявки создателя (= launchRules.maxInitialBuyLamports, 5 % саплая)
+  minBidsForCount: number;            // 5: меньше заявок → result.bids = "<5"
+  drand: {
+    chainHash: string;                // "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971" (quicknet)
+    publicKey: string;                // hex G2, 96 байт (quicknet)
+    genesis: number;                  // 1692803367 (unix СЕКУНДЫ)
+    period: number;                   // 3 (сек)
+    scheme: "bls-unchained-g1-rfc9380";
+  };
+}
+
+type FairLaunchStatus =
+  | "open"        // заявки принимаются (publishedAt ≤ now < closeAt)
+  | "closed"      // окно закрыто, ждём раунд drand (now < roundTime или beacon ещё не получен)
+  | "revealing"   // раунд наступил, сервер получает/проверяет beacon и расшифровывает
+  | "executing"   // задание create+buy у релейера
+  | "launched"    // tx подтверждена, доли начислены
+  | "failed"      // см. failure; все hold сняты, комиссия создателю возвращена
+  | "cancelled";  // создатель отменил до closeAt; все hold сняты
+
+interface FairLaunch {                // публичный, без подписи, одинаков для всех
+  id: string;                         // 32 hex (16 байт) = launchId в plaintext заявки
+  venue: "pumpfun";
+  meta: { name: string; symbol: string };   // картинку запуска сервер не отдаёт до launched (см. ниже)
+  status: FairLaunchStatus;
+  publishedAt: number;                // unix мс: граница эпохи Delayed после fl_create (не момент запроса)
+  closeAt: number;                    // unix мс = publishedAt + windowSecs·1000
+  drand: {
+    round: number;                    // R = R(closeAt) + 2; шифровать ровно на него
+    roundTime: number;                // t(R), unix мс (> closeAt)
+    signature?: string;               // hex 48 байт, после проверки beacon (status ≥ executing): проверяемо офлайн
+  };
+  commitment?: {                      // с момента closed (см. «Commitment»)
+    root: string;                     // hex sha256, 64 символа
+    attestation?: {                   // появляется, когда memo-tx с корнем подтверждена на Solana
+      solanaTx: string;               // подпись tx SPL Memo; data memo = ровно `root` (64 hex, без префикса)
+      slot: number;
+      signer: string;                 // публичный ключ аттестаций пула (не vault, не creator); тот же для всех запусков
+      matches: boolean;               // memo, прочитанный релейером из ПОДТВЕРЖДЁННОЙ tx, == root (серверная проверка)
+    };
+  };
+  result?: {                          // только launched
+    mint: string; solanaTx: string;
+    totalLamports: string;            // S — потрачено на покупку (с комиссией площадки)
+    tokenAmount: string;              // T — куплено всего, базовые единицы
+    decimals: number;
+    priceSol: string;                 // S/T в UI-единицах (SOL за 1 целый токен), одна для всех
+    bids: number | "<5";              // число ВАЛИДНЫХ заявок; < minBidsForCount → "<5"
+    oversubscribed: boolean;          // сумма заявок > maxTotalLamports, все урезаны в одной пропорции
+  };
+  failure?: "no_bids" | "drand_unavailable" | "venue_unavailable" | "tx_failed";
+  rules: UnzeenRule[];                // "fair_launch_sealed_bids" + правила создателя (lock/cap)
+}
+
+interface FairBid {                   // Portfolio.fairBids (только владельцу)
+  launchId: string;
+  holdZat: string;                    // номинал hold
+  status: "sealed"      // принята, ждёт раунда
+        | "cancelled"   // fl_cancel / отмена запуска создателем; hold снят
+        | "invalid"     // после раунда: не расшифровалась / чужой ключ / не тот запуск / сумма вне [minActionZat, holdZat]; hold снят
+        | "revealed"    // расшифрована, участвует, ждёт исполнения
+        | "settled"     // токены начислены
+        | "released";   // запуск failed; hold снят полностью
+  amountZat?: string;                 // расшифрованная сумма (revealed/settled/released)
+  tokenAmount?: string;               // settled: начислено токенов
+  chargedZat?: string;                // settled: списано зат (≤ amountZat)
+  releasedZat?: string;               // settled/released/invalid/cancelled: возвращено на доступный баланс
+  proof?: { leaf: string; path: string[] };   // с момента closed: доказательство включения (hex), см. «Commitment»
+}
+
+interface OwnFairLaunch {             // Portfolio.fairLaunches (только создателю)
+  launchId: string;
+  status: "scheduled" | FairLaunchStatus;   // scheduled — ещё не опубликован (now < publishedAt)
+  publishedAt: number; closeAt: number;
+}
+```
+
+### Операции (`POST /api/actions`, подпись/nonce/pad как у всех)
+
+```ts
+type SignedAction = /* ...v0.5... */
+  | { op: "fl_create"; venue: "pumpfun"; meta: { name: string; symbol: string; image?: string }; windowSecs: number }
+  | { op: "fl_bid"; launchId: string; holdZat: string; ciphertext: string }
+  | { op: "fl_cancel"; launchId: string }
+  | { op: "fl_cancel_launch"; launchId: string };
+// ActionReceipt: fl_create → { id, status: "queued", launchId }; fl_bid → { id, status: "queued" };
+//                fl_cancel / fl_cancel_launch → { id, status: "executed" }. Повтор того же запроса → тот же ответ.
+```
+
+| op | Проверки и эффект | Ошибки |
+|---|---|---|
+| `fl_create` | `meta` по правилам `create` (картинка ≤ 512 КиБ, EXIF чистит релейер); `windowSecs ∈ windowsSecs`; hold `createFeeZat`. Запуск появляется в `GET /api/launches` на ближайшей **границе эпохи Delayed** (30–60 с), не в момент запроса. Комиссия списывается при `launched`, иначе возвращается. Creator fee площадки от launch-tx остаётся пулу | `400 bad_request`, `422 insufficient_balance`, `503 venue_unavailable` (нет параметров кривой / `createEnabled=false`) |
+| `fl_bid` | Запуск опубликован и `open`, `now < closeAt`; `holdZat ∈ holdTiersZat`; `ciphertext` ≤ 1024 байт, age-armor со stanza `tlock <R> <quicknet hash>` (R = `drand.round` запуска); **одна активная заявка** на (ключ, запуск); hold `holdZat`. Создатель: `holdZat` ≤ наименьшего номинала, покрывающего `creatorMaxLamports` по текущему курсу | `404 not_found` (нет/не опубликован), `409 launch_closed`, `409 already_bid`, `400 bad_request` (номинал не из сетки), `400 bad_ciphertext`, `422 insufficient_balance`, `422 creator_cap` |
+| `fl_cancel` | Своя `sealed` заявка, `now < closeAt`: hold → доступно, ciphertext удаляется. Изменить сумму = отменить + новая заявка | `404 not_found` (нет активной заявки), `409 launch_closed` |
+| `fl_cancel_launch` | Только создатель (иначе 404), `now < closeAt` (в т. ч. до публикации): все заявки `cancelled`, все hold и комиссия возвращаются, запуск `cancelled` | `404 not_found`, `409 launch_closed` |
+
+### Plaintext заявки (64 байта) и шифрование
+
+```
+off len поле
+0   4   magic "UZFL" (0x55 0x5a 0x46 0x4c)
+4   1   version = 1
+5   2   chainId (байты PoolInfo.chainId: 02 02 devnet, 01 01 mainnet)
+7   16  launchId (сырые 16 байт FairLaunch.id)
+23  32  anonPubkey (ed25519, тот же ключ, что подписывает запрос)
+55  8   amountZat (u64 LE), minActionZat ≤ amountZat ≤ holdZat
+63  1   0x00
+```
+- Фронт: `ciphertext = await timelockEncrypt(FairLaunch.drand.round, Buffer.from(plaintext), staticQuicknetClient)` из **`tlock-js@0.9.0`** — строка age armor (`-----BEGIN AGE ENCRYPTED FILE-----`). **Никаких запросов к drand из браузера:** ChainClient статический, `info()` возвращает захардкоженные `chainHash`/`publicKey` (assert против `PoolInfo.fairLaunch.drand`), `get`/`latest` бросают ошибку. Таймер — локально по `roundTime`.
+- Сумма выбирается пользователем, номинал hold — наименьший ≥ суммы (пользователь может поднять). Свою сумму и ciphertext фронт хранит только локально (зашифрованно), для показа и проверки включения.
+- Сервер при приёме смотрит только заголовок (раунд, chain hash) — расшифровать до раунда нельзя никому.
+- Векторы: `core/testdata/fl-vectors.json` (plaintext → hex; ciphertext tlock-js на раунд 1000 + подпись раунда → plaintext).
+
+### Reveal и распределение (сервер)
+1. В `roundTime` сервер берёт beacon раунда `R` у relay drand (по кругу из 4), **проверяет BLS-подпись** против `drand.publicKey` и только потом расшифровывает. Подложный/недоступный beacon не делает ни одну заявку invalid. Нет валидного beacon за 60 мин → `failed (drand_unavailable)`.
+2. Заявка валидна, если расшифровалась и `magic/version/chainId/launchId` совпали, `anonPubkey` = автор заявки, `minActionZat ≤ amountZat ≤ holdZat`. Иначе `invalid` (hold снимается сразу, видит только владелец).
+3. Курс `lamportsPerZecBuy` — один для всех, фиксируется на момент reveal. `L_i = floor(amountZat_i · rate / 1e8)`; заявка создателя урезается до `creatorMaxLamports`. Если `Σ L_i > maxTotalLamports` — все `L_i` режутся в одной пропорции (`oversubscribed`). Сумма покупки округляется вниз до 0.001 SOL (D10). Меньше 0.001 SOL или 0 валидных заявок → `failed (no_bids)`.
+4. После подтверждения tx: участник получает `floor(T · e_i / E)` токенов и платит `ceil(S · e_i / E)` лампортов в ZEC по курсу reveal (`chargedZat ≤ amountZat ≤ holdZat`), остаток hold возвращается. Пыль округления остаётся пулу.
+5. Правила создателя: его доля ≤ 5 % саплая (по построению, см. спеку §4), токены создателя из запуска залочены на `launchRules.lockSecs`; для остальных лока нет. Обход вторым ключом не обнаружим — бейдж «rules apply to the launching key».
+
+### Commitment (проверка включения)
+В момент `closed` сервер публикует `commitment.root` — корень Merkle-дерева по всем `sealed` заявкам:
+- `leaf = sha256(0x00 ‖ utf8(ciphertext))` — ровно строка `ciphertext` из тела `fl_bid`;
+- листья сортируются по возрастанию (байтово) и добиваются случайными 32-байтными листьями до `max(8, 2^⌈log2 N⌉)` (размер дерева не выдаёт число заявок < 8);
+- `node = sha256(0x01 ‖ min(a, b) ‖ max(a, b))` (пара упорядочена байтово, направление в пути не нужно);
+- проверка: `h = leaf; for s of path: h = node(h, s); h === root`.
+`FairBid.proof` даётся владельцу с момента `closed`. Ciphertext после reveal удаляется с сервера и **никогда не публикуется** (после раунда его расшифрует кто угодно).
+
+**Аттестация на Solana (решение владельца).** Корень вычисляется в момент закрытия окна — **до** раунда drand, когда расшифровать заявки не может никто; после закрытия набор заявок не меняется. Сразу после закрытия пул отправляет memo-tx (программа SPL Memo) от отдельного ключа аттестаций; содержимое memo — только 64 hex корня, без префиксов (нейтрально до 28.10). Слот tx — неподделываемая метка времени: корень зафиксирован раньше `roundTime`. Когда tx подтверждена, в `commitment.attestation` появляются `solanaTx`, `slot`, `signer`.
+Проверка (фронт / любой): получить tx по `solanaTx` у любого RPC или в эксплорере → подписант = `signer`, есть инструкция `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr` с data = `root` (UTF-8) → `blockTime`/`slot` раньше `drand.roundTime`. Плюс своё доказательство: `verify(sha256(0x00 ‖ ciphertext), proof.path, root)`. Серверная проверка: релейер после подтверждения читает tx из сети и отдаёт фактический memo, core сравнивает его с `root` → `matches`. Это удобство; независимая проверка — по ссылке на эксплорер (прямых запросов браузера к сторонним RPC нет). `matches: false` — инцидент, UI показывает предупреждение.
+Если memo-tx не прошла — запуск продолжается (аттестация не блокирует reveal), поле `attestation` отсутствует.
+
+### Публично / приватно
+| | До `closeAt` | `closeAt` → раунд | После раунда |
+|---|---|---|---|
+| мета, `closeAt`, `R` | публично | публично | публично (картинка — после `launched`, в `Token`) |
+| число заявок | никому | никому | `result.bids`, если ≥ 5, иначе `"<5"` |
+| суммы заявок | никому (у оператора только номинал) | никому | только владельцу (`fairBids`) |
+| commitment root + memo-tx аттестации | — | публично | публично |
+
+`GET /api/launches[?status=open|closed|revealing|executing|launched|failed|cancelled][&limit≤100]` — опубликованные запуски, новые первыми; `Cache-Control: public, max-age=5`; без подписи, ответ одинаков для всех. `GET /api/launches/:id` — один запуск; неопубликованный или неизвестный → 404. Опрос фронтом — с одинаковым интервалом для всех зрителей страницы (3–5 с), без привязки к своим действиям. Лента (`/api/feed`, WS) после исполнения получает обычные `create` + `buy` с одной подписью.
 
 ## Дополнительные эндпоинты
 | Метод | Путь | Ответ |
@@ -403,7 +580,10 @@ type ErrorCode =
   | "venue_unavailable"    // 503: площадка/RPC недоступны, площадка не включена, нет курса ZEC/SOL, действия на mainnet выключены
   | "feature_disabled"     // 400 (v0.5): функция выключена на сервере (filter=whales|dev без полной ленты)
   | "creator_locked"       // 423 (v0.5): sell/withdraw_token затрагивает залоченные токены первой покупки создателя
-  | "creator_cap"          // 422 (v0.5): create/buy создателя превышает кап позиции (launchRules.capBps)
+  | "creator_cap"          // 422 (v0.5): create/buy создателя превышает кап позиции (launchRules.capBps); v0.6: fl_bid создателя с номиналом выше капа
+  | "launch_closed"        // 409 (v0.6): окно заявок fair-launch закрыто (now ≥ closeAt) или запуск не open
+  | "already_bid"          // 409 (v0.6): у ключа уже есть активная (sealed) заявка на этот запуск
+  | "bad_ciphertext"       // 400 (v0.6): не age-armor tlock, не тот раунд / chain hash, > 1024 байт
   | "internal";            // 500
 ```
 404 отдаётся и для mint, который сервис не отслеживает (даже если токен существует на Solana); исключения v0.5 — `GET /api/tokens/:mint` и `/safety`, они отвечают `202` и ставят mint в очередь индексатора. `message` — для разработчика, текст UI фронт берёт по `code`.

@@ -23,6 +23,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("../../migrations/0006_exec_mode_scrub.sql"),
     ),
     (7, "0007_intel", include_str!("../../migrations/0007_intel.sql")),
+    (
+        8,
+        "0008_fair_launch",
+        include_str!("../../migrations/0008_fair_launch.sql"),
+    ),
 ];
 
 /// Arbitrary constant for `pg_advisory_xact_lock` so concurrent starters serialize.

@@ -196,6 +196,23 @@ impl Ledger {
         request_hash: &[u8; 32],
         a: &NewAction,
     ) -> Result<ActionReceipt> {
+        let mut c = self.pool.get().await?;
+        let tx = c.transaction().await?;
+        let r = self.submit_in(&tx, pk, nonce, request_hash, a).await?;
+        tx.commit().await?;
+        Ok(r)
+    }
+
+    /// [`Self::submit`] inside a caller's transaction (fair-launch ops add their own rows).
+    /// On a replay (`replayed = true`) nothing was written.
+    pub(crate) async fn submit_in<C: GenericClient>(
+        &self,
+        tx: &C,
+        pk: &[u8; 32],
+        nonce: &[u8; 16],
+        request_hash: &[u8; 32],
+        a: &NewAction,
+    ) -> Result<ActionReceipt> {
         if a.amount_zat > 0 && a.amount_zat < self.policy.min_action_zat {
             return Err(LedgerError::BelowMinimum);
         }
@@ -217,8 +234,6 @@ impl Ledger {
             None => (None, None, None),
         };
 
-        let mut c = self.pool.get().await?;
-        let tx = c.transaction().await?;
         let inserted = tx
             .execute(
                 "INSERT INTO actions (id, anon_pubkey, nonce, request_hash, kind, hold_zat, status,
@@ -279,10 +294,10 @@ impl Ledger {
             if !ok {
                 return Err(LedgerError::InsufficientBalance);
             }
-            journal(&tx, pk_s, "hold", -hold, hold, None, Some(id_s)).await?;
+            journal(tx, pk_s, "hold", -hold, hold, None, Some(id_s)).await?;
         }
         if let Some((m, est)) = &a.gain {
-            self.check_creator_cap(&tx, pk_s, id_s, m, *est).await?;
+            self.check_creator_cap(tx, pk_s, id_s, m, *est).await?;
         }
         if let Some(m) = tmint {
             // Creator rule: the initial-buy tokens stay on the balance until the lock ends.
@@ -317,7 +332,7 @@ impl Ledger {
                 }
                 return Err(LedgerError::InsufficientBalance);
             }
-            token_journal(&tx, pk_s, m, "hold", -thold, thold, id_s).await?;
+            token_journal(tx, pk_s, m, "hold", -thold, thold, id_s).await?;
         }
         for (part, j) in a.jobs.iter().enumerate() {
             let part = i16::try_from(part).map_err(|_| LedgerError::Range)?;
@@ -353,7 +368,6 @@ impl Ledger {
             )
             .await?;
         }
-        tx.commit().await?;
         Ok(ActionReceipt {
             id,
             status: "queued".into(),
@@ -417,7 +431,7 @@ impl Ledger {
             .query(
                 &format!(
                     "SELECT {VIEW_COLS}, a.id, a.kind FROM actions a
-                     WHERE a.anon_pubkey = $1
+                     WHERE a.anon_pubkey = $1 AND a.kind NOT LIKE 'fl\\_%'
                      ORDER BY (a.status = 'queued') DESC, a.created_at DESC, a.id LIMIT $2"
                 ),
                 &[&pk_s, &limit],
@@ -822,7 +836,7 @@ pub fn minute_now_ms() -> u64 {
 
 /// D1: once settled, a job keeps only hour-precision times (the relayer no longer needs
 /// them) and no launch image.
-async fn mark_settled<C: GenericClient>(tx: &C, ids: &[i64]) -> Result<()> {
+pub(crate) async fn mark_settled<C: GenericClient>(tx: &C, ids: &[i64]) -> Result<()> {
     tx.execute(
         "UPDATE relayer_jobs SET
                 settled_at  = date_trunc('hour', now()),
@@ -840,7 +854,13 @@ async fn mark_settled<C: GenericClient>(tx: &C, ids: &[i64]) -> Result<()> {
     Ok(())
 }
 
-async fn credit_tokens<C: GenericClient>(tx: &C, pk: &[u8], mint: &str, n: i64, action_id: &[u8]) -> Result<()> {
+pub(crate) async fn credit_tokens<C: GenericClient>(
+    tx: &C,
+    pk: &[u8],
+    mint: &str,
+    n: i64,
+    action_id: &[u8],
+) -> Result<()> {
     tx.execute(
         "INSERT INTO token_balances (anon_pubkey, mint, available) VALUES ($1, $2, $3)
          ON CONFLICT (anon_pubkey, mint) DO UPDATE
@@ -851,7 +871,7 @@ async fn credit_tokens<C: GenericClient>(tx: &C, pk: &[u8], mint: &str, n: i64, 
     token_journal(tx, pk, mint, "buy_credit", n, 0, action_id).await
 }
 
-async fn token_journal<C: GenericClient>(
+pub(crate) async fn token_journal<C: GenericClient>(
     tx: &C,
     pk: &[u8],
     mint: &str,

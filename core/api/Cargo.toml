@@ -29,11 +29,13 @@ tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unzeen-ledger = { path = "../ledger" }
+unzeen-fair = { path = "../fair" }
 unzeen-protocol = { path = "../protocol" }
 zcash_address = "=0.14.0-pre.1"
 zcash_protocol = "=0.11.0-pre.0"
 
 [dev-dependencies]
+unzeen-fair = { path = "../fair" }
 tokio-tungstenite = "0.27"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 unzeen-protocol = { path = "../protocol" }

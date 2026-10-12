@@ -1,8 +1,15 @@
 # Unzeen — контракт core ↔ relayer
 
-Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
+Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
 
-Статус: **v2** (12.10, дни 4–5). Изменения против v1:
+Статус: **v3** (12.10, fair-launch; миграция `0008_fair_launch.sql`). **Внутреннее до 28.10 23:59 UTC.** Изменения против v2:
+1. **Новая op `fair_create`** — одна атомарная v0-tx create+buy fair-launch (спека `docs/analysis/fair-launch.md` §3). Как `create`, но: **mint keypair задан core** в новой колонке `mint_secret` (64 байта: seed 32 ‖ pubkey 32, формат Solana `Keypair.fromSecretKey`) и **один и тот же на всех попытках** — повтор не может создать второй mint (`prepareCreate(..., { mintKeypair })`). `lamports_in` — вся покупка запуска (до 25 % саплая, может быть ≫ обычного create), `min_out` > 0 (котировка по свежей кривой минус граница комиссии и 50 bps). `exec_mode = 'now'`, `not_before = now()`, `action_id = NULL` (задание связано с запуском в `fl_launches.job_id`, релейеру это не видно). Тот же путь отправки и тот же единый CU price, что у всех tx пула, **без Jito**. `confirmed`: `out_mint` = pubkey из `mint_secret` (обязательно), `out_token_amount`, `out_lamports`; в `trades`/`tokens` — как для `create` (`create` + `buy` с одной подписью), mint закрепить за vault (`mint_vaults`). `mint_secret` **никогда не логировать**; core обнуляет его при settle.
+2. **Новая op `attest`** — memo-tx (программа SPL Memo `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`) с данными ровно `meta.memo` (UTF-8, 64 hex корня commitment, без префиксов), подписанная **отдельным ключом аттестаций пула** (не vault, не creator; один на сеть, хранится как ключи vault: age, `$UNZEEN_HOME/<cluster>/solana/`), он же платит fee. `exec_mode = 'now'`, `action_id = NULL`, `venue`/`mint`/`lamports_in` = NULL. `confirmed`: `signature`, `slot`, `vault` = **публичный ключ аттестаций**, новая колонка `out_memo` = data memo-инструкции, **прочитанная из подтверждённой tx** (`getTransaction`), а не из задания. В `trades`/`tokens` ничего не писать. Ошибка → `failed` (запуск продолжается без аттестации).
+3. **Таблица `launch_curves (network, venue, virtual_sol_lamports, virtual_token_reserves, real_token_reserves, token_total_supply, updated_at)`** — релейер пишет параметры кривой из on-chain конфига площадки (pump.fun: `OnlinePumpSdk.fetchGlobal()`: `initialVirtualSolReserves`, `initialVirtualTokenReserves`, `initialRealTokenReserves`, `tokenTotalSupply`) при старте и раз в 10 мин (`INSERT ... ON CONFLICT (network, venue) DO UPDATE`). Core считает из неё капы (`maxInitialBuyLamports`, кап fair-launch 25 %). Строка `meteora-dbc` — по желанию (иначе core берёт кривую pump.fun с запасом 5/5,013). Без строки pumpfun fair-launch на сети недоступен (`fl_create` → 503).
+4. Права роли (`infra/relayer-role.sql`, перезапустить): SELECT `mint_secret`, SELECT/UPDATE `out_memo`; SELECT/INSERT/UPDATE `launch_curves`. На `fl_*` прав нет.
+5. Claim-запрос п. 1 возвращает `mint_secret` (добавить в `RETURNING`). Задания `fair_create`/`attest` закрывает core (`settled_at`), обычный settler их не трогает.
+
+Изменения v2 против v1:
 1. **Подключение только под ролью `unzeen_relayer`** через `DATABASE_URL_RELAYER` (D8). Владельческий `DATABASE_URL` релейеру не давать. На старте релейер проверяет `SELECT has_column_privilege('relayer_jobs','action_id','SELECT')` и при `true` отказывается стартовать.
 2. **Режимы исполнения, колонка `exec_mode` (0005, `now` | `delayed` | `max`).** Для `delayed`/`max` core ставит `not_before` = ближайшая граница эпохи (интервалы случайные 30–60 с / 5–15 мин; расписание не зависит от прихода запросов). Задания одной эпохи имеют одинаковый `not_before`: релейер берёт всё готовое разом и исполняет в случайном порядке, свой джиттер не добавляет. Для `now` (только buy/sell/create) `not_before` = момент приёма: релейер исполняет сразу. Priority fee — **единый квантованный compute unit price на ВСЕ tx пула** (любого режима, по Helius `getPriorityFeeEstimate`), чтобы tx режима now не выделялись комиссией. **Jito для now не используется** (Jito остаётся только для fair-launch). Юзер платит плоскую `nowFeeZat` core-у, на сумму `lamports_in` это не влияет. `transfer` всегда `delayed`/`max`. При settle core обнуляет `exec_mode` (0006).
 3. **Backoff через `not_before`.** Роли выдан `UPDATE (not_before)`; триггер `relayer_jobs_not_before_monotonic` (0003) разрешает только **увеличение** (`check_violation` при попытке сдвинуть раньше). Ранний запуск = нарушение тайминга.
@@ -46,7 +53,7 @@
 | `id` | core | bigserial, id задания для логов релейера |
 | `action_id` | core | bytea(16) или NULL. Релейеру не нужен, не логировать |
 | `part` | core | номер части (`transfer` при умном выводе: 0..N-1), иначе 0 |
-| `op` | core | `buy` \| `sell` \| `create` \| `transfer` |
+| `op` | core | `buy` \| `sell` \| `create` \| `transfer` \| `fair_create` (v3) \| `attest` (v3) |
 | `venue` | core | `pumpfun` \| `meteora-dbc` \| `jupiter` (NULL для `transfer`) |
 | `mint` | core | base58 mint (NULL для `create`) |
 | `lamports_in` | core | `buy`: лампорты на покупку; `create`: первая покупка (0 = без покупки) |
@@ -64,6 +71,8 @@
 | `vault` | relayer | публичный адрес vault, подписавшего tx (учёт релейера); для buy/sell/transfer = `mint_vaults.vault` этого mint |
 | `slot`, `out_mint`, `out_token_amount`, `out_lamports`, `network_fee` | relayer | факт исполнения (см. ниже) |
 | `error_code`, `error_message` | relayer | при `failed`; код из списка ниже, сообщение без данных пользователя |
+| `mint_secret` | core | v3, `fair_create`: keypair mint (64 байта), один на все попытки; NULL после settle. Не логировать |
+| `out_memo` | relayer | v3, `attest`: data memo из подтверждённой tx |
 | `settled_at` | core | реестр закрыт; после этого релейер строку не трогает |
 
 ### Операции и что вернуть в `confirmed`
@@ -74,6 +83,8 @@
 | `sell` | `venue, mint, token_amount, min_out` | токенов продано (≤ `token_amount`) | лампортов получено | |
 | `create` | `venue, meta, lamports_in, min_out` | токенов от первой покупки (0 если без) | лампортов на первую покупку | `out_mint` обязателен. creator — свежий адрес пула (не vault) |
 | `transfer` | `mint, token_amount, dest, gas_lamports` | токенов отправлено (= `token_amount`) | 0 | с vault этого mint (`mint_vaults`) вместе с каплей SOL `gas_lamports`; отдельная tx на каждую часть |
+| `fair_create` (v3) | `venue, meta, lamports_in, min_out, mint_secret` | токенов куплено | лампортов на покупку | `out_mint` = pubkey `mint_secret`; creator — свежий адрес пула; одна v0-tx + ALT |
+| `attest` (v3) | `meta.memo` | — | — | `vault` = ключ аттестаций, `out_memo` из подтверждённой tx, `slot` |
 
 Если `out_lamports` при `buy` меньше `lamports_in`, core вернёт пользователю разницу в ZEC по курсу задания. При `sell` недопроданный остаток токенов возвращается на баланс пользователя.
 
@@ -96,7 +107,7 @@ UPDATE relayer_jobs j
         LIMIT 1
         FOR UPDATE SKIP LOCKED)
 RETURNING j.id, j.part, j.op, j.venue, j.mint, j.lamports_in, j.token_amount, j.min_out,
-          j.meta, j.dest, j.gas_lamports, j.attempts;
+          j.meta, j.dest, j.gas_lamports, j.attempts, j.mint_secret;   -- v3
 ```
 Релейер держит две независимые полосы (Now — опрос ~300 мс, пачка — по эпохам). `exec_mode` используется только в WHERE: не возвращается, не передаётся исполнителю, не логируется. Внутри эпохи пачка исполняется в случайном порядке (N-4). Исполнение в обеих полосах побайтно одинаковое (один CU price из фонового кэша, без Jito).
 `$1` — id инстанса релейера (не hostname с IP), `$2` — сеть релейера, `$3` — размер батча (≥ ожидаемого размера эпохи, например 50). Опрос раз в 1–3 с. Задания одного батча (= одной эпохи core) исполнять в случайном порядке.

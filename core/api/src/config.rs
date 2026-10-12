@@ -36,6 +36,73 @@ pub struct Config {
     pub launch: LaunchConfig,
     /// Token intel (docs/INTEL.md).
     pub intel: IntelConfig,
+    /// Fair launch (API v0.6). Off by default: everything fair-launch is invisible.
+    pub fair: FairConfig,
+}
+
+/// Fair launch (API.md v0.6). Internal until 28.10.
+#[derive(Clone, Debug)]
+pub struct FairConfig {
+    /// UNZEEN_FAIR_LAUNCH=1. false: /api/launches* → 404, fl_* → 400 like an unknown op.
+    pub enabled: bool,
+    /// Allowed bid windows, seconds (UNZEEN_FL_WINDOWS_SECS, default 120,300,600,1800).
+    pub windows_secs: Vec<u32>,
+    /// Hold tiers, zat, ascending (UNZEEN_FL_HOLD_TIERS_ZAT; default per network).
+    pub hold_tiers_zat: Vec<u64>,
+    /// Cap of the total launch buy, bps of the supply (UNZEEN_FL_MAX_TOTAL_BPS, 2500).
+    pub max_total_bps: u64,
+    /// Below this many valid bids the public count is "<N" (5).
+    pub min_bids_for_count: u32,
+    /// drand relays, tried round-robin (UNZEEN_DRAND_URLS).
+    pub drand_urls: Vec<String>,
+    /// Venue fee bound for the launch min_out (UNZEEN_FL_FEE_BOUND_BPS, 300) + 50 bps slippage.
+    pub fee_bound_bps: u64,
+    pub slippage_bps: u64,
+    /// No verified beacon this long after the round time → failed (drand_unavailable). 3600.
+    pub drand_give_up_secs: u64,
+    /// No rate / curve this long after the round time → failed (venue_unavailable). 600.
+    pub rate_give_up_secs: u64,
+}
+
+pub const DRAND_RELAYS: [&str; 4] = [
+    "https://api.drand.sh",
+    "https://api2.drand.sh",
+    "https://api3.drand.sh",
+    "https://drand.cloudflare.com",
+];
+
+/// Hold tiers: mainnet 0.05/0.1/0.25/0.5/1/2.5/5/10 ZEC; devnet 0.001..0.05 TAZ (the devnet
+/// curve is ~30x cheaper and TAZ is scarce).
+pub fn default_hold_tiers(mainnet: bool) -> Vec<u64> {
+    if mainnet {
+        vec![
+            5_000_000,
+            10_000_000,
+            25_000_000,
+            50_000_000,
+            100_000_000,
+            250_000_000,
+            500_000_000,
+            1_000_000_000,
+        ]
+    } else {
+        vec![100_000, 250_000, 500_000, 1_000_000, 2_500_000, 5_000_000]
+    }
+}
+
+fn list<T: std::str::FromStr>(key: &str) -> anyhow::Result<Option<Vec<T>>> {
+    match var(key) {
+        None => Ok(None),
+        Some(v) => v
+            .split(',')
+            .map(|x| {
+                x.trim()
+                    .parse::<T>()
+                    .map_err(|_| anyhow!("{key}: comma-separated numbers"))
+            })
+            .collect::<anyhow::Result<Vec<T>>>()
+            .map(Some),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -49,6 +116,9 @@ pub struct LaunchConfig {
     /// Initial virtual reserves of the launch curve (pump.fun Global: 30 SOL / 1.073e15).
     pub virtual_sol_lamports: u64,
     pub virtual_token_reserves: u64,
+    /// The UNZEEN_LAUNCH_VIRTUAL_* values were set explicitly (not defaults). Fair launch uses
+    /// env curve values only then; otherwise it needs the network curve (`launch_curves`).
+    pub curve_from_env: bool,
 }
 
 impl LaunchConfig {
@@ -248,7 +318,40 @@ impl Config {
             total_supply: num("UNZEEN_LAUNCH_TOTAL_SUPPLY", 1_000_000_000_000_000)?,
             virtual_sol_lamports: num("UNZEEN_LAUNCH_VIRTUAL_SOL_LAMPORTS", 30_000_000_000)?,
             virtual_token_reserves: num("UNZEEN_LAUNCH_VIRTUAL_TOKEN_RESERVES", 1_073_000_000_000_000)?,
+            curve_from_env: var("UNZEEN_LAUNCH_VIRTUAL_SOL_LAMPORTS").is_some(),
         };
+        let mainnet = solana == SolanaCluster::MainnetBeta;
+        let fair = FairConfig {
+            enabled: var("UNZEEN_FAIR_LAUNCH").as_deref() == Some("1"),
+            windows_secs: list("UNZEEN_FL_WINDOWS_SECS")?.unwrap_or_else(|| vec![120, 300, 600, 1800]),
+            hold_tiers_zat: list("UNZEEN_FL_HOLD_TIERS_ZAT")?.unwrap_or_else(|| default_hold_tiers(mainnet)),
+            max_total_bps: num("UNZEEN_FL_MAX_TOTAL_BPS", 2_500)?,
+            min_bids_for_count: num("UNZEEN_FL_MIN_BIDS_FOR_COUNT", 5)?,
+            drand_urls: var("UNZEEN_DRAND_URLS")
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().trim_end_matches('/').to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_else(|| DRAND_RELAYS.iter().map(|s| s.to_string()).collect()),
+            fee_bound_bps: num::<u64>("UNZEEN_FL_FEE_BOUND_BPS", 300)?.min(5_000),
+            slippage_bps: 50,
+            drand_give_up_secs: 3_600,
+            rate_give_up_secs: 600,
+        };
+        if fair.windows_secs.is_empty() || fair.windows_secs.iter().any(|w| !(60..=86_400).contains(w)) {
+            bail!("UNZEEN_FL_WINDOWS_SECS: 60..86400 seconds each");
+        }
+        if fair.hold_tiers_zat.is_empty()
+            || !fair.hold_tiers_zat.windows(2).all(|w| w[0] < w[1])
+            || fair.hold_tiers_zat[0] < policy.min_action_zat
+        {
+            bail!("UNZEEN_FL_HOLD_TIERS_ZAT: strictly ascending, each >= MIN_ACTION_ZAT");
+        }
+        if fair.max_total_bps == 0 || fair.max_total_bps > 5_000 || fair.drand_urls.is_empty() {
+            bail!("UNZEEN_FL_MAX_TOTAL_BPS must be 1..5000 (far from graduation); UNZEEN_DRAND_URLS non-empty");
+        }
         if launch.cap_bps > 10_000 {
             bail!("UNZEEN_CREATOR_CAP_BPS must be 0..10000");
         }
@@ -333,6 +436,7 @@ impl Config {
                 queue_max: num::<i64>("UNZEEN_INTEL_QUEUE_MAX", 256)?.clamp(1, 100_000),
                 whale_lamports: num::<i64>("UNZEEN_WHALE_LAMPORTS", 1_000_000_000)?.max(1),
             },
+            fair,
         };
         Ok(cfg)
     }

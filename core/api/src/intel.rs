@@ -117,7 +117,17 @@ pub async fn safety(State(st): State<AppState>, Path(mint): Path<String>) -> Api
     let launch = is_unzeen_launch(&c, &mint).await?;
     let l = &st.cfg.launch;
     match data.and_then(|d| safety_json(&mint, as_of, &d, launch.then_some((l.lock_secs, l.cap_bps)))) {
-        Some(v) => Ok(public(v, 60)),
+        Some(mut v) => {
+            // v0.6: fair-launched mint (only while the feature is visible).
+            if st.cfg.fair.enabled
+                && launch
+                && st.ledger.fl_is_fair_mint(&mint).await?
+                && let Some(rules) = v["unzeen"]["rules"].as_array_mut()
+            {
+                rules.insert(0, json!("fair_launch_sealed_bids"));
+            }
+            Ok(public(v, 60))
+        }
         // Malformed snapshot (indexer bug): same as "no snapshot yet".
         None => pending(&c).await,
     }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["protocol", "ledger", "scanner", "api"]
+members = ["protocol", "fair", "ledger", "scanner", "api"]
 
 [workspace.package]
 edition = "2024"

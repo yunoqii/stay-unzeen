@@ -17,6 +17,7 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 unzeen-protocol = { path = "../protocol" }
+unzeen-fair = { path = "../fair" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

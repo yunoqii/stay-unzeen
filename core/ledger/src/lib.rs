@@ -11,6 +11,7 @@
 
 pub mod actions;
 pub mod decide;
+pub mod fair;
 mod migrate;
 pub mod payouts;
 
@@ -54,6 +55,12 @@ pub enum LedgerError {
     /// The creator's position through the pool would exceed the cap (API 422 creator_cap).
     #[error("creator position cap")]
     CreatorCap,
+    /// Fair launch: the bid window is closed or the launch is not open (API 409 launch_closed).
+    #[error("launch closed")]
+    LaunchClosed,
+    /// Fair launch: the key already has a sealed bid on this launch (API 409 already_bid).
+    #[error("already bid")]
+    AlreadyBid,
 }
 
 /// SQLSTATE of a Postgres error, or a coarse kind for client-side errors. Safe to log.
@@ -97,6 +104,8 @@ impl LedgerError {
             LedgerError::NotFound => "not_found",
             LedgerError::CreatorLocked => "creator_locked",
             LedgerError::CreatorCap => "creator_cap",
+            LedgerError::LaunchClosed => "launch_closed",
+            LedgerError::AlreadyBid => "already_bid",
         }
     }
 }
@@ -198,11 +207,11 @@ pub struct Ledger {
     rules: CreatorRules,
 }
 
-fn to_i64(v: u64) -> Result<i64> {
+pub(crate) fn to_i64(v: u64) -> Result<i64> {
     i64::try_from(v).map_err(|_| LedgerError::Range)
 }
 
-fn to_u64(v: i64) -> u64 {
+pub(crate) fn to_u64(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
 }
 
@@ -552,7 +561,7 @@ async fn finalize<C: GenericClient>(
     })
 }
 
-async fn journal<C: GenericClient>(
+pub(crate) async fn journal<C: GenericClient>(
     tx: &C,
     pk: &[u8],
     kind: &str,

@@ -26,18 +26,22 @@ GRANT SELECT (id, part, op, venue, mint, lamports_in, token_amount, min_out, met
               gas_lamports, network, status, not_before, attempts, claimed_by, claimed_at,
               lease_until, signature, last_valid_block_height, vault, slot, out_mint,
               out_token_amount, out_lamports, network_fee, error_code, error_message,
-              settled_at, created_at, updated_at, exec_mode)
+              settled_at, created_at, updated_at, exec_mode,
+              mint_secret, out_memo)   -- 0008: fair_create / attest
     ON relayer_jobs TO unzeen_relayer;
 -- not_before: backoff only; a trigger (0003) refuses to move it earlier.
 GRANT UPDATE (status, attempts, claimed_by, claimed_at, lease_until, not_before, signature,
               last_valid_block_height, vault, slot, out_mint, out_token_amount,
-              out_lamports, network_fee, error_code, error_message, updated_at)
+              out_lamports, network_fee, error_code, error_message, updated_at, out_memo)
     ON relayer_jobs TO unzeen_relayer;
 
 -- mint -> vault pinning (0003): the relayer owns it (re-pin = UPDATE of vault only).
 GRANT SELECT, INSERT, UPDATE (vault) ON mint_vaults TO unzeen_relayer;
 -- Relayer state (0004): vault rotation and the fresh-creator counter.
 GRANT SELECT, INSERT, UPDATE ON relayer_vault_usage, relayer_creator_counter TO unzeen_relayer;
+
+-- Launch curve of the network (0008): written from the venue's on-chain config.
+GRANT SELECT, INSERT, UPDATE ON launch_curves TO unzeen_relayer;
 
 -- Public market data.
 GRANT SELECT, INSERT, UPDATE ON tokens TO unzeen_relayer;

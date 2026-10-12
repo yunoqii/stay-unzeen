@@ -75,6 +75,7 @@
   "holders": { "top10Pct": "12.5", "devPct": "3.1" | null, "unzeenPoolPct": "0.8" },   // необязательно; asOf ставит core = as_of
   "market": { "venue": "pumpfun" | "meteora-dbc" | "jupiter", "status": "curve" | "graduated",
               "curveProgressPct": "41.2", "lpBurnedPct": "100" },                     // проценты — десятичные строки
+              // meteora-dbc: lpBurnedPct = доля LP, заблокированного навсегда (позиция DAMM v2), а не сожжённый LP-mint
   "socials": { "twitter": "https://x.com/…", "telegram": "https://t.me/…", "website": "https://…" },  // необязательно
   "image": "https://<api origin>/media/<sha40>.png",                                  // необязательно
   "dev": { "address": "…", "launchesSeen": 3, "rugsSeen": 1, "since": 1760000000000 }, // только с историей дева (флаг), не для Unzeen-запусков

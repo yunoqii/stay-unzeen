@@ -1,0 +1,57 @@
+{
+  "_comment": "Fair-launch vectors (API.md v0.6). ciphertexts produced by tlock-js@0.9.0 timelockEncrypt with a STATIC quicknet ChainClient (no network); beacons from api.drand.sh quicknet. Internal until 28.10.",
+  "drand": {
+    "chainHash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+    "publicKey": "83cf0f2896adee7eb8b5f01fcad3912212c437e0073e911fb90022d3e760183c8c4b450b6a0a6c3ac6a5776a2d1064510d1fec758c921cc22b0e17e63aaf4bcb5ed66304de9cf809bd274ca73bab4af5a6e9c76a4bc09e76eae8991ef5ece45a",
+    "genesis": 1692803367,
+    "period": 3,
+    "scheme": "bls-unchained-g1-rfc9380"
+  },
+  "beacons": [
+    {
+      "round": 1000,
+      "randomness": "fe290beca10872ef2fb164d2aa4442de4566183ec51c56ff3cd603d930e54fdd",
+      "signature": "b44679b9a59af2ec876b1a6b1ad52ea9b1615fc3982b19576350f93447cb1125e342b73a8dd2bacbe47e4b6b63ed5e39"
+    },
+    {
+      "round": 1001,
+      "randomness": "b0a591ad1b9002cfc372ac6e30abd3da8d3088d4caae026961743474fb94235f",
+      "signature": "b33bf3667cbd5a82de3a24b4e0e9fe5513cc1a0e840368c6e31f5fcfa79bea03f73896b25883abf2853d10337fb8fa41"
+    }
+  ],
+  "tlockJs": [
+    {
+      "name": "devnet_bid",
+      "round": 1000,
+      "chainId": "0202",
+      "launchId": "000102030405060708090a0b0c0d0e0f",
+      "anonSeed": "0707070707070707070707070707070707070707070707070707070707070707",
+      "anonPubkey": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "amountZat": "12345678",
+      "plaintext": "555a464c010202000102030405060708090a0b0c0d0e0fea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c4e61bc000000000000",
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MQpocG1BR2g3ejhJWlAxN3V3TllqL2pLWVk0MlgzbjFrT1BHYTFNYXlpYmJI\nVWRlTThybTRWNUlOMGgzTVNJWnJ6CkNJc25IczIzSjNyeXdHdG5jVXVxSlhQODI5\nVk5ubWx5ZWZPcUtWNVlYYjVuRTM5Z1pNcEFaQnNuN3gzMXpyYkwKQWtsY2VtU1RU\nV2s1YVFwZkxZYTNXWStZVEp4Ym9hamlxdm5iOUdsK0xLZwotLS0geVpuRkhkd0Z6\nL3NRemdhKzlkck9zSm14Yjg4WTdKeXZrYktVVjJuZmY5dwo8ICH3tgdL7fI3Ysjr\nsrPi8d0idrFpddqnUN5spSlUk0GFBwbFXP2ZBKg0tCRkNp+Ge4Tx0Cr+T+tWkqI3\nthyPD/T94GydyrvvkooOJaglkQhJWRh/iPJ/GU6it6ai1Ow=\n-----END AGE ENCRYPTED FILE-----\n"
+    },
+    {
+      "name": "mainnet_bid",
+      "round": 1000,
+      "chainId": "0101",
+      "launchId": "000102030405060708090a0b0c0d0e0f",
+      "anonSeed": "0707070707070707070707070707070707070707070707070707070707070707",
+      "anonPubkey": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "amountZat": "500000000",
+      "plaintext": "555a464c010101000102030405060708090a0b0c0d0e0fea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c0065cd1d0000000000",
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MQpqTlFKNjhObVM0QzJhTFkrVk1HZENUWGFhNkM2SllHTzdYZXJkY0htMytX\nelhYUUdxM0pvQytvU1JJZVBCZXB6CkR1cGNFRXo5MURKVWZQNHBOSkltKy9FTEh0\nM3cvdjBobmFFdGtTKzlDRGErS25xdWZpbnBXQ3p6aEFWTVV4bTYKQzBUOTk1QzhM\nNFcrZEhmVERnQ3FTTHBPWS80Z1QrbUR2L0FNRURtWVFLOAotLS0gWmJ2Z1kxQjBN\nN2pYdG9CRHpydGt5bCtEWGZNejZaY3hzaVZZUVJHTmFsQQoovpi916gLJVXpD71x\nigRRfHJP6Q845gV3sQaOohknBq63+yQbqsJ414KV/gdgSsSJzjUnYcRkaSo73PVY\nGRfuwa7KmkULH9cTReVsmmruSJB//EcWT9qEYi72t3GDRB4=\n-----END AGE ENCRYPTED FILE-----\n"
+    },
+    {
+      "name": "wrong_round",
+      "round": 1001,
+      "chainId": "0202",
+      "launchId": "000102030405060708090a0b0c0d0e0f",
+      "anonSeed": "0707070707070707070707070707070707070707070707070707070707070707",
+      "anonPubkey": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "amountZat": "12345678",
+      "plaintext": "555a464c010202000102030405060708090a0b0c0d0e0fea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c4e61bc000000000000",
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDEgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MQp0MWY1RWQrVTZhUS9BclYwRzZDT1VGOWdvMnlvMnpHcUhEcW1Ed2h0L3FR\ncnNyTnVjcVZUYzFxZTRWa3JxU1g4CkJoVU4wcVJIeCtHK2lOQ3I5SmJvcmd1SG1J\ndGx5dHNHOTZKWFhQdkJBRDdkd1QwWWhkSnZjNVQrUExwb3dvL2oKZmhQY3hObC96\nTkR1UUlyK1d2VkIvakpuMTNxY296LzFFSE5OVmtZZENqbwotLS0gSGlIeUd6TmZP\nemNrZFk2ZG05TEM4UXdYeEROUmRCZzhuem9saVM1VlZoTQpsrcUHZ75r0zKveCVr\ngEIG06koUMWJUL1BCgVzsF4xyxSVjr9An+1gyD/AaWYF/HQzZGtS15kwfpw4AU+0\nxuYX6/OSXcsS+jGsSCZnjg5Sg7i6YVTHN8a7vL4ocu0TTtI=\n-----END AGE ENCRYPTED FILE-----\n"
+    }
+  ]
+}

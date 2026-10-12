@@ -1,0 +1,21 @@
+[package]
+name = "unzeen-fair"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Unzeen fair-launch: drand quicknet beacon check, tlock decryption, sealed-bid codec, commitment tree, allocation math (no I/O)"
+
+[dependencies]
+# drand tlock (age format) — decryption only, no network. `armor`: tlock-js emits age armor.
+tlock_age = { version = "=0.0.10", features = ["armor"] }
+# BLS signature check of a drand round (bls-unchained-g1-rfc9380 = G2PubkeyRfc).
+drand-verify = "=0.6.2"
+hex = "0.4"
+rand = "0.10"
+sha2 = "0.11"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+ed25519-dalek = "3"

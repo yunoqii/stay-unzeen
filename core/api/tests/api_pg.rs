@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 use unzeen_api::{
     AppState,
-    config::{Config, ExecConfig, Fees, IntelConfig, LaunchConfig, Limits, RateConfig},
+    config::{Config, ExecConfig, FairConfig, Fees, IntelConfig, LaunchConfig, Limits, RateConfig},
     rate::now_ms,
     router,
 };
@@ -99,11 +99,24 @@ fn config(url: &str) -> Config {
             total_supply: 1_000_000_000_000_000,
             virtual_sol_lamports: 30_000_000_000,
             virtual_token_reserves: 1_073_000_000_000_000,
+            curve_from_env: false,
         },
         intel: IntelConfig {
             full_trades: false,
             queue_max: 256,
             whale_lamports: 1_000_000_000,
+        },
+        fair: FairConfig {
+            enabled: false,
+            windows_secs: vec![120, 300],
+            hold_tiers_zat: unzeen_api::config::default_hold_tiers(false),
+            max_total_bps: 2_500,
+            min_bids_for_count: 5,
+            drand_urls: vec!["http://127.0.0.1:9".into()],
+            fee_bound_bps: 300,
+            slippage_bps: 50,
+            drand_give_up_secs: 3_600,
+            rate_give_up_secs: 600,
         },
     }
 }
@@ -285,8 +298,9 @@ async fn pool_info() {
         json!({"address":"utest1example","network":"test","chainId":"0202",
                "minDepositZat":"100000","minActionZat":"100000","confirmations":3,
                "createEnabled":true,
-               "features":{"fullTrades":false},
-               "launchRules":{"lockSecs":86400,"capBps":500,"maxInitialBuyLamports":"1466000000"},
+               "features":{"fullTrades":false,"fairLaunch":false},
+               "launchRules":{"lockSecs":86400,"capBps":500,"maxInitialBuyLamports":"1466000000",
+                              "maxInitialBuyLamportsByVenue":{"pumpfun":"1466000000"}},
                "fees":{"createFeeZat":"100000","withdrawZecFeeZat":"15000",
                        "withdrawTokenGasLamports":"2000000","withdrawTokenCostLamports":"2100000",
                        "nowFeeZat":"500"}})
@@ -1173,6 +1187,587 @@ async fn creator_rules_lock_and_cap() {
     .await;
     assert_eq!(e.state.ledger.janitor().await.unwrap().unlocked, 1);
     let r = e.signed(&me, "POST", "/api/actions", &sell("1000")).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    e.drop_schema().await;
+}
+
+// ================================================================== fair launch (API v0.6)
+
+mod fair {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use axum::{Router, extract::Path, http::StatusCode as S, routing::get};
+    use unzeen_fair::{alloc, bid::BidPlaintext, drand, merkle};
+
+    use super::*;
+
+    const SIG_1000: &str =
+        "b44679b9a59af2ec876b1a6b1ad52ea9b1615fc3982b19576350f93447cb1125e342b73a8dd2bacbe47e4b6b63ed5e39";
+    const SIG_1001: &str =
+        "b33bf3667cbd5a82de3a24b4e0e9fe5513cc1a0e840368c6e31f5fcfa79bea03f73896b25883abf2853d10337fb8fa41";
+    /// devnet pump.fun Global: 1 SOL virtual, 1.073e15 virtual tokens, 7.931e14 real, 1e15 supply.
+    const VS: u64 = 1_000_000_000;
+    const VT: u64 = 1_073_000_000_000_000;
+    const SUPPLY: u64 = 1_000_000_000_000_000;
+
+    /// Mock drand relay: serves the REAL quicknet signatures of rounds 1000/1001 from the
+    /// fixture; while `forged` is set it answers round 1000 with the signature of round 1001.
+    /// Any other round: 425 Too Early.
+    async fn mock_drand(forged: Arc<AtomicBool>) -> String {
+        let app = Router::new().route(
+            "/{hash}/public/{round}",
+            get(move |Path((hash, round)): Path<(String, u64)>| {
+                let forged = forged.clone();
+                async move {
+                    if hash != drand::QUICKNET_CHAIN_HASH_HEX {
+                        return (S::NOT_FOUND, String::new());
+                    }
+                    let sig = match round {
+                        1000 if forged.load(Ordering::SeqCst) => SIG_1001,
+                        1000 => SIG_1000,
+                        1001 => SIG_1001,
+                        _ => return (S::from_u16(425).unwrap(), String::new()),
+                    };
+                    (
+                        S::OK,
+                        json!({"round": round, "randomness": "00", "signature": sig}).to_string(),
+                    )
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    async fn fair_env(drand_url: String) -> Option<Env> {
+        let e = setup_with(move |c| {
+            c.fair.enabled = true;
+            c.fair.windows_secs = vec![120, 300];
+            c.fair.drand_urls = vec![drand_url];
+            // Round 1000 is in 2023: never give up in tests.
+            c.fair.drand_give_up_secs = 1_000_000_000;
+            c.fair.rate_give_up_secs = 1_000_000_000;
+        })
+        .await?;
+        e.sql(&format!(
+            "INSERT INTO {s}.launch_curves (network, venue, virtual_sol_lamports, virtual_token_reserves,
+                                             real_token_reserves, token_total_supply)
+             VALUES ('devnet', 'pumpfun', {VS}, {VT}, 793100000000000, {SUPPLY});
+             ALTER TABLE {s}.fl_launches DROP CONSTRAINT fl_launches_check;",
+            s = e.schema
+        ))
+        .await;
+        Some(e)
+    }
+
+    fn create_body() -> String {
+        json!({"op":"fl_create","venue":"pumpfun","meta":{"name":"Fair One","symbol":"FAIR"},"windowSecs":120})
+            .to_string()
+    }
+
+    impl Env {
+        /// Create a launch as user(n) and make it open now with reveal round 1000.
+        async fn open_launch(&self, n: u8) -> String {
+            let r = self.signed(&user(n), "POST", "/api/actions", &create_body()).await;
+            assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+            assert_eq!(r.body["status"], "queued");
+            let id = r.body["launchId"].as_str().unwrap().to_string();
+            // Not published before the epoch boundary.
+            assert_eq!(
+                self.get(&format!("/api/launches/{id}")).await.status,
+                StatusCode::NOT_FOUND
+            );
+            self.sql(&format!(
+                "UPDATE {s}.fl_launches SET published_at = now() - interval '1 second',
+                        close_at = now() + interval '1 hour', round = 1000,
+                        round_time = to_timestamp({t}) WHERE id = '\\x{id}'",
+                s = self.schema,
+                t = drand::QUICKNET_GENESIS + 999 * 3
+            ))
+            .await;
+            id
+        }
+
+        async fn close(&self, id: &str) {
+            self.sql(&format!(
+                "UPDATE {}.fl_launches SET close_at = now() - interval '1 millisecond' WHERE id = '\\x{id}'",
+                self.schema
+            ))
+            .await;
+        }
+
+        async fn bid(&self, n: u8, id: &str, hold: u64, ct: &str) -> Resp {
+            let body = json!({"op":"fl_bid","launchId":id,"holdZat":hold.to_string(),"ciphertext":ct}).to_string();
+            self.signed(&user(n), "POST", "/api/actions", &body).await
+        }
+
+        async fn wait_status(&self, id: &str, want: &str) -> Value {
+            for _ in 0..150 {
+                let r = self.get(&format!("/api/launches/{id}")).await;
+                if r.body["status"] == want {
+                    return r.body;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!(
+                "launch never reached {want}: {:?}",
+                self.get(&format!("/api/launches/{id}")).await.body
+            );
+        }
+
+        async fn avail(&self, n: u8) -> (i64, i64) {
+            let pk = user(n).verifying_key().to_bytes();
+            let r = self
+                .admin
+                .query_one(
+                    &format!(
+                        "SELECT available_zat, held_zat FROM {}.balances WHERE anon_pubkey = $1",
+                        self.schema
+                    ),
+                    &[&&pk[..]],
+                )
+                .await
+                .unwrap();
+            (r.get(0), r.get(1))
+        }
+    }
+
+    fn sealed(n: u8, id: &str, amount: u64) -> String {
+        let p = BidPlaintext {
+            chain: CHAIN.to_bytes(),
+            launch_id: hex::decode(id).unwrap().try_into().unwrap(),
+            anon_pubkey: user(n).verifying_key().to_bytes(),
+            amount_zat: amount,
+        };
+        drand::encrypt(1000, &p.encode())
+    }
+
+    #[tokio::test]
+    async fn fair_launch_full_cycle() {
+        let forged = Arc::new(AtomicBool::new(true));
+        let url = mock_drand(forged.clone()).await;
+        let Some(e) = fair_env(url).await else { return };
+        let s = e.schema.clone();
+        for n in 1..=6 {
+            e.fund(n, 0, 100_000_000).await;
+        }
+
+        // PoolInfo: flag on, caps from the network curve (devnet: ~0.304 SOL total, ~0.048 SOL creator).
+        e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+        let pool = e.get("/api/pool").await.body;
+        assert_eq!(pool["features"]["fairLaunch"], true);
+        let max_total = alloc::curve_max_lamports(VS, VT, SUPPLY / 4);
+        let creator_max = alloc::curve_max_lamports(VS, VT, SUPPLY / 20);
+        assert_eq!(pool["fairLaunch"]["maxTotalLamports"], max_total.to_string());
+        assert_eq!(pool["fairLaunch"]["creatorMaxLamports"], creator_max.to_string());
+        assert_eq!(pool["launchRules"]["maxInitialBuyLamports"], creator_max.to_string());
+        assert_eq!(pool["fairLaunch"]["drand"]["chainHash"], drand::QUICKNET_CHAIN_HASH_HEX);
+        assert_eq!(pool["fairLaunch"]["holdTiersZat"][0], "100000");
+
+        let id = e.open_launch(1).await;
+        assert_eq!(e.avail(1).await, (100_000_000 - 100_000, 100_000), "create fee held");
+        let l = e.get(&format!("/api/launches/{id}")).await;
+        assert_eq!(l.status, StatusCode::OK);
+        assert_eq!(l.headers["cache-control"], "public, max-age=5");
+        assert_eq!(l.body["status"], "open");
+        assert_eq!(l.body["drand"]["round"], 1000);
+        assert!(l.body.get("commitment").is_none() && l.body.get("result").is_none());
+        assert!(
+            l.body["rules"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("fair_launch_sealed_bids"))
+        );
+
+        // Submission checks.
+        let ct2 = sealed(2, &id, 1_000_000);
+        assert_eq!(code(&e.bid(2, &id, 1_234, &ct2).await), "bad_request", "tier");
+        assert_eq!(code(&e.bid(2, &id, 1_000_000, "hello").await), "bad_ciphertext");
+        let other_round = drand::encrypt(1001, &[0; 64]);
+        assert_eq!(code(&e.bid(2, &id, 1_000_000, &other_round).await), "bad_ciphertext");
+        let unknown = "00".repeat(16);
+        assert_eq!(e.bid(2, &unknown, 1_000_000, &ct2).await.status, StatusCode::NOT_FOUND);
+        // Creator: tier above the 5 % cap (~0.0048 ZEC at 10 SOL/ZEC → tier 0.005) → 422.
+        let ct1 = sealed(1, &id, 500_000);
+        assert_eq!(code(&e.bid(1, &id, 1_000_000, &ct1).await), "creator_cap");
+
+        // Bids: creator (trimmed at reveal), two valid, a copied ciphertext, an over-hold amount.
+        let ct3 = sealed(3, &id, 2_000_000);
+        let ct5 = sealed(5, &id, 600_000);
+        for (n, hold, ct) in [
+            (1, 500_000, &ct1),
+            (2, 1_000_000, &ct2),
+            (3, 2_500_000, &ct3),
+            (4, 1_000_000, &ct2),
+            (5, 500_000, &ct5),
+        ] {
+            let r = e.bid(n, &id, hold, ct).await;
+            assert_eq!(r.status, StatusCode::OK, "user {n}: {:?}", r.body);
+            assert_eq!(r.body["status"], "queued");
+        }
+        assert_eq!(e.avail(3).await, (100_000_000 - 2_500_000, 2_500_000), "hold = tier");
+        // One sealed bid per key; cancel releases; idempotent retry of the same request.
+        let ct6 = sealed(6, &id, 300_000);
+        assert_eq!(e.bid(6, &id, 500_000, &ct6).await.status, StatusCode::OK);
+        assert_eq!(code(&e.bid(6, &id, 500_000, &ct6).await), "already_bid");
+        let cancel = json!({"op":"fl_cancel","launchId":id}).to_string();
+        let h = e.sign(&user(6), "POST", "/api/actions", &cancel);
+        let r = e.raw("POST", "/api/actions", &cancel, Some(&h)).await;
+        assert_eq!(r.body["status"], "executed", "{:?}", r.body);
+        let again = e.raw("POST", "/api/actions", &cancel, Some(&h)).await;
+        assert_eq!(again.body["id"], r.body["id"]);
+        assert_eq!(e.avail(6).await, (100_000_000, 0));
+        assert_eq!(
+            code(&e.signed(&user(6), "POST", "/api/actions", &cancel).await),
+            "not_found"
+        );
+
+        // Owner view before close: sealed, no amount, no proof; no fl_* in actions.
+        let pf = e.signed(&user(2), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(pf["fairBids"][0]["status"], "sealed");
+        assert!(pf["fairBids"][0].get("amountZat").is_none() && pf["fairBids"][0].get("proof").is_none());
+        assert_eq!(pf["actions"].as_array().unwrap().len(), 0);
+        let pf1 = e.signed(&user(1), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(pf1["fairLaunches"][0]["launchId"], id);
+        assert_eq!(pf1["fairLaunches"][0]["status"], "open");
+        // Nobody sees a count before the round.
+        let list = e.get("/api/launches?status=open").await.body;
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert!(!list.to_string().contains("\"bids\"") && list[0].get("result").is_none());
+        assert_eq!(e.get("/api/launches?status=nope").await.status, StatusCode::BAD_REQUEST);
+
+        // Close → root + attest job; reveal round in the past → revealing with a FORGED beacon.
+        e.close(&id).await;
+        assert_eq!(code(&e.bid(6, &id, 500_000, &ct6).await), "launch_closed");
+        let l = e.wait_status(&id, "revealing").await;
+        let root = l["commitment"]["root"].as_str().unwrap().to_string();
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'attest' AND exec_mode = 'now'
+                   AND action_id IS NULL AND meta->>'memo' = '{root}'"
+            ))
+            .await,
+            1
+        );
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Forged beacon: NO bid judged, nothing decrypted, no job.
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.fl_bids WHERE status <> 'sealed' AND status <> 'cancelled'"
+            ))
+            .await,
+            0
+        );
+        assert_eq!(e.wait_status(&id, "revealing").await["status"], "revealing");
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'fair_create'"
+            ))
+            .await,
+            0
+        );
+
+        // Proofs are available from close on and verify against the root.
+        let pf = e.signed(&user(2), "GET", "/api/portfolio", "").await.body;
+        let proof = &pf["fairBids"][0]["proof"];
+        let leaf: [u8; 32] = hex::decode(proof["leaf"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(leaf, merkle::leaf(&ct2));
+        let path: Vec<[u8; 32]> = proof["path"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| hex::decode(h.as_str().unwrap()).unwrap().try_into().unwrap())
+            .collect();
+        assert_eq!(path.len(), 3, "padded to 8 leaves");
+        let root_b: [u8; 32] = hex::decode(&root).unwrap().try_into().unwrap();
+        assert!(merkle::verify(&leaf, &path, &root_b));
+
+        // Real beacon → reveal → executing.
+        forged.store(false, Ordering::SeqCst);
+        e.sql(&format!("UPDATE {s}.fl_launches SET next_try_at = NULL")).await;
+        let l = e.wait_status(&id, "executing").await;
+        assert_eq!(l["drand"]["signature"], SIG_1000);
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.fl_bids WHERE ciphertext IS NOT NULL"
+            ))
+            .await,
+            0
+        );
+        assert_eq!(
+            e.avail(4).await,
+            (100_000_000, 0),
+            "copied ciphertext → invalid, released"
+        );
+        assert_eq!(e.avail(5).await, (100_000_000, 0), "amount > hold → invalid, released");
+        let pf4 = e.signed(&user(4), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(pf4["fairBids"][0]["status"], "invalid");
+        assert!(pf4["fairBids"][0].get("amountZat").is_none());
+
+        // The job: one fair_create, D10-rounded, within the cap, fixed mint keypair, no action link.
+        let job = e
+            .admin
+            .query_one(
+                &format!(
+                    "SELECT lamports_in, min_out, mint_secret, exec_mode, action_id IS NULL, venue, meta->>'symbol'
+                     FROM {s}.relayer_jobs WHERE op = 'fair_create'"
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        let lamports_in = job.get::<_, i64>(0) as u64;
+        let secret: Vec<u8> = job.get(2);
+        assert_eq!(lamports_in % alloc::LAMPORTS_STEP, 0);
+        assert!(lamports_in <= max_total);
+        assert_eq!(secret.len(), 64);
+        assert_eq!(
+            (job.get::<_, String>(3), job.get::<_, bool>(4)),
+            ("now".to_string(), true)
+        );
+        assert_eq!(
+            (job.get::<_, String>(5), job.get::<_, String>(6)),
+            ("pumpfun".into(), "FAIR".into())
+        );
+        let sk = SigningKey::from_bytes(&secret[..32].try_into().unwrap());
+        assert_eq!(sk.verifying_key().to_bytes()[..], secret[32..]);
+        let mint = unzeen_protocol::pubkey_to_b58(&secret[32..].try_into().unwrap());
+
+        // Expected allocation (test re-derives it from the public formulas).
+        let bids = [
+            alloc::ValidBid {
+                amount_zat: 500_000,
+                is_creator: true,
+            },
+            alloc::ValidBid {
+                amount_zat: 1_000_000,
+                is_creator: false,
+            },
+            alloc::ValidBid {
+                amount_zat: 2_000_000,
+                is_creator: false,
+            },
+        ];
+        let plan = alloc::plan(&bids, RATE, max_total, creator_max);
+        assert!(plan.oversubscribed);
+        assert_eq!(plan.effective[0], creator_max * max_total / (creator_max + 300_000_000));
+        assert!(lamports_in <= plan.total && plan.total - lamports_in <= plan.total / 100 + alloc::LAMPORTS_STEP);
+
+        // Relayer: both jobs confirmed.
+        let spent = lamports_in - 1_000;
+        let t = alloc::curve_tokens_out(VS, VT, spent) * 99 / 100;
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGFAIR', out_mint = '{mint}',
+                    out_token_amount = {t}, out_lamports = {spent} WHERE op = 'fair_create';
+             UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGATTEST', slot = 77,
+                    vault = 'AttestKey111', out_memo = '{root}' WHERE op = 'attest';"
+        ))
+        .await;
+        let l = e.wait_status(&id, "launched").await;
+        assert_eq!(l["result"]["mint"], mint);
+        assert_eq!(l["result"]["solanaTx"], "SIGFAIR");
+        assert_eq!(l["result"]["bids"], "<5");
+        assert_eq!(l["result"]["oversubscribed"], true);
+        assert_eq!(l["result"]["tokenAmount"], t.to_string());
+        assert_eq!(l["result"]["totalLamports"], spent.to_string());
+        assert_eq!(l["commitment"]["attestation"]["solanaTx"], "SIGATTEST");
+        assert_eq!(l["commitment"]["attestation"]["slot"], 77);
+        assert_eq!(l["commitment"]["attestation"]["matches"], true);
+
+        let mut tok_sum = 0u64;
+        for (i, (n, amount)) in [(1u8, 500_000u64), (2, 1_000_000), (3, 2_000_000)]
+            .into_iter()
+            .enumerate()
+        {
+            let e_i = e
+                .one_i64(&format!(
+                    "SELECT e_lamports FROM {s}.fl_bids WHERE anon_pubkey = '\\x{}'",
+                    hex::encode(user(n).verifying_key().to_bytes())
+                ))
+                .await as u64;
+            let e_total: u64 = e
+                .one_i64(&format!("SELECT total_e FROM {s}.fl_launches WHERE id = '\\x{id}'"))
+                .await as u64;
+            assert_eq!(e_i, plan.effective[i], "user {n}");
+            assert_eq!(e_total, plan.total);
+            let sh = alloc::share(e_i, plan.total, t, spent, RATE, amount);
+            let toks = e
+                .one_i64(&format!(
+                    "SELECT available FROM {s}.token_balances WHERE mint = '{mint}' AND anon_pubkey = '\\x{}'",
+                    hex::encode(user(n).verifying_key().to_bytes())
+                ))
+                .await as u64;
+            assert_eq!(toks, sh.tokens, "user {n} tokens");
+            assert!(sh.charge_zat <= amount);
+            let fee = if n == 1 { 100_000 } else { 0 };
+            assert_eq!(
+                e.avail(n).await,
+                (100_000_000 - fee - sh.charge_zat as i64, 0),
+                "user {n} zec"
+            );
+            tok_sum += toks;
+            if n == 1 {
+                // Creator: within 5 % of the supply, locked 24 h.
+                assert!(toks <= SUPPLY / 20, "{toks}");
+                assert_eq!(
+                    e.one_i64(&format!(
+                        "SELECT count(*) FROM {s}.creator_tokens WHERE mint = '{mint}' AND locked_amount = {toks}
+                           AND locked_until >= now() + interval '24 hours'"
+                    ))
+                    .await,
+                    1
+                );
+            }
+        }
+        assert!(tok_sum <= t, "Σ t_i ≤ T");
+        // Owner view after settle; secret erased; launch visible as launched in the list.
+        let pf = e.signed(&user(2), "GET", "/api/portfolio", "").await.body;
+        let b = &pf["fairBids"][0];
+        assert_eq!(b["status"], "settled");
+        assert_eq!(b["amountZat"], "1000000");
+        assert!(b["tokenAmount"].as_str().is_some() && b["chargedZat"].as_str().is_some());
+        assert_eq!(pf["holdings"][0]["mint"], mint);
+        assert_eq!(pf["actions"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE mint_secret IS NOT NULL"
+            ))
+            .await,
+            0
+        );
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE settled_at IS NULL"
+            ))
+            .await,
+            0
+        );
+        // Creator lock applies to the fair allocation.
+        let sell = json!({"op":"sell","venue":"pumpfun","mint":mint,"amount":"1","minZecOut":"100000"}).to_string();
+        assert_eq!(
+            code(&e.signed(&user(1), "POST", "/api/actions", &sell).await),
+            "creator_locked"
+        );
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn fair_launch_hidden_when_disabled() {
+        let Some(e) = setup().await else { return };
+        e.fund(1, 0, 100_000_000).await;
+        assert_eq!(e.get("/api/launches").await.status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            e.get(&format!("/api/launches/{}", "00".repeat(16))).await.status,
+            StatusCode::NOT_FOUND
+        );
+        let unknown = e.signed(&user(1), "POST", "/api/actions", r#"{"op":"nope"}"#).await;
+        let fl = e.signed(&user(1), "POST", "/api/actions", &create_body()).await;
+        assert_eq!(fl.status, StatusCode::BAD_REQUEST);
+        assert_eq!(fl.body, unknown.body, "indistinguishable from an unknown op");
+        e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+        let pool = e.get("/api/pool").await.body;
+        assert_eq!(pool["features"]["fairLaunch"], false);
+        assert!(pool.get("fairLaunch").is_none());
+        let pf = e.signed(&user(1), "GET", "/api/portfolio", "").await.body;
+        assert!(pf.get("fairBids").is_none() && pf.get("fairLaunches").is_none());
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn fair_launch_cancel_and_failures() {
+        let forged = Arc::new(AtomicBool::new(false));
+        let url = mock_drand(forged).await;
+        let Some(e) = fair_env(url).await else { return };
+        let s = e.schema.clone();
+        for n in 1..=3 {
+            e.fund(n, 0, 100_000_000).await;
+        }
+        // drand: future round → 425 → TooEarly; known round → verified beacon.
+        assert!(matches!(
+            e.state.drand.fetch(99_999_999_999).await,
+            unzeen_api::fair::Fetch::TooEarly
+        ));
+        assert!(matches!(
+            e.state.drand.fetch(1000).await,
+            unzeen_api::fair::Fetch::Beacon(_)
+        ));
+
+        // Creator cancels: only the creator (others get 404), everything released.
+        let a = e.open_launch(1).await;
+        let ct2 = sealed(2, &a, 1_000_000);
+        assert_eq!(e.bid(2, &a, 1_000_000, &ct2).await.status, StatusCode::OK);
+        let cl = json!({"op":"fl_cancel_launch","launchId":a}).to_string();
+        assert_eq!(
+            e.signed(&user(2), "POST", "/api/actions", &cl).await.status,
+            StatusCode::NOT_FOUND
+        );
+        let r = e.signed(&user(1), "POST", "/api/actions", &cl).await;
+        assert_eq!(r.body["status"], "executed", "{:?}", r.body);
+        assert_eq!(e.avail(1).await, (100_000_000, 0));
+        assert_eq!(e.avail(2).await, (100_000_000, 0));
+        assert_eq!(e.wait_status(&a, "cancelled").await["status"], "cancelled");
+        assert_eq!(
+            code(&e.bid(3, &a, 1_000_000, &sealed(3, &a, 1_000_000)).await),
+            "launch_closed"
+        );
+
+        // No bids at all → failed (no_bids), fee returned.
+        let b = e.open_launch(1).await;
+        e.close(&b).await;
+        let l = e.wait_status(&b, "failed").await;
+        assert_eq!(l["failure"], "no_bids");
+        assert!(l["commitment"]["root"].as_str().is_some());
+        assert_eq!(e.avail(1).await, (100_000_000, 0));
+
+        // Relayer failure → failed (tx_failed), every hold released.
+        let c = e.open_launch(1).await;
+        assert_eq!(
+            e.bid(3, &c, 1_000_000, &sealed(3, &c, 900_000)).await.status,
+            StatusCode::OK
+        );
+        e.close(&c).await;
+        e.wait_status(&c, "executing").await;
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'failed', error_code = 'slippage' WHERE op = 'fair_create'"
+        ))
+        .await;
+        let l = e.wait_status(&c, "failed").await;
+        assert_eq!(l["failure"], "tx_failed");
+        assert_eq!(e.avail(3).await, (100_000_000, 0));
+        assert_eq!(e.avail(1).await, (100_000_000, 0));
+        let pf = e.signed(&user(3), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(pf["fairBids"][0]["status"], "released");
+        assert_eq!(pf["fairBids"][0]["releasedZat"], "1000000");
+        e.drop_schema().await;
+    }
+}
+
+#[tokio::test]
+async fn creator_cap_per_venue_meteora_dbc() {
+    let Some(e) = setup_with(|c| c.venues = vec!["pumpfun".into(), "meteora-dbc".into()]).await else {
+        return;
+    };
+    e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+    let pool = e.get("/api/pool").await.body;
+    let rules = &pool["launchRules"];
+    assert_eq!(rules["maxInitialBuyLamports"], "1466000000");
+    assert_eq!(rules["maxInitialBuyLamportsByVenue"]["pumpfun"], "1466000000");
+    // 1% DBC fee instead of ~1.25%: 1.466 SOL × 5/5.013, rounded down to 0.001 SOL.
+    assert_eq!(rules["maxInitialBuyLamportsByVenue"]["meteora-dbc"], "1462000000");
+    // 1.465 SOL initial buy: fine on pump.fun, over the cap on meteora-dbc.
+    e.fund(8, 0, 100_000_000).await;
+    let create = |venue: &str| {
+        json!({"op":"create","venue":venue,"meta":{"name":"Cap","symbol":"CAP"},"initialBuyZec":"14650000"}).to_string()
+    };
+    let r = e.signed(&user(8), "POST", "/api/actions", &create("meteora-dbc")).await;
+    assert_eq!(code(&r), "creator_cap", "{:?}", r.body);
+    let r = e.signed(&user(8), "POST", "/api/actions", &create("pumpfun")).await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
     e.drop_schema().await;
 }

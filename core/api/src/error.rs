@@ -93,6 +93,16 @@ impl From<LedgerError> for ApiError {
                 "the creator's initial-buy tokens are locked (PoolInfo.launchRules.lockSecs)",
             ),
             LedgerError::CreatorCap => Self::creator_cap(),
+            LedgerError::LaunchClosed => Self::new(
+                StatusCode::CONFLICT,
+                "launch_closed",
+                "the bid window of this launch is closed",
+            ),
+            LedgerError::AlreadyBid => Self::new(
+                StatusCode::CONFLICT,
+                "already_bid",
+                "this key already has a sealed bid on this launch (fl_cancel first)",
+            ),
             LedgerError::Db(_) | LedgerError::Pool(_) => {
                 // Display of LedgerError carries only SQLSTATE / a coarse kind (N3).
                 tracing::error!(error = %e, "ledger failure");
