@@ -5,8 +5,7 @@
 ## Zcash
 | Слой | Что | Зачем |
 |---|---|---|
-| Нода | **Zebra** (`zebrad`) testnet | Источник блоков |
-| Light-сервер | **lightwalletd** (gRPC); альтернатива **Zaino** ⚠ проверить готовность | Compact-блоки для сканера |
+| Light-сервер | **Публичный lightwalletd** (`zec.rocks:443` / `testnet.zec.rocks:443`) + запасной. Своей ноды Zebra не ставим | Compact-блоки для сканера |
 | Кошелёк пула | **librustzcash**: `zcash_client_backend`, `zcash_client_sqlite`, `zcash_keys`, `orchard` | Скан, расшифровка memo, отправка shielded |
 | Образец кода | **zcash-devtool** | Примеры скана/отправки |
 | Пул | **Ironwood** (исправленная Orchard, Halo2; Orchard закрыт для депозитов с NU6.3, ZIP 258) | Без trusted setup |
@@ -36,11 +35,11 @@
 - **core** (Rust): `axum` (REST + WS), `tokio`, `sqlx` + Postgres.
 - **relayer** (TS, Node/Bun): очередь в Postgres → адаптеры.
 - **web**: Next.js — см. `docs/FRONTEND.md` (shadcn/ui, Motion, Phosphor, Geist, lightweight-charts).
-- **infra**: docker-compose — `zebrad`, `lightwalletd`, `postgres`.
+- **infra**: docker-compose — `postgres` (своей ноды нет).
 
 ## Поток
 ```
-ZODL → shielded ZEC + memo → Zebra → lightwalletd → core (librustzcash)
+ZODL → shielded ZEC + memo → публичный lightwalletd → core (librustzcash)
      → Postgres (реестр, очередь) → relayer → pump.fun / Meteora / Jupiter / Jito
      → Helius → core → WebSocket → web: «unzeen купил…»
 ```

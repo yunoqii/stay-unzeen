@@ -20,7 +20,7 @@
 - analyst: ревью сканера, протокола unz1/подписи, сквозная приватность → `docs/analysis/review-day2.md`
 
 ## Решения
-- Своя нода Zebra не обязательна: демо через публичный lightwalletd (zec.rocks) + запасной; в README — self-host/Tor; свой сервер на VPS в дни 13–14, если будет время
+- **Своей ноды Zebra/lightwalletd НЕ ставим** (окончательно, владелец). Только публичный lightwalletd (zec.rocks) + запасной; self-host/Tor — только строка в roadmap README
 
 ## Риски
 - mainnet init/sync не проверен вживую (заблокировано разрешениями) → ручной прогон владельцем
@@ -36,7 +36,6 @@
 - stonk.fun = Raydium LaunchLab, своего SDK нет → только торговля через Jupiter
 - Pyth Hermes требует API-ключ → курс из котировки 1Click
 - Нужны: рабочий демо-URL на весь период судейства (до 22.11) + видео 2 мин
-- Синк Zebra testnet долгий → разработка против публичного lightwalletd
 - Фаусет: только Valar 0.125 TAZ/сутки; zingo-cli на testnet — только ветка dev; ZODL testnet — сборка из исходников
 
 ## Нужно от владельца
