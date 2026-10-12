@@ -1,4 +1,4 @@
-// Mirrors docs/API.md v0.5 (token intel block at the bottom). Do not diverge: change the contract first.
+// Mirrors docs/API.md v0.6 (token intel and fair-launch blocks at the bottom). Do not diverge: change the contract first.
 //
 // Units (docs/API.md "Единицы сумм"):
 //   - spendable amounts: integer strings in BASE units (token base units, lamports, zatoshis)
@@ -85,14 +85,24 @@ export interface PoolInfo {
     withdrawTokenCostLamports?: Lamports;
     nowFeeLamports?: Lamports;
   };
+  /** v0.4: false -> POST create answers 503 venue_unavailable. */
+  createEnabled?: boolean;
   /** v0.5: what the server has switched on (not a build-time flag of the front). */
-  features?: { fullTrades: boolean };
+  features?: {
+    fullTrades: boolean;
+    /** v0.6: false -> the whole fair-launch surface is hidden (no UI, no code loaded). */
+    fairLaunch?: boolean;
+  };
+  /** v0.6: only with features.fairLaunch = true. */
+  fairLaunch?: FairLaunchParams;
   /** v0.5: creator rules of Unzeen launches, enforced by the ledger. 0 = rule off. */
   launchRules?: {
     lockSecs: number;
     capBps: number;
     /** Max first buy of `create`, lamports (after rounding). */
     maxInitialBuyLamports: Lamports;
+    /** v0.6: the same cap per enabled launchpad venue (create is checked against its own venue's curve). */
+    maxInitialBuyLamportsByVenue?: Record<string, Lamports>;
   };
   /** v0.4: public rate from the background cache. Absent = no rate (actions -> 503). */
   rate?: {
@@ -135,6 +145,10 @@ export interface Portfolio {
    * when it settled.
    */
   actions?: (ActionStatus & { id: string; kind?: ActionKind })[];
+  /** v0.6, only with features.fairLaunch: the key's last 20 sealed bids. */
+  fairBids?: FairBid[];
+  /** v0.6, only with features.fairLaunch: launches created by this key. */
+  fairLaunches?: OwnFairLaunch[];
 }
 
 /** Body of POST /api/actions. anonPubkey/nonce/ts/sig go in x-unzeen-* headers, not here. */
@@ -147,6 +161,7 @@ export type SignedAction =
       // name 1..32 chars, symbol 1..10 ASCII alnum, image: data:image/(png|jpeg|webp);base64,... up to 512 KiB
       meta: { name: string; symbol: string; image?: string };
       initialBuyZec?: Zatoshis;
+      exec?: ExecMode;
     }
   // Not supported yet (400 "op not supported yet"): claim, order_create, order_cancel, chat. UI shows "soon".
   | { op: "claim"; mint?: string }
@@ -168,7 +183,12 @@ export type SignedAction =
       amount: string; // zatoshis for buy kinds, token base units for sell kinds
     }
   | { op: "order_cancel"; orderId: string }
-  | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean };
+  | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean }
+  // v0.6 fair-launch (only with features.fairLaunch; otherwise 400 like an unknown op)
+  | { op: "fl_create"; venue: "pumpfun"; meta: { name: string; symbol: string; image?: string }; windowSecs: number }
+  | { op: "fl_bid"; launchId: string; holdZat: Zatoshis; ciphertext: string }
+  | { op: "fl_cancel"; launchId: string }
+  | { op: "fl_cancel_launch"; launchId: string };
 
 /**
  * What actually goes on the wire: the action plus `pad`, random filler that brings every body to a
@@ -194,6 +214,8 @@ export interface ActionReceipt {
   id: string; // 32 hex
   status: ActionState;
   rate?: RateUsed; // buy / sell / create / withdraw_token
+  /** v0.6: fl_create only. */
+  launchId?: string;
 }
 
 /** GET /api/actions/:id (owner only). */
@@ -276,6 +298,9 @@ export type ErrorCode =
   | "feature_disabled"
   | "creator_locked"
   | "creator_cap"
+  | "launch_closed" // 409 (v0.6)
+  | "already_bid" // 409 (v0.6)
+  | "bad_ciphertext" // 400 (v0.6)
   | "internal";
 
 export interface ApiErrorBody {
@@ -297,7 +322,12 @@ export const isPending = (x: unknown): x is PendingResponse =>
 export type RiskyExtension = "permanentDelegate" | "transferHook" | "transferFee" | "defaultFrozen" | "mintClose" | "pausable";
 
 /** Rules the pool enforces in its ledger for tokens launched through Unzeen. */
-export type UnzeenRule = "creator_initial_buy_locked_24h" | "initial_buy_cap_5pct" | "authorities_revoked" | (string & {});
+export type UnzeenRule =
+  | "creator_initial_buy_locked_24h"
+  | "initial_buy_cap_5pct"
+  | "authorities_revoked"
+  | "fair_launch_sealed_bids" // v0.6
+  | (string & {});
 
 /** GET /api/tokens/:mint/safety (200). Public, no signature, identical for every caller. */
 export interface TokenSafety {
@@ -359,4 +389,103 @@ export interface TokenTrade extends FeedEvent {
   trader: string;
   /** "dev" is never set on vault trades. */
   tags: TradeTag[];
+}
+
+// ---- fair-launch (docs/API.md v0.6, internal until 28.10) ----
+// Types only: erased at build time. Runtime code lives in lib/fair and components/fair, which load
+// only when PoolInfo.features.fairLaunch is true.
+
+/** PoolInfo.fairLaunch */
+export interface FairLaunchParams {
+  /** Allowed bid windows, seconds (default [120, 300, 600, 1800]). */
+  windowsSecs: number[];
+  /** Hold denominations, zatoshis, ascending. */
+  holdTiersZat: Zatoshis[];
+  /** Cap of the total buy, bps of supply. */
+  maxTotalBps: number;
+  /** Cap of the total buy on this network's curve; null = curve unknown (fl_create -> 503). */
+  maxTotalLamports: Lamports | null;
+  /** Cap of the creator's bid (= launchRules.maxInitialBuyLamports). */
+  creatorMaxLamports: Lamports | null;
+  /** Fewer valid bids than this -> result.bids = "<5". */
+  minBidsForCount: number;
+  drand: {
+    chainHash: string;
+    publicKey: string;
+    /** unix SECONDS */
+    genesis: number;
+    /** seconds */
+    period: number;
+    scheme: "bls-unchained-g1-rfc9380";
+  };
+}
+
+export type FairLaunchStatus = "open" | "closed" | "revealing" | "executing" | "launched" | "failed" | "cancelled";
+
+/** GET /api/launches, /api/launches/:id. Public, identical for everyone. */
+export interface FairLaunch {
+  /** 32 hex (16 bytes) = launchId in the bid plaintext. */
+  id: string;
+  venue: "pumpfun";
+  meta: { name: string; symbol: string };
+  status: FairLaunchStatus;
+  /** unix ms: the Delayed epoch boundary after fl_create. */
+  publishedAt: number;
+  /** unix ms = publishedAt + windowSecs * 1000 */
+  closeAt: number;
+  drand: {
+    /** R: encrypt to exactly this round. */
+    round: number;
+    /** t(R), unix ms (> closeAt). */
+    roundTime: number;
+    /** hex 48 bytes, after the beacon was verified. */
+    signature?: string;
+  };
+  /** From `closed` on. */
+  commitment?: {
+    /** hex sha256 */
+    root: string;
+    attestation?: {
+      /** SPL Memo tx whose data is exactly `root`. */
+      solanaTx: string;
+      slot: number;
+      signer: string;
+      matches: boolean;
+    };
+  };
+  /** launched only */
+  result?: {
+    mint: string;
+    solanaTx: string;
+    totalLamports: Lamports;
+    tokenAmount: TokenBaseUnits;
+    decimals: number;
+    priceSol: DecimalString;
+    bids: number | "<5";
+    oversubscribed: boolean;
+  };
+  failure?: "no_bids" | "drand_unavailable" | "venue_unavailable" | "tx_failed";
+  rules: UnzeenRule[];
+}
+
+/** Portfolio.fairBids (owner only). */
+export interface FairBid {
+  launchId: string;
+  holdZat: Zatoshis;
+  status: "sealed" | "cancelled" | "invalid" | "revealed" | "settled" | "released";
+  amountZat?: Zatoshis;
+  tokenAmount?: TokenBaseUnits;
+  chargedZat?: Zatoshis;
+  releasedZat?: Zatoshis;
+  /** From `closed` on: inclusion proof (hex). */
+  proof?: { leaf: string; path: string[] };
+}
+
+/** Portfolio.fairLaunches (creator only). */
+export interface OwnFairLaunch {
+  launchId: string;
+  /** scheduled: not published yet (now < publishedAt). */
+  status: "scheduled" | FairLaunchStatus;
+  publishedAt: number;
+  closeAt: number;
 }

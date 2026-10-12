@@ -96,6 +96,11 @@ export interface Api {
   getOrders(signer: Signer): Promise<Order[]>;
   getCreator(signer: Signer): Promise<CreatorToken[]>;
   getStats(): Promise<PlatformStats>;
+  /**
+   * Plain GET for features that bring their own endpoints and load on demand (their paths stay out
+   * of the main bundle). Same transport, signing and error mapping as everything else.
+   */
+  request<T>(path: string, signer?: Signer): Promise<T>;
   subscribeFeed(onEvent: (e: FeedEvent) => void, onStatus?: (s: FeedStatus) => void, opts?: FeedSubscription): () => void;
 }
 
@@ -190,6 +195,7 @@ function makeApi(send: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscr
     getOrders: (signer) => get("/api/orders", signer),
     getCreator: (signer) => get("/api/creator", signer),
     getStats: () => get("/api/stats"),
+    request: (path, signer) => get(path, signer),
     subscribeFeed,
   };
 }

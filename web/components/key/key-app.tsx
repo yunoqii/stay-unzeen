@@ -38,13 +38,14 @@ type Flow = null | "create" | "restore";
 const SURFACE = { duration: 0.3, ease: [0.16, 1, 0.3, 1] as const };
 
 /** Where to go after unlocking, from ?next=. Whitelisted: never an open redirect. */
-const NEXT_PATHS = ["/portfolio", "/pay"] as const;
+const NEXT_PATHS = ["/portfolio", "/pay", "/launch"] as const;
 
 function nextPath(): string | null {
   const n = new URLSearchParams(window.location.search).get("next");
   if (!n) return null;
   if ((NEXT_PATHS as readonly string[]).includes(n)) return n;
   // Back to a token page: base58 mint only, so the path can't point anywhere else.
+  if (/^\/launch\/[0-9a-f]{32}$/.test(n)) return n;
   return /^\/token\/[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(n) ? n : null;
 }
 

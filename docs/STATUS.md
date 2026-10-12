@@ -26,6 +26,8 @@
 - adapters (день 7): индексатор токенов (тик 45–75 с, пачка 8 с приманками, warm set, SSRF-safe метаданные, T1 без мастер-сида), Helius Sender с одинаковыми чаевыми; 228/228 тестов (проверил лид)
 - Спеки: Verify (`docs/analysis/verify.md`), лимитки/TP/SL (`docs/analysis/orders.md`)
 - web: стиль на всех страницах, интерактив, видео-обзор (локально, не в git)
+- core: fair-launch (tlock-js→Rust сходится, заявки, commitment root + memo-аттестация, распределение, флаг) — 120/120 тестов (проверил лид)
+- web: форма /launch (pump.fun/Meteora, лимит initial buy, правила), fair-launch UI (tlock в браузере, кольца, проверка включения, reveal) — код только в ленивом чанке; 202/202 (по отчёту)
 - Ревью кода дня 2: `docs/analysis/review-day3.md` (critical нет; N1–N11 розданы агентам)
 - Ревью безопасности/приватности дня 2: `docs/analysis/review-day2.md` (3 critical закрыты решениями владельца, high — в работе у backend/frontend)
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
@@ -95,5 +97,6 @@
 - Поиск секретов по всей истории (`gitleaks detect --log-opts="--all"` + grep mnemonic/uview/JWT) до открытия репо
 - VPS живой 29.10–22.11: мониторинг uptime, балансов TAZ/devnet-SOL/demo-ключей, запасной lightwalletd; логи по чек-листу H9
 - Description ≤2000 символов (what it does / why it doesn't leak / real vs mock) + demo-ключи
+- Публичный деплой до 28.10 собирать с `NEXT_PUBLIC_FAIR_LAUNCH_BUILD=0` и `UNZEEN_FAIR_LAUNCH=0` (кода fair-launch нет в бандле); 28.10 перед открытием репо — включить
 - 28.10 до 20:00 UTC открыть репо, проверить в инкогнито, отправить форму; после отправки черновик не пересохранять
 - Копить TAZ заранее (фаусет 0.125/сутки) для demo-ключей

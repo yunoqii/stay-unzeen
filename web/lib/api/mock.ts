@@ -15,6 +15,7 @@ import { checkUnz1, decodeUnz1, type ChainId } from "@/lib/crypto/unz1";
 import type { Network } from "@/lib/network";
 import { memoText, parseZip321 } from "@/lib/zip321";
 import { ApiError } from "./errors";
+import type { FairHost, FairMock } from "./mock-fair";
 import type {
   ActionReceipt,
   ActionStatus,
@@ -331,16 +332,32 @@ function poolAddress(network: Network): string {
 
 /** launchRules.maxInitialBuyLamports of the mock: about 5% of supply on a fresh curve. */
 const MOCK_MAX_INITIAL_BUY_LAMPORTS = BigInt(1_500_000_000);
+/** v0.6 per-venue cap: meteora-dbc narrowed by 5/5.013 (its 1 % fee vs ~1.25 %), as core does for now. */
+const mockVenueCap = (venue: string) => (venue === "meteora-dbc" ? (MOCK_MAX_INITIAL_BUY_LAMPORTS * BigInt(5000)) / BigInt(5013) : MOCK_MAX_INITIAL_BUY_LAMPORTS);
 
 /** Flat fee of exec "now" (field name pending in docs/API.md). Shown in quotes; the mock does not charge it. */
 const NOW_FEE_ZAT = "5000";
+const FEES = { nowFeeZat: NOW_FEE_ZAT, createFeeZat: "100000", withdrawZecFeeZat: "15000" };
+
+/** Mock twin of UNZEEN_CREATE_ENABLED: NEXT_PUBLIC_MOCK_CREATE_DISABLED=1 shows the disabled launch state. */
+const CREATE_ENABLED = process.env.NEXT_PUBLIC_MOCK_CREATE_DISABLED !== "1";
 
 export function mockPool(network: Network): PoolInfo {
-  const extra = { features: { fullTrades: FULL_FEED }, launchRules: { lockSecs: 86_400, capBps: 500, maxInitialBuyLamports: MOCK_MAX_INITIAL_BUY_LAMPORTS.toString() } };
+  const extra = {
+    createEnabled: CREATE_ENABLED,
+    features: { fullTrades: FULL_FEED, fairLaunch: FAIR_ON },
+    ...(fair ? { fairLaunch: fair.params(network) } : {}),
+    launchRules: {
+      lockSecs: 86_400,
+      capBps: 500,
+      maxInitialBuyLamports: MOCK_MAX_INITIAL_BUY_LAMPORTS.toString(),
+      maxInitialBuyLamportsByVenue: { pumpfun: MOCK_MAX_INITIAL_BUY_LAMPORTS.toString(), "meteora-dbc": mockVenueCap("meteora-dbc").toString() },
+    },
+  };
   const rate = { lamportsPerZec: MID_LAMPORTS_PER_ZEC.toString(), lamportsPerZecBuy: mockRate(true).lamportsPerZec, lamportsPerZecSell: mockRate(false).lamportsPerZec, spreadBps: Number(SPREAD_BPS), source: "fixed" as const, ts: Math.floor(Date.now() / 60_000) * 60_000 };
   return network === "mainnet"
-    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT }, rate, ...extra }
-    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT }, rate, ...extra };
+    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: FEES, rate, ...extra }
+    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: FEES, rate, ...extra };
 }
 
 interface MockAccount {
@@ -382,7 +399,8 @@ function portfolioOf(network: Network, pubkey: string): Portfolio {
     claimable: [],
     deposits: a.deposits.slice(0, 20).map((d) => ({ ...d })),
     // Pending in docs/API.md (analysis N-2): every own action rides along with the regular poll.
-    actions: [...actions.values()].filter((x) => x.network === network && x.pubkey === pubkey).map((x) => ({ id: x.id, ...x.status })),
+    actions: [...actions.values()].filter((x) => x.network === network && x.pubkey === pubkey && !x.hidden).map((x) => ({ id: x.id, ...x.status })),
+    ...(fair ? fair.portfolio(network, pubkey) : {}),
   };
 }
 
@@ -530,12 +548,13 @@ export const MOCK_EXEC_MODE_MS: Record<ExecMode, [number, number]> = {
   delayed: [8_000, 15_000],
   max: [25_000, 45_000],
 };
-const TRADE_OPS = new Set(["buy", "sell"]);
+const TRADE_OPS = new Set(["buy", "sell", "create"]);
 const WITHDRAW_OPS = new Set(["withdraw_token", "withdraw_zec"]);
 
-function execDelay(action: SignedAction): [number, number] {
+function execDelay(action: SignedAction, padOnly = false): [number, number] {
   const pad = (action as { pad?: unknown }).pad;
   if (pad !== undefined && (typeof pad !== "string" || pad.length > 8192)) throw new ApiError("bad_request", "pad: expected a string", 400);
+  if (padOnly) return [0, 0];
   const mode = "exec" in action ? action.exec : undefined;
   if (mode === undefined) return EXEC_DELAY_MS[action.op] ?? [5_000, 10_000];
   if (!isExecMode(mode)) throw new ApiError("bad_request", 'exec: expected "now" | "delayed" | "max"', 400);
@@ -560,6 +579,8 @@ interface MockAction {
   /** What is reserved until execution. */
   holdZat: bigint;
   holdToken?: { mint: string; amount: bigint };
+  /** fl_* ops: kept for nonce idempotency only, never listed in Portfolio.actions (v0.6). */
+  hidden?: boolean;
 }
 
 const actions = new Map<string, MockAction>();
@@ -635,8 +656,9 @@ function accept(network: Network, pubkey: string, action: SignedAction): Omit<Mo
     case "create": {
       const initial = action.initialBuyZec === undefined ? N0 : amountOf(action.initialBuyZec, "initialBuyZec", false);
       if (action.venue === "jupiter") throw new ApiError("bad_request", "create: jupiter is not a launchpad", 400);
+      if (!CREATE_ENABLED) throw new ApiError("venue_unavailable", "create is not enabled", 503);
       if (initial > N0 && initial < minAction) throw new ApiError("below_minimum", "initialBuyZec below PoolInfo.minActionZat", 422);
-      if ((initial * BigInt(mockRate(true).lamportsPerZec)) / ZAT > MOCK_MAX_INITIAL_BUY_LAMPORTS) throw new ApiError("creator_cap", "initial buy above launchRules.maxInitialBuyLamports", 422);
+      if ((initial * BigInt(mockRate(true).lamportsPerZec)) / ZAT > mockVenueCap(action.venue)) throw new ApiError("creator_cap", "initial buy above launchRules.maxInitialBuyLamportsByVenue", 422);
       const total = initial + CREATE_FEE_ZAT;
       if (a.zecBalance < total) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
       a.zecBalance -= total;
@@ -788,6 +810,15 @@ function submit(network: Network, method: "POST", path: string, body: string | u
   }
   if (!action?.op) throw new ApiError("bad_request", "op required", 400);
   if (UNSUPPORTED_OPS.has(action.op)) throw new ApiError("bad_request", "op not supported yet", 400);
+  if (process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1" && fair && action.op.startsWith("fl_")) {
+    execDelay({ op: "fl", pad: (action as { pad?: unknown }).pad } as unknown as SignedAction, true);
+    const receipt = fair.submit(network, pubkey, action);
+    seenNonces.set(nonceKey, now + 120_000);
+    const act: MockAction = { id: receipt.id, network, pubkey, action, nonceKey, bodyHash: hash, receipt, status: { status: receipt.status }, holdZat: N0, hidden: true };
+    actions.set(receipt.id, act);
+    byNonce.set(nonceKey, receipt.id);
+    return receipt;
+  }
   const [lo, hi] = execDelay(action);
   // Rejected actions do not burn the nonce (docs/API.md).
   const accepted = accept(network, pubkey, action);
@@ -811,8 +842,10 @@ export async function handle(
   headers: Partial<SignedHeaders>,
 ): Promise<unknown> {
   init(Date.now());
+  await loadFair();
   await delay(rand(120, 380));
   scan(Date.now());
+  fair?.tick(Date.now());
   const url = new URL(pathWithQuery, "http://mock.local");
   const p = url.pathname;
   const q = url.searchParams;
@@ -861,6 +894,7 @@ export async function handle(
       return candles(s, tf, num("from"), num("to"));
     }
     if (p === "/api/pool") return mockPool(network);
+    if (process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1" && fair && (p === "/api/launches" || p.startsWith("/api/launches/"))) return fair.get(network, p, q);
     if ((m = p.match(/^\/api\/actions\/([^/]+)$/))) {
       const pub = authorize(network, method, pathWithQuery, body, headers);
       const a = actions.get(decodeURIComponent(m[1]));
@@ -1079,3 +1113,56 @@ export function subscribeFeed(onEvent: (e: FeedEvent) => void, mint?: string): (
     clearTimeout(timer);
   };
 }
+
+// ---- fair-launch (v0.6), only in builds with NEXT_PUBLIC_MOCK_FAIR_LAUNCH=1 ----
+// The flag is inlined at build time: without it the import below is dead code and lib/api/mock-fair.ts
+// (and everything it pulls in) is not part of the bundle at all.
+
+const FAIR_ON = process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1";
+let fair: FairMock | null = null;
+let fairLoading: Promise<void> | null = null;
+
+function loadFair(): Promise<void> | void {
+  if (process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH !== "1") return;
+  return (fairLoading ??= import("./mock-fair").then((m) => {
+    fair = m.createFairMock(fairHost);
+  }));
+}
+
+const FAIR_TOKEN_PRICE = 2.8e-8;
+
+const fairHost: FairHost = {
+  pool: (network) => mockPool(network),
+  balance: (network, pubkey) => account(network, pubkey),
+  buyRate: () => mockRate(true),
+  creatorMaxLamports: MOCK_MAX_INITIAL_BUY_LAMPORTS.toString(),
+  createFeeZat: CREATE_FEE_ZAT,
+  b58: (len) => b58(len),
+  launch(network, x) {
+    void network;
+    const now = Date.now();
+    const venue: Venue = "pumpfun";
+    const s: MockTokenState = {
+      token: { mint: mintFor(venue, x.symbol + ":" + hex16()), symbol: x.symbol, name: x.name, image: x.image, venue, status: "curve", decimals: DECIMALS[venue], priceSol: "0", marketCapSol: "0", createdAt: now },
+      price: FAIR_TOKEN_PRICE,
+      supply: SUPPLY,
+      heat: 3,
+    };
+    state!.push(s);
+    unzeenLaunches.add(s.token.mint);
+    const out = BigInt(toBaseUnits(Number(x.lamports) / 1e9 / FAIR_TOKEN_PRICE, s.token.decimals));
+    s.price *= 1 + Number(x.lamports) / 1e9 / 60;
+    syncTokenFields();
+    const tx = b58(88);
+    // One signature: create and the pooled buy land in the same transaction.
+    publish({ id: b58(16), kind: "create", venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: "0", solAmount: "0", decimals: s.token.decimals, solanaTx: tx, ts: now });
+    publish({ id: b58(16), kind: "buy", venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: x.lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
+    const price = out > N0 ? Number(x.lamports) / 1e9 / (Number(out) / 10 ** s.token.decimals) : FAIR_TOKEN_PRICE;
+    return { mint: s.token.mint, tokenAmount: out, decimals: s.token.decimals, solanaTx: tx, priceSol: plain(price, 6) };
+  },
+  creditTokens(network, pubkey, mint, amount) {
+    if (amount <= N0) return;
+    const h = holdingOf(account(network, pubkey), mint);
+    h.amount = (BigInt(h.amount) + amount).toString();
+  },
+};

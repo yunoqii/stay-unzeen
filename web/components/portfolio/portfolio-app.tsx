@@ -1,11 +1,14 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { WarningCircle } from "@phosphor-icons/react";
 import { useActions } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
 import { useNetwork } from "@/lib/network";
+import { sealedOn } from "@/lib/features";
+import type { FairBid, OwnFairLaunch } from "@/lib/api/types";
 import { usePool } from "@/hooks/use-pool";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { useTokens } from "@/hooks/use-tokens";
@@ -17,6 +20,12 @@ import { PeekProvider } from "./peek";
 import { SessionActivity } from "./session-activity";
 import { SettingsCard } from "./settings-card";
 import { WithdrawPanel, type WithdrawTab } from "./withdraw-panel";
+
+// On-demand block, only when the server reports the feature (and the build carries it).
+const Sealed =
+  process.env.NEXT_PUBLIC_FAIR_LAUNCH_BUILD !== "0"
+    ? dynamic<{ bids: FairBid[]; launches: OwnFairLaunch[] }>(() => import("@/components/fair/fair-portfolio"), { ssr: false })
+    : null;
 
 export function PortfolioApp() {
   return (
@@ -80,6 +89,9 @@ function PortfolioView() {
             </motion.div>
           )}
         </AnimatePresence>
+        {Sealed && sealedOn(pool) && portfolio && (portfolio.fairBids?.length || portfolio.fairLaunches?.length) ? (
+          <Sealed bids={portfolio.fairBids ?? []} launches={portfolio.fairLaunches ?? []} />
+        ) : null}
         <SessionActivity actions={actions} />
         <DepositsList deposits={portfolio?.deposits ?? null} confirmations={pool?.confirmations} />
         <SettingsCard />

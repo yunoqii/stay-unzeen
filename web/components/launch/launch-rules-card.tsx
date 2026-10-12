@@ -10,13 +10,14 @@ import { usePool } from "@/hooks/use-pool";
  * The launch form will cap its "initial buy" input at maxInitialBuyZat; the backend answers
  * creator_cap above it anyway.
  */
-export function LaunchRulesCard() {
+export function LaunchRulesCard({ extra = [], firstBuyLabel = "Your first buy" }: { extra?: string[]; firstBuyLabel?: string } = {}) {
   const { pool } = usePool();
   const r = pool?.launchRules;
   const maxZat = maxInitialBuyZat(pool);
   const rules = (["creator_initial_buy_locked_24h", "initial_buy_cap_5pct", "authorities_revoked"] as const)
     .map((id) => ruleText(id, r))
-    .filter((t): t is string => t !== null);
+    .filter((t): t is string => t !== null)
+    .concat(extra);
   return (
     <section aria-labelledby="launch-rules-t" className="grid gap-px bg-border sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
       <div className="bg-background p-5">
@@ -34,7 +35,7 @@ export function LaunchRulesCard() {
         <p className="mt-3 text-[11px] text-faint-foreground">{RULES_SCOPE} Buyers see them as a badge on the token page.</p>
       </div>
       <div className="bg-background p-5">
-        <p className="text-sm font-medium">Your first buy</p>
+        <p className="text-sm font-medium">{firstBuyLabel}</p>
         <p className="tabular mt-3 text-2xl tracking-tight">
           {maxZat === null || !r ? "—" : `up to ${formatZec(maxZat.toString())} ZEC`}
         </p>

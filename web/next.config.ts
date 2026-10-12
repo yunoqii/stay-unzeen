@@ -64,6 +64,13 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  // Build-time feature switches, always inlined (an unset NEXT_PUBLIC_* var is otherwise left as a runtime
+  // lookup, and the code behind it is not dropped from the bundle).
+  env: {
+    NEXT_PUBLIC_MOCK_FAIR_LAUNCH: process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH ?? "",
+    NEXT_PUBLIC_FAIR_LAUNCH_BUILD: process.env.NEXT_PUBLIC_FAIR_LAUNCH_BUILD ?? "",
+    NEXT_PUBLIC_MOCK_CREATE_DISABLED: process.env.NEXT_PUBLIC_MOCK_CREATE_DISABLED ?? "",
+  },
   cacheComponents: true,
   partialPrefetching: true,
   poweredByHeader: false,

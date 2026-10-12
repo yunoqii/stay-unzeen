@@ -3,7 +3,14 @@
 
 import type { ApiErrorBody, ErrorCode } from "./types";
 
-const CODES: readonly ErrorCode[] = [
+/**
+ * Codes of features that load on demand (fair-launch, v0.6) are registered by their own chunk via
+ * registerErrorCodes(), so the main bundle carries neither their names nor their texts.
+ */
+type LateCode = "launch_closed" | "already_bid" | "bad_ciphertext";
+type BaseCode = Exclude<ErrorCode, LateCode>;
+
+const CODES: BaseCode[] = [
   "bad_request",
   "unauthorized",
   "not_found",
@@ -68,7 +75,7 @@ export async function errorFromResponse(res: Response, label: string): Promise<A
   const retry = res.headers.get("retry-after");
   const retryAfter = retry && /^\d+$/.test(retry) ? Number(retry) : undefined;
   if (isApiErrorBody(body)) {
-    const code = (CODES as readonly string[]).includes(body.error.code)
+    const code = knownCode(body.error.code)
       ? body.error.code
       : (STATUS_FALLBACK[res.status] ?? "internal");
     return new ApiError(code, `${label}: ${body.error.message}`, res.status, body.error.details, retryAfter);
@@ -76,7 +83,20 @@ export async function errorFromResponse(res: Response, label: string): Promise<A
   return new ApiError(STATUS_FALLBACK[res.status] ?? "internal", `${label} → ${res.status}`, res.status, undefined, retryAfter);
 }
 
-const UI_TEXT: Record<ErrorCode | ClientErrorCode, string> = {
+const lateCodes = new Set<string>();
+const lateText = new Map<string, string>();
+
+/** Teach the error mapper codes of an on-demand feature (called by that feature's chunk). */
+export function registerErrorCodes(texts: Partial<Record<ErrorCode, string>>) {
+  for (const [code, text] of Object.entries(texts)) {
+    lateCodes.add(code);
+    if (text) lateText.set(code, text);
+  }
+}
+
+const knownCode = (c: string): c is ErrorCode => (CODES as readonly string[]).includes(c) || lateCodes.has(c);
+
+const UI_TEXT: Record<BaseCode | ClientErrorCode, string> = {
   bad_request: "Something in this request is off. Check the values and try again.",
   unauthorized: "Your anon key could not be verified. Check your device clock and try again.",
   not_found: "Not found. Unzeen does not track this yet.",
@@ -101,7 +121,7 @@ const UI_TEXT: Record<ErrorCode | ClientErrorCode, string> = {
 export function errorText(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.code === "rate_limited" && e.retryAfter) return `Too many requests. Try again in ${e.retryAfter}s.`;
-    return UI_TEXT[e.code];
+    return UI_TEXT[e.code as BaseCode | ClientErrorCode] ?? lateText.get(e.code) ?? UI_TEXT.internal;
   }
   return UI_TEXT.internal;
 }

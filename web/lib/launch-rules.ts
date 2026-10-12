@@ -34,9 +34,15 @@ export function ruleText(rule: UnzeenRule, r: Rules | undefined = undefined): st
   }
 }
 
-/** Largest initialBuyZec (zatoshis) that stays under maxInitialBuyLamports at the pool's buy rate; null if unknown. */
-export function maxInitialBuyZat(pool: Pick<PoolInfo, "launchRules" | "rate"> | null | undefined): bigint | null {
-  const max = pool?.launchRules?.maxInitialBuyLamports;
+/** Cap of the first buy of `create` on `venue` (v0.6 per-venue cap, falling back to the pump.fun one). */
+export function maxInitialBuyLamports(pool: Pick<PoolInfo, "launchRules"> | null | undefined, venue?: string): string | undefined {
+  const r = pool?.launchRules;
+  return (venue && r?.maxInitialBuyLamportsByVenue?.[venue]) || r?.maxInitialBuyLamports;
+}
+
+/** Largest initialBuyZec (zatoshis) that stays under the venue's cap at the pool's buy rate; null if unknown. */
+export function maxInitialBuyZat(pool: Pick<PoolInfo, "launchRules" | "rate"> | null | undefined, venue?: string): bigint | null {
+  const max = maxInitialBuyLamports(pool, venue);
   const rate = pool?.rate?.lamportsPerZecBuy;
   if (!max || !/^\d+$/.test(max) || max === "0" || !rate || !/^\d+$/.test(rate) || rate === "0") return null;
   return (BigInt(max) * ZAT_PER_ZEC) / BigInt(rate);
