@@ -8,6 +8,7 @@
 
 import { base58 } from "@scure/base";
 import { bodyHash, HEADER_NONCE, verifyRequest, type SignedHeaders } from "@/lib/crypto/sign";
+import { isExecMode } from "@/lib/exec";
 import { isSolanaAddress } from "@/lib/trade";
 import { checkWithdrawUa } from "@/lib/zcash/ua";
 import { checkUnz1, decodeUnz1, type ChainId } from "@/lib/crypto/unz1";
@@ -20,6 +21,7 @@ import type {
   Candle,
   CandleTimeframe,
   DepositInfo,
+  ExecMode,
   FeedEvent,
   PlatformStats,
   PoolInfo,
@@ -322,10 +324,13 @@ function poolAddress(network: Network): string {
   return out;
 }
 
+/** Flat fee of exec "now" (field name pending in docs/API.md). Shown in quotes; the mock does not charge it. */
+const NOW_FEE_ZAT = "5000";
+
 export function mockPool(network: Network): PoolInfo {
   return network === "mainnet"
-    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3 }
-    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3 };
+    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT } }
+    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: { nowFeeZat: NOW_FEE_ZAT } };
 }
 
 interface MockAccount {
@@ -366,6 +371,8 @@ function portfolioOf(network: Network, pubkey: string): Portfolio {
     holdings: a.holdings.map((h) => ({ ...h })),
     claimable: [],
     deposits: a.deposits.slice(0, 20).map((d) => ({ ...d })),
+    // Pending in docs/API.md (analysis N-2): every own action rides along with the regular poll.
+    actions: [...actions.values()].filter((x) => x.network === network && x.pubkey === pubkey).map((x) => ({ id: x.id, ...x.status })),
   };
 }
 
@@ -503,6 +510,33 @@ const EXEC_DELAY_MS: Record<string, [number, number]> = {
   withdraw_token: [8_000, 16_000],
   withdraw_zec: [12_000, 24_000],
 };
+
+/**
+ * Execution mode timing (owner decision 12.10). "now" is real-time (1-3 s); "delayed" (30-60 s) and
+ * "max" (5-15 min) are compressed so a demo does not stall. Without `exec` the op's own delay applies.
+ */
+export const MOCK_EXEC_MODE_MS: Record<ExecMode, [number, number]> = {
+  now: [1_000, 3_000],
+  delayed: [8_000, 15_000],
+  max: [25_000, 45_000],
+};
+const TRADE_OPS = new Set(["buy", "sell"]);
+const WITHDRAW_OPS = new Set(["withdraw_token", "withdraw_zec"]);
+
+function execDelay(action: SignedAction): [number, number] {
+  const pad = (action as { pad?: unknown }).pad;
+  if (pad !== undefined && (typeof pad !== "string" || pad.length > 8192)) throw new ApiError("bad_request", "pad: expected a string", 400);
+  const mode = "exec" in action ? action.exec : undefined;
+  if (mode === undefined) return EXEC_DELAY_MS[action.op] ?? [5_000, 10_000];
+  if (!isExecMode(mode)) throw new ApiError("bad_request", 'exec: expected "now" | "delayed" | "max"', 400);
+  if (WITHDRAW_OPS.has(action.op)) {
+    // Withdrawals are never instant: that would link a trade to the receiving address on-chain.
+    if (mode === "now") throw new ApiError("bad_request", "exec: withdrawals take delayed | max", 400);
+    return mode === "max" ? MOCK_EXEC_MODE_MS.max : EXEC_DELAY_MS[action.op];
+  }
+  if (!TRADE_OPS.has(action.op)) throw new ApiError("bad_request", `exec is not allowed for ${action.op}`, 400);
+  return MOCK_EXEC_MODE_MS[mode];
+}
 
 interface MockAction {
   id: string;
@@ -741,6 +775,7 @@ function submit(network: Network, method: "POST", path: string, body: string | u
   }
   if (!action?.op) throw new ApiError("bad_request", "op required", 400);
   if (UNSUPPORTED_OPS.has(action.op)) throw new ApiError("bad_request", "op not supported yet", 400);
+  const [lo, hi] = execDelay(action);
   // Rejected actions do not burn the nonce (docs/API.md).
   const accepted = accept(network, pubkey, action);
   seenNonces.set(nonceKey, now + 120_000);
@@ -748,7 +783,6 @@ function submit(network: Network, method: "POST", path: string, body: string | u
   const act: MockAction = { ...accepted, id, nonceKey, bodyHash: hash, receipt: { ...accepted.receipt, id } };
   actions.set(id, act);
   byNonce.set(nonceKey, id);
-  const [lo, hi] = EXEC_DELAY_MS[action.op] ?? [5_000, 10_000];
   setTimeout(() => execute(act), rand(lo, hi));
   return act.receipt;
 }

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { ArrowRight, ArrowSquareOut, CaretDown, Copy, ShieldCheck, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, ArrowSquareOut, CaretDown, Copy, Lightning, ShieldCheck, WarningCircle } from "@phosphor-icons/react";
 import { AnimatePresence, motion } from "motion/react";
 import { toast } from "sonner";
 import { API_MODE } from "@/lib/api/client";
@@ -228,6 +228,11 @@ function DepositRequest({
             </div>
           </div>
         </div>
+
+        <p className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Lightning size={14} weight="light" className="shrink-0 text-zec" aria-hidden />
+          Top up in advance — faster trades and better privacy
+        </p>
 
         <div role="note" className="flex gap-2.5 rounded-xl border border-zec/30 bg-zec-soft px-3.5 py-3 text-xs text-pretty">
           <WarningCircle size={16} weight="light" className="mt-px shrink-0 text-zec" aria-hidden />

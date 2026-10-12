@@ -15,6 +15,7 @@ import { DepositsList } from "./deposits-list";
 import { HoldingsList } from "./holdings-list";
 import { PeekProvider } from "./peek";
 import { SessionActivity } from "./session-activity";
+import { SettingsCard } from "./settings-card";
 import { WithdrawPanel, type WithdrawTab } from "./withdraw-panel";
 
 export function PortfolioApp() {
@@ -28,7 +29,7 @@ export function PortfolioApp() {
 }
 
 function PortfolioView() {
-  const { portfolio, error } = usePortfolio(10_000);
+  const { portfolio, error } = usePortfolio();
   const { pool } = usePool();
   const { tokens } = useTokens();
   const [withdraw, setWithdraw] = useState<{ tab: WithdrawTab; mint: string | null } | null>(null);
@@ -80,6 +81,7 @@ function PortfolioView() {
         </AnimatePresence>
         <SessionActivity actions={actions} />
         <DepositsList deposits={portfolio?.deposits ?? null} confirmations={pool?.confirmations} />
+        <SettingsCard />
       </div>
     </div>
   );

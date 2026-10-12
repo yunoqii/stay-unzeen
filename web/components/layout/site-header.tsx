@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { KeyStatus } from "./key-status";
 import { NetworkBanner } from "./network-banner";
 import { NetworkSwitch } from "./network-switch";
+import { PortfolioSync } from "./portfolio-sync";
 import { Wordmark } from "./logo";
 import { NAV, isActive } from "./nav-items";
 
@@ -37,6 +38,7 @@ export function SiteHeader() {
           )}
           <NetworkSwitch />
           <KeyStatus />
+          <PortfolioSync />
         </div>
       </div>
       <NetworkBanner />

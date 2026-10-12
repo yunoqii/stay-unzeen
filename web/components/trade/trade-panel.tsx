@@ -10,20 +10,19 @@ import { lastRate, submitAction, useAction, useActivityVersion } from "@/lib/act
 import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, unitsToNumber, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
-import { quoteBuy, quoteSell } from "@/lib/trade";
+import { nowFee as poolNowFee, resolveExec, useDefaultExec, withExec, type ExecMode, type NowFee } from "@/lib/exec";
+import { lamportsToZatCeil, quoteBuy, quoteSell } from "@/lib/trade";
 import { cn } from "@/lib/utils";
 import { usePool } from "@/hooks/use-pool";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { Button } from "@/components/ui/button";
 import { ActionStatusCard } from "./action-status";
+import { ExecSwitch } from "./exec-switch";
 
 type Side = "buy" | "sell";
 const SLIPPAGE_BPS = [50, 100, 300, 500];
 const BUY_PRESETS = ["0.01", "0.05", "0.1"];
 const SELL_PRESETS = [25, 50, 100];
-
-/** The batch-privacy field is not in docs/API.md yet: the switch is shown, not sent. */
-const MAX_PRIVACY_IN_API = false;
 
 export function TradePanel({ token, priceSol }: { token: Token; priceSol: string }) {
   const key = useKeyState();
@@ -86,12 +85,14 @@ function KeyPrompt({ mint, locked }: { mint: string; locked: boolean }) {
 
 function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceSol: string }) {
   const network = useNetwork();
-  const { portfolio } = usePortfolio(15_000);
+  const { portfolio } = usePortfolio();
   const { pool } = usePool();
   useActivityVersion(); // re-render when a new rate arrives
   const [amount, setAmount] = useState("");
   const [slippage, setSlippage] = useState(100);
-  const [maxPrivacy, setMaxPrivacy] = useState(false);
+  const profileExec = useDefaultExec(network);
+  const [execOverride, setExecOverride] = useState<ExecMode | null>(null);
+  const exec = resolveExec(profileExec, execOverride);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -150,9 +151,12 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
     if (!canSubmit || parsed === null) return;
     setBusy(true);
     setError(null);
-    const action: SignedAction = isBuy
-      ? { op: "buy", venue, mint: token.mint, zecIn: parsed.toString(), minOut: (quote && "minOut" in quote ? quote.minOut : BigInt(0)).toString() }
-      : { op: "sell", venue, mint: token.mint, amount: parsed.toString(), minZecOut: (quote && "minZecOut" in quote ? quote.minZecOut : BigInt(0)).toString() };
+    const action: SignedAction = withExec(
+      isBuy
+        ? { op: "buy", venue, mint: token.mint, zecIn: parsed.toString(), minOut: (quote && "minOut" in quote ? quote.minOut : BigInt(0)).toString() }
+        : { op: "sell", venue, mint: token.mint, amount: parsed.toString(), minZecOut: (quote && "minZecOut" in quote ? quote.minZecOut : BigInt(0)).toString() },
+      exec,
+    );
     try {
       const it = await submitAction(network, action, {
         op: side,
@@ -163,6 +167,7 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
       });
       setActiveId(it.id);
       setAmount("");
+      setExecOverride(null); // the override was for this order only
     } catch (e) {
       setError(e instanceof ApiError ? e : new ApiError("internal", String(e)));
     } finally {
@@ -248,7 +253,15 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
         </p>
       )}
 
-      <Quote side={side} token={token} quote={quote} hasAmount={parsed !== null && !inputError} rate={!!rate} slippage={slippage} />
+      <Quote
+        side={side}
+        token={token}
+        quote={quote}
+        hasAmount={parsed !== null && !inputError}
+        rate={rate ? BigInt(rate.lamportsPerZec) : null}
+        slippage={slippage}
+        nowFee={exec === "now" ? { fee: poolNowFee(pool) } : null}
+      />
 
       <fieldset>
         <legend className="text-xs text-muted-foreground">Max slippage</legend>
@@ -261,27 +274,7 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
         </div>
       </fieldset>
 
-      <label className={cn("flex items-start gap-3 rounded-xl border border-border px-3 py-2.5", !MAX_PRIVACY_IN_API && "opacity-60")}>
-        <input
-          type="checkbox"
-          role="switch"
-          checked={maxPrivacy}
-          disabled={!MAX_PRIVACY_IN_API}
-          onChange={(e) => setMaxPrivacy(e.target.checked)}
-          className="peer sr-only"
-        />
-        <span
-          aria-hidden
-          className="relative mt-0.5 h-5 w-9 shrink-0 rounded-full border border-border-strong bg-surface-2 transition-colors peer-checked:bg-zec/30 peer-focus-visible:ring-2 peer-focus-visible:ring-ring"
-        >
-          <span className={cn("absolute top-0.5 left-0.5 size-3.5 rounded-full bg-muted-foreground transition-transform duration-200", maxPrivacy && "translate-x-4 bg-zec")} />
-        </span>
-        <span className="text-sm">
-          Max privacy <span className="text-muted-foreground">(slower)</span>
-          {!MAX_PRIVACY_IN_API && <span className="ml-2 rounded-full border border-border px-1.5 py-px text-[10px] text-faint-foreground uppercase">soon</span>}
-          <span className="mt-0.5 block text-xs text-faint-foreground">Waits for a later, bigger batch: up to 15 min. Harder to match by timing.</span>
-        </span>
-      </label>
+      <ExecSwitch value={exec} onChange={(m) => setExecOverride(m === profileExec ? null : m)} profileDefault={profileExec} />
 
       {graduated && venue === "jupiter" && (
         <p className="flex gap-2 text-xs text-muted-foreground">
@@ -334,13 +327,16 @@ function Quote({
   hasAmount,
   rate,
   slippage,
+  nowFee,
 }: {
   side: Side;
   token: Token;
   quote: ReturnType<typeof quoteBuy> | ReturnType<typeof quoteSell>;
   hasAmount: boolean;
-  rate: boolean;
+  rate: bigint | null;
   slippage: number;
+  /** Shown when exec is "now"; fee null = the pool does not publish it yet. */
+  nowFee: { fee: NowFee | null } | null;
 }) {
   const sym = `$${token.symbol}`;
   if (!hasAmount)
@@ -372,6 +368,20 @@ function Quote({
           ["Trade size", `≈ ${formatSol(Number(quote.lamports) / 1e9)} SOL`],
           [`Min received · ${slippage / 100}%`, `${formatZec(quote.minZecOut.toString())} ZEC`],
         ];
+  if (nowFee)
+    rows.push([
+      "Priority fee · Now",
+      nowFee.fee === null ? (
+        "Flat, set by the pool, from balance"
+      ) : "zat" in nowFee.fee ? (
+        `${formatZec(nowFee.fee.zat.toString())} ZEC from balance`
+      ) : (
+        <span key="fee">
+          {formatSol(Number(nowFee.fee.lamports) / 1e9)} SOL
+          {rate !== null && <span className="text-faint-foreground"> · ≈ {formatZec(lamportsToZatCeil(nowFee.fee.lamports, rate).toString())} ZEC from balance</span>}
+        </span>
+      ),
+    ]);
   return (
     <dl className="space-y-1.5 rounded-xl border border-border px-3 py-3 text-xs">
       {rows.map(([k, v], i) => (

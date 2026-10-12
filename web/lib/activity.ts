@@ -1,6 +1,6 @@
 "use client";
 
-// Actions this tab submitted, tracked until they settle (GET /api/actions/:id).
+// Actions this tab submitted, tracked until they settle (statuses from the portfolio poll, see below).
 // Memory only: never written to storage, gone on reload. Withdrawal destinations are not kept at all,
 // so nothing here can tie a Solana address to the anon key. Also remembers the last rate the pool
 // fixed for us: the API has no public rate endpoint, so quotes use the most recent one we saw.
@@ -8,7 +8,7 @@
 import { useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { api, ApiError, errorText } from "@/lib/api/client";
-import type { ActionReceipt, ActionStatus, RateUsed, SignedAction } from "@/lib/api/types";
+import type { ActionReceipt, ActionStatus, ExecMode, RateUsed, SignedAction } from "@/lib/api/types";
 import { getSigner } from "@/lib/crypto/session";
 import type { Network } from "@/lib/network";
 
@@ -25,6 +25,8 @@ export interface TrackedAction {
   /** What was signed: zatoshis for buy / withdraw_zec, token base units for sell / withdraw_token. */
   amount: string;
   parts?: number;
+  /** Execution mode the action was signed with (drives "Sending…" vs "Queued for next batch"). */
+  exec?: ExecMode;
   submittedAt: number;
   status: ActionStatus;
   /** Polling gave up (long payout delays); the portfolio still reflects the outcome. */
@@ -60,43 +62,50 @@ export function lastRate(network: Network, side: "buy" | "sell"): RateUsed | nul
   return rates[network][side] ?? rates[network][side === "buy" ? "sell" : "buy"] ?? null;
 }
 
-const POLL_FAST = 2_000;
-const POLL_SLOW = 6_000;
+/** After this a still-queued action is marked stale (long payout delays); the balance still settles it. */
 const GIVE_UP_MS = 20 * 60_000;
 
-function poll(id: string) {
-  const it = items.get(id);
-  if (!it || it.status.status !== "queued") return;
-  const age = Date.now() - it.submittedAt;
-  if (age > GIVE_UP_MS) {
-    items.set(id, { ...it, stale: true });
-    emit();
-    return;
-  }
-  const next = () => setTimeout(() => poll(id), age < 60_000 ? POLL_FAST : POLL_SLOW);
-  const signer = getSigner(it.network);
-  if (!signer) return void next(); // locked: wait, keep the entry
-  api
-    .getAction(signer, id)
-    .then((status) => {
-      const cur = items.get(id);
-      if (!cur) return;
-      rememberRate(cur.network, cur.op, status.rate);
+/**
+ * Statuses come only from the regular, fixed-interval portfolio poll (Portfolio.actions), never from
+ * polling GET /api/actions/:id: a per-action poll stops the moment the action settles and so tells
+ * anyone watching the network when the trade or withdrawal happened (analysis now-mode N-2).
+ */
+export function applyActionStatuses(
+  network: Network,
+  pubkey: string,
+  list: ({ id: string } & ActionStatus)[] | undefined,
+  now: number = Date.now(),
+) {
+  let changed = false;
+  const byId = new Map((list ?? []).map((x) => [x.id, x]));
+  for (const cur of items.values()) {
+    if (cur.network !== network || cur.pubkey !== pubkey) continue;
+    if (cur.status.status === "executed" || cur.status.status === "failed") continue;
+    const hit = byId.get(cur.id);
+    if (hit) {
+      const { id: _id, ...status } = hit;
+      void _id;
+      if (!status.rate && cur.status.rate) status.rate = cur.status.rate;
       if (JSON.stringify(status) !== JSON.stringify(cur.status)) {
-        items.set(id, { ...cur, status });
-        emit();
-        if (status.status !== "queued") announce({ ...cur, status });
+        rememberRate(network, cur.op, status.rate);
+        const next = { ...cur, status, stale: false };
+        items.set(cur.id, next);
+        changed = true;
+        if (status.status === "executed" || status.status === "failed") announce(next);
       }
-      if (status.status === "queued") next();
-    })
-    .catch((e: unknown) => {
-      if (e instanceof ApiError && e.code === "not_found") {
-        items.delete(id);
-        emit();
-        return;
-      }
-      next();
-    });
+    } else if (!cur.stale && now - cur.submittedAt > GIVE_UP_MS) {
+      items.set(cur.id, { ...cur, stale: true });
+      changed = true;
+    }
+  }
+  if (changed) emit();
+}
+
+const acceptedListeners = new Set<() => void>();
+/** Fires when the pool accepted an action: balances moved at a moment the POST already revealed. */
+export function onActionAccepted(l: () => void): () => void {
+  acceptedListeners.add(l);
+  return () => void acceptedListeners.delete(l);
 }
 
 function announce(a: TrackedAction) {
@@ -144,12 +153,13 @@ export async function submitAction(
     network,
     pubkey: signer.pubkey,
     ...meta,
+    exec: "exec" in action ? action.exec : undefined,
     submittedAt: Date.now(),
     status: { status: receipt.status, rate: receipt.rate },
   };
   items.set(it.id, it);
   emit();
-  if (receipt.status === "queued") setTimeout(() => poll(it.id), POLL_FAST);
+  acceptedListeners.forEach((l) => l());
   return it;
 }
 

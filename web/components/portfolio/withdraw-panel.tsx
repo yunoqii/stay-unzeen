@@ -8,6 +8,7 @@ import type { PoolInfo, Portfolio, SignedAction, Token } from "@/lib/api/types";
 import { lastRate, recentBuyAmounts, submitAction, useAction, useActivityVersion } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, shortAddr, unitsToNumber, ZEC_DECIMALS } from "@/lib/format";
+import { WITHDRAW_EXEC_DEFAULT, withExec, type WithdrawExecMode } from "@/lib/exec";
 import { useNetwork } from "@/lib/network";
 import { amountsMatch, isSolanaAddress, WITHDRAW_ZEC_FEE_ZAT, withdrawTokenFee } from "@/lib/trade";
 import { checkWithdrawUa } from "@/lib/zcash/ua";
@@ -107,6 +108,8 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
   const [error, setError] = useState<ApiError | null>(null);
   const [sentId, setSentId] = useState<string | null>(null);
   const [ghost, setGhost] = useState<Ghost | null>(null);
+  // Never "now", and the profile default does not apply to withdrawals (lib/exec.ts).
+  const [exec, setExec] = useState<WithdrawExecMode>(WITHDRAW_EXEC_DEFAULT);
   const sent = useAction(sentId);
 
   if (sent) return <Sent action={sent} ghost={ghost} onAgain={() => setSentId(null)} />;
@@ -153,9 +156,12 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
     if (!ready || parsed === null) return;
     setBusy(true);
     setError(null);
-    const action: SignedAction = smart
-      ? { op: "withdraw_token", mint: selected.mint, amount: parsed.toString(), to: dests, smart: { parts, maxDelayMin: maxDelay } }
-      : { op: "withdraw_token", mint: selected.mint, amount: parsed.toString(), to: dests[0] };
+    const action: SignedAction = withExec(
+      smart
+        ? { op: "withdraw_token", mint: selected.mint, amount: parsed.toString(), to: dests, smart: { parts, maxDelayMin: maxDelay } }
+        : { op: "withdraw_token", mint: selected.mint, amount: parsed.toString(), to: dests[0] },
+      exec,
+    );
     try {
       const it = await submitAction(network, action, { op: "withdraw_token", mint: selected.mint, symbol: token.symbol, decimals: token.decimals, amount: parsed.toString(), parts: n });
       setGhost({ symbol: token.symbol, image: token.image, label: formatCompact(unitsToNumber(parsed.toString(), token.decimals)) });
@@ -163,6 +169,7 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
       setAmount("");
       setAddrs(["", "", "", "", ""]);
       setTouched([false, false, false, false, false]);
+      setExec(WITHDRAW_EXEC_DEFAULT);
     } catch (e) {
       setError(e instanceof ApiError ? e : new ApiError("internal", String(e)));
     } finally {
@@ -347,12 +354,31 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
         </AnimatePresence>
       </div>
 
+      <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border px-3 py-3">
+        <input type="checkbox" role="switch" checked={exec === "max"} onChange={(e) => setExec(e.target.checked ? "max" : "delayed")} className="peer sr-only" />
+        <span aria-hidden className="relative mt-0.5 h-5 w-9 shrink-0 rounded-full border border-border-strong bg-surface-2 transition-colors peer-checked:bg-zec/30 peer-focus-visible:ring-2 peer-focus-visible:ring-ring">
+          <span className={cn("absolute top-0.5 left-0.5 size-3.5 rounded-full bg-muted-foreground transition-transform duration-200", exec === "max" && "translate-x-4 bg-zec")} />
+        </span>
+        <span className="text-sm">
+          Max privacy <span className="text-muted-foreground">(10–60 min)</span>
+          <span className="mt-0.5 block text-xs text-pretty text-faint-foreground">
+            Withdrawals are never instant: a quick one right after a buy would tie the two together on-chain.
+          </span>
+        </span>
+      </label>
+
       <dl className="space-y-1.5 text-xs">
         <Row k="Gas">
           {formatSol(Number(fee.lamports) / 1e9)} SOL{n > 1 ? ` (${n} addresses)` : ""} dropped with the tokens
           {fee.zat !== null && <span className="text-faint-foreground"> · ≈ {formatZec(fee.zat.toString())} ZEC from balance</span>}
         </Row>
-        <Row k="Delay">{smart ? `Random, each part within ${maxDelay < 60 ? `${maxDelay} min` : `${maxDelay / 60} h`}` : "Random, 30 s – 5 min"}</Row>
+        <Row k="Delay">
+          {smart
+            ? `Random, each part within ${maxDelay < 60 ? `${maxDelay} min` : `${maxDelay / 60} h`}`
+            : exec === "max"
+                ? "Random, 10 – 60 min"
+                : "Random, 30 s – 5 min"}
+        </Row>
         <Row k="Sent from">A different pool vault than your buys</Row>
       </dl>
       {zecShort && <p className="text-xs text-sell">Not enough ZEC on your balance to pay the gas. Top up first.</p>}

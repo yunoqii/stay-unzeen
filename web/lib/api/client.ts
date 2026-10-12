@@ -5,6 +5,7 @@
 
 import { signRequest, type SignedHeaders, type Signer } from "@/lib/crypto/sign";
 import { networkConfig } from "@/lib/network";
+import { padAction } from "@/lib/pad";
 import { ApiError, errorFromResponse } from "./errors";
 import * as mock from "./mock";
 import type {
@@ -158,7 +159,8 @@ function makeApi(send: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscr
     getPool: () => get("/api/pool"),
     // The anon pubkey never goes into a URL path or query (access logs = IP <-> key). Header only.
     getPortfolio: (signer) => get("/api/portfolio", signer),
-    postAction: (signer, action) => post("/api/actions", action, signer, 2),
+    // Padded to a fixed size bucket before signing: the length must not reveal the op or the mode.
+    postAction: (signer, action) => post("/api/actions", padAction(action), signer, 2),
     getAction: (signer, id) => get(`/api/actions/${enc(id)}`, signer),
     getOrders: (signer) => get("/api/orders", signer),
     getCreator: (signer) => get("/api/creator", signer),

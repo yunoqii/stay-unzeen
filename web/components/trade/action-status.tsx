@@ -5,13 +5,14 @@ import { Check, CircleNotch, Copy, X } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { ApiError, errorText } from "@/lib/api/client";
 import type { TrackedAction } from "@/lib/activity";
+import { queuedLabel } from "@/lib/exec";
 import { formatCompact, formatZec, shortAddr, unitsToNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 type Step = { key: string; label: string; detail?: React.ReactNode };
 
 /**
- * Signed -> Queued for next batch -> Confirmed (or Failed). The signature is shown with a copy button
+ * Signed -> Queued for next batch (or "Sending…" for exec "now") -> Confirmed (or Failed). The signature is shown with a copy button
  * only: a link to an explorer would hand the explorer "this IP looked at this tx" (review D13).
  */
 export function ActionStatusCard({ action, className }: { action: TrackedAction; className?: string }) {
@@ -24,10 +25,16 @@ export function ActionStatusCard({ action, className }: { action: TrackedAction;
     { key: "signed", label: "Signed with your anon key", detail: "Accepted by the pool. Nothing left this browser but the signed order." },
     {
       key: "queued",
-      label: "Queued for next batch",
+      label: queuedLabel(action.exec),
       detail: action.stale
         ? "Still waiting. Payouts can take a while; your balance updates when it goes out."
-        : action.op === "withdraw_token" || action.op === "withdraw_zec"
+        : action.exec === "now"
+          ? "Skips the batch with a priority fee. Lands in seconds."
+          : action.exec === "max"
+            ? action.op.startsWith("withdraw")
+              ? "Max privacy: a long random delay, up to an hour. Harder to match by timing."
+              : "Max privacy: waits for a later, bigger batch, up to 15 minutes. Harder to match by timing."
+            : action.op === "withdraw_token" || action.op === "withdraw_zec"
           ? "Goes out after a random delay, from a different vault than your buys."
           : "Orders leave in batches after a random delay, so the timing doesn't point at you.",
     },

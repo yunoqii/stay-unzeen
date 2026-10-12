@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Key, LockKey, LockKeyOpen } from "@phosphor-icons/react";
+import { GearSix, Key, LockKey, LockKeyOpen } from "@phosphor-icons/react";
 import { useKeyState } from "@/lib/crypto/session";
 import { cn } from "@/lib/utils";
 
@@ -15,7 +15,7 @@ export function KeyStatus() {
       : state.status === "locked"
         ? { Icon: LockKey, label: "Locked" }
         : { Icon: Key, label: "Set up key" };
-  return (
+  const chip = (
     <Link
       href="/key"
       aria-label={`Anon key: ${label}`}
@@ -29,5 +29,20 @@ export function KeyStatus() {
       <Icon size={14} weight={state.status === "unlocked" ? "duotone" : "light"} className={state.status === "unlocked" ? "text-zec" : undefined} />
       <span className="hidden sm:inline">{label}</span>
     </Link>
+  );
+  if (state.status !== "unlocked") return chip;
+  // Settings (default execution mode) live in /portfolio; reachable straight from the key chip.
+  return (
+    <span className="inline-flex items-center gap-1">
+      {chip}
+      <Link
+        href="/portfolio#settings"
+        aria-label="Settings"
+        title="Settings"
+        className="grid size-8 place-items-center rounded-full border border-border text-muted-foreground transition-colors duration-150 hover:border-border-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+      >
+        <GearSix size={14} weight="light" />
+      </Link>
+    </span>
   );
 }

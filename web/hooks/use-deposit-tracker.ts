@@ -21,7 +21,7 @@ export type DepositPhase =
  * "seen" endpoint by design (docs/API.md v0.3), so on the real API "seen" is the user's own tap.
  */
 export function useDepositTracker(network: Network, memo: string) {
-  const { portfolio, refresh } = usePortfolio(4_000);
+  const { portfolio, refresh } = usePortfolio();
   const known = useRef<Set<string> | null>(null);
   const [phase, setPhase] = useState<DepositPhase>({ step: "waiting" });
 

@@ -7,6 +7,12 @@
 
 export type Venue = "pumpfun" | "meteora-dbc" | "jupiter";
 
+/**
+ * Execution mode of buy / sell / withdraw (owner decision 12.10, docs/ARCHITECTURE.md):
+ * "now" 1-3 s with a priority fee, "delayed" 30-60 s batches, "max" 5-15 min batches.
+ */
+export type ExecMode = "now" | "delayed" | "max";
+
 /** Integer string in token base units: UI = value / 10^decimals. */
 export type TokenBaseUnits = string;
 /** Integer string in lamports: UI = value / 1e9. */
@@ -70,6 +76,15 @@ export interface PoolInfo {
   minActionZat: Zatoshis;
   /** K: blocks until a deposit is credited (default 3). */
   confirmations: number;
+  /** v0.4 fees. The flat fee of exec "now" (`nowFeeZat` or `nowFeeLamports`) is pending in docs/API.md. */
+  fees?: {
+    nowFeeZat?: Zatoshis;
+    createFeeZat?: Zatoshis;
+    withdrawZecFeeZat?: Zatoshis;
+    withdrawTokenGasLamports?: Lamports;
+    withdrawTokenCostLamports?: Lamports;
+    nowFeeLamports?: Lamports;
+  };
 }
 
 export interface DepositInfo {
@@ -96,12 +111,18 @@ export interface Portfolio {
   claimable: { mint: string; solAmount: Lamports }[];
   /** Last 20, newest first. */
   deposits: DepositInfo[];
+  /**
+   * Status of the owner's actions of the last 24 h (pending in docs/API.md, analysis N-2). Comes with
+   * every fixed-interval portfolio poll, so the client never polls a single action and never reveals
+   * when it settled.
+   */
+  actions?: (ActionStatus & { id: string })[];
 }
 
 /** Body of POST /api/actions. anonPubkey/nonce/ts/sig go in x-unzeen-* headers, not here. */
 export type SignedAction =
-  | { op: "buy"; venue: Venue; mint: string; zecIn: Zatoshis; minOut: TokenBaseUnits }
-  | { op: "sell"; venue: Venue; mint: string; amount: TokenBaseUnits; minZecOut: Zatoshis }
+  | { op: "buy"; venue: Venue; mint: string; zecIn: Zatoshis; minOut: TokenBaseUnits; exec?: ExecMode }
+  | { op: "sell"; venue: Venue; mint: string; amount: TokenBaseUnits; minZecOut: Zatoshis; exec?: ExecMode }
   | {
       op: "create";
       venue: Venue; // "jupiter" -> 400
@@ -111,13 +132,14 @@ export type SignedAction =
     }
   // Not supported yet (400 "op not supported yet"): claim, order_create, order_cancel, chat. UI shows "soon".
   | { op: "claim"; mint?: string }
-  | { op: "withdraw_zec"; to: string; amount: Zatoshis }
+  | { op: "withdraw_zec"; to: string; amount: Zatoshis; exec?: "delayed" | "max" }
   | {
       op: "withdraw_token";
       mint: string;
       amount: TokenBaseUnits;
       to: string | string[];
       smart?: { parts: number; maxDelayMin: number }; // parts 2..5, to.length === parts
+      exec?: "delayed" | "max"; // withdrawals are never "now"
     }
   | {
       op: "order_create";
@@ -129,6 +151,12 @@ export type SignedAction =
     }
   | { op: "order_cancel"; orderId: string }
   | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean };
+
+/**
+ * What actually goes on the wire: the action plus `pad`, random filler that brings every body to a
+ * fixed size bucket so its length does not reveal the op or the mode (pending in docs/API.md, R-web-3).
+ */
+export type PaddedAction = SignedAction & { pad?: string };
 
 export type ActionState = "queued" | "executed" | "failed";
 
