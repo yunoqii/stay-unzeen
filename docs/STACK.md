@@ -26,7 +26,8 @@
 | Jupiter Swap API | Вторичка ⚠ маршрутизация токенов на кривой |
 | Jito block engine | Атомарный create+buy (fair-launch) |
 | **Helius Free** | только оценка priority fee (фоново) и отправка tx через Helius Sender (SWQOS-only, одинаковые чаевые ~0.000005 SOL на ВСЕХ tx пула) |
-| **Shyft Free** | все чтения: warm set, top-10, приманки, подписки на кривые (accountSubscribe). Решение 12.10: чтение и отправка у разных провайдеров |
+| **Helius Free (index)** | только `getTokenLargestAccounts` (top-10) на тике пачкой с приманками — Shyft Free этот метод закрывает (решение 12.10) |
+| **Shyft Free** | все чтения (кроме top-10; WS Shyft недоступен — опрос раз в ~15 с): warm set, top-10, приманки, подписки на кривые (accountSubscribe). Решение 12.10: чтение и отправка у разных провайдеров |
 
 ## Криптография
 - drand **tlock** (`tlock-js` на фронте) — заявки fair-launch.
