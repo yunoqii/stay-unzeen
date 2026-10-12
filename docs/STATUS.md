@@ -1,6 +1,6 @@
 # Status
 
-**День 1 / 16** (12.10.2026). Последняя сводка: `docs/sessions/2026-10-12-1850.md`. Дедлайн: 28.10 23:59 UTC.
+**День 2 / 16** (начат 12.10.2026 вечером). Последняя сводка: `docs/sessions/2026-10-12-1850.md`. Дедлайн: 28.10 23:59 UTC.
 
 ## Готово
 - Структура команды (CLAUDE.md, агенты), ARCHITECTURE.md, API.md v0
@@ -13,8 +13,14 @@
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
 
-## В работе (день 1)
-- —
+## В работе (день 2)
+- backend: `core/` — кодек unz1 + тест-векторы, реестр балансов в Postgres (депозит → баланс anon-ключа), шифрование сида пула, тихие логи
+- backend: `adapters/` — адаптер pump.fun на devnet (pump-sdk 4.0.0), e2e create/buy/sell
+- frontend: типы/моки под API v0.1, `/key` (12 слов, шифрование паролем), подпись запросов
+- analyst: ревью сканера, протокола unz1/подписи, сквозная приватность → `docs/analysis/review-day2.md`
+
+## Решения
+- Своя нода Zebra не обязательна: демо через публичный lightwalletd (zec.rocks) + запасной; в README — self-host/Tor; свой сервер на VPS в дни 13–14, если будет время
 
 ## Риски
 - mainnet init/sync не проверен вживую (заблокировано разрешениями) → ручной прогон владельцем
