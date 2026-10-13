@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Header safe zones</title>
+<link rel="stylesheet" href="base.css">
+<style>
+  body { padding: 40px 50px; width: 1600px; height: 1720px; background: #000; }
+  h1 { font-size: 18px; font-weight: 500; color: var(--paper); margin-bottom: 6px; }
+  .note { font-family: "Geist Mono", monospace; font-size: 12px; color: var(--fog-2); margin-bottom: 20px; line-height: 1.6; }
+  .note span { padding: 1px 6px; border-radius: 3px; }
+  .b { position: relative; width: 1500px; height: 500px; margin-bottom: 40px; }
+  .b img { width: 1500px; height: 500px; display: block; }
+  .tag { position: absolute; top: -18px; left: 0; font-family: "Geist Mono", monospace; font-size: 12px; color: var(--fog-3); }
+  .crop-v { position: absolute; left: 0; right: 0; height: 60px; background: rgb(255 64 129 / .22); }
+  .crop-h { position: absolute; top: 0; bottom: 0; width: 75px; background: rgb(255 64 129 / .22); }
+  .av { position: absolute; left: 40px; top: 333px; width: 335px; height: 335px; border-radius: 50%; background: rgb(0 200 255 / .28); outline: 2px dashed rgb(0 200 255 / .9); }
+  .safe { position: absolute; left: 400px; right: 175px; top: 60px; bottom: 60px; outline: 2px dashed rgb(120 255 120 / .85); }
+</style></head><body>
+<h1>Header: X safe zones (1500x500)</h1>
+<p class="note">
+  <span style="background:rgb(0 200 255 / .35)">blue</span> desktop avatar overlap (circle 335px at x40, y333, approx. 134/600 of profile width) &nbsp;
+  <span style="background:rgb(255 64 129 / .35)">pink</span> may be cropped on mobile / narrow viewports (60px top/bottom, 5% sides) &nbsp;
+  <span style="outline:1px dashed rgb(120 255 120)">green</span> keep key text inside
+</p>
+<script>
+for (const v of ["a","b","c"]) document.write(`<div class="b"><div class="tag">banner-${v}.png</div><img src="../banner-${v}.png">
+  <div class="crop-v" style="top:0"></div><div class="crop-v" style="bottom:0"></div>
+  <div class="crop-h" style="left:0"></div><div class="crop-h" style="right:0"></div>
+  <div class="safe"></div><div class="av"></div></div>`);
+</script></body></html>

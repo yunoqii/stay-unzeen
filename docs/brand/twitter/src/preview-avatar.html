@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Avatar circle-crop preview</title>
+<link rel="stylesheet" href="base.css">
+<style>
+  body { padding: 40px; width: 1640px; height: 1000px; background: #000; font-family: "Geist", sans-serif; }
+  h1 { font-size: 18px; font-weight: 500; color: var(--paper); margin-bottom: 6px; }
+  p.note { font-family: "Geist Mono", monospace; font-size: 12px; color: var(--fog-2); margin-bottom: 26px; }
+  .row { display: flex; align-items: center; gap: 34px; padding: 22px 0; border-top: 1px solid var(--hair); }
+  .lab { width: 70px; font-family: "Geist Mono", monospace; font-size: 13px; color: var(--fog-3); }
+  .sq { position: relative; width: 240px; height: 240px; flex: none; }
+  .sq img { width: 240px; height: 240px; display: block; }
+  .sq::after { content: ""; position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 999px rgb(0 0 0 / .62); outline: 1px dashed rgb(255 255 255 / .5); outline-offset: -1px; }
+  .sq { overflow: hidden; }
+  .c { border-radius: 50%; display: block; }
+  .light { background: #fff; padding: 16px; border-radius: 12px; display: flex; align-items: center; gap: 22px; }
+  .dark { background: #000; border: 1px solid #2f3336; padding: 16px; border-radius: 12px; display: flex; align-items: center; gap: 22px; }
+  .cap { font-family: "Geist Mono", monospace; font-size: 11px; color: var(--fog-2); text-align: center; margin-top: 6px; }
+</style></head><body>
+<h1>Avatar: X circle crop</h1>
+<p class="note">Left: full 400x400 with the circle X keeps (outside dimmed). Right: real sizes on X dark and light: 200px (profile @1.5x), 133px (profile), 48px (timeline), 32px (reply).</p>
+<div id="rows"></div>
+<script>
+for (const v of ["a","b","c"]) {
+  const sizes = [200,133,48,32].map(s => `<div><img class="c" src="../avatar-${v}@2x.png" width="${s}" height="${s}"><div class="cap">${s}</div></div>`).join("");
+  document.getElementById("rows").insertAdjacentHTML("beforeend",
+    `<div class="row"><div class="lab">avatar-${v}</div><div class="sq"><img src="../avatar-${v}.png"></div><div class="dark">${sizes}</div><div class="light">${sizes.replace(/class="cap"/g,'class="cap" style="color:#536471"')}</div></div>`);
+}
+</script></body></html>

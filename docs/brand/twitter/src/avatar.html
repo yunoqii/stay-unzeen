@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>unzeen avatar</title>
+<link rel="stylesheet" href="base.css">
+<style>
+  .canvas { width: 400px; height: 400px; }
+  .v { display: none; position: absolute; inset: 0; }
+  body[data-v="a"] .va, body[data-v="b"] .vb, body[data-v="c"] .vc { display: block; }
+  svg { position: absolute; inset: 0; width: 400px; height: 400px; }
+  /* (c) monogram */
+  .grid { position: absolute; inset: 0;
+    background-image: linear-gradient(var(--hair) 1px, transparent 1px), linear-gradient(90deg, var(--hair) 1px, transparent 1px);
+    background-size: 40px 40px; background-position: 0 0;
+    -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 40%, transparent 72%); }
+  .mono-u { position: absolute; left: 0; right: 0; top: 52px; text-align: center;
+    font-weight: 520; font-size: 300px; line-height: 1; letter-spacing: -0.04em; color: var(--paper); transform: translateX(-34px); }
+</style></head>
+<body>
+<div class="canvas grain">
+  <!-- (a) eclipse mark, large. Geometry = web/components/layout/logo.tsx x12.5 -->
+  <div class="v va">
+    <svg viewBox="0 0 400 400">
+      <defs>
+        <radialGradient id="a-amb" cx="38%" cy="64%" r="60%"><stop offset="0" stop-color="#f4b728" stop-opacity=".10"/><stop offset="1" stop-color="#f4b728" stop-opacity="0"/></radialGradient>
+        <filter id="a-glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="9"/></filter>
+        <radialGradient id="a-disc" cx="40%" cy="35%" r="75%"><stop offset="0" stop-color="#08080a"/><stop offset="1" stop-color="#040405"/></radialGradient>
+      </defs>
+      <rect width="400" height="400" fill="url(#a-amb)"/>
+      <circle cx="200" cy="200" r="148" fill="none" stroke="#f4b728" stroke-width="14" opacity=".55" filter="url(#a-glow)"/>
+      <circle cx="200" cy="200" r="148" fill="none" stroke="#f4b728" stroke-width="7"/>
+      <circle cx="231" cy="181" r="144" fill="url(#a-disc)"/>
+      <circle cx="231" cy="181" r="144" fill="none" stroke="rgb(255 255 255 / .09)" stroke-width="1.5"/>
+    </svg>
+  </div>
+  <!-- (b) eclipse whose visible light is a censor hatch -->
+  <div class="v vb">
+    <svg viewBox="0 0 400 400">
+      <defs>
+        <pattern id="b-h" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+          <rect width="4" height="12" fill="#f4b728"/>
+        </pattern>
+        <pattern id="b-hg" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+          <rect width="2" height="12" fill="#ffffff" opacity=".05"/>
+        </pattern>
+        <filter id="b-glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="14"/></filter>
+      </defs>
+      <rect width="400" height="400" fill="url(#b-hg)"/>
+      <circle cx="200" cy="200" r="150" fill="#f4b728" opacity=".18" filter="url(#b-glow)"/>
+      <circle cx="200" cy="200" r="150" fill="#050506"/>
+      <circle cx="200" cy="200" r="150" fill="url(#b-h)"/>
+      <circle cx="200" cy="200" r="150" fill="none" stroke="#f4b728" stroke-width="4"/>
+      <circle cx="240" cy="176" r="143" fill="#050506"/>
+      <circle cx="240" cy="176" r="143" fill="none" stroke="rgb(255 255 255 / .10)" stroke-width="1.5"/>
+    </svg>
+  </div>
+  <!-- (c) monogram on ledger grid, eclipse as the full stop -->
+  <div class="v vc">
+    <div class="grid"></div>
+    <div class="mono-u">u</div>
+    <svg viewBox="0 0 400 400">
+      <circle cx="200" cy="200" r="199" fill="none" stroke="rgb(255 255 255 / .0)"/>
+      <g transform="translate(296 286)">
+        <circle cx="0" cy="0" r="23" fill="none" stroke="#f4b728" stroke-width="4"/>
+        <circle cx="6" cy="-4" r="22" fill="#050506"/>
+      </g>
+    </svg>
+  </div>
+</div>
+<script>document.body.dataset.v = (location.hash.slice(1) || "a");</script>
+</body></html>
