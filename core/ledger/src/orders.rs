@@ -179,7 +179,12 @@ fn id16(v: Vec<u8>) -> [u8; 16] {
 }
 
 /// Release the hold of an order (held on its `order_create` action) and close it.
-async fn close_order<C: GenericClient>(tx: &C, order_id: &[u8], status: &str, error: Option<&str>) -> Result<()> {
+pub(crate) async fn close_order<C: GenericClient>(
+    tx: &C,
+    order_id: &[u8],
+    status: &str,
+    error: Option<&str>,
+) -> Result<()> {
     if let Some(a) = tx
         .query_opt(
             "SELECT anon_pubkey, hold_zat, token_mint, token_hold FROM actions

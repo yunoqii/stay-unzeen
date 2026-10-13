@@ -36,6 +36,8 @@ pub struct Ctx {
     /// Unix ms at validation (`time_at` bounds).
     pub now_ms: u64,
     pub min_deposit_zat: u64,
+    /// `PoolInfo.minActionZat` (DCA slices).
+    pub min_action_zat: u64,
     /// Enabled venues (`PoolInfo.venues[].venue`).
     pub venues: Vec<String>,
     pub fair_launch: bool,
@@ -185,8 +187,14 @@ struct Facts {
     wait_min: u64,
     runs: u32,
     repeat: Option<(usize, u32)>,
-    /// Literal mints that need a price tick (P8).
-    need_tick: Vec<String>,
+    /// Mints that need a price tick (P8); resolved through swaps before the check.
+    need_tick: Vec<MintR>,
+    /// `swap`: its `to` (what `{step: k}` of this swap names).
+    swap_to: Option<MintR>,
+    /// Successors besides the next step: `onFail`/`onFalse` gotos, `repeat` jumps back.
+    jumps: Vec<usize>,
+    /// `end`: no successor.
+    terminal: bool,
 }
 
 struct P<'a> {
@@ -303,9 +311,7 @@ impl P<'_> {
             if !s.as_u64().is_some_and(|b| (50..=5_000).contains(&b)) {
                 return Err(self.e("bad_guard"));
             }
-            if let MintR::Lit(m) = mint {
-                f.need_tick.push(m.clone());
-            }
+            f.need_tick.push(mint.clone());
             return Ok(());
         }
         match o.get("limitPrice").and_then(Value::as_str) {
@@ -410,9 +416,7 @@ impl P<'_> {
                     return Err(self.e("bad_range"));
                 }
                 self.opt_timeout(b)?;
-                if let MintR::Lit(m) = m {
-                    f.need_tick.push(m);
-                }
+                f.need_tick.push(m);
                 f.runs = 0;
             }
             "deposit_received" => {
@@ -463,9 +467,7 @@ impl P<'_> {
                     _ => return Err(self.e("bad_field")),
                 }
                 self.opt_timeout(b)?;
-                if let MintR::Lit(m) = m {
-                    f.need_tick.push(m);
-                }
+                f.need_tick.push(m);
                 f.runs = 0;
             }
             "wait_fixed" => {
@@ -523,7 +525,8 @@ impl P<'_> {
                 self.guard(b.get("guardSell"), &from, &mut f)?;
                 self.guard(b.get("guardBuy"), &to, &mut f)?;
                 self.exec(b.get("exec"), false, &mut f)?;
-                f.traded.extend([from, to]);
+                f.traded.extend([from, to.clone(), MintR::Step(i)]);
+                f.swap_to = Some(to);
                 f.runs = 2;
             }
             "dca" => {
@@ -542,6 +545,13 @@ impl P<'_> {
                 let m = self.mint(b.get("mint"))?;
                 self.amount(b.get("total"), want)?;
                 let slices = self.uint(b.get("slices"), 2, 12)?;
+                // An `abs` ZEC total must give every slice (±20 % weights) the minimum action.
+                if want == Out::Zat
+                    && let Some(t) = b["total"]["abs"].as_str().and_then(|s| s.parse::<u64>().ok())
+                    && t / slices * 8 / 10 < self.ctx.min_action_zat
+                {
+                    return Err(self.e("bad_amount"));
+                }
                 let ev = b
                     .get("everySecs")
                     .and_then(Value::as_object)
@@ -571,8 +581,10 @@ impl P<'_> {
                     Some("limit_sell" | "take_profit" | "stop_loss" | "bracket") => Out::Tokens,
                     _ => return Err(self.e("bad_field")),
                 };
-                self.mint(o.get("mint"))?;
+                // P2: a fired order is a public trade of the mint (any kind).
+                let m = self.mint(o.get("mint"))?;
                 self.amount(o.get("amount"), want)?;
+                f.traded.push(m);
                 // Prices, slippage, TTL: the ordinary order_create rules at execution (v0.8/v0.15).
             }
             "order_cancel" => {
@@ -707,7 +719,10 @@ impl P<'_> {
                 }
                 match b.get("onFalse") {
                     Some(Value::String(s)) if s == "stop" => {}
-                    Some(g @ Value::Object(_)) => self.goto(g, n)?,
+                    Some(g @ Value::Object(_)) => {
+                        self.goto(g, n)?;
+                        f.jumps.push(g["goto"].as_u64().unwrap_or(0) as usize);
+                    }
                     _ => return Err(self.e("bad_on_fail")),
                 }
                 f.runs = 0;
@@ -817,8 +832,24 @@ pub fn validate(plan: &Value, ctx: &Ctx) -> Outcome {
             ttl,
         };
         let b = s["block"].as_object().ok_or(inv(Some(i), "unknown_block"))?;
-        facts.push(pp.block(b, n)?);
+        let mut f = pp.block(b, n)?;
         pp.on_fail(s.get("onFail"), n)?;
+        // Control edges for P2: onFail goto (also after retries); repeat jumps back; end stops.
+        let of = s.get("onFail");
+        for g in [
+            of.and_then(|x| x.get("goto")),
+            of.and_then(|x| x.get("then")).and_then(|x| x.get("goto")),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            f.jumps.push(g.as_u64().unwrap_or(0) as usize);
+        }
+        if let Some((from, _)) = f.repeat {
+            f.jumps.push(from);
+        }
+        f.terminal = types[i] == "end";
+        facts.push(f);
     }
 
     // Repeats: non-overlapping ranges, total executions ≤ 40.
@@ -838,28 +869,48 @@ pub fn validate(plan: &Value, ctx: &Ctx) -> Outcome {
         return Err(inv(None, "too_many_runs"));
     }
 
-    // P1: Now only right after the plan's creation or its manual start, never inside a repeat.
+    // P1 (lead decision 13.10): Now only on the first step after `manual_start` (a human
+    // click), never after an event, never inside a repeat. A retried Now step runs `delayed`.
     for (i, f) in facts.iter().enumerate() {
-        if f.exec_now {
-            let first = i == 0 || (i == 1 && types[0] == "manual_start");
-            if !first || covered[i] {
-                return Err(rule(i, "now_not_first"));
+        if f.exec_now && !(i == 1 && types[0] == "manual_start" && !covered[i]) {
+            return Err(rule(i, "now_not_first"));
+        }
+    }
+    // Mint classes: `{step: swap}` is the swap's `to` (recursively); `{step: create}` stays.
+    let resolve = |m: &MintR| -> MintR {
+        let mut m = m.clone();
+        for _ in 0..MAX_STEPS {
+            match &m {
+                MintR::Step(k) if facts[*k].swap_to.is_some() => m = facts[*k].swap_to.clone().expect("some"),
+                _ => break,
+            }
+        }
+        m
+    };
+    let traded: Vec<Vec<MintR>> = facts.iter().map(|f| f.traded.iter().map(&resolve).collect()).collect();
+    // P2: on EVERY path of the step graph (next, onFail/onFalse gotos, repeat back-jumps)
+    // from a trade of M to a withdrawal of M, the guaranteed waits sum to ≥ 1 h.
+    for (w, f) in facts.iter().enumerate() {
+        let Some(m) = f.withdraw_mint.as_ref().map(&resolve) else {
+            continue;
+        };
+        for (src, t) in traded.iter().enumerate() {
+            if src == w || !t.contains(&m) {
+                continue;
+            }
+            if min_wait_between(&facts, src, w).is_some_and(|d| d < WITHDRAW_AFTER_TRADE_SECS) {
+                return Err(rule(w, "withdraw_too_soon"));
             }
         }
     }
-    // P2: a token withdrawal after a trade of the same mint needs a ≥ 1 h wait in between.
+    // P8: price-dependent blocks only on mints with a pool price tick; a mint created by the
+    // plan is allowed, a `{step: swap}` must have a tick on its `to`.
     for (i, f) in facts.iter().enumerate() {
-        let Some(m) = &f.withdraw_mint else { continue };
-        let Some(j) = (0..i).rev().find(|j| facts[*j].traded.contains(m)) else {
-            continue;
-        };
-        if !facts[j + 1..i].iter().any(|x| x.wait_min >= WITHDRAW_AFTER_TRADE_SECS) {
-            return Err(rule(i, "withdraw_too_soon"));
-        }
-    }
-    // P8: price-dependent blocks only on mints with a pool price tick (or created by the plan).
-    for (i, f) in facts.iter().enumerate() {
-        if f.need_tick.iter().any(|m| !ctx.priced_mints.contains(m)) {
+        let bad = f.need_tick.iter().map(&resolve).any(|m| match m {
+            MintR::Lit(m) => !ctx.priced_mints.contains(&m),
+            MintR::Step(_) => false,
+        });
+        if bad {
             return Err(rule(i, "unpriced_mint"));
         }
     }
@@ -871,6 +922,44 @@ pub fn validate(plan: &Value, ctx: &Ctx) -> Outcome {
         manual_start: types[0] == "manual_start",
         has_withdraw,
     })
+}
+
+/// Smallest guaranteed wait (sum of `wait_min` of the steps strictly between) over all paths
+/// `from → to` of the step graph; `None` if `to` is unreachable. Node-weighted Dijkstra (≤ 12
+/// nodes, cycles from `repeat` are fine: weights are non-negative).
+fn min_wait_between(facts: &[Facts], from: usize, to: usize) -> Option<u64> {
+    let n = facts.len();
+    // Every step may fail; `onFail: "skip"` / `{retry, then: "skip"}` lands on i + 1 like success.
+    let succ = |i: usize| -> Vec<usize> {
+        let mut s = facts[i].jumps.clone();
+        if !facts[i].terminal && i + 1 < n {
+            s.push(i + 1);
+        }
+        s
+    };
+    let mut dist = vec![u64::MAX; n];
+    let mut done = vec![false; n];
+    for s in succ(from) {
+        dist[s] = 0;
+    }
+    loop {
+        let u = (0..n)
+            .filter(|i| !done[*i] && dist[*i] < u64::MAX)
+            .min_by_key(|i| dist[*i])?;
+        if u == to {
+            return Some(dist[u]);
+        }
+        done[u] = true;
+        // The wait of `u` counts only on its normal exit; a failure jump (onFail / onFalse goto)
+        // or a repeat jump may leave without it.
+        let through = dist[u].saturating_add(facts[u].wait_min);
+        for v in succ(u) {
+            let d = if facts[u].jumps.contains(&v) { dist[u] } else { through };
+            if d < dist[v] {
+                dist[v] = d;
+            }
+        }
+    }
 }
 
 fn is_b58_32(s: &str) -> bool {

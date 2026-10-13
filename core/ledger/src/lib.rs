@@ -21,6 +21,7 @@ pub mod orders;
 pub mod payouts;
 pub mod quotes;
 pub mod rebalance;
+pub mod scenarios;
 pub mod stats;
 pub mod verify;
 
@@ -86,6 +87,12 @@ pub enum LedgerError {
     /// Orders: the pool-wide open order limit (API 503 venue_unavailable).
     #[error("orders full")]
     OrdersFull,
+    /// Scenarios (v0.19): more than 3 active plans of the key (API 422 scenario_limit).
+    #[error("scenario limit")]
+    ScenarioLimit,
+    /// Scenarios: start/cancel of a plan not in the needed status (API 409 scenario_not_active).
+    #[error("scenario not active")]
+    ScenarioNotActive,
     /// Chat: (nick, mint) muted by the operator (API 403 chat_muted).
     #[error("chat muted")]
     ChatMuted,
@@ -143,6 +150,8 @@ impl LedgerError {
             LedgerError::OrdersFull => "orders_full",
             LedgerError::ChatMuted => "chat_muted",
             LedgerError::ChatFull => "chat_full",
+            LedgerError::ScenarioLimit => "scenario_limit",
+            LedgerError::ScenarioNotActive => "scenario_not_active",
         }
     }
 }

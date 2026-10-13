@@ -18,6 +18,7 @@ fn ctx(defaults: &Value, over: Option<&Value>) -> Ctx {
     Ctx {
         now_ms: get("nowMs").as_u64().unwrap(),
         min_deposit_zat: get("minDepositZat").as_str().unwrap().parse().unwrap(),
+        min_action_zat: get("minActionZat").as_str().unwrap().parse().unwrap(),
         venues: strings(get("venues")),
         fair_launch: get("fairLaunch").as_bool().unwrap(),
         chat: get("chat").as_bool().unwrap(),

@@ -344,6 +344,10 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
     if st.cfg.chat.noop {
         r.0["features"]["noop"] = json!(true);
     }
+    if st.cfg.scenarios.enabled {
+        r.0["features"]["scenarios"] = json!(true);
+        r.0["scenarios"] = scenarios::ops::pool_block(&st);
+    }
     // Flag off: no "fair" anywhere in the public PoolInfo (absent key = disabled).
     if let Some(fl) = fair::pool_block(&st).await? {
         r.0["features"]["fairLaunch"] = json!(true);
@@ -549,7 +553,12 @@ async fn portfolio(State(st): State<AppState>, method: Method, uri: Uri, headers
         v["fairBids"] = bids;
         v["fairLaunches"] = launches;
     }
-    Ok(padded(v, 4096))
+    if st.cfg.scenarios.enabled {
+        let own = st.ledger.owner_scenarios(&a.pubkey).await?;
+        v["scenarios"] = own.iter().map(scenarios::ops::scenario_json).collect::<Vec<_>>().into();
+    }
+    // v0.19: 8 KiB buckets for everyone, so the size never tells whether a key has scenarios.
+    Ok(padded(v, 8192))
 }
 
 // ------------------------------------------------------------------ actions
@@ -614,9 +623,10 @@ async fn submit_action(
     let mut raw: Value = serde_json::from_slice(&body).map_err(|_| ApiError::bad_request("invalid action body"))?;
     if let Some(obj) = raw.as_object_mut()
         && let Some(p) = obj.remove("pad")
-        && p.as_str().is_none_or(|s| s.len() > 8192)
+        && p.as_str().is_none_or(|s| s.len() > 16_384)
     {
-        return Err(ApiError::bad_request("pad: string up to 8192 bytes"));
+        // v0.19: up to 16 KiB so a scenario plan pads to a constant size.
+        return Err(ApiError::bad_request("pad: string up to 16384 bytes"));
     }
     let request_hash: [u8; 32] = Sha256::digest(&body).into();
     if chat::is_chat_op(&raw) {
@@ -630,6 +640,14 @@ async fn submit_action(
     }
     if raw.get("op").and_then(Value::as_str) == Some("claim") {
         let v = creator_fees::claim(&st, raw, &a.pubkey, &a.nonce, &request_hash).await?;
+        return Ok(padded(v, 1024));
+    }
+    if scenarios::ops::is_scenario_op(&raw) {
+        // Flag off: exactly what an unknown op gets.
+        if !st.cfg.scenarios.enabled {
+            return Err(ApiError::bad_request("invalid action body"));
+        }
+        let v = scenarios::ops::submit(&st, raw, &a.pubkey, &a.nonce, &request_hash).await?;
         return Ok(padded(v, 1024));
     }
     if orders::is_order_op(&raw) {
@@ -778,6 +796,9 @@ pub fn spawn_background(st: &AppState) {
             if let Err(e) = s.ledger.orders_janitor().await {
                 tracing::warn!(error = %e, "orders janitor failed");
             }
+            if let Err(e) = s.ledger.scenarios_janitor().await {
+                tracing::warn!(error = %e, "scenarios janitor failed");
+            }
             if let Err(e) = s.ledger.verify_janitor().await {
                 tracing::warn!(error = %e, "verify janitor failed");
             }
@@ -816,4 +837,7 @@ pub fn spawn_background(st: &AppState) {
     // D14: ZEC/SOL quote on a timer, never on demand.
     tokio::spawn(st.rate.clone().refresh_loop());
     tokio::spawn(st.public_rates.clone().refresh_loop());
+    if st.cfg.scenarios.enabled {
+        tokio::spawn(scenarios::exec::run(st.clone()));
+    }
 }

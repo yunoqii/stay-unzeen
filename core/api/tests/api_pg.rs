@@ -138,6 +138,10 @@ fn config(url: &str) -> Config {
             min_account_zat: 100_000,
             key: None,
         },
+        scenarios: unzeen_api::config::ScenariosConfig {
+            enabled: true,
+            key: Some(unzeen_api::config::ChatKey([5; 32])),
+        },
         quotes: unzeen_api::config::QuotesConfig {
             list: unzeen_api::config::known_quotes(false),
             zec_spread_bps: 30,
@@ -318,6 +322,13 @@ async fn pool_info() {
     assert_eq!(rate["lamportsPerZec"], RATE.to_string());
     assert_eq!(rate["source"], "fixed");
     assert_eq!(rate["lamportsPerZecBuy"], rate["lamportsPerZec"], "spread 0 in tests");
+    // v0.19: scenarios on in tests (only the S3 blocks are advertised).
+    let scn = b.as_object_mut().unwrap().remove("scenarios").expect("scenarios block");
+    assert_eq!(scn["maxSteps"], 12);
+    assert_eq!(scn["ttlSecs"]["maxNoWithdraw"], 604_800);
+    assert!(scn["blocks"].as_array().unwrap().iter().any(|x| x == "buy"));
+    assert_eq!(b["features"]["scenarios"], true);
+    b["features"].as_object_mut().unwrap().remove("scenarios");
     assert_eq!(
         b,
         json!({"address":"utest1example","network":"test","chainId":"0202",
@@ -4478,4 +4489,380 @@ async fn public_rates_and_hood_venue() {
     let r = e.signed(&user(1), "POST", "/api/actions", &body).await;
     assert_eq!(r.body["error"]["code"], "insufficient_balance", "{:?}", r.body);
     e.drop_schema().await;
+}
+
+// ================================================================== scenarios (API v0.19, S2/S3)
+
+mod scenarios_v019 {
+    use super::*;
+
+    impl Env {
+        async fn scenario(&self, n: u8) -> Value {
+            let pf = self.signed(&user(n), "GET", "/api/portfolio", "").await;
+            assert_eq!(pf.raw_len % 8192, 0, "portfolio padded to 8 KiB");
+            pf.body["scenarios"][0].clone()
+        }
+
+        async fn wait_scenario(&self, n: u8, f: impl Fn(&Value) -> bool) -> Value {
+            for _ in 0..100 {
+                let s = self.scenario(n).await;
+                if f(&s) {
+                    return s;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("scenario condition not reached: {:?}", self.scenario(n).await);
+        }
+
+        async fn wait_jobs(&self, op: &str, n: i64) {
+            let s = &self.schema;
+            for _ in 0..100 {
+                if self
+                    .one_i64(&format!("SELECT count(*) FROM {s}.relayer_jobs WHERE op = '{op}'"))
+                    .await
+                    >= n
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let r = self
+                .admin
+                .query_one(
+                    &format!("SELECT status, error, phase, cursor, state::text FROM {s}.scenarios LIMIT 1"),
+                    &[],
+                )
+                .await
+                .unwrap();
+            panic!(
+                "no {op} job: {:?} {:?} {:?} {:?} {:?}",
+                r.get::<_, String>(0),
+                r.get::<_, Option<String>>(1),
+                r.get::<_, String>(2),
+                r.get::<_, i16>(3),
+                r.get::<_, String>(4)
+            );
+        }
+
+        async fn token_with_tick(&self) {
+            let s = &self.schema;
+            let now = now_ms();
+            self.sql(&format!(
+                "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol)
+                 VALUES ('{MINT}', 'pumpfun', 'UNZ', 'Unz', 6, 0.000001, 1000);
+                 INSERT INTO {s}.intel_prices (mint, price_sol, status, tick_at) VALUES ('{MINT}', 0.000001, 'curve', {now})"
+            ))
+            .await;
+        }
+    }
+
+    fn op(v: Value) -> String {
+        v.to_string()
+    }
+
+    fn plan_buy_wait_sell() -> Value {
+        json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"manual_start"}},
+            {"id":1,"block":{"type":"buy","venue":"pumpfun","mint":MINT,"zec":{"abs":"10000000"},
+                             "guard":{"slippageBps":500},"exec":"now"}},
+            {"id":2,"block":{"type":"wait_random","minSecs":3600,"maxSecs":7200}},
+            {"id":3,"block":{"type":"sell","venue":"pumpfun","mint":MINT,"amount":{"pct":100,"of":{"step":1}},
+                             "guard":{"slippageBps":1500},"exec":"delayed"}},
+            {"id":4,"block":{"type":"end"}}]})
+    }
+
+    #[tokio::test]
+    async fn manual_start_buy_wait_sell_done() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.fund(7, 0, 50_000_000).await;
+        e.token_with_tick().await;
+        let r = e
+            .signed(
+                &user(7),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_create","plan":plan_buy_wait_sell()})),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        assert_eq!(r.body["status"], "waiting_start");
+        let id = r.body["id"].as_str().unwrap().to_string();
+        let sc = e.scenario(7).await;
+        assert_eq!(
+            (sc["id"].as_str(), sc["status"].as_str()),
+            (Some(id.as_str()), Some("waiting_start"))
+        );
+        // The creation receipt is not a trade: not in Portfolio.actions, no hold, no job.
+        let pf = e.signed(&user(7), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(pf["actions"], json!([]));
+        assert_eq!(pf["zecHeld"], "0");
+
+        let r = e
+            .signed(
+                &user(7),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_start","id":id})),
+            )
+            .await;
+        assert_eq!(r.body["status"], "active", "{:?}", r.body);
+        // Now right after the manual start: an ordinary `now` buy with the hold taken at this step.
+        e.wait_jobs("buy", 1).await;
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'buy' AND exec_mode = 'now'"
+            ))
+            .await,
+            1
+        );
+        let sc = e.wait_scenario(7, |x| x["steps"][1]["status"] == "running").await;
+        let buy_action = sc["steps"][1]["actionId"].as_str().unwrap().to_string();
+        assert!(sc["steps"][1]["runs"] == 1);
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SB', out_token_amount = 90000000000,
+                    out_lamports = lamports_in WHERE op = 'buy'"
+        ))
+        .await;
+        // The executor took the wait (phase `waiting`, timer 1–2 h away).
+        for _ in 0..100 {
+            if e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.scenarios WHERE phase = 'waiting' AND cursor = 2"
+            ))
+            .await
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let sc = e.scenario(7).await;
+        assert_eq!(sc["steps"][2]["status"], "waiting");
+        let next = sc["steps"][2]["nextAt"].as_i64().unwrap();
+        assert!(
+            next % 60_000 == 0 && next > now_ms() as i64 + 3_000_000,
+            "minute-rounded, ≥ 1 h away"
+        );
+        let pf = e.signed(&user(7), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(pf["holdings"][0]["amount"], "90000000000");
+        assert!(pf["actions"].as_array().unwrap().iter().any(|a| a["id"] == buy_action));
+        // Skip the wait; the sell spends the buy's output (100 %).
+        e.sql(&format!("UPDATE {s}.scenarios SET next_at = now()")).await;
+        e.wait_jobs("sell", 1).await;
+        // A6: 100 % of the buy mirrors it → shaved 0.5–2 % and rounded to 3 significant digits.
+        let sold = e
+            .one_i64(&format!("SELECT token_amount FROM {s}.relayer_jobs WHERE op = 'sell'"))
+            .await;
+        assert!((88_200_000_000..90_000_000_000).contains(&sold), "{sold}");
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SS', out_token_amount = token_amount,
+                    out_lamports = 50000000 WHERE op = 'sell'"
+        ))
+        .await;
+        let sc = e.wait_scenario(7, |x| x["status"] == "done").await;
+        assert_eq!(sc["steps"][3]["status"], "done");
+        assert_eq!(sc["steps"][4]["status"], "done");
+        // Retention: closed + 24 h → scrubbed (gone from the portfolio), + 48 h → deleted.
+        e.sql(&format!(
+            "UPDATE {s}.scenarios SET closed_at = now() - interval '25 hours'"
+        ))
+        .await;
+        e.ledger.scenarios_janitor().await.unwrap();
+        assert_eq!(e.scenario(7).await, Value::Null);
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.scenario_runs WHERE action_id IS NOT NULL"
+            ))
+            .await,
+            0
+        );
+        e.sql(&format!(
+            "UPDATE {s}.scenarios SET closed_at = now() - interval '49 hours'"
+        ))
+        .await;
+        e.ledger.scenarios_janitor().await.unwrap();
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.scenarios")).await, 0);
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn refused_step_rolls_back_to_savepoint_and_fails_the_plan() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.fund(8, 0, 1_000_000).await;
+        e.token_with_tick().await;
+        // 0.5 ZEC buy with 0.01 ZEC on the balance → insufficient_balance at the step (hold at step).
+        let plan = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"buy","venue":"pumpfun","mint":MINT,"zec":{"abs":"50000000"},
+                             "guard":{"slippageBps":500},"exec":"delayed"}}]});
+        let r = e
+            .signed(
+                &user(8),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_create","plan":plan})),
+            )
+            .await;
+        assert_eq!(r.body["status"], "active", "{:?}", r.body);
+        let sc = e.wait_scenario(8, |x| x["status"] == "failed").await;
+        assert_eq!(sc["error"], "insufficient_balance");
+        assert_eq!(sc["steps"][0]["error"], "insufficient_balance");
+        // The refused action left nothing behind (savepoint): only the creation receipt exists.
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.actions WHERE kind <> 'scenario_create'"
+            ))
+            .await,
+            0
+        );
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.relayer_jobs")).await, 0);
+        let pf = e.signed(&user(8), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(
+            (pf["zecBalance"].as_str(), pf["zecHeld"].as_str()),
+            (Some("1000000"), Some("0"))
+        );
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn validation_limits_cancel_and_replay() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.fund(9, 0, 10_000_000).await;
+        e.token_with_tick().await;
+        // scenario_rule with details {step, code}.
+        let bad = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"wait_random","minSecs":60,"maxSecs":120}},
+            {"id":1,"block":{"type":"buy","venue":"pumpfun","mint":MINT,"zec":{"abs":"1000000"},
+                             "guard":{"slippageBps":500},"exec":"now"}}]});
+        let r = e
+            .signed(
+                &user(9),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_create","plan":bad})),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(r.body["error"]["code"], "scenario_rule");
+        assert_eq!(r.body["error"]["details"], json!({"code":"now_not_first","step":1}));
+        // A block of a later stage is not offered yet: like a disabled feature.
+        let later = json!({"v":1,"steps":[{"id":0,"block":{"type":"claim"}}]});
+        let r = e
+            .signed(
+                &user(9),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_create","plan":later})),
+            )
+            .await;
+        assert_eq!(
+            (r.status, r.body["error"]["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("bad_request"))
+        );
+        assert_eq!(r.body["error"]["details"], json!({"code":"feature_disabled","step":0}));
+        // 3 active plans per key, the 4th → scenario_limit.
+        let wait = json!({"v":1,"steps":[{"id":0,"block":{"type":"manual_start"}},
+                                         {"id":1,"block":{"type":"wait_random","minSecs":60,"maxSecs":120}}]});
+        let body = op(json!({"op":"scenario_create","plan":wait}));
+        let mut ids = vec![];
+        for _ in 0..3 {
+            let r = e.signed(&user(9), "POST", "/api/actions", &body).await;
+            assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+            ids.push(r.body["id"].as_str().unwrap().to_string());
+        }
+        let r = e.signed(&user(9), "POST", "/api/actions", &body).await;
+        assert_eq!(r.body["error"]["code"], "scenario_limit");
+        // Replace = cancel old + create new atomically (still 3 active).
+        let r = e
+            .signed(
+                &user(9),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_create","plan":wait,"replaces":ids[0]})),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.scenarios WHERE status IN ('waiting_start','active')"
+            ))
+            .await,
+            3
+        );
+        // Cancel one, then stop all; cancelling again → scenario_not_active.
+        let r = e
+            .signed(
+                &user(9),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_cancel","id":ids[1]})),
+            )
+            .await;
+        assert_eq!(r.body["status"], "cancelled", "{:?}", r.body);
+        let r = e
+            .signed(
+                &user(9),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_cancel","all":true})),
+            )
+            .await;
+        assert_eq!(r.body["ids"].as_array().unwrap().len(), 2, "{:?}", r.body);
+        let r = e
+            .signed(
+                &user(9),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_cancel","id":ids[1]})),
+            )
+            .await;
+        assert_eq!(
+            (r.status, r.body["error"]["code"].as_str()),
+            (StatusCode::CONFLICT, Some("scenario_not_active"))
+        );
+        // Another key cannot see or cancel them.
+        let r = e
+            .signed(
+                &user(1),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_cancel","id":ids[2]})),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND);
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn sealed_fields_and_expiry() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        // Sealing is exercised at the ledger level (S6 blocks are not offered yet): a plan with a
+        // blob is cancelled → the blob is gone in the same transaction.
+        e.fund(10, 0, 10_000_000).await;
+        let wait = json!({"v":1,"steps":[{"id":0,"block":{"type":"wait_random","minSecs":60,"maxSecs":120}}]});
+        let r = e
+            .signed(
+                &user(10),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_create","plan":wait})),
+            )
+            .await;
+        let id = r.body["id"].as_str().unwrap().to_string();
+        e.sql(&format!(
+            "INSERT INTO {s}.scenario_sealed (scenario_id, step, blob) VALUES ('\\x{id}', 0, '\\x00')"
+        ))
+        .await;
+        // TTL over → expired, sealed blob deleted.
+        e.sql(&format!(
+            "UPDATE {s}.scenarios SET expires_at = date_trunc('hour', now())"
+        ))
+        .await;
+        let sc = e.wait_scenario(10, |x| x["status"] == "expired").await;
+        assert_eq!(sc["id"], id);
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.scenario_sealed")).await, 0);
+        e.drop_schema().await;
+    }
 }

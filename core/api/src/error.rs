@@ -16,6 +16,8 @@ pub struct ApiError {
     pub retry_after: Option<u64>,
     /// `error.details` (API.md «Ошибки»): a stable machine code, never user data.
     pub details: Option<&'static str>,
+    /// v0.19 scenario errors: `details = { step, code }` (step of the plan, if any).
+    pub details_step: Option<usize>,
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
@@ -28,6 +30,7 @@ impl ApiError {
             message: message.into(),
             retry_after: None,
             details: None,
+            details_step: None,
         }
     }
 
@@ -113,6 +116,16 @@ impl From<LedgerError> for ApiError {
             ),
             LedgerError::OrderNotOpen => Self::new(StatusCode::CONFLICT, "order_not_open", "the order is not open"),
             LedgerError::OrdersFull => Self::venue_unavailable("orders are not available right now"),
+            LedgerError::ScenarioLimit => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "scenario_limit",
+                "too many active scenarios (PoolInfo.scenarios.maxActivePerKey)",
+            ),
+            LedgerError::ScenarioNotActive => Self::new(
+                StatusCode::CONFLICT,
+                "scenario_not_active",
+                "the scenario is not in the needed status",
+            ),
             LedgerError::ChatMuted => Self::new(StatusCode::FORBIDDEN, "chat_muted", "muted in this chat"),
             LedgerError::ChatFull => Self::rate_limited(30),
             LedgerError::AlreadyBid => Self::new(
@@ -134,6 +147,12 @@ impl IntoResponse for ApiError {
         let mut body = json!({ "error": { "code": self.code, "message": self.message } });
         if let Some(d) = self.details {
             body["error"]["details"] = json!(d);
+            if self.code.starts_with("scenario_") || self.details_step.is_some() {
+                body["error"]["details"] = json!({ "code": d });
+                if let Some(s) = self.details_step {
+                    body["error"]["details"]["step"] = json!(s);
+                }
+            }
         }
         let mut res = (self.status, Json(body)).into_response();
         res.headers_mut()

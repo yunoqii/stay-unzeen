@@ -2,7 +2,7 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.19** (13.10; контракт сценариев, реализация — этапы S2–S7, до них `features.scenarios` нет и `scenario_*` → `400 bad_request`). Изменения против v0.18:
+Статус: **v0.19** (13.10; миграция `0027_scenarios.sql`; сценарии за флагом `UNZEEN_SCENARIOS`: S2–S3 реализованы — create/start/cancel, `Portfolio.scenarios`, исполнитель блоков `manual_start`/`wait_*`/`buy`/`sell`/`sell_all`/`end`; остальные блоки — S4–S6, до тех пор `feature_disabled`). Изменения против v0.18:
 - **Сценарии** (план из ≤ 12 блоков, одна подпись): раздел «Сценарии (v0.19)» ниже, спека `docs/analysis/scenarios.md`, решения владельца 13.10. Векторы валидации: `core/testdata/scenario-vectors.json` (фронт и core проверяют по одному файлу).
 - **`Portfolio` выравнивается до кратного 8192 байт** (было 4096) — для всех, со сценариями и без: размер ответа не выдаёт их наличие. Вступает вместе с S3.
 - **`pad` тела `POST /api/actions`**: до 16384 байт (было 8192), чтобы `scenario_create` дополнялся до 16 КиБ. Вступает вместе с S3.
@@ -1070,10 +1070,15 @@ interface Scenario {                       // Portfolio.scenarios: ≤ 5, акт
 
 **Ошибки валидации** (`details: { step?: number, code }`, `step` нет у ошибок плана целиком):
 - `scenario_invalid` (400): `bad_version`, `empty`, `too_many_steps`, `bad_field`, `bad_step_id`, `unknown_block`, `bad_ttl`, `bad_mint`, `bad_amount`, `bad_guard`, `bad_exec`, `bad_venue`, `bad_ref`, `bad_goto`, `bad_on_fail`, `bad_range`, `bad_repeat`, `too_many_runs`, `manual_start_not_first`, `deposit_twice`, `same_mint`, `bad_address`, `bad_meta`, `bad_text`;
-- `scenario_rule` (422): `now_not_first` (P1: `exec:"now"` только у шага 0 или у шага 1 после `manual_start`, и не внутри `repeat`), `withdraw_too_soon` (P2: `withdraw_token` mint M после сделки/запуска по M без ожидания с гарантированным минимумом ≥ 3600 с между ними; `wait_fixed` считается за `secs − max(30, 10 %)`), `unpriced_mint` (P8: `slippageBps`, `price_cross`, `curve_progress` по литеральному mint без цены тика; mint, созданный планом, допустим; `limitPrice` — для любого);
+- `scenario_rule` (422):
+  - `now_not_first` (P1, решение лида 13.10): `exec:"now"` допустим **только у шага 1 плана, который начинается с `manual_start`** (сделка сразу после нажатия «старт»), и не внутри `repeat`. План без `manual_start` не может содержать Now. Повтор такого шага по `onFail: {retry}` исполняется как `delayed`;
+  - `withdraw_too_soon` (P2): на **каждом пути** графа шагов (следующий шаг, `skip`, `goto` из `onFail`/`onFalse`, возврат `repeat`) от сделки по mint M до `withdraw_token` по M гарантированные ожидания в сумме ≥ 3600 с. Сделка по M — `buy`, `sell`, `sell_all`, `swap` (обе стороны), `dca`, `create` (свой mint), **`order_place` любого вида** (исполнение ордера публично). `{step: k}` шага `swap` = его `to`. Гарантированное ожидание: `wait_random.minSecs`, `wait_fixed.secs − max(30, 10 %)`; уход по `goto`/`repeat` ожидания шага не засчитывает; триггеры считаются за 0;
+  - `unpriced_mint` (P8): `slippageBps`, `price_cross`, `curve_progress` только по mint с ценой тика пула; `{step: swap}` проверяется по его `to`; mint, созданный планом (`{step: create}`), допустим; `limitPrice` — для любого mint;
 - `bad_request` с `details.code = "feature_disabled"`: блок выключенной функции (`fl_*`, `chat`, `maxSniperPct`/`maxDevPct`) — ответ как на неизвестную операцию;
 - `scenario_limit` (422): > 3 активных планов ключа; `scenario_not_active` (409): `start`/`cancel` не из нужного статуса.
-- Сервер дополнительно проверяет при создании то, что требует состояния: UA (`check_ua`), правила ордера, кап/лок создателя — при исполнении шага.
+- `dca` с `side: "buy"` и `total.abs`: каждый срез (с весом −20 %) ≥ `minActionZat`, иначе `bad_amount`.
+- Сервер дополнительно проверяет **при создании** UA `withdraw_zec` (`check_ua` → `scenario_invalid` / `bad_address`) и (с S6) сетку `fl_bid.holdZat`; правила ордера, кап и лок создателя — при исполнении шага.
+- `details` у ошибок сценариев — объект `{ code, step? }` (у остальных кодов `details` по-прежнему строка).
 
 **Поведение (решения владельца 13.10):** TTL 1–72 ч (по умолчанию 24 ч), до 7 сут для планов без выводов; Now — только сразу после ручного старта; ожидания отображаются «≈»; hold — в момент шага (не хватило → `insufficient_balance` → `onFail`); `deposit_received` считает только депозиты (не выручку и не claim), срабатывает через 10–40 мин после зачисления; `fl_bid` — только в опубликованный запуск; ордера плана **отменяются** при отмене и истечении плана (hold возвращается), при успешном завершении остаются; `retry` — только для `slippage`, `pool_liquidity`, `venue_unavailable`, `rate_limited`, пауза 1–5 эпох; `balance_frozen` — не ошибка шага, план ждёт. Сценарные действия видны в `Portfolio.actions`/`orders` как обычные; публичных метрик сценариев нет. Адреса вывода, `create.meta`, `fl_bid.ciphertext`, `chat.text` хранятся зашифрованными ключом вне БД и стираются при постановке шага или закрытии плана; план целиком стирается через 24 ч после закрытия, удаляется через 48 ч.
 
@@ -1087,6 +1092,11 @@ interface Scenario {                       // Portfolio.scenarios: ≤ 5, акт
 7. Блок выключенной функции → `bad_request` с `details.code = "feature_disabled"` (в черновике — просто `bad_request`).
 8. Паддинг `Portfolio` 8192 и `pad` тела 16384 зафиксированы (в черновике — предложение).
 9. Перечислены коды `details.code`; в векторах каждый невалидный план содержит ровно одну ошибку, порядок проверок не входит в контракт.
+10. P1 строже черновика: Now только у шага 1 после `manual_start` (шаг 0 без ручного старта — `now_not_first`); retry Now-шага — `delayed`.
+11. P2 по всем путям графа (goto/skip/repeat), учитывает `order_place` и `{step: swap}`; P8 проверяет `{step: swap}` по его `to` (ревью `docs/analysis/review-numeric-hood.md` п. 1–5, 11).
+12. `dca` (buy, `abs`): минимальный срез проверяется при создании.
+
+**Этапы.** Блоки появляются в `PoolInfo.scenarios.blocks` по мере готовности исполнителя; блок, которого там нет, → `bad_request` / `feature_disabled` (как выключенная функция). Сейчас (S3): `manual_start`, `wait_fixed`, `wait_random`, `buy`, `sell`, `sell_all`, `end`. Дальше: S4 триггеры (`time_at`, `price_cross`, `deposit_received`, `own_result`, `curve_progress`, `check_safety`), S5 `order_place`/`order_cancel`/`swap`/`dca`/`repeat`, S6 `create`/`fl_*`/`claim`/`withdraw_*`/`chat`.
 
 ## Единицы сумм
 

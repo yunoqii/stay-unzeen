@@ -46,6 +46,20 @@ pub struct Config {
     pub chat: ChatConfig,
     /// Quote assets of non-SOL pairs (API v0.13).
     pub quotes: QuotesConfig,
+    /// Scenarios (API v0.19).
+    pub scenarios: ScenariosConfig,
+}
+
+/// Scenarios (API v0.19, docs/analysis/scenarios.md). Off: no `features.scenarios`, the ops
+/// answer like unknown ops.
+#[derive(Clone, Debug, Default)]
+pub struct ScenariosConfig {
+    /// UNZEEN_SCENARIOS=1.
+    pub enabled: bool,
+    /// K_scn (UNZEEN_SCENARIO_KEY_FILE, 32 bytes hex, 0600, outside the DB and `.env`):
+    /// seals withdrawal addresses, launch meta, bid ciphertexts and chat text of plans.
+    /// Present iff `enabled`.
+    pub key: Option<ChatKey>,
 }
 
 /// ZEC SPL (Zcash on Solana, bridged; launchpads-a.md): 8 decimals like ZEC.
@@ -680,6 +694,18 @@ impl Config {
                     )?,
                     key,
                 }
+            },
+            scenarios: {
+                let enabled = var("UNZEEN_SCENARIOS").as_deref() == Some("1");
+                let key = if enabled {
+                    let p = var("UNZEEN_SCENARIO_KEY_FILE").ok_or_else(|| {
+                        anyhow!("UNZEEN_SCENARIOS=1 needs UNZEEN_SCENARIO_KEY_FILE (32 bytes hex, like the chat key)")
+                    })?;
+                    Some(load_chat_key(std::path::Path::new(&p)).context("UNZEEN_SCENARIO_KEY_FILE")?)
+                } else {
+                    None
+                };
+                ScenariosConfig { enabled, key }
             },
         };
         // v0.18: venues of another chain (pons = Robinhood Chain) cannot be enabled on Solana.

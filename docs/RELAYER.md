@@ -1,6 +1,6 @@
 # Unzeen — контракт core ↔ relayer
 
-Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql`, `0009_verify.sql`, `0010_creator_fees.sql`, `0011_orders.sql`, `0012_fair_review.sql`, `0013_creator_stats.sql`, `0014_verify_review.sql`, `0015_rebalance.sql`, `0017_fair_bundle.sql`, `0018_discovery.sql`, `0019_quotes.sql`, `0020_quote_fees.sql`, `0021_bracket_orders.sql`, `0022_bags_first_buy.sql`, `0023_payout_review.sql`, `0024_intel_creates.sql`, `0025_verify_digest_v2.sql`, `0026_amounts_numeric.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
+Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql`, `0009_verify.sql`, `0010_creator_fees.sql`, `0011_orders.sql`, `0012_fair_review.sql`, `0013_creator_stats.sql`, `0014_verify_review.sql`, `0015_rebalance.sql`, `0017_fair_bundle.sql`, `0018_discovery.sql`, `0019_quotes.sql`, `0020_quote_fees.sql`, `0021_bracket_orders.sql`, `0022_bags_first_buy.sql`, `0023_payout_review.sql`, `0024_intel_creates.sql`, `0025_verify_digest_v2.sql`, `0026_amounts_numeric.sql`, `0027_scenarios.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
 
 Статус: **v12** (13.10; миграция 0026; API.md v0.18). Robinhood Chain, этап 0: только типы и контракт, роль релейера и индексатора не меняется. Изменения против v11:
 
@@ -10,6 +10,8 @@
    - Гранты по колонкам не изменились (`ALTER COLUMN TYPE` их сохраняет); `infra/relayer-role.sql` и `infra/indexer-role.sql` перезапустить, как после любой миграции.
 2. **Площадка `pons`** (Pons V2, Robinhood Chain) добавлена во все CHECK `venue` (`relayer_jobs`, `tokens`, `trades`, `intel_tokens`, `market_trades`, `intel_discovery`, `launch_curves`, `creator_fee_sweeps`, `intel_creates`). Core задания `pons` пока **не ставит**.
 3. **Сети `hood` (EVM chain id 4663) и `hood-testnet` (46630)** добавлены во все CHECK `network`; `verify_snapshots.chain_id` += `0111`, `0212`. Релейер Solana по-прежнему берёт только свою сеть (`network = $2`), строки hood его не касаются. Будущий EVM-релейер: суммы в wei / базовых единицах ERC-20 в тех же колонках, `signature` = tx hash (0x…), `slot` = номер блока.
+
+4. **0027 (сценарии, API v0.19)** — таблицы `scenarios`, `scenario_runs`, `scenario_sealed` только для core; роли релейера и индексатора доступа к ним не получают. Шаг сценария приходит релейеру обычным заданием (`buy`/`sell` …, случайный `request_hash`, та же эпоха и тот же fee-профиль) — для релейера ничего не меняется.
 
 Изменения v11 против v10:
 
