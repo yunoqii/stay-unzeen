@@ -40,6 +40,7 @@
 - —
 
 ## Решения
+- 13.10 (лид, по launchpads-a.md): quote-токены — запас на каждом vault, пополнение пачками (своп-нога в той же tx — только fallback); единая ставка creator fee для всех запусков; LaunchLab-адаптер покрывает stonk.fun и bonk.fun (ID платформ захардкожены); Anoncoin/Surge — только торговля через Jupiter; Bags — с оговоркой, после LaunchLab
 - 13.10 (лид, по launchpads-b.md): пары не к SOL — модель «реестр в лампортах, своп SOL→quote ногой в той же tx через закреплённый пул SOL/USDC, SOL/USD1, пыль — пулу, пакетный своп по расписанию»; делаем DBC с USDC/USD1, затем Raydium LaunchLab со своей platform config; meme.fun — после; Printr/Stoxes/Lesgo — не делаем (только торговля через Jupiter, если подтвердится); xStocks как quote — нет; fair-launch — только SOL
 - 13.10 (владелец): Robinhood Chain — пока только ресёрч (`docs/analysis/robinhood-chain.md`); решение о реализации — после DONE.md (вся Solana-часть сделана и протестирована) и если останется время
 - 13.10 (владелец): проработать все UX-состояния (матрица `docs/design/ux-states.md`, dev-only chaos-режим мока)
