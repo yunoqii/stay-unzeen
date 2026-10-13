@@ -26,7 +26,7 @@ use unzeen_protocol::chat as pc;
 
 use crate::{
     AppState,
-    actions::solana_address,
+    actions::any_address,
     error::{ApiError, ApiResult},
     rate::apply_spread,
 };
@@ -177,7 +177,11 @@ fn msg_id(s: &str) -> ApiResult<[u8; 16]> {
         .ok_or_else(ApiError::not_found)
 }
 
+/// 32-byte mint id for the nick: an SPL mint, or 12 zero bytes ‖ an ERC-20 address (v0.20).
 fn mint_bytes(mint: &str) -> ApiResult<[u8; 32]> {
+    if let Some(a) = unzeen_protocol::evm::parse_address(mint) {
+        return Ok(unzeen_protocol::evm::asset32(&a));
+    }
     bs58::decode(mint)
         .into_vec()
         .ok()
@@ -258,7 +262,7 @@ pub(crate) async fn submit_inner(st: &AppState, raw: Value, body_len: usize, n: 
             show_creator_badge,
             slow,
         } => {
-            let mint = solana_address(&mint, "mint")?;
+            let mint = any_address(&mint, "mint")?;
             let mb = mint_bytes(&mint)?;
             if !st.ledger.chat_mint_listed(&mint).await? {
                 return Err(ApiError::not_found());
@@ -359,7 +363,7 @@ pub async fn page(
     if !st.cfg.chat.enabled {
         return Err(ApiError::not_found());
     }
-    let mint = solana_address(&mint, "mint")?;
+    let mint = any_address(&mint, "mint")?;
     let limit = match q.get("limit") {
         None => 50,
         Some(s) => s

@@ -10,6 +10,12 @@
 //! rootsDigest v2 (API v0.17) = SHA256("unzeen/verify/v2/snapshot" ‖ the same fields as v1
 //!               ‖ u32(Q) ‖ per quote asset, ascending mint: mint[32] ‖ u8(decimals)
 //!               ‖ u8(bridged) ‖ u8(counted) ‖ u64(dustBelow))
+//! v3 (API v0.20, Robinhood Chain; Solana snapshots stay v2):
+//! leaf v3 = SHA256("unzeen/verify/v3/leaf" ‖ chainId[2] ‖ u32(snapshotId) ‖ asset[32] ‖ anonPubkey[32]
+//!               ‖ u8(piece) ‖ u128(value) ‖ blind[32])
+//! node v3 = SHA256("unzeen/verify/v3/node" ‖ L.hash ‖ u128(L.sum) ‖ R.hash ‖ u128(R.sum))
+//! rootsDigest v3 = the v2 layout under "unzeen/verify/v3/snapshot"
+//! asset of an ERC-20 = 12 zero bytes ‖ address[20] (`evm::asset32`); ZEC = 32 zero bytes.
 //! ```
 //! All integers big-endian. No randomness here: splitting/shuffling/blinds are the caller's.
 
@@ -22,6 +28,9 @@ pub const NODE_TAG: &[u8] = b"unzeen/verify/v1/node";
 pub const SNAPSHOT_TAG: &[u8] = b"unzeen/verify/v1/snapshot";
 /// v2 digest (API v0.17): also commits to the snapshot's `quoteAssets`.
 pub const SNAPSHOT_TAG_V2: &[u8] = b"unzeen/verify/v2/snapshot";
+pub const LEAF_TAG_V3: &[u8] = b"unzeen/verify/v3/leaf";
+pub const NODE_TAG_V3: &[u8] = b"unzeen/verify/v3/node";
+pub const SNAPSHOT_TAG_V3: &[u8] = b"unzeen/verify/v3/snapshot";
 /// `asset` of ZEC.
 pub const ZEC_ASSET: [u8; 32] = [0; 32];
 /// Minimum tree size.
@@ -58,6 +67,113 @@ pub fn leaf_hash(
     h.update(value.to_be_bytes());
     h.update(blind);
     h.finalize().into()
+}
+
+/// v3 leaf: the value is u128 (1e27 base units of an 18-decimal ERC-20 do not fit u64).
+#[allow(clippy::too_many_arguments)]
+pub fn leaf_hash_v3(
+    chain: [u8; 2],
+    snapshot_id: u32,
+    asset: &[u8; 32],
+    anon_pubkey: &[u8; 32],
+    piece: u8,
+    value: u128,
+    blind: &[u8; 32],
+) -> Hash {
+    let mut h = Sha256::new();
+    h.update(LEAF_TAG_V3);
+    h.update(chain);
+    h.update(snapshot_id.to_be_bytes());
+    h.update(asset);
+    h.update(anon_pubkey);
+    h.update([piece]);
+    h.update(value.to_be_bytes());
+    h.update(blind);
+    h.finalize().into()
+}
+
+/// Tree version: v1 node tag (Solana snapshots, digest v1/v2) or v3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeVersion {
+    V1,
+    V3,
+}
+
+impl TreeVersion {
+    fn node_tag(self) -> &'static [u8] {
+        match self {
+            TreeVersion::V1 => NODE_TAG,
+            TreeVersion::V3 => NODE_TAG_V3,
+        }
+    }
+}
+
+pub fn node_v(v: TreeVersion, l: &Node, r: &Node) -> Node {
+    let mut h = Sha256::new();
+    h.update(v.node_tag());
+    h.update(l.hash);
+    h.update(l.sum.to_be_bytes());
+    h.update(r.hash);
+    h.update(r.sum.to_be_bytes());
+    Node {
+        hash: h.finalize().into(),
+        sum: l.sum.saturating_add(r.sum),
+    }
+}
+
+/// [`build`] for a tree version.
+pub fn build_v(v: TreeVersion, leaves: Vec<Node>) -> Vec<Vec<Node>> {
+    assert!(leaves.len().is_power_of_two(), "tree size must be a power of two");
+    let mut levels = vec![leaves];
+    while levels.last().expect("non-empty").len() > 1 {
+        let next = levels
+            .last()
+            .expect("non-empty")
+            .chunks(2)
+            .map(|c| node_v(v, &c[0], &c[1]))
+            .collect();
+        levels.push(next);
+    }
+    levels
+}
+
+/// [`root_from_path`] for a tree version.
+pub fn root_from_path_v(v: TreeVersion, leaf: &Node, mut idx: usize, path: &[Node]) -> Node {
+    let mut cur = *leaf;
+    for s in path {
+        cur = if idx & 1 == 0 {
+            node_v(v, &cur, s)
+        } else {
+            node_v(v, s, &cur)
+        };
+        idx /= 2;
+    }
+    cur
+}
+
+/// `rootsDigest` v3: the v2 fields and quote assets under the v3 tag.
+pub fn roots_digest_v3(h: &SnapshotHeader, roots: &[([u8; 32], Node)], quotes: &[QuoteAssetFact]) -> Hash {
+    quotes_digest(digest_with(SNAPSHOT_TAG_V3, h, roots), quotes)
+}
+
+fn quotes_digest(mut d: Sha256, quotes: &[QuoteAssetFact]) -> Hash {
+    let mut q: Vec<&QuoteAssetFact> = quotes.iter().collect();
+    q.sort_by(|a, b| a.mint.cmp(&b.mint));
+    d.update((q.len() as u32).to_be_bytes());
+    for a in q {
+        d.update(a.mint);
+        d.update([a.decimals, u8::from(a.bridged), u8::from(a.counted)]);
+        d.update(a.dust_below.to_be_bytes());
+    }
+    d.finalize().into()
+}
+
+/// Round `v` UP to a multiple of `g` (u128 values of v3).
+pub fn round_up_u128(v: u128, g: u128) -> u128 {
+    if g <= 1 {
+        return v;
+    }
+    v.div_ceil(g).saturating_mul(g)
 }
 
 pub fn node(l: &Node, r: &Node) -> Node {
@@ -147,16 +263,7 @@ pub fn roots_digest(h: &SnapshotHeader, roots: &[([u8; 32], Node)]) -> Hash {
 /// `rootsDigest` v2: v1 fields under the v2 tag, then the quote assets (sorted here by mint).
 /// The operator signature then covers which quote mints count toward ZEC and their dust.
 pub fn roots_digest_v2(h: &SnapshotHeader, roots: &[([u8; 32], Node)], quotes: &[QuoteAssetFact]) -> Hash {
-    let mut d = digest_with(SNAPSHOT_TAG_V2, h, roots);
-    let mut q: Vec<&QuoteAssetFact> = quotes.iter().collect();
-    q.sort_by(|a, b| a.mint.cmp(&b.mint));
-    d.update((q.len() as u32).to_be_bytes());
-    for a in q {
-        d.update(a.mint);
-        d.update([a.decimals, u8::from(a.bridged), u8::from(a.counted)]);
-        d.update(a.dust_below.to_be_bytes());
-    }
-    d.finalize().into()
+    quotes_digest(digest_with(SNAPSHOT_TAG_V2, h, roots), quotes)
 }
 
 fn digest_with(tag: &[u8], h: &SnapshotHeader, roots: &[([u8; 32], Node)]) -> Sha256 {

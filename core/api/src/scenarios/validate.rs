@@ -45,6 +45,12 @@ pub struct Ctx {
     pub full_trades: bool,
     /// Mints with an indexer price tick (`intel_prices`): P8.
     pub priced_mints: Vec<String>,
+    /// v0.20: the server trades on Robinhood Chain: mints and withdrawal addresses are EVM
+    /// (`0x` + 40 hex, compared in EIP-55 form).
+    pub evm: bool,
+    /// Mints of the key's own orders / actions named by `own_result {orderId | actionId}`
+    /// (lowercase hex id → mint): such a step is a trade of that mint for P2 (review-scenarios п. 1).
+    pub ref_mints: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,13 +257,10 @@ impl P<'_> {
 
     fn mint(&self, v: Option<&Value>) -> Result<MintR, ValidationError> {
         match v {
-            Some(Value::String(s)) => {
-                if is_b58_32(s) {
-                    Ok(MintR::Lit(s.clone()))
-                } else {
-                    Err(self.e("bad_mint"))
-                }
-            }
+            Some(Value::String(s)) => match self.canon(s) {
+                Some(c) => Ok(MintR::Lit(c)),
+                None => Err(self.e("bad_mint")),
+            },
             Some(o @ Value::Object(_)) => {
                 let k = self.step_ref(o)?;
                 if produces_mint(&self.types[k]) {
@@ -345,6 +348,75 @@ impl P<'_> {
                 Ok(())
             }
             _ => Err(self.e("bad_exec")),
+        }
+    }
+
+    /// `order_create` rules (API v0.8/v0.15) at plan creation, not hours later (review п. 9).
+    fn order_fields(&self, o: &Map<String, Value>, bracket: bool) -> Result<(), ValidationError> {
+        const KEYS: [&str; 12] = [
+            "kind",
+            "venue",
+            "mint",
+            "amount",
+            "triggerPriceSol",
+            "tpPriceSol",
+            "slPriceSol",
+            "slSlippageBps",
+            "slippageBps",
+            "ttlSecs",
+            "exec",
+            "rearm",
+        ];
+        if o.keys().any(|k| !KEYS.contains(&k.as_str())) {
+            return Err(self.e("bad_field"));
+        }
+        let price = |k: &str| o.get(k).map(|v| v.as_str().is_some_and(is_decimal_positive));
+        let e18 = |k: &str| {
+            o.get(k)
+                .and_then(Value::as_str)
+                .and_then(crate::scenarios::validate::e18)
+        };
+        if bracket {
+            if o.contains_key("triggerPriceSol")
+                || price("tpPriceSol") != Some(true)
+                || price("slPriceSol") != Some(true)
+            {
+                return Err(self.e("bad_range"));
+            }
+            if e18("slPriceSol") >= e18("tpPriceSol") {
+                return Err(self.e("bad_range"));
+            }
+        } else if price("triggerPriceSol") != Some(true)
+            || ["tpPriceSol", "slPriceSol", "slSlippageBps"]
+                .iter()
+                .any(|k| o.contains_key(*k))
+        {
+            return Err(self.e("bad_range"));
+        }
+        for k in ["slippageBps", "slSlippageBps"] {
+            if o.contains_key(k) {
+                self.uint(o.get(k), 50, 5_000)?;
+            }
+        }
+        if o.contains_key("ttlSecs") {
+            self.uint(o.get("ttlSecs"), 3_600, 259_200)?;
+        }
+        match o.get("exec").map(Value::as_str) {
+            None | Some(Some("delayed" | "max")) => {}
+            _ => return Err(self.e("bad_exec")),
+        }
+        if o.get("rearm").is_some_and(|v| !v.is_boolean()) {
+            return Err(self.e("bad_field"));
+        }
+        Ok(())
+    }
+
+    /// Canonical address of this chain (base58 on Solana, EIP-55 on Robinhood Chain).
+    fn canon(&self, s: &str) -> Option<String> {
+        if self.ctx.evm {
+            unzeen_protocol::evm::canonical_address(s)
+        } else {
+            is_b58_32(s).then(|| s.to_string())
         }
     }
 
@@ -462,10 +534,21 @@ impl P<'_> {
                     if self.types[k] != "order_place" {
                         return Err(self.e("bad_ref"));
                     }
-                } else if r.contains_key("orderId") {
-                    self.hex16(r.get("orderId"))?;
                 } else {
-                    self.hex16(r.get("actionId"))?;
+                    let key = if r.contains_key("orderId") {
+                        "orderId"
+                    } else {
+                        "actionId"
+                    };
+                    self.hex16(r.get(key))?;
+                    // The order / action fires a trade of its mint while this step waits (P2).
+                    if let Some(m) = r
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .and_then(|id| self.ctx.ref_mints.get(id))
+                    {
+                        f.traded.push(MintR::Lit(m.clone()));
+                    }
                 }
                 if !matches!(b.get("on").and_then(Value::as_str), Some("filled" | "failed" | "any")) {
                     return Err(self.e("bad_field"));
@@ -608,7 +691,7 @@ impl P<'_> {
                 let m = self.mint(o.get("mint"))?;
                 self.amount(o.get("amount"), want)?;
                 f.traded.push(m);
-                // Prices, slippage, TTL: the ordinary order_create rules at execution (v0.8/v0.15).
+                self.order_fields(o, kind == Some("bracket"))?;
             }
             "order_cancel" => {
                 self.fields(b, &["ref"], &[])?;
@@ -700,8 +783,9 @@ impl P<'_> {
                         self.uint(o.get("parts"), 2, 5)? as usize
                     }
                 };
-                let distinct: HashSet<&str> = to.iter().copied().collect();
-                if to.len() != parts || distinct.len() != to.len() || !to.iter().all(|a| is_b58_32(a)) {
+                let canon: Vec<Option<String>> = to.iter().map(|a| self.canon(a)).collect();
+                let distinct: HashSet<&str> = canon.iter().flatten().map(String::as_str).collect();
+                if to.len() != parts || distinct.len() != to.len() || canon.iter().any(Option::is_none) {
                     return Err(self.e("bad_address"));
                 }
                 self.exec(b.get("exec"), false, &mut f)?;
@@ -871,7 +955,8 @@ pub fn validate(plan: &Value, ctx: &Ctx) -> Outcome {
         let mut f = pp.block(b, n)?;
         pp.on_fail(s.get("onFail"), n)?;
         // Control edges for P2: onFail goto (also after retries); repeat jumps back; end stops.
-        let of = s.get("onFail");
+        // A wait never fails, so its onFail goto is not an edge (review-scenarios п. 8 A).
+        let of = s.get("onFail").filter(|_| !types[i].starts_with("wait_"));
         for g in [
             of.and_then(|x| x.get("goto")),
             of.and_then(|x| x.get("then")).and_then(|x| x.get("goto")),
@@ -1011,6 +1096,21 @@ fn min_wait_between(facts: &[Facts], from: usize, to: usize) -> Option<u64> {
             }
         }
     }
+}
+
+/// Decimal price → ×1e18 integer (for comparing the bracket legs).
+fn e18(s: &str) -> Option<u128> {
+    let (i, f) = s.split_once('.').unwrap_or((s, ""));
+    if f.len() > 18 {
+        return None;
+    }
+    let i: u128 = i.parse().ok()?;
+    let f: u128 = if f.is_empty() {
+        0
+    } else {
+        format!("{f:0<18}").parse().ok()?
+    };
+    i.checked_mul(10u128.pow(18))?.checked_add(f)
 }
 
 fn is_b58_32(s: &str) -> bool {

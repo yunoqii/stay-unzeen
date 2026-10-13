@@ -39,6 +39,41 @@ pub fn parse_address(s: &str) -> Option<[u8; 20]> {
     hex::decode(h).ok()?.try_into().ok()
 }
 
+/// EIP-55 checksum form (`0x` + mixed-case hex) of an address.
+pub fn to_checksum(addr: &[u8; 20]) -> String {
+    let lower = hex::encode(addr);
+    let h = keccak256(lower.as_bytes());
+    let mut out = String::with_capacity(42);
+    out.push_str("0x");
+    for (i, c) in lower.chars().enumerate() {
+        let nibble = (h[i / 2] >> (if i % 2 == 0 { 4 } else { 0 })) & 0x0f;
+        out.push(if c.is_ascii_alphabetic() && nibble >= 8 {
+            c.to_ascii_uppercase()
+        } else {
+            c
+        });
+    }
+    out
+}
+
+/// Canonical EVM address of the API (`0x` + 40 hex, EIP-55). All-lowercase / all-uppercase
+/// input is accepted (no checksum to check); mixed case must be a valid EIP-55 checksum.
+pub fn canonical_address(s: &str) -> Option<String> {
+    let a = parse_address(s)?;
+    let c = to_checksum(&a);
+    let h = &s[2..];
+    let plain = h == h.to_ascii_lowercase() || h == h.to_ascii_uppercase();
+    (plain || s == c).then_some(c)
+}
+
+/// 32-byte asset / mint id of an ERC-20 for 32-byte slots (Verify v3 `asset`, chat nick):
+/// 12 zero bytes ‖ address. Never equal to a Solana mint of the same snapshot (other chain id).
+pub fn asset32(addr: &[u8; 20]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[12..].copy_from_slice(addr);
+    out
+}
+
 /// secp256k1 group order / 2 (big-endian), for the low-s rule.
 const HALF_N: [u8; 32] = [
     0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x5d, 0x57, 0x6e,
@@ -109,5 +144,25 @@ mod tests {
             !verify_eip191("2c7536e3605d9c16a7a3d7b1898e529396a65c23", &sig_hex, &msg),
             "needs 0x"
         );
+    }
+
+    #[test]
+    fn eip55() {
+        // EIP-55 test vectors.
+        for a in [
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+            "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+            "0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB",
+            "0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb",
+        ] {
+            assert_eq!(to_checksum(&parse_address(a).unwrap()), a);
+            assert_eq!(canonical_address(&a.to_lowercase()).as_deref(), Some(a));
+            assert_eq!(canonical_address(a).as_deref(), Some(a));
+        }
+        // Wrong mixed case is refused (typo protection).
+        assert_eq!(canonical_address("0x5AAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"), None);
+        assert_eq!(canonical_address("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeA"), None);
+        let a = parse_address("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed").unwrap();
+        assert_eq!(&asset32(&a)[..12], &[0u8; 12]);
     }
 }

@@ -30,16 +30,30 @@ fn env_u64(key: &str, default: u64) -> anyhow::Result<u64> {
 /// Ledger policy from env: UNZEEN_CONFIRMATIONS (3), MIN_DEPOSIT_ZAT (100000),
 /// MIN_ACTION_ZAT (100000), UNZEEN_SOLANA_CLUSTER (devnet | mainnet-beta).
 pub fn policy_from_env(c: &Common) -> anyhow::Result<Policy> {
-    let cluster: SolanaCluster = std::env::var("UNZEEN_SOLANA_CLUSTER")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "devnet".into())
-        .parse()
-        .map_err(|e: String| anyhow!(e))?;
     let confirmations = u32::try_from(env_u64("UNZEEN_CONFIRMATIONS", 3)?)?.max(1);
+    // API v0.20: UNZEEN_CHAIN=hood → Robinhood Chain instance (chain id 0111 / 0212 from the
+    // Zcash network; its own pool wallet and DB, RELAYER v13).
+    let chain = match std::env::var("UNZEEN_CHAIN").ok().filter(|v| !v.is_empty()).as_deref() {
+        None | Some("solana") => {
+            let cluster: SolanaCluster = std::env::var("UNZEEN_SOLANA_CLUSTER")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "devnet".into())
+                .parse()
+                .map_err(|e: String| anyhow!(e))?;
+            ChainId::new(c.network.zcash_net(), cluster)
+        }
+        Some("hood") => {
+            let net = match c.network.zcash_net() {
+                unzeen_protocol::ZcashNet::Mainnet => unzeen_protocol::HoodNet::Mainnet,
+                unzeen_protocol::ZcashNet::Testnet => unzeen_protocol::HoodNet::Testnet,
+            };
+            ChainId::hood(c.network.zcash_net(), net)
+        }
+        Some(other) => anyhow::bail!("UNZEEN_CHAIN={other:?}: expected solana | hood"),
+    };
     // Same pairing rule as the API (review-numeric-hood п. 15): a testnet wallet with a
     // mainnet-beta cluster would freeze every deposit as `bad_signature` (chain id 0201).
-    let chain = ChainId::new(c.network.zcash_net(), cluster);
     if ChainId::from_bytes(chain.to_bytes()).is_none() {
         anyhow::bail!(
             "UNZEEN_SOLANA_CLUSTER does not match the Zcash network (mainnet ↔ mainnet-beta, testnet ↔ devnet)"
@@ -151,11 +165,8 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
     let key = note_ref_key(c, &db)?;
     // Public facts for `GET /api/pool` (the API server has no wallet access).
     let ua = wallet::show(c)?.ua_orchard;
-    let solana = policy
-        .chain
-        .solana()
-        .ok_or_else(|| anyhow::anyhow!("Robinhood Chain pools are not served by this scanner yet"))?;
-    let cluster = crate::rebalance::cluster_str(solana);
+    let trade = policy.chain.trade;
+    let cluster = trade.network();
     if let Err(msg) = ledger.check_pool_network(c.network.as_str(), cluster).await? {
         anyhow::bail!("refusing to start: {msg}");
     }
@@ -187,7 +198,7 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
         None
     };
     let rebalance_cfg = if rebalance {
-        let cfg = crate::rebalance::RebalanceCfg::from_env(c, solana)?;
+        let cfg = crate::rebalance::RebalanceCfg::from_env(c, trade)?;
         match cfg.dry_reason() {
             Some(reason) => info!(reason, "rebalance enabled in DRY-RUN mode (quotes only, nothing sent)"),
             None => {

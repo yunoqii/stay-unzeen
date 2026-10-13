@@ -91,16 +91,16 @@ pub async fn fair_curve(st: &AppState) -> ApiResult<Option<CurveRow>> {
 }
 
 /// (max total lamports, creator max lamports) on a curve.
-pub fn caps(st: &AppState, c: &CurveRow) -> (u64, u64) {
-    let supply = c.total_supply as u128;
-    let total_tokens = (supply * st.cfg.fair.max_total_bps as u128 / 10_000) as u64;
+pub fn caps(st: &AppState, c: &CurveRow) -> (u128, u128) {
+    let supply = c.total_supply;
+    let total_tokens = supply.saturating_mul(st.cfg.fair.max_total_bps as u128) / 10_000;
     // Never past graduation (real reserves), whatever the bps says.
     let total_tokens = total_tokens.min(c.real_tokens.saturating_sub(1));
     let max_total = unzeen_fair::alloc::curve_max_lamports(c.virtual_sol, c.virtual_tokens, total_tokens);
     let creator = if st.cfg.launch.cap_bps == 0 {
         max_total
     } else {
-        let cap = (supply * st.cfg.launch.cap_bps as u128 / 10_000) as u64;
+        let cap = supply.saturating_mul(st.cfg.launch.cap_bps as u128) / 10_000;
         unzeen_fair::alloc::curve_max_lamports(c.virtual_sol, c.virtual_tokens, cap).min(max_total)
     };
     (max_total, creator)

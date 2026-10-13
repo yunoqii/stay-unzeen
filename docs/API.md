@@ -2,9 +2,26 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.19** (13.10; миграция `0027_scenarios.sql`; сценарии за флагом `UNZEEN_SCENARIOS`, реализованы все блоки S2–S6: create/start/cancel, `Portfolio.scenarios`, исполнитель триггеров, ожиданий, сделок, ордеров, swap/dca/repeat, create/fl_*/claim/withdraw/chat; `fl_*` — только при `features.fairLaunch`, `chat` — при `features.chat`). Изменения против v0.18:
+Статус: **v0.20** (13.10; миграция `0029_verify_v3.sql`; RELAYER.md v14). Изменения против v0.19:
+- **Инстанс Robinhood Chain** (`UNZEEN_CHAIN=hood`; свой origin, свой Zcash-кошелёк пула, своя БД; `chainId` `0212` testnet / `0111` mainnet). Для фронта:
+  - `PoolInfo.chain = { id: "hood", network: "hood-testnet" | "hood", native: { symbol: "ETH", decimals: 18 }, evmChainId }`, `venues` = `[pons]`, `quotes` = `[]`;
+  - **все поля в нативных единицах — wei** вместо лампортов (имена прежние): `rate.lamportsPerZec*` (wei за 1 ZEC), `FeedEvent.solAmount`, `fees.withdrawToken*Lamports`, `claimable[].solAmount`, `launchRules.maxInitialBuyLamports*`, `Candle.volume`; `priceSol`/`marketCapSol` — ETH;
+  - mint и адреса вывода — EVM `0x` + 40 hex. Сервер принимает любой регистр (смешанный — только с верной контрольной суммой EIP-55) и возвращает/хранит **EIP-55**. Base58-адрес на hood-сервере → `400`, `0x`-адрес на Solana-сервере → `400` (в действиях); в публичных путях (`/api/tokens/:mint`, ws) неизвестный mint — как раньше `404`;
+  - токен-суммы до 38 цифр; шаг округления покупки — 0.0001 ETH (D10);
+  - `create` на `pons`: `quote` отсутствует или `"ETH"`, `platform` нет; без кривой Pons у сервера (`launch_curves`) → `503 venue_unavailable`;
+  - fair-launch, ордера и пары не к ETH на hood недоступны (флаги/`venues` их не показывают); чат: `mint[32]` в формуле ника = 12 нулевых байт ‖ адрес токена;
+  - сценарии работают так же (адреса EVM).
+- **Verify v3** (снимки Robinhood Chain, `digestVersion: 3`; снимки Solana остаются v2):
+  - `leaf = SHA256("unzeen/verify/v3/leaf" ‖ chainId[2] ‖ u32(snapshotId) ‖ asset[32] ‖ anonPubkey[32] ‖ u8(piece) ‖ u128(value) ‖ blind[32])` — **значение 16 байт** (у v1/v2 — 8);
+  - `node = SHA256("unzeen/verify/v3/node" ‖ L.hash ‖ u128(L.sum) ‖ R.hash ‖ u128(R.sum))`;
+  - `rootsDigest = SHA256("unzeen/verify/v3/snapshot" ‖ …поля v2…)`;
+  - `asset` ERC-20 = 12 нулевых байт ‖ адрес (20 байт); в JSON `trees[].asset` — `0x…` (EIP-55), `value`/`sum` — десятичные строки (могут быть > 2^64);
+  - векторы для браузерной проверки: `core/testdata/verify-v3-vectors.json` (листья, путь, корни, дайджест).
+- **Сценарии по аудиту** (`review-scenarios.md`, подробности в разделе «Сценарии»): `Portfolio` ровно 64 КиБ; `Portfolio.scenarios[]` **без `plan`** (план и адреса — только на устройстве, где план подписан); полы — по времени от последней реальной сделки ключа, шаг ждёт; новые векторы (84 случая).
+
+v0.19 (13.10). (13.10; миграция `0027_scenarios.sql`; сценарии за флагом `UNZEEN_SCENARIOS`, реализованы все блоки S2–S6: create/start/cancel, `Portfolio.scenarios`, исполнитель триггеров, ожиданий, сделок, ордеров, swap/dca/repeat, create/fl_*/claim/withdraw/chat; `fl_*` — только при `features.fairLaunch`, `chat` — при `features.chat`). Изменения против v0.18:
 - **Сценарии** (план из ≤ 12 блоков, одна подпись): раздел «Сценарии (v0.19)» ниже, спека `docs/analysis/scenarios.md`, решения владельца 13.10. Векторы валидации: `core/testdata/scenario-vectors.json` (фронт и core проверяют по одному файлу).
-- **`Portfolio` выравнивается до кратного 8192 байт** (было 4096) — для всех, со сценариями и без: размер ответа не выдаёт их наличие. Вступает вместе с S3.
+- **`Portfolio` всегда ровно 65 536 байт** (64 КиБ, поле `pad`; было кратно 4096) — один размер для всех ключей, со сценариями и без. Больше — только у ключа с очень большим числом позиций (тогда следующая кратная 64 КиБ).
 - **`pad` тела `POST /api/actions`**: до 16384 байт (было 8192), чтобы `scenario_create` дополнялся до 16 КиБ. Вступает вместе с S3.
 - Новые коды ошибок: `scenario_invalid` (400), `scenario_rule` (422), `scenario_limit` (422), `scenario_not_active` (409).
 - **Подготовка hood (ревью `review-numeric-hood.md`):** на сервере Solana токен-суммы (`amount`, `minOut`, сумма ордера на продажу) ограничены **u64** (SPL) → больше → `400 bad_request`; у hood-сервера — 38 цифр. Шаг округления суммы покупки D10 зависит от цепочки: 0.001 SOL на Solana, **0.0001 ETH** на hood. Снимок Verify с активом, который нельзя закоммитить (например, `0x…` ERC-20 до Verify v3), пропускается целиком (`skip_reason = unsupported_asset`), а не молча без этого актива.
@@ -1058,7 +1075,7 @@ interface Scenario {                       // Portfolio.scenarios: ≤ 5, акт
   createdAt: number;                       // вниз до минуты
   expiresAt: number;                       // вверх до часа
   cursor: number;
-  plan: ScenarioPlan;                      // эхо; адреса и UA маской «Ab3d…9xYz», text/meta/ciphertext — пустые строки
+  // `plan` НЕ возвращается (ревью сценариев п. 2/10): план и адреса вывода показывает только устройство, где план подписан (локальный зашифрованный стор). Сервер не хранит даже фрагментов адреса.
   steps: { id: number; status: "pending" | "waiting" | "running" | "done" | "skipped" | "failed";
            runs: number; nextAt?: number /* вниз до минуты */; actionId?: string; orderId?: string; error?: ErrorCode }[];
   error?: ErrorCode;
@@ -1095,11 +1112,24 @@ interface Scenario {                       // Portfolio.scenarios: ≤ 5, акт
 5. `AmountSpec.abs`: токены — до 38 цифр (v0.18), зат — ≤ 2^63−1.
 6. `scenario_cancel {all: true}` отвечает `{ ids: string[], status: "cancelled" }`.
 7. Блок выключенной функции → `bad_request` с `details.code = "feature_disabled"` (в черновике — просто `bad_request`).
-8. Паддинг `Portfolio` 8192 и `pad` тела 16384 зафиксированы (в черновике — предложение).
+8. `Portfolio` фиксированно 64 КиБ, `pad` тела — до 16384 (в черновике — предложение 8192 для портфеля).
 9. Перечислены коды `details.code`; в векторах каждый невалидный план содержит ровно одну ошибку, порядок проверок не входит в контракт.
 10. P1 строже черновика: Now только у шага 1 после `manual_start` (шаг 0 без ручного старта — `now_not_first`); retry Now-шага — `delayed`.
 11. P2 по всем путям графа (goto/skip/repeat), учитывает `order_place` и `{step: swap}`; P8 проверяет `{step: swap}` по его `to` (ревью `docs/analysis/review-numeric-hood.md` п. 1–5, 11).
 12. `dca` (buy, `abs`): минимальный срез проверяется при создании.
+
+**Аудит сценариев (`docs/analysis/review-scenarios.md`), решения лида 13.10:**
+- **Полы — по времени от последней РЕАЛЬНОЙ сделки ключа** (любое действие: ручное, сработавший ордер, другой план; в полёте = «сейчас», подтверждённая = время блока). Не прошёл пол → шаг **ждёт** (`steps[].status = "waiting"`, `nextAt`), не падает:
+  - P9/P5: любая сделка плана (buy/sell/sell_all/swap-нога/срез dca) не раньше `U(1, 3)` эпох после последней сделки ключа (в т. ч. в `repeat` и через промежуточные шаги);
+  - P6: buy не раньше `U(3, 15)` мин после последней продажи ключа — независимо от источника суммы (`of: "balance"` тоже);
+  - P2: `withdraw_token` не раньше 1 ч + `U(0, 30 мин)` после последней сделки ключа по этому mint (исполнение ордера и сделки вне плана тоже считаются);
+  - P4: `chat` не раньше `U(10, 30)` мин после последней сделки ключа по mint (`swap.from`/`to`, ордера — тоже), и всегда `slow`.
+- Валидатор: `own_result {orderId | actionId}` своего ордера/действия = сделка его mint для P2; поля `order_place.order` проверяются при создании (`exec: "now"` → `bad_exec`, цены/ноги bracket/ttl/slippage → `bad_range`, лишнее поле → `bad_field`); `onFail goto` у `wait_*` не ребро графа (ожидание не падает); шаги после `end` без `goto` на них недостижимы и в P2 не участвуют; `dca` (buy, `abs`): `total / slices × 0.8 ≥ minActionZat`; `check_safety.require.authoritiesRevoked: false` → `bad_field`. **Сервер — источник истины**, всё это в векторах.
+- `limitPrice` по mint, у которого core не знает decimals (нет в `tokens`/карточке индексатора), → шаг `not_found` (никаких «decimals = 6 по умолчанию»).
+- Повтор Now-шага `create` тоже исполняется как `delayed`.
+- Запечатанный адрес/текст шага стирается **после подтверждения** его действия (повтор `retry` его ещё использует), а при `skip`/`goto`/провале шага — сразу.
+- План в статусе `failed` отменяет свои открытые ордера (hold возвращается), как `cancel`/`expire`.
+- `scenario_create` требует у ключа доступного баланса ≥ `minActionZat` (иначе `422 insufficient_balance`): общий кап 500 планов не занять пустыми ключами.
 
 **Блоки.** `PoolInfo.scenarios.blocks` — все блоки, кроме `fl_*` без `features.fairLaunch` и `chat` без `features.chat`; блок, которого там нет, → `bad_request` / `feature_disabled`.
 

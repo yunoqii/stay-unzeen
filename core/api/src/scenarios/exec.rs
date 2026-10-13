@@ -155,43 +155,81 @@ fn advance(st: &AppState, row: &mut ScenarioRow, steps: &[Value]) -> Next {
     goto_floor(st, row, steps, prev_trade)
 }
 
-fn traded_mint_before(row: &ScenarioRow, steps: &[Value], upto: usize, mint: &str) -> bool {
-    (0..upto).any(|k| {
-        TRADES.contains(&ty_of(steps, k)) && out_of(row, k)["mint"].as_str() == Some(mint)
-            || steps[k]["block"]["mint"].as_str() == Some(mint) && TRADES.contains(&ty_of(steps, k))
-    })
+/// What a step is about to do, for the time floors.
+enum Floor<'a> {
+    Buy,
+    Sell,
+    WithdrawToken(&'a str),
+    Chat(&'a str),
+}
+
+/// A floor draw kept for the step (re-rolling on every pass would bias the wait short).
+fn draw(row: &mut ScenarioRow, key: &str, lo: f64, hi: f64) -> f64 {
+    if let Some(v) = sub(row)[key].as_f64() {
+        return v;
+    }
+    let v = uni(lo, hi);
+    sub(row)[key] = json!(v);
+    v
+}
+
+/// Seconds the step must still wait for the server floors, measured from the key's LAST REAL
+/// trade in the ledger (any action: manual, a fired order, another plan), `None` = may run:
+/// - P9 / P5: any pool trade of the key ≥ U(1, 3) epochs before this trade (repeat bodies and
+///   non-trading steps in between change nothing);
+/// - P6: a buy ≥ U(3, 15) min after the key's last sell (whatever funds it, `of: "balance"` too);
+/// - P2: a token withdrawal ≥ 1 h + U(0, 30 min) after the last trade of that mint (a fired
+///   order or a trade outside the plan included);
+/// - P4: a chat line ≥ U(10, 30) min after the last trade of that mint (then always `slow`).
+async fn floor_wait(
+    st: &AppState,
+    tx: &Tx<'_>,
+    row: &mut ScenarioRow,
+    f: Floor<'_>,
+) -> Result<Option<f64>, LedgerError> {
+    let need_and_since = match f {
+        Floor::Buy | Floor::Sell => {
+            let Some((since, kind)) = sc::last_trade(tx, &row.pk, None).await? else {
+                return Ok(None);
+            };
+            let mut need = draw(row, "p9", 1.0, 3.0) * epoch_mean(st);
+            if matches!(f, Floor::Buy) && kind == "sell" {
+                need = need.max(draw(row, "p6", 180.0, 900.0));
+            }
+            (need, since)
+        }
+        Floor::WithdrawToken(m) => {
+            let Some((since, _)) = sc::last_trade(tx, &row.pk, Some(m)).await? else {
+                return Ok(None);
+            };
+            (3_600.0 + draw(row, "p2", 0.0, 1_800.0), since)
+        }
+        Floor::Chat(m) => {
+            let Some((since, _)) = sc::last_trade(tx, &row.pk, Some(m)).await? else {
+                return Ok(None);
+            };
+            (draw(row, "p4", 600.0, 1_800.0), since)
+        }
+    };
+    let (need, since) = need_and_since;
+    Ok((since < need).then_some(need - since + 1.0))
+}
+
+/// The step waits for a floor: never a failure.
+fn hold_for(row: &mut ScenarioRow, secs: f64) -> Next {
+    let i = row.cursor;
+    set_step_status(row, i, "waiting");
+    Next::In(Some(secs))
 }
 
 fn goto_floor(st: &AppState, row: &mut ScenarioRow, steps: &[Value], prev_trade: bool) -> Next {
     let Some(next) = steps.get(row.cursor) else {
         return Next::Close("done", None);
     };
-    let b = &next["block"];
-    let ty = b["type"].as_str().unwrap_or("");
-    let mut delay = 0.0;
-    if TRADES.contains(&ty) && prev_trade {
-        // P9: never two pool trades of one plan in adjacent epochs.
-        delay += uni(1.0, 3.0) * epoch_mean(st);
-    }
-    if ty == "buy"
-        && let Some(k) = b["zec"]["of"]["step"].as_u64()
-        && matches!(ty_of(steps, k as usize), "sell" | "sell_all")
-    {
-        // P6: "sold for X → bought for ≈X" never lines up in time.
-        delay += uni(180.0, 900.0);
-    }
-    if ty == "withdraw_token" {
-        // P2 floor on top of the validated ≥ 1 h wait.
-        delay += uni(0.0, 1_800.0);
-    }
-    if ty == "chat"
-        && let Some(m) = mint_of(row, &b["mint"])
-        && traded_mint_before(row, steps, row.cursor, &m)
-    {
-        // P4: a chat line right after one's own trade ties the nick to the trade size.
-        delay += uni(600.0, 1_800.0);
-    }
-    Next::In(Some(delay))
+    // Floors are checked by TIME against the key's real last trade when the step runs
+    // ([`floor_wait`]), not by which step came before (review-scenarios п. 1/3/4/6).
+    let _ = (st, next, prev_trade);
+    Next::In(Some(0.0))
 }
 
 /// onFail of the current step for `code`.
@@ -216,6 +254,8 @@ fn on_fail(st: &AppState, row: &mut ScenarioRow, steps: &[Value], code: &str) ->
 /// `stop` | `skip` | `{goto}` after a failed (or false) step.
 fn jump(st: &AppState, row: &mut ScenarioRow, steps: &[Value], then: &Value, code: &str) -> Next {
     let i = row.cursor;
+    // A step that ends without success drops its sealed blob now (review-scenarios п. 12).
+    row.state["dropSealed"] = json!(i);
     set_step_status(row, i, "failed");
     match then {
         Value::String(s) if s == "skip" => {
@@ -263,6 +303,12 @@ async fn plan_pass(st: &AppState, id: &[u8; 16], rep: &mut PassReport) -> Result
     } else {
         return Ok(());
     };
+    if let Some(k) = row.state.get("dropSealed").and_then(Value::as_u64) {
+        sc::drop_sealed(&tx, id, k as usize).await?;
+        if let Some(o) = row.state.as_object_mut() {
+            o.remove("dropSealed");
+        }
+    }
     match next {
         Next::In(None) if row.phase == "in_flight" => sc::save(&tx, &row, None).await?,
         Next::In(None) => return Ok(()), // nothing changed (still waiting on settlement)
@@ -296,6 +342,8 @@ async fn settle_in_flight(
     match status.as_str() {
         "executed" => {
             sc::finish_run(tx, &row.id, seq, "done", None).await?;
+            // Sealed address / meta: kept until the step is confirmed (a retry needs it again).
+            sc::drop_sealed(tx, &row.id, i).await?;
             let f = fill.unwrap_or(Value::Null);
             let pending_mint = row.state["pending"]["mint"].as_str().map(String::from);
             row.state["pending"] = Value::Null;
@@ -873,25 +921,31 @@ async fn amount_of(tx: &Tx<'_>, row: &ScenarioRow, spec: &Value, zat: bool, mint
     Ok(pct(base, p))
 }
 
+type Guarded = Result<(u128, u32, u32, bool), &'static str>;
+
 /// Price (e18, quote per whole token) for a guard and the token's decimals / ZEC-pair flag.
-/// USDC/USD1 pairs are refused at plan creation (`unsupported_pair`); `None` here = no price yet.
-async fn guard_price(
-    tx: &Tx<'_>,
-    st: &AppState,
-    mint: &str,
-    guard: &Value,
-) -> Result<Option<(u128, u32, u32, bool)>, LedgerError> {
+/// USDC/USD1 pairs are refused at plan creation (`unsupported_pair`); `None` = no price yet
+/// (transient), `Some(Err("not_found"))` = decimals unknown to core.
+async fn guard_price(tx: &Tx<'_>, st: &AppState, mint: &str, guard: &Value) -> Result<Option<Guarded>, LedgerError> {
+    // Decimals only from core's data (pool tokens or the indexer's card), never a default: a
+    // wrong decimals value moves minOut by orders of magnitude (review-scenarios п. 5).
     let t = tx
         .query_opt(
-            "SELECT t.decimals, t.quote_mint, p.price_sol::text,
+            "SELECT COALESCE(t.decimals, it.decimals), t.quote_mint, p.price_sol::text,
                     (extract(epoch FROM now()) * 1000)::bigint - p.tick_at
-             FROM tokens t LEFT JOIN intel_prices p ON p.mint = t.mint WHERE t.mint = $1",
+             FROM (SELECT $1::text AS mint) m
+             LEFT JOIN tokens t ON t.mint = m.mint
+             LEFT JOIN intel_tokens it ON it.mint = m.mint
+             LEFT JOIN intel_prices p ON p.mint = m.mint",
             &[&mint],
         )
         .await?;
-    let (dec, quote, tick, age): (i16, Option<String>, Option<String>, Option<i64>) = match &t {
+    let (dec, quote, tick, age): (Option<i16>, Option<String>, Option<String>, Option<i64>) = match &t {
         Some(r) => (r.get(0), r.get(1), r.get(2), r.get(3)),
-        None => (6, None, None, None),
+        None => (None, None, None, None),
+    };
+    let Some(dec) = dec else {
+        return Ok(Some(Err("not_found")));
     };
     let zec_pair = match &quote {
         None => false,
@@ -901,7 +955,7 @@ async fn guard_price(
         },
     };
     if let Some(lp) = guard["limitPrice"].as_str() {
-        return Ok(parse_e18(lp).map(|e| (e, dec.clamp(0, 18) as u32, 0, zec_pair)));
+        return Ok(parse_e18(lp).map(|e| Ok((e, dec.clamp(0, 18) as u32, 0, zec_pair))));
     }
     let slip = guard["slippageBps"].as_u64().unwrap_or(500) as u32;
     if zec_pair {
@@ -911,7 +965,7 @@ async fn guard_price(
     Ok(tick
         .filter(|_| fresh)
         .and_then(|p| parse_e18(&p))
-        .map(|e| (e, dec.clamp(0, 18) as u32, slip, false)))
+        .map(|e| Ok((e, dec.clamp(0, 18) as u32, slip, false))))
 }
 
 enum Trade {
@@ -936,15 +990,25 @@ async fn submit_trade(
         // balance_frozen (reorg) is not a step error: wait.
         return Ok(Next::In(Some(60.0)));
     }
+    let fl = if matches!(t, Trade::Buy { .. }) {
+        Floor::Buy
+    } else {
+        Floor::Sell
+    };
+    if let Some(w) = floor_wait(st, tx, row, fl).await? {
+        return Ok(hold_for(row, w));
+    }
     // P1 (lead 13.10): a retried Now step is no longer the human click it followed: delayed.
     let exec = match exec {
         Some("now") if row.attempt == 0 => "now",
         Some("max") => "max",
         _ => "delayed",
     };
-    let Some((e18, dec, slip, zec_pair)) = guard_price(tx, st, mint, guard).await? else {
+    let (e18, dec, slip, zec_pair) = match guard_price(tx, st, mint, guard).await? {
+        Some(Ok(g)) => g,
+        Some(Err(code)) => return Ok(on_fail(st, row, steps, code)),
         // No fresh tick yet: transient (the next tick may bring a price).
-        return Ok(on_fail(st, row, steps, "venue_unavailable"));
+        None => return Ok(on_fail(st, row, steps, "venue_unavailable")),
     };
     let Ok(r) = st.rate.get().await else {
         return Ok(on_fail(st, row, steps, "venue_unavailable"));
@@ -959,7 +1023,7 @@ async fn submit_trade(
             let zat = u64::try_from(zat).unwrap_or(u64::MAX);
             // Quote units the buy will spend (lamports at the buy rate; ZEC SPL ×10 to the 1e9 scale).
             let units = if zec_pair {
-                zat.saturating_mul(10)
+                u128::from(zat) * 10
             } else {
                 rate::zat_to_lamports(zat, rate::apply_spread(r.lamports_per_zec, spread, true))
             };
@@ -1010,10 +1074,9 @@ async fn submit_built(
     match sc::submit_step(&st.ledger, tx, &row.pk, &new).await {
         Ok(rec) => {
             sc::insert_run(tx, &row.id, i, row.attempt, "queued", Some(&rec.id), None).await?;
-            if let Some(k) = drop_sealed {
-                // The address / meta now lives only where the existing rules keep it.
-                sc::drop_sealed(tx, &row.id, k).await?;
-            }
+            // The sealed blob of this step is dropped once the action is confirmed (settlement)
+            // or the step gives up (`jump`), not at queueing: a retry still needs it.
+            let _ = drop_sealed;
             row.runs += 1;
             row.phase = "in_flight".into();
             row.state["pending"] = json!({ "mint": mint });
@@ -1065,8 +1128,13 @@ async fn sealed_action(
             let Some(meta) = secret.as_ref().map(|s| s["meta"].clone()) else {
                 return step_error(st, tx, row, steps, &ApiError::bad_request("sealed")).await;
             };
-            let mut v = json!({ "op": "create", "venue": c["venue"], "meta": meta,
-                                "exec": c["exec"].as_str().unwrap_or("delayed") });
+            // P1: a retried Now launch is delayed like a retried Now trade (review п. 7).
+            let ex = match c["exec"].as_str() {
+                Some("now") if row.attempt == 0 => "now",
+                Some("max") => "max",
+                _ => "delayed",
+            };
+            let mut v = json!({ "op": "create", "venue": c["venue"], "meta": meta, "exec": ex });
             if c.get("initialBuyZec").is_some() {
                 let z = amount_of(tx, row, &c["initialBuyZec"], true, "").await?;
                 v["initialBuyZec"] = json!(z.to_string());
@@ -1082,6 +1150,9 @@ async fn sealed_action(
             let (Some(mint), Some(to)) = (mint_of(row, &b["mint"]), secret.as_ref().map(|s| s["to"].clone())) else {
                 return step_error(st, tx, row, steps, &ApiError::bad_request("sealed")).await;
             };
+            if let Some(w) = floor_wait(st, tx, row, Floor::WithdrawToken(&mint)).await? {
+                return Ok(hold_for(row, w));
+            }
             let amount = amount_of(tx, row, &b["amount"], false, &mint).await?;
             let mut v = json!({ "op": "withdraw_token", "mint": mint, "amount": amount.to_string(),
                                 "to": to, "exec": exec });
@@ -1245,8 +1316,11 @@ async fn side_tx(
             let Some(text) = secret.as_ref().map(|s| s["text"].clone()) else {
                 return step_error(st, tx, row, steps, &ApiError::bad_request("sealed")).await;
             };
-            // P4: after a trade of this mint the message is always slow.
-            let slow = traded_mint_before(row, steps, i, &mint);
+            // P4: after a trade of this mint (any, by time) the message waits and is always slow.
+            if let Some(w) = floor_wait(st, tx, row, Floor::Chat(&mint)).await? {
+                return Ok(hold_for(row, w));
+            }
+            let slow = sc::last_trade(tx, &row.pk, Some(&mint)).await?.is_some();
             let raw = json!({ "op": "chat", "mint": mint, "text": text,
                               "showCreatorBadge": b["showCreatorBadge"].as_bool().unwrap_or(false), "slow": slow });
             let n = unzeen_ledger::NonceCtx {

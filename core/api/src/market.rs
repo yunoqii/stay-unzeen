@@ -20,7 +20,7 @@ use unzeen_ledger::{LedgerError, Num, tokio_postgres::Row};
 
 use crate::{
     AppState,
-    actions::solana_address,
+    actions::any_address,
     error::{ApiError, ApiResult},
 };
 
@@ -147,7 +147,7 @@ fn limit(q: &HashMap<String, String>, default: i64, max: i64) -> ApiResult<i64> 
 
 fn mint_param(m: &str) -> ApiResult<String> {
     // Unknown / malformed mints are simply "not tracked".
-    solana_address(m, "mint").map_err(|_| ApiError::not_found())
+    any_address(m, "mint").map_err(|_| ApiError::not_found())
 }
 
 pub async fn feed(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> ApiResult<Response> {
@@ -645,7 +645,7 @@ pub async fn ws_feed(
     ws: WebSocketUpgrade,
 ) -> ApiResult<Response> {
     let mint = match q.get("mint") {
-        Some(m) => Some(solana_address(m, "mint")?),
+        Some(m) => Some(any_address(m, "mint")?),
         None => None,
     };
     let permit = st

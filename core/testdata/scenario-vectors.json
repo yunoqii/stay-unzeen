@@ -2886,6 +2886,464 @@
     "step": 0,
     "code": "bad_venue"
    }
+  },
+  {
+   "name": "review-scenarios 1b: own_result on an own order is a trade of its mint (P2)",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "own_result",
+       "ref": {
+        "orderId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "on": "filled"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "abs": "5"
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_rule",
+    "step": 1,
+    "code": "withdraw_too_soon"
+   },
+   "ctx": {
+    "refMints": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "So11111111111111111111111111111111111111112"
+    }
+   }
+  },
+  {
+   "name": "own_result on an unknown id: no mint, no P2 (the server resolves ids of the key only)",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "own_result",
+       "ref": {
+        "orderId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       },
+       "on": "filled"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "abs": "5"
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 1,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "review-scenarios 1a: order + wait passes statically (the executor holds the withdrawal by time)",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "order_place",
+       "order": {
+        "kind": "limit_buy",
+        "mint": "So11111111111111111111111111111111111111112",
+        "amount": {
+         "abs": "1000000"
+        },
+        "triggerPriceSol": "0.000001"
+       }
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 3600,
+       "maxSecs": 7200
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "abs": "5"
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 2,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "review-scenarios 8A: a wait's onFail goto is not an edge (waits never fail)",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 3600,
+       "maxSecs": 7200
+      },
+      "onFail": {
+       "goto": 2
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "abs": "5"
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 2,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "review-scenarios 8B: dca slice threshold is total / slices × 0.8",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "dca",
+       "side": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "total": {
+        "abs": "400000"
+       },
+       "slices": 4,
+       "everySecs": {
+        "min": 600,
+        "max": 900
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_amount"
+   }
+  },
+  {
+   "name": "review-scenarios 8B: dca at the threshold",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "dca",
+       "side": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "total": {
+        "abs": "500000"
+       },
+       "slices": 4,
+       "everySecs": {
+        "min": 600,
+        "max": 900
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 4,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "review-scenarios 8C: authoritiesRevoked false is not a requirement",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "check_safety",
+       "mint": "So11111111111111111111111111111111111111112",
+       "require": {
+        "authoritiesRevoked": false
+       },
+       "onFalse": "stop"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_field"
+   }
+  },
+  {
+   "name": "review-scenarios 9F: order exec now",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "order_place",
+       "order": {
+        "kind": "limit_sell",
+        "mint": "So11111111111111111111111111111111111111112",
+        "amount": {
+         "abs": "5"
+        },
+        "triggerPriceSol": "0.1",
+        "exec": "now"
+       }
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_exec"
+   }
+  },
+  {
+   "name": "review-scenarios 9F: bracket without the stop-loss leg",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "order_place",
+       "order": {
+        "kind": "bracket",
+        "mint": "So11111111111111111111111111111111111111112",
+        "amount": {
+         "abs": "5"
+        },
+        "tpPriceSol": "0.2"
+       }
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_range"
+   }
+  },
+  {
+   "name": "review-scenarios 9F: bracket legs in the wrong order",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "order_place",
+       "order": {
+        "kind": "bracket",
+        "mint": "So11111111111111111111111111111111111111112",
+        "amount": {
+         "abs": "5"
+        },
+        "tpPriceSol": "0.1",
+        "slPriceSol": "0.2"
+       }
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_range"
+   }
+  },
+  {
+   "name": "review-scenarios 9F: order ttl below 1 h",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "order_place",
+       "order": {
+        "kind": "limit_sell",
+        "mint": "So11111111111111111111111111111111111111112",
+        "amount": {
+         "abs": "5"
+        },
+        "triggerPriceSol": "0.1",
+        "ttlSecs": 100
+       }
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_range"
+   }
+  },
+  {
+   "name": "review-scenarios 9F: unknown order field",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "order_place",
+       "order": {
+        "kind": "limit_sell",
+        "mint": "So11111111111111111111111111111111111111112",
+        "amount": {
+         "abs": "5"
+        },
+        "triggerPriceSol": "0.1",
+        "extra": 1
+       }
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_field"
+   }
+  },
+  {
+   "name": "review-scenarios 9H: steps after `end` are unreachable (no P2 path)",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "end"
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "abs": "5"
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 2,
+    "ttlSecs": 86400
+   }
   }
  ]
 }

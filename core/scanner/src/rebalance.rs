@@ -30,7 +30,6 @@ use anyhow::{Context, anyhow, bail};
 use tonic::transport::Channel;
 use tracing::{info, warn};
 use unzeen_ledger::{FundOutcome, Inventory, Ledger, LiveRebalance, RebalanceHistory};
-use unzeen_protocol::SolanaCluster;
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
     data_api::{WalletRead, wallet::ConfirmationsPolicy},
@@ -101,13 +100,6 @@ fn env_str(k: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-pub fn cluster_str(c: SolanaCluster) -> &'static str {
-    match c {
-        SolanaCluster::MainnetBeta => "mainnet-beta",
-        SolanaCluster::Devnet => "devnet",
-    }
-}
-
 /// Base58 of exactly 32 bytes (a Solana address).
 pub fn valid_sol_address(s: &str) -> bool {
     bs58::decode(s).into_vec().is_ok_and(|v| v.len() == 32)
@@ -119,16 +111,27 @@ pub fn is_transparent(s: &str, net: &Network) -> bool {
 }
 
 impl RebalanceCfg {
-    pub fn from_env(c: &Common, cluster: SolanaCluster) -> anyhow::Result<Self> {
+    /// v0.20: the native coin of the pool's chain — SOL (target `sol`, recipient
+    /// UNZEEN_REBALANCE_SOL_ADDRESS) or ETH on Robinhood Chain (target `eth`, recipient
+    /// UNZEEN_REBALANCE_ETH_ADDRESS = the pool's rebalance address, adapters keyring branch 3).
+    /// Amounts in the same fields: lamports or wei (defaults per chain).
+    pub fn from_env(c: &Common, trade: unzeen_protocol::TradeNet) -> anyhow::Result<Self> {
+        let hood = matches!(trade, unzeen_protocol::TradeNet::Hood(_));
+        let (min_free, reserve, keep) = if hood {
+            // 1 ETH free, 0.001 ETH reserve per vault, 0.001 ETH kept on the rebalance address.
+            (1_000_000_000_000_000_000, 1_000_000_000_000_000, 1_000_000_000_000_000)
+        } else {
+            (2_000_000_000, 5_000_000, 10_000_000)
+        };
         let cfg = Self {
-            network: cluster_str(cluster),
-            target: "sol",
+            network: trade.network(),
+            target: if hood { "eth" } else { "sol" },
             zcash: c.network,
             allow_mainnet: std::env::var("UNZEEN_ALLOW_MAINNET_REBALANCE").as_deref() == Ok("1"),
             lot_zat: env_u64("UNZEEN_REBALANCE_LOT_ZAT", 50_000_000)?,
             max_lot_zat: env_u64("UNZEEN_REBALANCE_MAX_LOT_ZAT", 50_000_000)?.min(HARD_MAX_LOT_ZAT),
-            min_free_lamports: env_u64("UNZEEN_REBALANCE_MIN_FREE_LAMPORTS", 2_000_000_000)?,
-            vault_reserve_lamports: env_u64("UNZEEN_REBALANCE_VAULT_RESERVE_LAMPORTS", 5_000_000)?,
+            min_free_lamports: env_u64("UNZEEN_REBALANCE_MIN_FREE_LAMPORTS", min_free)?,
+            vault_reserve_lamports: env_u64("UNZEEN_REBALANCE_VAULT_RESERVE_LAMPORTS", reserve)?,
             inventory_max_age_secs: env_u64("UNZEEN_REBALANCE_INVENTORY_MAX_AGE_SECS", 900)?,
             delay_min_secs: env_u64("UNZEEN_REBALANCE_DELAY_MIN_SECS", 600)? as f64,
             delay_max_secs: env_u64("UNZEEN_REBALANCE_DELAY_MAX_SECS", 3600)? as f64,
@@ -141,13 +144,17 @@ impl RebalanceCfg {
             quote_max_age_secs: env_u64("UNZEEN_REBALANCE_QUOTE_MAX_AGE_SECS", 300)?,
             poll_secs: env_u64("UNZEEN_REBALANCE_POLL_SECS", 60)?.max(15),
             slow_alert_secs: 3 * 3600,
-            keep_lamports: env_u64("UNZEEN_REBALANCE_KEEP_LAMPORTS", 10_000_000)?,
+            keep_lamports: env_u64("UNZEEN_REBALANCE_KEEP_LAMPORTS", keep)?,
             fund_delay_min_secs: env_u64("UNZEEN_REBALANCE_FUND_DELAY_MIN_SECS", 60)? as f64,
             fund_delay_max_secs: env_u64("UNZEEN_REBALANCE_FUND_DELAY_MAX_SECS", 600)? as f64,
             fund_max_attempts: 5,
             fund_retry_secs: 600.0,
             fee_margin_zat: env_u64("UNZEEN_REBALANCE_FEE_MARGIN_ZAT", 100_000)?,
-            sol_address: env_str("UNZEEN_REBALANCE_SOL_ADDRESS"),
+            sol_address: if hood {
+                env_str("UNZEEN_REBALANCE_ETH_ADDRESS")
+            } else {
+                env_str("UNZEEN_REBALANCE_SOL_ADDRESS")
+            },
             refund_taddr: env_str("UNZEEN_REBALANCE_REFUND_TADDR"),
         };
         cfg.validate()?;
@@ -164,10 +171,14 @@ impl RebalanceCfg {
         if self.delay_max_secs < self.delay_min_secs || self.fund_delay_max_secs < self.fund_delay_min_secs {
             bail!("rebalance delay max < min");
         }
-        if let Some(a) = &self.sol_address
-            && !valid_sol_address(a)
-        {
-            bail!("UNZEEN_REBALANCE_SOL_ADDRESS is not a Solana address");
+        if let Some(a) = &self.sol_address {
+            if self.target == "eth" {
+                if unzeen_protocol::evm::canonical_address(a).as_deref() != Some(a.as_str()) {
+                    bail!("UNZEEN_REBALANCE_ETH_ADDRESS must be an EIP-55 checksummed EVM address");
+                }
+            } else if !valid_sol_address(a) {
+                bail!("UNZEEN_REBALANCE_SOL_ADDRESS is not a Solana address");
+            }
         }
         if let Some(t) = &self.refund_taddr
             && !is_transparent(t, &Network::MainNetwork)
@@ -179,7 +190,7 @@ impl RebalanceCfg {
 
     /// `None` = live sends allowed; `Some(reason)` = dry-run.
     pub fn dry_reason(&self) -> Option<&'static str> {
-        if self.zcash != NetName::Main || self.network != "mainnet-beta" {
+        if self.zcash != NetName::Main || !matches!(self.network, "mainnet-beta" | "hood") {
             return Some("not mainnet (1Click has no testnet)");
         }
         if !self.allow_mainnet {
@@ -189,7 +200,11 @@ impl RebalanceCfg {
             return Some("lot above UNZEEN_REBALANCE_MAX_LOT_ZAT");
         }
         if self.sol_address.is_none() {
-            return Some("UNZEEN_REBALANCE_SOL_ADDRESS not set");
+            return Some(if self.target == "eth" {
+                "UNZEEN_REBALANCE_ETH_ADDRESS not set"
+            } else {
+                "UNZEEN_REBALANCE_SOL_ADDRESS not set"
+            });
         }
         if self.refund_taddr.is_none() {
             return Some("UNZEEN_REBALANCE_REFUND_TADDR not set");
@@ -201,6 +216,9 @@ impl RebalanceCfg {
     /// (UNZEEN_REBALANCE_ZEC_SPL_LOT_ZAT, _MIN_FREE_ZAT), free = ZEC SPL on vaults + rebalance
     /// address − queued ZEC-pair buys.
     pub fn zec_spl(&self) -> anyhow::Result<Self> {
+        if self.target == "eth" {
+            bail!("ZEC SPL is a Solana asset: no zec-spl rebalance on Robinhood Chain");
+        }
         let c = Self {
             target: "zec_spl",
             lot_zat: env_u64("UNZEEN_REBALANCE_ZEC_SPL_LOT_ZAT", 50_000_000)?,
@@ -214,10 +232,18 @@ impl RebalanceCfg {
     }
 
     pub fn destination(&self) -> &'static str {
-        if self.target == "zec_spl" {
-            oneclick::ZEC_SPL_ASSET
-        } else {
-            oneclick::SOL_ASSET
+        match self.target {
+            "zec_spl" => oneclick::ZEC_SPL_ASSET,
+            "eth" => oneclick::HOOD_ETH_ASSET,
+            _ => oneclick::SOL_ASSET,
+        }
+    }
+
+    /// Reference value of a lot in the destination's native units (1Click USD prices).
+    pub fn expected_out(&self, tokens: &serde_json::Value, lot_zat: u64) -> Option<u64> {
+        match self.target {
+            "eth" => oneclick::expected_native(tokens, lot_zat, oneclick::HOOD_ETH_ASSET, 18),
+            _ => oneclick::expected_lamports(tokens, lot_zat),
         }
     }
 
@@ -227,7 +253,11 @@ impl RebalanceCfg {
             dry,
             amount_zat: self.lot_zat,
             refund_to: self.refund_taddr.as_deref().unwrap_or(oneclick::DUMMY_ZEC_REFUND),
-            recipient: self.sol_address.as_deref().unwrap_or(oneclick::DUMMY_SOL_RECIPIENT),
+            recipient: self.sol_address.as_deref().unwrap_or(if self.target == "eth" {
+                oneclick::DUMMY_EVM_RECIPIENT
+            } else {
+                oneclick::DUMMY_SOL_RECIPIENT
+            }),
             slippage_bps: self.slippage_bps,
             deadline_unix: now_unix + self.quote_deadline_secs,
         }
@@ -544,7 +574,7 @@ async fn quote<O: OneClick>(
         let Ok(tokens) = oc.tokens().await else {
             return Ok(Err(QuoteReject::NoPrice.code()));
         };
-        let Some(e) = oneclick::expected_lamports(&tokens, p.amount_zat) else {
+        let Some(e) = cfg.expected_out(&tokens, p.amount_zat) else {
             return Ok(Err(QuoteReject::NoPrice.code()));
         };
         e
@@ -821,7 +851,7 @@ pub async fn dry_quote<O: OneClick>(
         Some(p.amount_zat)
     } else {
         match oc.tokens().await {
-            Ok(t) => oneclick::expected_lamports(&t, p.amount_zat),
+            Ok(t) => cfg.expected_out(&t, p.amount_zat),
             Err(_) => None,
         }
     };
@@ -1120,7 +1150,7 @@ mod tests {
         let mut pc: PgConfig = url.parse().unwrap();
         pc.options(format!("-c search_path={schema}"));
         let policy = Policy {
-            chain: ChainId::new(ZcashNet::Mainnet, SolanaCluster::MainnetBeta),
+            chain: ChainId::new(ZcashNet::Mainnet, unzeen_protocol::SolanaCluster::MainnetBeta),
             confirmations: 3,
             min_deposit_zat: 100_000,
             min_action_zat: 50_000,

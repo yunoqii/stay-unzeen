@@ -148,30 +148,25 @@ pub fn parse_e18(s: &str) -> Option<u128> {
 }
 
 /// buy: min tokens (base units) for `lamports` at `trigger × (1 + slippage)`.
-pub fn buy_min_out(lamports: u64, trigger_e18: u128, decimals: u32, slippage_bps: u32) -> Option<u128> {
-    // tokens_whole = lamports / (trigger · 1e9 · (1 + s)); base = · 10^dec
-    let num = (lamports as u128)
-        .checked_mul(10u128.checked_pow(decimals)?)?
+pub fn buy_min_out(lamports: u128, trigger_e18: u128, decimals: u32, slippage_bps: u32) -> Option<u128> {
+    // tokens_whole = lamports / (trigger · 1e9 · (1 + s)); base = · 10^dec (256-bit product).
+    let den = trigger_e18.checked_mul(10_000 + slippage_bps as u128)?;
+    let scale = 10u128
+        .checked_pow(decimals)?
         .checked_mul(1_000_000_000)?
         .checked_mul(10_000)?;
-    let den = trigger_e18.checked_mul(10_000 + slippage_bps as u128)?;
-    if den == 0 {
-        return None;
-    }
-    Some(num / den)
+    unzeen_fair::alloc::mul_div(lamports, scale, den)
 }
 
 /// sell: min lamports for `amount` base units at `trigger × (1 − slippage)`.
 pub fn sell_min_out(amount: u128, trigger_e18: u128, decimals: u32, slippage_bps: u32) -> Option<u128> {
     // lamports = amount / 10^dec · trigger · 1e9 = amount · trigger_e18 / (10^dec · 1e9)
-    let num = amount
-        .checked_mul(trigger_e18)?
-        .checked_mul(10_000 - slippage_bps.min(10_000) as u128)?;
+    let k = trigger_e18.checked_mul(10_000 - slippage_bps.min(10_000) as u128)?;
     let den = 10u128
         .checked_pow(decimals)?
         .checked_mul(1_000_000_000)?
         .checked_mul(10_000)?;
-    Some(num / den)
+    unzeen_fair::alloc::mul_div(amount, k, den)
 }
 
 fn id16(v: Vec<u8>) -> [u8; 16] {
@@ -702,10 +697,10 @@ impl Ledger {
             amount
         };
         let (lamports, zat, min_out) = if buy {
-            let full = ((hold.max(0) as u128) * (rate.lamports_per_zec as u128) / ZAT_PER_ZEC) as u64;
+            let full = (hold.max(0) as u128) * (rate.lamports_per_zec as u128) / ZAT_PER_ZEC;
             let shave = (rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64;
             let lamports = unzeen_fair::alloc::fuzz_lamports(full, shave);
-            let zat = ((lamports as u128) * ZAT_PER_ZEC)
+            let zat = (lamports * ZAT_PER_ZEC)
                 .div_ceil(rate.lamports_per_zec.max(1) as u128)
                 .min(hold.max(0) as u128) as u64;
             match buy_min_out(lamports, price_e18, dec, slip) {
@@ -770,7 +765,7 @@ impl Ledger {
                 &aid_s,
                 &(if buy { "buy" } else { "sell" }),
                 &mint,
-                &(if buy { Some(Num::from(lamports)) } else { None }),
+                &(if buy { Some(Num::from_u128(lamports)?) } else { None }),
                 &(if buy { None } else { Some(Num::from_u128(amount)?) }),
                 &Num::from_u128(min_out)?,
                 &network,

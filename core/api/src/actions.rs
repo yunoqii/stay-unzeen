@@ -194,6 +194,32 @@ pub fn solana_address(s: &str, field: &str) -> ApiResult<String> {
     }
 }
 
+fn is_hood(st: &AppState) -> bool {
+    matches!(st.cfg.policy.chain.trade, unzeen_protocol::TradeNet::Hood(_))
+}
+
+/// Address on this server's chain (v0.20): base58 on Solana, EVM `0x…` on Robinhood Chain
+/// (any case accepted for all-lower/upper input, a mixed case must be a valid EIP-55
+/// checksum; returned in EIP-55 form, as the hood relayer writes mints).
+pub fn chain_address(st: &AppState, s: &str, field: &str) -> ApiResult<String> {
+    if is_hood(st) {
+        unzeen_protocol::evm::canonical_address(s)
+            .ok_or_else(|| ApiError::bad_request(format!("{field}: not an EVM address (0x + 40 hex, EIP-55)")))
+    } else {
+        solana_address(s, field)
+    }
+}
+
+/// Mint / address of either chain in canonical form (public read paths: an unknown mint is
+/// just "not tracked").
+pub fn any_address(s: &str, field: &str) -> ApiResult<String> {
+    if s.starts_with("0x") {
+        return unzeen_protocol::evm::canonical_address(s)
+            .ok_or_else(|| ApiError::bad_request(format!("{field}: not an EVM address")));
+    }
+    solana_address(s, field)
+}
+
 /// UA of this network with an Orchard/Ironwood receiver; t-addresses, Sapling-only and
 /// other networks are rejected.
 pub fn check_ua(st: &AppState, s: &str) -> ApiResult<()> {
@@ -287,10 +313,10 @@ fn venue(st: &AppState, v: &str) -> ApiResult<String> {
             "venue: expected pumpfun | meteora-dbc | jupiter | raydium-launchlab | bags | pons",
         ));
     }
-    // v0.18: a venue of another chain (pons = Robinhood Chain) is never executed here.
-    if HOOD_VENUES.contains(&v) {
+    // A venue of another chain is never executed here (pons only on a hood server).
+    if HOOD_VENUES.contains(&v) != is_hood(st) {
         return Err(ApiError::venue_unavailable(format!(
-            "{v} trades on Robinhood Chain, not on this server"
+            "{v} is not a venue of this server's chain"
         )));
     }
     if !st.cfg.venues.iter().any(|e| e == v) {
@@ -413,10 +439,28 @@ fn used(r: &rate::Rate, applied: u64) -> RateUsed {
 }
 
 /// Estimated zat value of `amount` base units at `price_sol` (decimal SOL per whole token).
+#[cfg(test)]
 fn estimate_zat(price_sol: &str, decimals: i16, amount: u128, lamports_per_zec: u64) -> Option<u64> {
-    let lamports_per_whole = crate::config::sol_to_lamports(&truncate_decimals(price_sol, 9))?;
-    let lamports = amount.checked_mul(lamports_per_whole as u128)? / 10u128.checked_pow(decimals.max(0) as u32)?;
-    let zat = lamports.checked_mul(100_000_000)? / (lamports_per_zec.max(1) as u128);
+    estimate_zat_on(
+        unzeen_protocol::TradeNet::Solana(unzeen_protocol::SolanaCluster::Devnet),
+        price_sol,
+        decimals,
+        amount,
+        lamports_per_zec,
+    )
+}
+
+/// [`estimate_zat`] with the price in the chain's native coin (SOL → lamports, ETH → wei).
+fn estimate_zat_on(
+    trade: unzeen_protocol::TradeNet,
+    price: &str,
+    decimals: i16,
+    amount: u128,
+    units_per_zec: u64,
+) -> Option<u64> {
+    let per_whole = crate::config::price_to_units(&truncate_decimals(price, 18), trade)?;
+    let units = mul_div(amount, per_whole, 10u128.checked_pow(decimals.max(0) as u32)?);
+    let zat = mul_div(units, 100_000_000, units_per_zec.max(1) as u128);
     Some(zat.min(u64::MAX as u128) as u64)
 }
 
@@ -482,7 +526,7 @@ pub fn split_amount(amount: u128, parts: u32) -> Vec<u128> {
 /// amount is shaved 0–1 % and rounded down to 0.001 SOL so it does not reveal `zec_in`; the
 /// user is charged only the ZEC equivalent of the lamports actually sent (the rest stays
 /// available), and `minOut` shrinks in proportion (same minimum price).
-pub fn fuzzed_buy(zec_in: u64, min_out: u128, applied: u64, min_action: u64) -> ApiResult<(u64, u64, u128)> {
+pub fn fuzzed_buy(zec_in: u64, min_out: u128, applied: u64, min_action: u64) -> ApiResult<(u64, u128, u128)> {
     fuzzed_buy_step(zec_in, min_out, applied, min_action, rate::LAMPORTS_STEP)
 }
 
@@ -493,12 +537,13 @@ pub fn fuzzed_buy_step(
     applied: u64,
     min_action: u64,
     step: u64,
-) -> ApiResult<(u64, u64, u128)> {
+) -> ApiResult<(u64, u128, u128)> {
+    // u128 native units (lamports / wei) end to end: no saturation above 18.4 ETH (v0.20).
     let full = zat_to_lamports(zec_in, applied);
     let mut lamports = rate::fuzz_units(full, rand_unit(), step);
     // Never charge less than the minimum action because of rounding: step back up if possible.
     while lamports > 0 && lamports_to_zat_ceil(lamports, applied) < min_action {
-        let up = lamports + step;
+        let up = lamports + u128::from(step);
         if up > full {
             break;
         }
@@ -512,19 +557,17 @@ pub fn fuzzed_buy_step(
     }
     // minOut × lamports / full, exact for any u128 minOut (review-numeric-hood п. 6: a 1e27 minOut
     // times wei would saturate a plain product and silently drop the slippage guard).
-    let min_out = mul_div(min_out, lamports as u128, full.max(1) as u128);
+    let min_out = mul_div(min_out, lamports, full.max(1));
     Ok((zat, lamports, min_out))
 }
 
-/// `a × b / d` (floor) without overflow for `b ≤ d` (a ratio ≤ 1): `(a / d) · b + (a % d) · b / d`,
-/// where `(a % d) · b < d · b ≤ d²`; `d < 2^64` keeps that below `u128::MAX`. Saturates otherwise.
+/// `floor(a × b / d)` with a 256-bit intermediate (`unzeen_fair::alloc::mul_div`); 0 for `d = 0`,
+/// `u128::MAX` if the quotient does not fit.
 pub fn mul_div(a: u128, b: u128, d: u128) -> u128 {
     if d == 0 {
         return 0;
     }
-    let (q, r) = (a / d, a % d);
-    q.saturating_mul(b)
-        .saturating_add(r.checked_mul(b).map_or(u128::MAX, |x| x / d))
+    unzeen_fair::alloc::mul_div(a, b, d).unwrap_or(u128::MAX)
 }
 
 pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<NewAction> {
@@ -585,7 +628,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             exec: mode,
         } => {
             let v = venue(st, &v)?;
-            let mint = solana_address(&mint, "mint")?;
+            let mint = chain_address(st, &mint, "mint")?;
             let zec_in = positive(&zec_in, "zecIn")?;
             let min_out = token_cap(st, parse_token_amount(&min_out, "minOut")?, "minOut")?;
             if zec_in < min_action {
@@ -607,10 +650,10 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 let spot = known.as_ref().and_then(|t| {
                     let p = t.price_quote.as_deref()?;
                     let upw = crate::config::sol_to_lamports(&truncate_decimals(p, 9))? / 10;
-                    crate::launch::tokens_at_spot(units, upw, t.decimals)
+                    crate::launch::tokens_at_spot(units, u128::from(upw), t.decimals)
                 });
                 return Ok(NewAction {
-                    gain: Some((mint.clone(), spot.map_or(min_out, u128::from).max(min_out))),
+                    gain: Some((mint.clone(), spot.unwrap_or(min_out).max(min_out))),
                     amount_zat,
                     fee_zat: now_fee(mode),
                     rate: Some(parity_used(applied)),
@@ -618,7 +661,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                     jobs: vec![NewJob {
                         venue: Some(v),
                         mint: Some(mint),
-                        lamports_in: Some(units.into()),
+                        lamports_in: Some(units),
                         min_out: Some(min_out),
                         ..job(JobOp::Buy, mode, epoch(mode))
                     }],
@@ -638,24 +681,19 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             // Creator cap (v0.5): upper-bound token estimate; the ledger applies it only if
             // this key created the mint.
             let spot = known.and_then(|(p, d)| {
-                let lpw = crate::config::sol_to_lamports(&truncate_decimals(&p, 9))?;
-                crate::launch::tokens_at_spot(lamports, lpw, d)
+                let upw = crate::config::price_to_units(&p, st.cfg.policy.chain.trade)?;
+                crate::launch::tokens_at_spot(lamports, upw, d)
             });
-            let gain = crate::launch::buy_gain_estimate(
-                &crate::rules_curve(st, &v).await?.0,
-                lamports,
-                spot,
-                u64::try_from(min_out).unwrap_or(u64::MAX),
-            );
+            let gain = crate::launch::buy_gain_estimate(&crate::rules_curve(st, &v).await?.0, lamports, spot, min_out);
             NewAction {
-                gain: Some((mint.clone(), u128::from(gain).max(min_out))),
+                gain: Some((mint.clone(), gain.max(min_out))),
                 amount_zat,
                 fee_zat: now_fee(mode),
                 rate: Some(used(&r, applied)),
                 jobs: vec![NewJob {
                     venue: Some(v),
                     mint: Some(mint),
-                    lamports_in: Some(lamports.into()),
+                    lamports_in: Some(lamports),
                     min_out: Some(min_out),
                     ..job(JobOp::Buy, mode, epoch(mode))
                 }],
@@ -670,7 +708,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             exec: mode,
         } => {
             let v = venue(st, &v)?;
-            let mint = solana_address(&mint, "mint")?;
+            let mint = chain_address(st, &mint, "mint")?;
             let amount = token_cap(st, positive_tokens(&amount, "amount")?, "amount")?;
             let min_zec_out = parse_amount(&min_zec_out, "minZecOut")?;
             // A6: a sell that mirrors this key's public buy (±1 %) is shaved 0.5–2 % and
@@ -729,7 +767,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             // N7: sells are checked against the minimum too (by the signed floor, or by the
             // current price when the token is known).
             let est = known
-                .and_then(|(p, d)| estimate_zat(&p, d, amount, applied))
+                .and_then(|(p, d)| estimate_zat_on(st.cfg.policy.chain.trade, &p, d, amount, applied))
                 .unwrap_or(0);
             if signed_floor < min_action && est < min_action {
                 return Err(ApiError::below_minimum(
@@ -764,11 +802,16 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             }
             check_meta(&meta)?;
             // v0.13: pair and LaunchLab platform.
-            let quote = quote.unwrap_or_else(|| "SOL".into());
-            if !["SOL", "USDC", "USD1", "ZEC"].contains(&quote.as_str()) {
+            // Robinhood Chain: Pons launches are ETH-paired only (`quote` absent or "ETH").
+            let native = if is_hood(st) { "ETH" } else { "SOL" };
+            let quote = quote.unwrap_or_else(|| native.into());
+            if is_hood(st) && quote != "ETH" {
+                return Err(ApiError::bad_request("quote: ETH (Robinhood Chain)"));
+            }
+            if !is_hood(st) && !["SOL", "USDC", "USD1", "ZEC"].contains(&quote.as_str()) {
                 return Err(ApiError::bad_request("quote: SOL | USDC | USD1 | ZEC"));
             }
-            let qcfg = if quote == "SOL" {
+            let qcfg = if quote == native {
                 None
             } else {
                 let supported = crate::config::known_quotes(st.cfg.cluster == "mainnet-beta")
@@ -806,6 +849,13 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                     "Bags launch curve not loaded yet, retry later",
                 ));
             }
+            // Pons: the creator cap needs Pons' own curve (`launch_curves (hood*, pons)` from the
+            // relayer); the pump.fun fallback has another supply and decimals.
+            if v == "pons" && !crate::rules_curve(st, &v).await?.2 {
+                return Err(ApiError::venue_unavailable(
+                    "Pons launch curve not loaded yet, retry later",
+                ));
+            }
             let initial = match initial_buy_zec.as_deref() {
                 Some(s) => parse_amount(s, "initialBuyZec")?,
                 None => 0,
@@ -830,7 +880,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             if initial > 0 && st.cfg.launch.cap_bps > 0 {
                 let full = zat_to_lamports(initial, applied);
                 let max = match zec {
-                    Some(_) => crate::max_initial_buy_zec_units(st),
+                    Some(_) => u128::from(crate::max_initial_buy_zec_units(st)),
                     None => crate::max_initial_buy_for(st, &v).await?,
                 };
                 let step = if zec.is_some() {
@@ -838,7 +888,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 } else {
                     rate::buy_step(st.cfg.policy.chain.trade)
                 };
-                if full - full % step > max {
+                if full - full % u128::from(step) > max {
                     return Err(ApiError::creator_cap());
                 }
             }
@@ -870,9 +920,9 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 // pool through the vault pinned to the new mint. Not atomic: a sniper can buy
                 // in between; min_out from the Bags curve bounds the price paid.
                 let (curve, _, _) = crate::rules_curve(st, &v).await?;
-                let min_out = u128::from(curve.tokens_out_initial(lamports) / 4 * 3);
+                let min_out = curve.tokens_out_initial(lamports) / 4 * 3;
                 // RELAYER v10: the vault picked for the launch must also fund the first buy.
-                m["reserve_lamports"] = json!(lamports);
+                m["reserve_lamports"] = json!(u64::try_from(lamports).unwrap_or(u64::MAX));
                 jobs.push(NewJob {
                     venue: Some(v.clone()),
                     lamports_in: Some(0u128),
@@ -882,7 +932,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 });
                 jobs.push(NewJob {
                     venue: Some(v),
-                    lamports_in: Some(lamports.into()),
+                    lamports_in: Some(lamports),
                     min_out: Some(min_out),
                     held: true,
                     ..job(JobOp::Buy, mode, delay)
@@ -890,7 +940,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             } else {
                 jobs.push(NewJob {
                     venue: Some(v),
-                    lamports_in: Some(lamports.into()),
+                    lamports_in: Some(lamports),
                     min_out: Some(0),
                     meta: Some(m),
                     ..job(JobOp::Create, mode, delay)
@@ -928,7 +978,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             exec: mode,
         } => {
             no_now(mode)?;
-            let mint = solana_address(&mint, "mint")?;
+            let mint = chain_address(st, &mint, "mint")?;
             let amount = token_cap(st, positive_tokens(&amount, "amount")?, "amount")?;
             let dests: Vec<String> = match to {
                 To::One(s) => vec![s],
@@ -949,8 +999,11 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 ));
             }
             let mut seen = std::collections::HashSet::new();
+            let dests: Vec<String> = dests
+                .iter()
+                .map(|d| chain_address(st, d, "to"))
+                .collect::<ApiResult<_>>()?;
             for d in &dests {
-                solana_address(d, "to")?;
                 if !seen.insert(d.as_str()) {
                     return Err(ApiError::bad_request("to: addresses must be distinct"));
                 }
@@ -983,7 +1036,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 })
                 .collect();
             NewAction {
-                fee_zat: lamports_to_zat_ceil(cost, applied),
+                fee_zat: lamports_to_zat_ceil(u128::from(cost), applied),
                 token_hold: Some((mint, amount)),
                 rate: Some(used(&r, applied)),
                 jobs,
@@ -1091,7 +1144,7 @@ mod tests {
         let rate = 11_532_100_000; // lamports per ZEC
         for _ in 0..200 {
             let (zat, lamports, min_out) = fuzzed_buy(50_000_000, 1_000_000, rate, 100_000).unwrap();
-            assert_eq!(lamports % rate::LAMPORTS_STEP, 0);
+            assert_eq!(lamports % u128::from(rate::LAMPORTS_STEP), 0);
             assert!((49_400_000..=50_000_000).contains(&zat), "{zat}");
             assert!(lamports_to_zat_ceil(lamports, rate) == zat);
             assert!(zat_to_lamports(zat, rate) >= lamports);

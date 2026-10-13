@@ -49,8 +49,12 @@ pub struct RateProvider {
 
 const ZEC_ASSET: &str = "nep141:zec.omft.near";
 const SOL_ASSET: &str = "nep141:sol.omft.near";
+/// Native ETH on Robinhood Chain (v0.20 hood instance: the rate is wei per ZEC).
+const HOOD_ETH_ASSET: &str = "nep141:hood.omft.near";
 /// wSOL mint: a valid Solana address no user owns (1Click requires a recipient).
 const DUMMY_SOL_RECIPIENT: &str = "So11111111111111111111111111111111111111112";
+/// A valid checksummed EVM address not of the pool (1Click refuses burn addresses).
+const DUMMY_EVM_RECIPIENT: &str = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
 /// Placeholder refund address required by the API for a dry quote (no deposit is ever made).
 const DUMMY_ZEC_REFUND: &str = "t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs";
 
@@ -139,11 +143,11 @@ impl RateProvider {
             "slippageTolerance": 100,
             "originAsset": ZEC_ASSET,
             "depositType": "ORIGIN_CHAIN",
-            "destinationAsset": SOL_ASSET,
+            "destinationAsset": if self.cfg.hood { HOOD_ETH_ASSET } else { SOL_ASSET },
             "amount": "100000000",
             "refundTo": DUMMY_ZEC_REFUND,
             "refundType": "ORIGIN_CHAIN",
-            "recipient": DUMMY_SOL_RECIPIENT,
+            "recipient": if self.cfg.hood { DUMMY_EVM_RECIPIENT } else { DUMMY_SOL_RECIPIENT },
             "recipientType": "DESTINATION_CHAIN",
             "deadline": deadline,
         });
@@ -185,25 +189,24 @@ pub fn apply_spread(mid: u64, bps: u64, buy: bool) -> u64 {
     v.min(u64::MAX as u128) as u64
 }
 
-/// zat × (lamports per ZEC) / 1e8, floor.
-pub fn zat_to_lamports(zat: u64, lamports_per_zec: u64) -> u64 {
-    ((zat as u128) * (lamports_per_zec as u128) / 100_000_000).min(u64::MAX as u128) as u64
+/// zat × (native units per ZEC) / 1e8, floor. Native units: lamports (Solana) or wei
+/// (Robinhood Chain); u128 since API v0.20 (wei passes u64 at 18.4 ETH).
+pub fn zat_to_lamports(zat: u64, lamports_per_zec: u64) -> u128 {
+    (zat as u128) * (lamports_per_zec as u128) / 100_000_000
 }
 
 /// Ceil variant (for minimums the pool must get).
-pub fn zat_to_lamports_ceil(zat: u64, lamports_per_zec: u64) -> u64 {
-    ((zat as u128) * (lamports_per_zec as u128))
-        .div_ceil(100_000_000)
-        .min(u64::MAX as u128) as u64
+pub fn zat_to_lamports_ceil(zat: u64, lamports_per_zec: u64) -> u128 {
+    ((zat as u128) * (lamports_per_zec as u128)).div_ceil(100_000_000)
 }
 
-/// lamports × 1e8 / (lamports per ZEC), ceil (fees the user pays).
-pub fn lamports_to_zat_ceil(lamports: u64, lamports_per_zec: u64) -> u64 {
+/// native units × 1e8 / (units per ZEC), ceil (fees the user pays); saturates at u64::MAX zat.
+pub fn lamports_to_zat_ceil(lamports: u128, lamports_per_zec: u64) -> u64 {
     if lamports_per_zec == 0 {
         return u64::MAX;
     }
-    ((lamports as u128) * 100_000_000)
-        .div_ceil(lamports_per_zec as u128)
+    unzeen_fair::alloc::mul_div_ceil(lamports, 100_000_000, lamports_per_zec as u128)
+        .unwrap_or(u128::MAX)
         .min(u64::MAX as u128) as u64
 }
 
@@ -230,15 +233,13 @@ pub fn zat_to_units_ceil(zat: u64, units_per_zec: u64) -> u128 {
 /// D10: the SOL amount of a buy must not reveal the ZEC amount the user typed (zecIn × rate is
 /// reversible). Shave a random 0–1 % and round DOWN to 0.001 SOL; the user is only charged
 /// the ZEC equivalent of what is actually spent. `u` is uniform in [0, 1).
-pub fn fuzz_lamports(lamports: u64, u: f64) -> u64 {
+pub fn fuzz_lamports(lamports: u128, u: f64) -> u128 {
     fuzz_units(lamports, u, LAMPORTS_STEP)
 }
 
-/// [`fuzz_lamports`] with another step (ZEC SPL units: 0.0001 ZEC).
-pub fn fuzz_units(units: u64, u: f64, step: u64) -> u64 {
-    let step = step.max(1);
-    let shaved = (units as f64 * (1.0 - 0.01 * u.clamp(0.0, 1.0))) as u64;
-    shaved / step * step
+/// [`fuzz_lamports`] with another step (ZEC SPL units: 0.0001 ZEC; wei: 0.0001 ETH).
+pub fn fuzz_units(units: u128, u: f64, step: u64) -> u128 {
+    unzeen_fair::alloc::fuzz_step(units, u, u128::from(step))
 }
 
 /// Minimal RFC 3339 UTC formatter (no chrono dependency).
@@ -284,22 +285,34 @@ mod tests {
     #[test]
     fn amounts() {
         let r = 11_469_831_889; // lamports per ZEC
-        assert_eq!(zat_to_lamports(100_000_000, r), r);
+        assert_eq!(zat_to_lamports(100_000_000, r), u128::from(r));
         assert_eq!(zat_to_lamports(500_000, r), 57_349_159);
         assert_eq!(zat_to_lamports_ceil(500_000, r), 57_349_160);
-        assert_eq!(lamports_to_zat_ceil(r, r), 100_000_000);
+        assert_eq!(lamports_to_zat_ceil(u128::from(r), r), 100_000_000);
         assert_eq!(lamports_to_zat_ceil(1, r), 1);
         assert_eq!(apply_spread(10_000, 50, true), 9_950);
         assert_eq!(apply_spread(10_000, 50, false), 10_050);
-        assert_eq!(zat_to_lamports(u64::MAX, u64::MAX), u64::MAX);
+        assert_eq!(
+            zat_to_lamports(u64::MAX, u64::MAX),
+            (u64::MAX as u128) * (u64::MAX as u128) / 100_000_000
+        );
+        // wei: 40 ZEC at 0.485 ETH/ZEC = 19.4 ETH (> u64::MAX wei), no saturation.
+        assert_eq!(
+            zat_to_lamports(4_000_000_000, 485_000_000_000_000_000),
+            19_400_000_000_000_000_000
+        );
+        assert_eq!(
+            lamports_to_zat_ceil(19_400_000_000_000_000_000, 485_000_000_000_000_000),
+            4_000_000_000
+        );
     }
 
     #[test]
     fn fuzz_rounds_down_within_one_percent() {
-        let l = 5_766_050_000u64; // 0.5 ZEC at 11.5321 SOL/ZEC
+        let l = 5_766_050_000u128; // 0.5 ZEC at 11.5321 SOL/ZEC
         for u in [0.0, 0.3, 0.999] {
             let f = fuzz_lamports(l, u);
-            assert_eq!(f % LAMPORTS_STEP, 0);
+            assert_eq!(f % u128::from(LAMPORTS_STEP), 0);
             assert!(f <= l && f as f64 >= l as f64 * 0.99 - LAMPORTS_STEP as f64, "{f}");
         }
         assert_eq!(fuzz_lamports(5_766_050_000, 0.0), 5_766_000_000);

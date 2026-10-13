@@ -65,6 +65,7 @@ fn config(url: &str) -> Config {
             cache_secs: 45,
             max_stale_secs: 300,
             spread_bps: 0,
+            hood: false,
         },
         exec: ExecConfig {
             epoch_min_secs: 30.0,
@@ -256,7 +257,15 @@ impl Env {
     }
 
     fn sign(&self, sk: &SigningKey, method: &str, path: &str, body: &str) -> api_auth::SignedHeaders {
-        api_auth::sign_request(CHAIN, sk, method, path, body.as_bytes(), rand::random(), now_ms())
+        api_auth::sign_request(
+            self.state.cfg.policy.chain,
+            sk,
+            method,
+            path,
+            body.as_bytes(),
+            rand::random(),
+            now_ms(),
+        )
     }
 
     async fn signed(&self, sk: &SigningKey, method: &str, path: &str, body: &str) -> Resp {
@@ -280,7 +289,7 @@ impl Env {
             expiry: (now_ms() / 1000) as u32 + 3600,
             target: Target::None,
         }
-        .sign(&user(n), CHAIN)
+        .sign(&user(n), self.state.cfg.policy.chain)
         .encode();
         let obs = NoteObs {
             note_ref: NoteRefKey::new([1; 32]).note_ref(&[n; 32], 4, i),
@@ -1318,9 +1327,9 @@ mod fair {
     const SIG_1001: &str =
         "b33bf3667cbd5a82de3a24b4e0e9fe5513cc1a0e840368c6e31f5fcfa79bea03f73896b25883abf2853d10337fb8fa41";
     /// devnet pump.fun Global: 1 SOL virtual, 1.073e15 virtual tokens, 7.931e14 real, 1e15 supply.
-    const VS: u64 = 1_000_000_000;
-    const VT: u64 = 1_073_000_000_000_000;
-    const SUPPLY: u64 = 1_000_000_000_000_000;
+    const VS: u128 = 1_000_000_000;
+    const VT: u128 = 1_073_000_000_000_000;
+    const SUPPLY: u128 = 1_000_000_000_000_000;
 
     /// Mock drand relay: serves the REAL quicknet signatures of rounds 1000/1001 from the
     /// fixture; while `forged` is set it answers round 1000 with the signature of round 1001.
@@ -1633,7 +1642,7 @@ mod fair {
             )
             .await
             .unwrap();
-        let lamports_in = gi(&job, 0) as u64;
+        let lamports_in = gi(&job, 0) as u128;
         let secret: Vec<u8> = job.get(2);
         assert_eq!(lamports_in % alloc::LAMPORTS_STEP, 0);
         assert!(lamports_in <= max_total);
@@ -1675,7 +1684,7 @@ mod fair {
         // min_out) is accepted and shared pro rata; the unspent part of every hold is released.
         let spent = lamports_in * 8 / 10;
         let t = alloc::curve_tokens_out(VS, VT, spent) * 99 / 100;
-        assert!(t < gi(&job, 1) as u64, "below min_out");
+        assert!(t < gi(&job, 1) as u128, "below min_out");
         e.sql(&format!(
             "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGFAIR', out_mint = '{mint}',
                     out_token_amount = {t}, out_lamports = {spent}, vault = 'VaultA',
@@ -1700,7 +1709,7 @@ mod fair {
         assert_eq!(l["commitment"]["attestation"]["blockTime"], 1_692_806_300);
         assert_eq!(l["commitment"]["attestation"]["beforeRound"], true);
 
-        let mut tok_sum = 0u64;
+        let mut tok_sum = 0u128;
         for (i, (n, amount)) in [(1u8, 500_000u64), (2, 1_000_000), (3, 2_000_000)]
             .into_iter()
             .enumerate()
@@ -1710,10 +1719,10 @@ mod fair {
                     "SELECT e_lamports FROM {s}.fl_bids WHERE anon_pubkey = '\\x{}'",
                     hex::encode(user(n).verifying_key().to_bytes())
                 ))
-                .await as u64;
-            let e_total: u64 = e
+                .await as u128;
+            let e_total: u128 = e
                 .one_i64(&format!("SELECT total_e FROM {s}.fl_launches WHERE id = '\\x{id}'"))
-                .await as u64;
+                .await as u128;
             assert_eq!(e_i, plan.effective[i], "user {n}");
             assert_eq!(e_total, plan.total);
             let sh = alloc::share(e_i, plan.total, t, spent, RATE, amount);
@@ -1722,7 +1731,7 @@ mod fair {
                     "SELECT available FROM {s}.token_balances WHERE mint = '{mint}' AND anon_pubkey = '\\x{}'",
                     hex::encode(user(n).verifying_key().to_bytes())
                 ))
-                .await as u64;
+                .await as u128;
             assert_eq!(toks, sh.tokens, "user {n} tokens");
             assert!(sh.charge_zat <= amount);
             let fee = if n == 1 { 100_000 } else { 0 };
@@ -2737,7 +2746,7 @@ mod orders_v08 {
         // E4: min_out from the tick price (0.9e-6), not the trigger, quantized to 3 digits.
         assert_eq!(
             gi(&job, 2) as u128,
-            quantize_min_out(buy_min_out(lamports, parse_e18("0.0000009").unwrap(), 6, 500).unwrap())
+            quantize_min_out(buy_min_out(lamports as u128, parse_e18("0.0000009").unwrap(), 6, 500).unwrap())
         );
         assert_eq!(
             (job.get::<_, String>(3), job.get::<_, bool>(4)),
@@ -4505,7 +4514,7 @@ mod scenarios_v019 {
     impl Env {
         async fn scenario(&self, n: u8) -> Value {
             let pf = self.signed(&user(n), "GET", "/api/portfolio", "").await;
-            assert_eq!(pf.raw_len % 8192, 0, "portfolio padded to 8 KiB");
+            assert_eq!(pf.raw_len, unzeen_api::PORTFOLIO_BYTES, "one fixed portfolio size");
             pf.body["scenarios"][0].clone()
         }
 
@@ -4913,9 +4922,18 @@ mod scenarios_v019 {
 
     /// Skip the current timer of every plan (waits, floors, polls).
     async fn skip_timers(e: &Env) {
+        // Floors are measured from the key's real last trade (public `trades.ts`): the fake
+        // relayer's confirmed jobs get feed rows dated 3 h back, as if that much time had passed.
+        let s = &e.schema;
         e.sql(&format!(
-            "UPDATE {}.scenarios SET next_at = now() WHERE next_at IS NOT NULL",
-            e.schema
+            "INSERT INTO {s}.trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts)
+             SELECT CASE WHEN op = 'sell' THEN 'sell' ELSE 'buy' END, COALESCE(venue, 'pumpfun'),
+                    COALESCE(mint, out_mint, 'M'), 'X', COALESCE(out_token_amount, 0), COALESCE(out_lamports, 0), 6,
+                    signature, 1, now() - interval '3 hours'
+             FROM {s}.relayer_jobs WHERE status = 'confirmed' AND signature IS NOT NULL AND op IN ('buy', 'sell', 'create')
+             ON CONFLICT DO NOTHING;
+             UPDATE {s}.trades SET ts = now() - interval '3 hours' WHERE ts > now() - interval '3 hours';
+             UPDATE {s}.scenarios SET next_at = now() WHERE next_at IS NOT NULL"
         ))
         .await;
     }
@@ -5138,7 +5156,14 @@ mod scenarios_v019 {
         create_plan(&e, 14, plan).await;
         // The address is sealed (masked echo), the plain one is nowhere in the plan row.
         let sc = e.scenario(14).await;
-        assert_eq!(sc["plan"]["steps"][3]["block"]["to"], "4Nd1…DB4T");
+        assert!(sc.get("plan").is_none(), "no plan echo in the portfolio");
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.scenarios WHERE plan->'steps'->3->'block'->>'to' = 'sealed'"
+            ))
+            .await,
+            1
+        );
         assert_eq!(
             e.one_i64(&format!(
                 "SELECT count(*) FROM {s}.scenarios WHERE plan::text LIKE '%{dest}%'"
@@ -5163,8 +5188,14 @@ mod scenarios_v019 {
             .await,
             1
         );
-        // Used once → the sealed blob is gone in the same transaction.
-        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.scenario_sealed")).await, 0);
+        // The sealed address stays until the transfer is confirmed (a retry needs it), then goes.
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.scenario_sealed")).await, 1);
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'T' || id, out_token_amount = token_amount,
+                    out_lamports = 0 WHERE op = 'transfer'"
+        ))
+        .await;
+        wait_sql(&e, &format!("SELECT (count(*) = 0)::int FROM {s}.scenario_sealed")).await;
         // A failing safety check stops the plan with `check_failed`.
         e.sql(&format!(
             "UPDATE {s}.token_safety SET data = jsonb_set(data, '{{authorities,mintRevoked}}', 'false')"
@@ -5259,7 +5290,7 @@ mod scenarios_v019 {
         assert!(p.get("scenarios").is_none() && p["features"].get("scenarios").is_none());
         let pf = e.signed(&user(1), "GET", "/api/portfolio", "").await;
         assert!(pf.body.get("scenarios").is_none());
-        assert_eq!(pf.raw_len % 8192, 0, "same 8 KiB bucket without the feature");
+        assert_eq!(pf.raw_len, unzeen_api::PORTFOLIO_BYTES, "same size without the feature");
         e.drop_schema().await;
     }
 
@@ -5282,5 +5313,430 @@ mod scenarios_v019 {
         }
         let ops = include_str!("../src/scenarios/ops.rs");
         assert!(!ops.contains("reqwest") && !ops.contains(".refresh("));
+    }
+
+    /// Review-scenarios п. 1/3: floors by TIME from the key's real last trade. A manual buy
+    /// outside the plan holds the plan's token withdrawal back; a sell holds a following buy
+    /// funded `of: "balance"` (P6) — the step waits, it never fails.
+    #[tokio::test]
+    async fn s8_floors_by_time_from_real_trades() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.token_with_tick().await;
+        e.fund(16, 0, 100_000_000).await;
+        let pk = hex::encode(user(16).verifying_key().to_bytes());
+        e.sql(&format!(
+            "INSERT INTO {s}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{pk}', '{MINT}', 5000000000)"
+        ))
+        .await;
+        // A manual buy of MINT, still in flight.
+        let r = e.signed(&user(16), "POST", "/api/actions", &buy_body(1_000_000)).await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        let dest = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
+        let plan = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"withdraw_token","mint":MINT,"amount":{"abs":"1000000000"},"to":dest,"exec":"max"}}]});
+        create_plan(&e, 16, plan).await;
+        wait_sql(
+            &e,
+            &format!("SELECT count(*) FROM {s}.scenarios WHERE state->'steps'->>'0' = 'waiting'"),
+        )
+        .await;
+        // Confirmed 30 min ago: still < 1 h + U(0, 30 min).
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'MB', out_token_amount = 1000,
+                    out_lamports = lamports_in WHERE op = 'buy';
+             INSERT INTO {s}.trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts)
+             VALUES ('buy', 'pumpfun', '{MINT}', 'X', 1000, 1, 6, 'MB', 1, now() - interval '30 minutes');
+             UPDATE {s}.scenarios SET next_at = now()"
+        ))
+        .await;
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert_eq!(
+            e.one_i64(&format!("SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'transfer'"))
+                .await,
+            0
+        );
+        assert_eq!(
+            e.one_i64(&format!("SELECT count(*) FROM {s}.scenarios WHERE status = 'active'"))
+                .await,
+            1
+        );
+        // 3 h later: the withdrawal goes.
+        wait_jobs_skipping(&e, "transfer", 1).await;
+
+        // P6 through `of: "balance"`: sell, then a buy of another mint waits U(3, 15) min.
+        let plan = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"sell","venue":"pumpfun","mint":MINT,"amount":{"abs":"2000000000"},
+                             "guard":{"limitPrice":"0.0001"},"exec":"delayed"}},
+            {"id":1,"block":{"type":"buy","venue":"pumpfun","mint":MINT,"zec":{"pct":10,"of":"balance"},
+                             "guard":{"limitPrice":"0.00001"},"exec":"delayed"}}]});
+        create_plan(&e, 16, plan).await;
+        wait_jobs_skipping(&e, "sell", 1).await;
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'S6', out_token_amount = token_amount,
+                    out_lamports = 2000000 WHERE op = 'sell';
+             INSERT INTO {s}.trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts)
+             VALUES ('sell', 'pumpfun', '{MINT}', 'X', 1, 1, 6, 'S6', 1, now())"
+        ))
+        .await;
+        wait_sql(
+            &e,
+            &format!("SELECT count(*) FROM {s}.scenarios WHERE cursor = 1 AND status = 'active'"),
+        )
+        .await;
+        e.sql(&format!(
+            "UPDATE {s}.scenarios SET next_at = now() WHERE status = 'active' AND cursor = 1"
+        ))
+        .await;
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert_eq!(
+            e.one_i64(&format!("SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'buy'"))
+                .await,
+            1,
+            "only the manual buy"
+        );
+        let p6 = e
+            .one_i64(&format!(
+                "SELECT (state->'sub'->>'p6')::float8::bigint FROM {s}.scenarios WHERE status = 'active' AND cursor = 1"
+            ))
+            .await;
+        assert!((180..=900).contains(&p6), "{p6}");
+        wait_jobs_skipping(&e, "buy", 2).await;
+        e.drop_schema().await;
+    }
+}
+
+// ================================================================== Robinhood Chain instance (API v0.20)
+
+/// A hood-testnet instance end to end with a fake relayer: deposit (memo signed for 0212) →
+/// buy on Pons (wei, 18-decimal token amounts beyond u64) → sell → withdraw_token to an EVM
+/// address. Solana venues / addresses are refused on this server.
+#[tokio::test]
+async fn hood_instance_deposit_buy_sell_withdraw() {
+    const TOKEN: &str = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+    const WEI_PER_ZEC: u64 = 485_000_000_000_000_000; // 0.485 ETH / ZEC
+    let Some(e) = setup_with(|c| {
+        c.policy.chain = ChainId::hood(ZcashNet::Testnet, unzeen_protocol::HoodNet::Testnet);
+        c.cluster = "hood-testnet";
+        c.venues = vec!["pons".into()];
+        c.rate.fixed_lamports_per_zec = Some(WEI_PER_ZEC);
+        c.rate.hood = true;
+        c.quotes.list = vec![];
+        c.fees.withdraw_token_gas_lamports = 50_000_000_000_000;
+        c.fees.withdraw_token_cost_lamports = 10_000_000_000_000;
+    })
+    .await
+    else {
+        return;
+    };
+    let s = e.schema.clone();
+    e.ledger.set_pool_meta("network", "test").await.unwrap();
+    e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+    let p = e.get("/api/pool").await.body;
+    assert_eq!(p["chainId"], "0212");
+    assert_eq!(
+        p["chain"],
+        json!({"id":"hood","network":"hood-testnet","mainnet":false,"native":{"symbol":"ETH","decimals":18},"evmChainId":46630})
+    );
+    assert_eq!(p["venues"][0]["venue"], "pons");
+    assert_eq!(p["quotes"], json!([]));
+
+    // Deposit: the memo is signed for chain id 0212.
+    e.fund(20, 0, 50_000_000).await;
+    let pf = e.signed(&user(20), "GET", "/api/portfolio", "").await.body;
+    assert_eq!(pf["zecBalance"], "50000000");
+
+    e.sql(&format!(
+        "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol)
+         VALUES ('{TOKEN}', 'pons', 'PONS', 'Pons token', 18, 0.0000000001, 100)"
+    ))
+    .await;
+    // Solana venue / mint refused here.
+    let bad = json!({"op":"buy","venue":"pumpfun","mint":TOKEN,"zecIn":"1000000","minOut":"1"}).to_string();
+    let r = e.signed(&user(20), "POST", "/api/actions", &bad).await;
+    assert_eq!(r.body["error"]["code"], "venue_unavailable", "{:?}", r.body);
+    let bad = json!({"op":"buy","venue":"pons","mint":MINT,"zecIn":"1000000","minOut":"1"}).to_string();
+    let r = e.signed(&user(20), "POST", "/api/actions", &bad).await;
+    assert_eq!(r.body["error"]["code"], "bad_request", "{:?}", r.body);
+
+    // Buy 0.1 ZEC → ≈ 0.0485 ETH in 0.0001 ETH steps; the lowercase mint is stored EIP-55.
+    let buy = json!({"op":"buy","venue":"pons","mint":TOKEN.to_lowercase(),"zecIn":"10000000",
+                     "minOut":"100000000000000000000000000","exec":"delayed"})
+    .to_string();
+    let r = e.signed(&user(20), "POST", "/api/actions", &buy).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let job = e
+        .admin
+        .query_one(
+            &format!(
+                "SELECT network, venue, mint, lamports_in::text, min_out::text FROM {s}.relayer_jobs WHERE op = 'buy'"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            job.get::<_, String>(0),
+            job.get::<_, String>(1),
+            job.get::<_, String>(2)
+        ),
+        ("hood-testnet".into(), "pons".into(), TOKEN.into())
+    );
+    let wei: u128 = job.get::<_, String>(3).parse().unwrap();
+    assert_eq!(wei % 100_000_000_000_000, 0, "D10 step 0.0001 ETH");
+    assert!(
+        (48_000_000_000_000_000..=48_500_000_000_000_000).contains(&wei),
+        "{wei}"
+    );
+    let min_out: u128 = job.get::<_, String>(4).parse().unwrap();
+    assert!(
+        min_out > u64::MAX as u128 && min_out <= 100_000_000_000_000_000_000_000_000,
+        "{min_out}"
+    );
+    // Fake relayer: confirmed with 5e26 + 1 base units (≫ u64), all the wei spent.
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = '0xb1', slot = 7, vault = '0x0000000000000000000000000000000000000001',
+                out_mint = mint, out_token_amount = 500000000000000000000000001, out_lamports = lamports_in, network_fee = 20000000000000
+          WHERE op = 'buy'"
+    ))
+    .await;
+    let mut held = String::new();
+    for _ in 0..50 {
+        let pf = e.signed(&user(20), "GET", "/api/portfolio", "").await.body;
+        if let Some(h) = pf["holdings"].as_array().and_then(|a| a.first()) {
+            held = h["amount"].as_str().unwrap().to_string();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(held, "500000000000000000000000001");
+
+    // Sell 2e26: proceeds in wei → ZEC at the fixed rate.
+    let sell = json!({"op":"sell","venue":"pons","mint":TOKEN,"amount":"200000000000000000000000000",
+                      "minZecOut":"1000000","exec":"delayed"})
+    .to_string();
+    let r = e.signed(&user(20), "POST", "/api/actions", &sell).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let min_wei: u128 = e
+        .admin
+        .query_one(
+            &format!("SELECT min_out::text FROM {s}.relayer_jobs WHERE op = 'sell'"),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get::<_, String>(0)
+        .parse()
+        .unwrap();
+    assert_eq!(min_wei, 4_850_000_000_000_000, "0.01 ZEC at 0.485 ETH/ZEC, ceil");
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = '0xb2', slot = 8,
+                out_token_amount = token_amount, out_lamports = 19400000000000000000 WHERE op = 'sell'"
+    ))
+    .await;
+    // 19.4 ETH (> u64::MAX wei) → 40 ZEC credited.
+    let mut zec = String::new();
+    for _ in 0..50 {
+        zec = e.signed(&user(20), "GET", "/api/portfolio", "").await.body["zecBalance"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        if zec.parse::<u64>().unwrap() > 4_000_000_000 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(zec.parse::<u64>().unwrap() >= 4_000_000_000, "{zec}");
+
+    // Withdraw 1e26 to a fresh EVM address (lowercase in, EIP-55 out), ETH gas drop in wei.
+    let to = "0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359";
+    let w = json!({"op":"withdraw_token","mint":TOKEN,"amount":"100000000000000000000000000","to":to,"exec":"delayed"})
+        .to_string();
+    let r = e.signed(&user(20), "POST", "/api/actions", &w).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let t = e
+        .admin
+        .query_one(
+            &format!("SELECT dest, gas_lamports, token_amount::text FROM {s}.relayer_jobs WHERE op = 'transfer'"),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(t.get::<_, String>(0), "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359");
+    assert_eq!(t.get::<_, i64>(1), 50_000_000_000_000);
+    let part: u128 = t.get::<_, String>(2).parse().unwrap();
+    assert!(
+        part < 100_000_000_000_000_000_000_000_000 && part > 97_000_000_000_000_000_000_000_000,
+        "A1 shave {part}"
+    );
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = '0xb3', slot = 9, out_token_amount = token_amount,
+                out_lamports = 0 WHERE op = 'transfer'"
+    ))
+    .await;
+    for _ in 0..50 {
+        let pf = e.signed(&user(20), "GET", "/api/portfolio", "").await.body;
+        if pf["holdings"][0]["held"] == "0" {
+            let left: u128 = pf["holdings"][0]["amount"].as_str().unwrap().parse().unwrap();
+            assert_eq!(
+                left,
+                500_000_000_000_000_000_000_000_001 - 200_000_000_000_000_000_000_000_000 - part
+            );
+            e.drop_schema().await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("withdrawal not settled");
+}
+
+mod verify_v3 {
+    use unzeen_ledger::verify::VerifyTiming;
+    use unzeen_protocol::verify::{self as pv, Node, TreeVersion};
+
+    use super::*;
+
+    const T: VerifyTiming = VerifyTiming {
+        freeze_secs: 4.0,
+        quiesce_secs: 2.0,
+    };
+
+    async fn wait_status(e: &Env, id: i32, want: &str) {
+        for _ in 0..100 {
+            let st: String = e
+                .admin
+                .query_one(
+                    &format!("SELECT status FROM {}.verify_snapshots WHERE id = $1", e.schema),
+                    &[&id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            if st == want {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let r = e
+            .admin
+            .query_one(
+                &format!(
+                    "SELECT status, skip_reason FROM {}.verify_snapshots WHERE id = $1",
+                    e.schema
+                ),
+                &[&id],
+            )
+            .await
+            .unwrap();
+        panic!(
+            "snapshot {id} never reached {want}: {:?} {:?}",
+            r.get::<_, String>(0),
+            r.get::<_, Option<String>>(1)
+        );
+    }
+
+    /// API v0.20: a Robinhood Chain snapshot is digest v3 with u128 leaves (1e27 base units of
+    /// an ERC-20) and `0x…` assets; the browser check (leaf v3 → path → root) holds.
+    #[tokio::test]
+    async fn hood_snapshot_is_v3_with_u128_leaves() {
+        const TOKEN: &str = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+        let Some(e) = setup_with(|c| {
+            c.policy.chain = ChainId::hood(ZcashNet::Testnet, unzeen_protocol::HoodNet::Testnet);
+            c.cluster = "hood-testnet";
+            c.venues = vec!["pons".into()];
+            c.rate.fixed_lamports_per_zec = Some(485_000_000_000_000_000);
+            c.rate.hood = true;
+            c.quotes.list = vec![];
+            c.verify.timing = T;
+        })
+        .await
+        else {
+            return;
+        };
+        let s = e.schema.clone();
+        e.fund(1, 0, 123_456_789).await;
+        let pk1 = user(1).verifying_key().to_bytes();
+        e.sql(&format!(
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals) VALUES ('{TOKEN}', 'pons', 'P', 'P', 18);
+             INSERT INTO {s}.token_balances (anon_pubkey, mint, available, held)
+               VALUES ('\\x{}', '{TOKEN}', 1000000000000000000000000000, 7);
+             INSERT INTO {s}.pool_meta (key, value) VALUES ('reserve_zat', '123456789'), ('reserve_height', '3000000');",
+            hex::encode(pk1)
+        ))
+        .await;
+        let id = e
+            .ledger
+            .verify_request("hood-testnet", "0212", "manual", T)
+            .await
+            .unwrap()
+            .unwrap();
+        wait_status(&e, id, "collecting").await;
+        e.sql(&format!(
+            "INSERT INTO {s}.verify_vaults (snapshot_id, address, lamports, tokens, sig)
+             VALUES ({id}, '0x0000000000000000000000000000000000000001', 30000000000000000000,
+                     '[{{\"mint\":\"{TOKEN}\",\"amount\":\"1000000000000000000000000007\"}}]', '0xsig');
+             UPDATE {s}.verify_snapshots SET solana_slot = 12345678, assets_done_at = now() WHERE id = {id};"
+        ))
+        .await;
+        e.ledger.set_reserve(123_456_789, 3_000_000, now_ms()).await.unwrap();
+        wait_status(&e, id, "built").await;
+        let v = e.get("/api/verify").await.body;
+        assert_eq!(v["digestVersion"], 3);
+        assert_eq!(v["chainId"], "0212");
+        assert_eq!(v["vaults"][0]["lamports"], "30000000000000000000", "wei beyond u64");
+        let tree = v["trees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["asset"] == TOKEN)
+            .unwrap()
+            .clone();
+        assert_eq!(tree["sum"], "1000000000000000000000000007");
+
+        let p = e.signed(&user(1), "GET", "/api/verify/proof", "").await.body;
+        let ap = p["proofs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["asset"] == TOKEN)
+            .unwrap();
+        let asset = unzeen_protocol::evm::asset32(&unzeen_protocol::evm::parse_address(TOKEN).unwrap());
+        let mut total = 0u128;
+        for pc in ap["pieces"].as_array().unwrap() {
+            let value: u128 = pc["value"].as_str().unwrap().parse().unwrap();
+            total += value;
+            let blind: [u8; 32] = hex::decode(pc["blind"].as_str().unwrap()).unwrap().try_into().unwrap();
+            let leaf = Node {
+                hash: pv::leaf_hash_v3(
+                    [2, 0x12],
+                    id as u32,
+                    &asset,
+                    &pk1,
+                    pc["piece"].as_u64().unwrap() as u8,
+                    value,
+                    &blind,
+                ),
+                sum: value,
+            };
+            let path: Vec<Node> = pc["path"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| Node {
+                    hash: hex::decode(n["hash"].as_str().unwrap()).unwrap().try_into().unwrap(),
+                    sum: n["sum"].as_str().unwrap().parse().unwrap(),
+                })
+                .collect();
+            let root = pv::root_from_path_v(
+                TreeVersion::V3,
+                &leaf,
+                pc["leafIndex"].as_u64().unwrap() as usize,
+                &path,
+            );
+            assert_eq!(hex::encode(root.hash), tree["root"].as_str().unwrap());
+        }
+        assert_eq!(total, 1_000_000_000_000_000_000_000_000_007);
+        e.drop_schema().await;
     }
 }

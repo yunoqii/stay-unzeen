@@ -6,58 +6,55 @@
 //! any buy of `x` lamports can get on that curve (fees only lower it). The cap check uses
 //! upper bounds, so it can only refuse too much, never let a buy past the cap.
 
-use crate::rate::LAMPORTS_STEP;
+use unzeen_fair::alloc::mul_div;
 
+/// D10 step of SOL launches (0.001 SOL); Robinhood Chain uses `rate::WEI_STEP`.
+pub const LAMPORTS_STEP: u128 = crate::rate::LAMPORTS_STEP as u128;
+
+/// Native units are lamports on Solana and wei on Robinhood Chain; token amounts are base units
+/// (an 18-decimal Pons supply is 1e27). All u128 with 256-bit intermediates (API v0.20).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Curve {
-    /// Initial virtual SOL reserves, lamports.
-    pub virtual_sol: u64,
+    /// Initial virtual native reserves.
+    pub virtual_sol: u128,
     /// Initial virtual token reserves, base units.
-    pub virtual_tokens: u64,
+    pub virtual_tokens: u128,
 }
 
 impl Curve {
-    /// Tokens (base units) a buy of `lamports` gets from the initial curve state, fees ignored.
-    pub fn tokens_out_initial(&self, lamports: u64) -> u64 {
-        let (s, t) = (self.virtual_sol as u128, self.virtual_tokens as u128);
-        if s == 0 {
-            return 0;
-        }
-        let k = s * t;
-        let left = k.div_ceil(s + lamports as u128);
-        (t - left.min(t)) as u64
+    /// Tokens (base units) a buy of `units` gets from the initial curve state, fees ignored:
+    /// `floor(T·x / (S + x))` (= `T − ceil(S·T / (S + x))`).
+    pub fn tokens_out_initial(&self, units: u128) -> u128 {
+        unzeen_fair::alloc::curve_tokens_out(self.virtual_sol, self.virtual_tokens, units)
     }
 
     /// Largest multiple of 0.001 SOL whose initial-curve output stays within `cap` tokens.
-    pub fn max_lamports_within(&self, cap: u64) -> u64 {
-        let (s, t) = (self.virtual_sol as u128, self.virtual_tokens as u128);
-        if cap as u128 >= t {
-            return u64::MAX - u64::MAX % LAMPORTS_STEP;
-        }
-        // s + x <= k / (t - cap)  <=>  k / (s + x) >= t - cap  <=>  out <= cap
-        let x = (s * t / (t - cap as u128)).saturating_sub(s);
-        let x = x.min(u64::MAX as u128) as u64;
-        let x = x - x % LAMPORTS_STEP;
-        debug_assert!(self.tokens_out_initial(x) <= cap);
+    pub fn max_lamports_within(&self, cap: u128) -> u128 {
+        self.max_units_within(cap, LAMPORTS_STEP)
+    }
+
+    /// Largest multiple of `step` whose initial-curve output stays within `cap` tokens.
+    pub fn max_units_within(&self, cap: u128, step: u128) -> u128 {
+        let x = unzeen_fair::alloc::curve_max_units(self.virtual_sol, self.virtual_tokens, cap, step);
+        debug_assert!(x == u128::MAX - u128::MAX % step.max(1) || self.tokens_out_initial(x) <= cap);
         x
     }
 }
 
-/// Tokens a buy of `lamports` gets at the spot price `lamports_per_whole` (SOL per whole token
-/// in lamports): an upper bound while the price only rises during the buy.
-pub fn tokens_at_spot(lamports: u64, lamports_per_whole: u64, decimals: i16) -> Option<u64> {
-    if lamports_per_whole == 0 {
+/// Tokens a buy of `units` gets at the spot price `units_per_whole` (native units per whole
+/// token): an upper bound while the price only rises during the buy.
+pub fn tokens_at_spot(units: u128, units_per_whole: u128, decimals: i16) -> Option<u128> {
+    if units_per_whole == 0 {
         return None;
     }
     let scale = 10u128.checked_pow(u32::try_from(decimals).ok()?)?;
-    let v = (lamports as u128).checked_mul(scale)? / lamports_per_whole as u128;
-    Some(v.min(u64::MAX as u128) as u64)
+    Some(mul_div(units, scale, units_per_whole).unwrap_or(u128::MAX))
 }
 
 /// Upper-bound estimate of a buy for the creator cap: the smaller of the initial-curve and
 /// spot bounds, never below the signed `min_out` (the buy fails below it anyway).
-pub fn buy_gain_estimate(curve: &Curve, lamports: u64, spot: Option<u64>, min_out: u64) -> u64 {
-    let initial = curve.tokens_out_initial(lamports);
+pub fn buy_gain_estimate(curve: &Curve, units: u128, spot: Option<u128>, min_out: u128) -> u128 {
+    let initial = curve.tokens_out_initial(units);
     spot.map_or(initial, |s| s.min(initial)).max(min_out)
 }
 
@@ -89,7 +86,7 @@ mod tests {
         virtual_tokens: 1_073_000_000_000_000,
     };
     /// 5 % of 1e9 tokens with 6 decimals.
-    const CAP: u64 = 50_000_000_000_000;
+    const CAP: u128 = 50_000_000_000_000;
 
     #[test]
     fn initial_curve_output() {
@@ -100,7 +97,7 @@ mod tests {
         // Monotone in the amount.
         assert!(PUMP.tokens_out_initial(2_000_000_000) > one);
         // Never more than the virtual reserves.
-        assert!(PUMP.tokens_out_initial(u64::MAX) < PUMP.virtual_tokens);
+        assert!(PUMP.tokens_out_initial(u64::MAX as u128) < PUMP.virtual_tokens);
     }
 
     #[test]

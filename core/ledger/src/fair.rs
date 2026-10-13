@@ -23,11 +23,9 @@ use crate::{
     to_i64, to_u64,
 };
 
-/// Fair-launch math (`unzeen_fair::alloc`) is pump.fun/Solana-only and stays `u64`; the
-/// NUMERIC(78,0) columns (0026) are converted at the edge and a value above `u64` is a range
-/// error, never a silent truncation.
-fn num_u64(v: Option<Num>) -> Result<u64> {
-    v.unwrap_or_default().to_u64()
+/// NUMERIC(78,0) → u128 (fair-launch math is u128 since API v0.20; negative → range error).
+fn num_u128(v: Option<Num>) -> Result<u128> {
+    v.unwrap_or_default().to_u128()
 }
 
 const MS: &str = "(extract(epoch FROM {}) * 1000)::bigint";
@@ -108,10 +106,10 @@ pub struct OwnerLaunch {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CurveRow {
-    pub virtual_sol: u64,
-    pub virtual_tokens: u64,
-    pub real_tokens: u64,
-    pub total_supply: u64,
+    pub virtual_sol: u128,
+    pub virtual_tokens: u128,
+    pub real_tokens: u128,
+    pub total_supply: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,8 +128,8 @@ pub const MAX_BIDS: i64 = 1024;
 pub struct RevealParams {
     /// Lamports per ZEC, buy side (after spread), one for everybody.
     pub rate: u64,
-    pub max_total_lamports: u64,
-    pub creator_max_lamports: u64,
+    pub max_total_lamports: u128,
+    pub creator_max_lamports: u128,
     /// Fresh-curve reserves for `min_out`.
     pub curve: CurveRow,
     /// Upper bound of venue fees for `min_out` (bps), plus `slippage_bps`.
@@ -160,7 +158,7 @@ pub enum RevealOutcome {
     Executing {
         valid: usize,
         invalid: usize,
-        lamports_in: u64,
+        lamports_in: u128,
     },
     /// No valid bids / below 0.001 SOL: failed (no_bids), everything released.
     NoBids { invalid: usize },
@@ -453,14 +451,13 @@ async fn finish_unsuccessful<C: GenericClient>(
 }
 
 /// `S/T` in UI units (SOL per whole token), trimmed decimal string.
-pub fn price_sol(lamports: u64, tokens: u64, decimals: u32) -> String {
+pub fn price_sol(lamports: u128, tokens: u128, decimals: u32) -> String {
     if tokens == 0 {
         return "0".into();
     }
-    // lamports · 10^dec / (tokens · 1e9), 18 fractional digits.
-    let num = (lamports as u128) * 10u128.pow(decimals.min(18)) * 10u128.pow(18);
-    let den = (tokens as u128) * 1_000_000_000;
-    let v = num / den;
+    // lamports · 10^dec · 1e18 / (tokens · 1e9), 18 fractional digits (256-bit intermediate).
+    let scale = 10u128.pow(decimals.min(18)) * 1_000_000_000;
+    let v = alloc::mul_div(lamports, scale, tokens).unwrap_or(u128::MAX);
     let (int, frac) = (v / 10u128.pow(18), v % 10u128.pow(18));
     let frac = format!("{frac:018}");
     let frac = frac.trim_end_matches('0');
@@ -482,13 +479,12 @@ impl Ledger {
                 &[&network, &venue],
             )
             .await?;
-        // Solana curves fit u64; a row that does not (an 18-decimal EVM curve) is skipped.
         Ok(r.and_then(|r| {
             Some(CurveRow {
-                virtual_sol: num_u64(r.get(0)).ok()?,
-                virtual_tokens: num_u64(r.get(1)).ok()?,
-                real_tokens: num_u64(r.get(2)).ok()?,
-                total_supply: num_u64(r.get(3)).ok()?,
+                virtual_sol: num_u128(r.get(0)).ok()?,
+                virtual_tokens: num_u128(r.get(1)).ok()?,
+                real_tokens: num_u128(r.get(2)).ok()?,
+                total_supply: num_u128(r.get(3)).ok()?,
             })
         }))
     }
@@ -1113,11 +1109,11 @@ impl Ledger {
             .iter()
             .map(|d| to_i64(d.amount.unwrap_or(0)))
             .collect::<Result<_>>()?;
-        let es: Vec<i64> = plan.effective.iter().map(|e| to_i64(*e)).collect::<Result<_>>()?;
+        let es: Vec<String> = plan.effective.iter().map(u128::to_string).collect();
         tx.execute(
             "UPDATE fl_bids b SET status = 'revealed', amount_zat = u.amount, e_lamports = u.e::numeric,
                     ciphertext = NULL
-             FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS u(id, amount, e) WHERE b.id = u.id",
+             FROM unnest($1::bigint[], $2::bigint[], $3::text[]) AS u(id, amount, e) WHERE b.id = u.id",
             &[&ids, &amounts, &es],
         )
         .await?;
@@ -1130,8 +1126,8 @@ impl Ledger {
         }
         // min_out: fresh-curve output of the buy net of a fee bound, minus slippage. The mint
         // is created by this very tx, so only a venue config change can trip it.
-        let net = (lamports_in as u128) * (10_000 - p.fee_bound_bps.min(9_999) as u128) / 10_000;
-        let quote = alloc::curve_tokens_out(p.curve.virtual_sol, p.curve.virtual_tokens, net as u64);
+        let net = alloc::mul_div(lamports_in, 10_000 - p.fee_bound_bps.min(9_999) as u128, 10_000).unwrap_or(0);
+        let quote = alloc::curve_tokens_out(p.curve.virtual_sol, p.curve.virtual_tokens, net);
         let min_out =
             crate::actions::quantize_min_out((quote as u128) * (10_000 - p.slippage_bps.min(10_000) as u128) / 10_000);
         let mint_secret: &[u8] = &p.mint_secret;
@@ -1142,7 +1138,7 @@ impl Ledger {
                  VALUES ('fair_create', $1, $2, $3, $4, $5, 'now', now(), $6) RETURNING id",
                 &[
                     &venue,
-                    &Num::from(lamports_in),
+                    &Num::from_u128(lamports_in)?,
                     &Num::from_u128(min_out)?,
                     &meta,
                     &network,
@@ -1160,8 +1156,8 @@ impl Ledger {
                 &id_s,
                 &sig,
                 &to_i64(p.rate)?,
-                &Num::from(plan.total),
-                &Num::from(lamports_in),
+                &Num::from_u128(plan.total)?,
+                &Num::from_u128(lamports_in)?,
                 &plan.oversubscribed,
                 &(valid.len() as i32),
                 &job,
@@ -1286,12 +1282,12 @@ impl Ledger {
         let creator: Option<Vec<u8>> = r.get(1);
         let create_aid: Option<Vec<u8>> = r.get(2);
         let rate = to_u64(r.get::<_, Option<i64>>(3).unwrap_or(0));
-        let total_e = num_u64(r.get(4))?;
+        let total_e = num_u128(r.get(4))?;
         let oversubscribed = r.get::<_, Option<bool>>(5).unwrap_or(false);
         let valid_bids = r.get::<_, Option<i32>>(6).unwrap_or(0);
         let mint: String = r.get::<_, Option<String>>(9).unwrap_or_default();
-        let t = num_u64(r.get(10))?;
-        let s = num_u64(r.get(11))?;
+        let t = num_u128(r.get(10))?;
+        let s = num_u128(r.get(11))?;
         let sig: Option<String> = r.get(12);
         let decimals: i16 = tx
             .query_opt("SELECT decimals FROM tokens WHERE mint = $1", &[&mint])
@@ -1309,9 +1305,9 @@ impl Ledger {
         for b in &bids {
             let (bid_id, pk, aid): (i64, Vec<u8>, Option<Vec<u8>>) = (b.get(0), b.get(1), b.get(2));
             let amount = to_u64(b.get::<_, Option<i64>>(3).unwrap_or(0));
-            let e = num_u64(b.get(4))?;
+            let e = num_u128(b.get(4))?;
             let sh = alloc::share(e, total_e, t, s, rate, amount);
-            let tokens = i128::from(sh.tokens);
+            let tokens = i128::try_from(sh.tokens).map_err(|_| LedgerError::Range)?;
             let charge = to_i64(sh.charge_zat)?;
             if let Some(aid) = &aid {
                 if tokens > 0 {
@@ -1359,7 +1355,7 @@ impl Ledger {
             let launch_fee = crate::creator_fees::launch_creator_fee(
                 &self.rules,
                 r.get::<_, Option<&str>>(14),
-                i128::from(s),
+                i128::try_from(s).map_err(|_| LedgerError::Range)?,
                 r.get::<_, Option<Num>>(15).map(|n| n.0),
             );
             tx.execute(

@@ -109,6 +109,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0027_scenarios",
         include_str!("../../migrations/0027_scenarios.sql"),
     ),
+    (
+        28,
+        "0028_hood_relayer",
+        include_str!("../../migrations/0028_hood_relayer.sql"),
+    ),
+    (
+        29,
+        "0029_verify_v3",
+        include_str!("../../migrations/0029_verify_v3.sql"),
+    ),
 ];
 
 /// Arbitrary constant for `pg_advisory_xact_lock` so concurrent starters serialize.
@@ -138,4 +148,27 @@ pub async fn run(c: &mut Client) -> Result<(), tokio_postgres::Error> {
         }
     }
     tx.commit().await
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every `core/migrations/*.sql` file is registered, once, under its number (a file that is
+    /// not in [`super::MIGRATIONS`] would silently never run).
+    #[test]
+    fn every_migration_file_is_registered() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../migrations");
+        let mut files: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".sql"))
+            .map(|n| n.trim_end_matches(".sql").to_string())
+            .collect();
+        files.sort();
+        let mut names: Vec<String> = super::MIGRATIONS.iter().map(|m| m.1.to_string()).collect();
+        names.sort();
+        assert_eq!(files, names);
+        for (v, n, _) in super::MIGRATIONS {
+            assert_eq!(n[..4].parse::<i32>().unwrap(), *v, "{n}");
+        }
+    }
 }

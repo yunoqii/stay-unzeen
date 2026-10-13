@@ -93,8 +93,9 @@ fn row_of(r: &tokio_postgres::Row) -> ScenarioRow {
     }
 }
 
-/// Close a plan inside `tx`: status, closed_at, sealed blobs gone; on cancel / expiry its open
-/// orders are cancelled (hold back to the balance), on success they stay (owner decision 13.10).
+/// Close a plan inside `tx`: status, closed_at, sealed blobs gone; on cancel / expiry / failure
+/// its open orders are cancelled (hold back to the balance), on success they stay (owner
+/// decision 13.10; `failed` like cancel — lead, review-scenarios п. 11).
 pub async fn close_in<C: GenericClient>(tx: &C, id: &[u8], status: &str, error: Option<&str>) -> Result<()> {
     tx.execute(
         "UPDATE scenarios SET status = $2, error = $3, closed_at = now(), next_at = NULL, phase = 'ready'
@@ -104,7 +105,7 @@ pub async fn close_in<C: GenericClient>(tx: &C, id: &[u8], status: &str, error: 
     .await?;
     tx.execute("DELETE FROM scenario_sealed WHERE scenario_id = $1", &[&id])
         .await?;
-    if matches!(status, "cancelled" | "expired") {
+    if matches!(status, "cancelled" | "expired" | "failed") {
         let open = tx
             .query(
                 "SELECT o.id FROM orders o JOIN scenario_runs r ON r.order_id = o.id
@@ -760,4 +761,55 @@ impl Ledger {
                 .map(|r| (r.get(0), r.get(1))),
         )
     }
+}
+
+/// Last pool trade of a key (spec §4.1 floors by TIME, review-scenarios п. 1/3/4/6): buys, sells
+/// and launches of any action of the key — manual, fired orders, other plans — in flight
+/// (counts as "now") or confirmed (public `trades.ts`, exact block time). `mint = None` → any
+/// mint. Returns (seconds since, kind of that trade). Looks back 24 h (the action ↔ job link
+/// lives 24 h after settlement; every floor is shorter).
+pub async fn last_trade<C: GenericClient>(tx: &C, pk: &[u8; 32], mint: Option<&str>) -> Result<Option<(f64, String)>> {
+    let pk_s: &[u8] = pk;
+    Ok(tx
+        .query_opt(
+            "SELECT extract(epoch FROM now() - at)::float8, op FROM (
+                 SELECT j.op,
+                        CASE WHEN j.status IN ('held', 'queued', 'claimed', 'sent') THEN now()
+                             ELSE COALESCE((SELECT max(t.ts) FROM trades t WHERE t.signature = j.signature),
+                                           j.updated_at) END AS at
+                 FROM actions a JOIN relayer_jobs j ON j.action_id = a.id
+                 WHERE a.anon_pubkey = $1 AND j.op IN ('buy', 'sell', 'create') AND j.status <> 'failed'
+                   AND ($2::text IS NULL OR j.mint = $2 OR j.out_mint = $2)
+             ) x WHERE at > now() - interval '24 hours' ORDER BY at DESC LIMIT 1",
+            &[&pk_s, &mint],
+        )
+        .await?
+        .map(|r| (r.get::<_, f64>(0).max(0.0), r.get(1))))
+}
+
+/// Mint of a key's own order / action (validator: `own_result {orderId | actionId}` is a trade
+/// of that mint for P2).
+pub async fn ref_mint<C: GenericClient>(c: &C, pk: &[u8; 32], id: &[u8; 16]) -> Result<Option<String>> {
+    let (pk_s, id_s): (&[u8], &[u8]) = (pk, id);
+    Ok(c.query_opt(
+        "SELECT mint FROM orders WHERE id = $2 AND anon_pubkey = $1 AND mint IS NOT NULL
+         UNION ALL
+         SELECT COALESCE(j.mint, j.out_mint, a.token_mint) FROM actions a
+           LEFT JOIN relayer_jobs j ON j.action_id = a.id
+          WHERE a.id = $2 AND a.anon_pubkey = $1
+         LIMIT 1",
+        &[&pk_s, &id_s],
+    )
+    .await?
+    .and_then(|r| r.get(0)))
+}
+
+/// Available zat of a key (scenario_create: a plan needs a funded key, review п. 14).
+pub async fn key_available_zat<C: GenericClient>(c: &C, pk: &[u8; 32]) -> Result<u64> {
+    let pk_s: &[u8] = pk;
+    Ok(
+        c.query_opt("SELECT available_zat FROM balances WHERE anon_pubkey = $1", &[&pk_s])
+            .await?
+            .map_or(0, |r| u64::try_from(r.get::<_, i64>(0)).unwrap_or(0)),
+    )
 }

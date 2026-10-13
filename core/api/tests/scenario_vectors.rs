@@ -24,6 +24,16 @@ fn ctx(defaults: &Value, over: Option<&Value>) -> Ctx {
         chat: get("chat").as_bool().unwrap(),
         full_trades: get("fullTrades").as_bool().unwrap(),
         priced_mints: strings(get("pricedMints")),
+        evm: false,
+        ref_mints: over
+            .and_then(|o| o.get("refMints"))
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 

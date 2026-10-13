@@ -289,10 +289,10 @@ pub struct LaunchConfig {
     /// Cap of the creator's position through the pool, basis points of the supply (0 = off).
     pub cap_bps: u64,
     /// Total supply of a launch, base units (pump.fun: 1e9 tokens x 1e6).
-    pub total_supply: u64,
+    pub total_supply: u128,
     /// Initial virtual reserves of the launch curve (pump.fun Global: 30 SOL / 1.073e15).
-    pub virtual_sol_lamports: u64,
-    pub virtual_token_reserves: u64,
+    pub virtual_sol_lamports: u128,
+    pub virtual_token_reserves: u128,
     /// The UNZEEN_LAUNCH_VIRTUAL_* values were set explicitly (not defaults). Fair launch uses
     /// env curve values only then; otherwise it needs the network curve (`launch_curves`).
     pub curve_from_env: bool,
@@ -308,7 +308,7 @@ pub struct LaunchConfig {
 
 impl LaunchConfig {
     pub fn cap_tokens(&self) -> u128 {
-        (self.total_supply as u128) * (self.cap_bps as u128) / 10_000
+        self.total_supply.saturating_mul(self.cap_bps as u128) / 10_000
     }
 
     pub fn rules(&self) -> unzeen_ledger::CreatorRules {
@@ -352,6 +352,8 @@ pub struct RateConfig {
     pub max_stale_secs: u64,
     /// Spread against the user in basis points (buy: fewer lamports, sell: fewer zat).
     pub spread_bps: u64,
+    /// v0.20: the rate is ZEC → ETH on Robinhood Chain (wei per ZEC) instead of ZEC → SOL.
+    pub hood: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -420,6 +422,42 @@ fn num<T: std::str::FromStr>(key: &str, default: T) -> anyhow::Result<T> {
 }
 
 /// Parse a decimal SOL amount ("11.47") into lamports.
+/// Decimal price of one whole token in native units of the chain (SOL → lamports ×1e9, ETH → wei
+/// ×1e18), for spot estimates.
+pub fn price_to_units(s: &str, trade: unzeen_protocol::TradeNet) -> Option<u128> {
+    match trade {
+        unzeen_protocol::TradeNet::Solana(_) => {
+            // Lamports have 9 decimals: a longer fraction is truncated (spot estimates only).
+            let t = match s.split_once('.') {
+                Some((i, f)) => format!("{i}.{}", &f[..f.len().min(9)]),
+                None => s.to_string(),
+            };
+            sol_to_lamports(&t).map(u128::from)
+        }
+        unzeen_protocol::TradeNet::Hood(_) => eth_to_wei(s),
+    }
+}
+
+/// Decimal ETH (≤ 18 fractional digits; longer fractions are truncated) → wei.
+pub fn eth_to_wei(s: &str) -> Option<u128> {
+    let s = s.trim();
+    let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+    if int.is_empty() && frac.is_empty() {
+        return None;
+    }
+    if !int.bytes().all(|b| b.is_ascii_digit()) || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let frac = &frac[..frac.len().min(18)];
+    let i: u128 = if int.is_empty() { 0 } else { int.parse().ok()? };
+    let f: u128 = if frac.is_empty() {
+        0
+    } else {
+        format!("{frac:0<18}").parse().ok()?
+    };
+    i.checked_mul(1_000_000_000_000_000_000)?.checked_add(f)
+}
+
 pub fn sol_to_lamports(s: &str) -> Option<u64> {
     let s = s.trim();
     let (int, frac) = s.split_once('.').unwrap_or((s, ""));
@@ -445,49 +483,71 @@ impl Config {
             "main" | "mainnet" => "main",
             other => bail!("UNZEEN_NETWORK={other:?}: expected test | main"),
         };
-        let solana: SolanaCluster = var("UNZEEN_SOLANA_CLUSTER")
-            .unwrap_or_else(|| "devnet".into())
-            .parse()
-            .map_err(|e: String| anyhow!(e))?;
-        let cluster = match solana {
-            SolanaCluster::Devnet => "devnet",
-            SolanaCluster::MainnetBeta => "mainnet-beta",
-        };
         let zcash = if network == "main" {
             ZcashNet::Mainnet
         } else {
             ZcashNet::Testnet
         };
-        // Only two legal chain ids: 0202 (Zcash testnet + Solana devnet) and 0101 (mainnet +
-        // mainnet-beta). Mixed combinations would sign memos/requests for a network nobody runs.
-        if (zcash == ZcashNet::Mainnet) != (solana == SolanaCluster::MainnetBeta) {
-            bail!(
-                "UNZEEN_NETWORK={network} with UNZEEN_SOLANA_CLUSTER={}: networks must match \
-                 (test+devnet or main+mainnet-beta)",
-                if solana == SolanaCluster::Devnet {
-                    "devnet"
+        // v0.20: UNZEEN_CHAIN = solana (default) | hood. A hood instance has its own pool wallet,
+        // DB and chain id (0111 / 0212, network from the Zcash network), RELAYER v13.
+        let chain = match var("UNZEEN_CHAIN").as_deref().unwrap_or("solana") {
+            "solana" => {
+                let solana: SolanaCluster = var("UNZEEN_SOLANA_CLUSTER")
+                    .unwrap_or_else(|| "devnet".into())
+                    .parse()
+                    .map_err(|e: String| anyhow!(e))?;
+                ChainId::new(zcash, solana)
+            }
+            "hood" => ChainId::hood(
+                zcash,
+                if zcash == ZcashNet::Mainnet {
+                    unzeen_protocol::HoodNet::Mainnet
                 } else {
-                    "mainnet-beta"
-                }
+                    unzeen_protocol::HoodNet::Testnet
+                },
+            ),
+            other => bail!("UNZEEN_CHAIN={other:?}: expected solana | hood"),
+        };
+        // Only the matching pairs (0101, 0202, 0111, 0212). Mixed combinations would sign
+        // memos/requests for a network nobody runs.
+        if ChainId::from_bytes(chain.to_bytes()).is_none() {
+            bail!(
+                "UNZEEN_NETWORK={network} with UNZEEN_SOLANA_CLUSTER: networks must match \
+                 (test+devnet or main+mainnet-beta)"
             );
         }
+        let trade = chain.trade;
+        let hood = matches!(trade, unzeen_protocol::TradeNet::Hood(_));
+        let cluster: &'static str = trade.network();
+        let mainnet = trade.is_mainnet();
         let policy = Policy {
-            chain: ChainId::new(zcash, solana),
+            chain,
             confirmations: num::<u32>("UNZEEN_CONFIRMATIONS", 3)?.max(1),
             min_deposit_zat: num("MIN_DEPOSIT_ZAT", 100_000)?,
             min_action_zat: num("MIN_ACTION_ZAT", 100_000)?,
             credit_jitter: num::<u32>("UNZEEN_CONFIRMATIONS_JITTER", 3)?.min(10),
         };
 
-        let fixed = match (solana, var("DEVNET_ZEC_SOL_RATE")) {
-            (SolanaCluster::Devnet, Some(v)) => Some(
+        // Fixed test rate: SOL per ZEC (devnet) or ETH per ZEC (hood-testnet); never with real money.
+        let fixed_key = if hood {
+            "DEVNET_ZEC_ETH_RATE"
+        } else {
+            "DEVNET_ZEC_SOL_RATE"
+        };
+        let fixed = match var(fixed_key) {
+            Some(_) if mainnet => bail!("{fixed_key} is not allowed on mainnet"),
+            Some(v) if hood => Some(
+                eth_to_wei(&v)
+                    .and_then(|w| u64::try_from(w).ok())
+                    .filter(|w| *w > 0)
+                    .context("DEVNET_ZEC_ETH_RATE must be a positive decimal (ETH per 1 ZEC)")?,
+            ),
+            Some(v) => Some(
                 sol_to_lamports(&v)
                     .filter(|l| *l > 0)
                     .context("DEVNET_ZEC_SOL_RATE must be a positive decimal (SOL per 1 ZEC)")?,
             ),
-            // Never a fixed rate with real money.
-            (SolanaCluster::MainnetBeta, Some(_)) => bail!("DEVNET_ZEC_SOL_RATE is not allowed on mainnet-beta"),
-            _ => None,
+            None => None,
         };
         let range = |kmin: &str, dmin: f64, kmax: &str, dmax: f64| -> anyhow::Result<(f64, f64)> {
             let (a, b): (f64, f64) = (num(kmin, dmin)?, num(kmax, dmax)?);
@@ -514,7 +574,6 @@ impl Config {
             launch_fee_bps_dbc: num::<u32>("UNZEEN_LAUNCH_CREATOR_FEE_BPS_DBC", 40)?.min(10_000),
             min_claim_zat: num::<u64>("MIN_CLAIM_ZAT", 10_000)?.clamp(1, policy.min_action_zat.max(1)),
         };
-        let mainnet = solana == SolanaCluster::MainnetBeta;
         let fair = FairConfig {
             enabled: var("UNZEEN_FAIR_LAUNCH").as_deref() == Some("1"),
             windows_secs: list("UNZEEN_FL_WINDOWS_SECS")?.unwrap_or_else(|| vec![120, 300, 600, 1800]),
@@ -551,7 +610,7 @@ impl Config {
         }
         if launch.virtual_sol_lamports == 0
             || launch.total_supply == 0
-            || u128::from(launch.virtual_token_reserves) <= launch.cap_tokens()
+            || launch.virtual_token_reserves <= launch.cap_tokens()
         {
             bail!("UNZEEN_LAUNCH_*: need virtual reserves > 0 and > the creator cap");
         }
@@ -581,6 +640,7 @@ impl Config {
                 cache_secs: num("RATE_CACHE_SECS", 45)?,
                 max_stale_secs: num("RATE_MAX_STALE_SECS", 120)?,
                 spread_bps: num::<u64>("UNZEEN_RATE_SPREAD_BPS", 50)?.min(2_000),
+                hood,
             },
             exec: ExecConfig {
                 epoch_min_secs: emin,
@@ -598,17 +658,24 @@ impl Config {
                 now_fee_zat: num("UNZEEN_NOW_FEE_ZAT", 5_000)?,
                 create_fee_zat: num("CREATE_FEE_ZAT", 100_000)?,
                 withdraw_zec_fee_zat: num("WITHDRAW_ZEC_FEE_ZAT", 15_000)?,
-                withdraw_token_gas_lamports: num("WITHDRAW_TOKEN_GAS_LAMPORTS", 2_000_000)?,
-                withdraw_token_cost_lamports: num("WITHDRAW_TOKEN_COST_LAMPORTS", 2_100_000)?,
+                // Native units: lamports (SOL drop + ATA rent/fee) or wei on hood (0.00005 ETH drop,
+                // 0.00001 ETH transfer fee).
+                withdraw_token_gas_lamports: num(
+                    "WITHDRAW_TOKEN_GAS_LAMPORTS",
+                    if hood { 50_000_000_000_000 } else { 2_000_000 },
+                )?,
+                withdraw_token_cost_lamports: num(
+                    "WITHDRAW_TOKEN_COST_LAMPORTS",
+                    if hood { 10_000_000_000_000 } else { 2_100_000 },
+                )?,
             },
             venues: var("UNZEEN_VENUES")
-                .unwrap_or_else(|| "pumpfun".into())
+                .unwrap_or_else(|| if hood { "pons".into() } else { "pumpfun".into() })
                 .split(',')
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
                 .collect(),
-            actions_enabled: solana == SolanaCluster::Devnet
-                || var("UNZEEN_ALLOW_MAINNET_ACTIONS").as_deref() == Some("1"),
+            actions_enabled: !mainnet || var("UNZEEN_ALLOW_MAINNET_ACTIONS").as_deref() == Some("1"),
             limits: Limits {
                 ip_per_sec: num("API_RL_IP_PER_SEC", 20.0)?,
                 ip_burst: num("API_RL_IP_BURST", 60.0)?,
@@ -655,8 +722,12 @@ impl Config {
                 },
             },
             quotes: {
-                let wanted =
-                    var("UNZEEN_QUOTES").unwrap_or_else(|| if mainnet { "USDC,ZEC".into() } else { "USDC".into() });
+                // Robinhood Chain: ETH pairs only (Pons), no SPL quote assets.
+                let wanted = if hood {
+                    String::new()
+                } else {
+                    var("UNZEEN_QUOTES").unwrap_or_else(|| if mainnet { "USDC,ZEC".into() } else { "USDC".into() })
+                };
                 let wanted: Vec<String> = wanted
                     .split(',')
                     .map(|v| v.trim().to_uppercase())
@@ -701,20 +772,45 @@ impl Config {
                     let p = var("UNZEEN_SCENARIO_KEY_FILE").ok_or_else(|| {
                         anyhow!("UNZEEN_SCENARIOS=1 needs UNZEEN_SCENARIO_KEY_FILE (32 bytes hex, like the chat key)")
                     })?;
-                    Some(load_chat_key(std::path::Path::new(&p)).context("UNZEEN_SCENARIO_KEY_FILE")?)
+                    let path = std::path::Path::new(&p);
+                    // K_scn: owner-only file (review-scenarios п. 13).
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mode = std::fs::metadata(path)
+                            .with_context(|| format!("reading {}", path.display()))?
+                            .permissions()
+                            .mode();
+                        if mode & 0o077 != 0 {
+                            bail!("UNZEEN_SCENARIO_KEY_FILE must be mode 0600 (owner only)");
+                        }
+                    }
+                    Some(load_chat_key(path).context("UNZEEN_SCENARIO_KEY_FILE")?)
                 } else {
                     None
                 };
                 ScenariosConfig { enabled, key }
             },
         };
-        // v0.18: venues of another chain (pons = Robinhood Chain) cannot be enabled on Solana.
+        // Venues of another chain cannot be enabled (pons only on hood, the rest only on Solana).
+        let on_hood = matches!(cfg.policy.chain.trade, unzeen_protocol::TradeNet::Hood(_));
         if let Some(v) = cfg
             .venues
             .iter()
-            .find(|v| crate::actions::HOOD_VENUES.contains(&v.as_str()))
+            .find(|v| crate::actions::HOOD_VENUES.contains(&v.as_str()) != on_hood)
         {
-            bail!("UNZEEN_VENUES: {v} is a Robinhood Chain venue; this server trades on Solana");
+            bail!("UNZEEN_VENUES: {v} is not a venue of this server's chain");
+        }
+        // K_scn and K_chat are different keys: one leaked key must not open the other's data.
+        if let (Some(a), Some(b)) = (&cfg.scenarios.key, &cfg.chat.key)
+            && a.0 == b.0
+        {
+            bail!("UNZEEN_SCENARIO_KEY_FILE holds the same key as UNZEEN_CHAT_KEY_FILE; use a separate key");
+        }
+        // Fair launch on Robinhood Chain needs a relayer path (Pons launchAndBuy) that does not
+        // exist yet; the math is ready (u128).
+        if hood && cfg.fair.enabled {
+            bail!("UNZEEN_FAIR_LAUNCH=1 is not supported on Robinhood Chain yet");
         }
         Ok(cfg)
     }

@@ -19,6 +19,11 @@ pub const SOL_ASSET: &str = "nep141:sol.omft.near";
 pub const ZEC_SPL_ASSET: &str = "1cs_v1:sol:spl:A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS";
 /// wSOL mint: a valid Solana address no one in the pool owns (dry quotes only).
 pub const DUMMY_SOL_RECIPIENT: &str = "So11111111111111111111111111111111111111112";
+/// Native ETH on Robinhood Chain (1Click `blockchain: "hood"`).
+pub const HOOD_ETH_ASSET: &str = "nep141:hood.omft.near";
+/// A valid checksummed EVM address nobody in the pool owns, for dry quotes (1Click refuses
+/// well-known burn addresses).
+pub const DUMMY_EVM_RECIPIENT: &str = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
 /// Placeholder mainnet t-address for dry quotes (no deposit is ever made).
 pub const DUMMY_ZEC_REFUND: &str = "t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs";
 /// 1Click minimum for ZEC (live answer 12.10: "try at least 132000").
@@ -272,6 +277,22 @@ pub fn check_quote(
     Ok(q)
 }
 
+/// Native units (10^decimals per coin) of `dest` a lot should give at the 1Click USD prices.
+pub fn expected_native(tokens: &Value, lot_zat: u64, dest: &str, decimals: i32) -> Option<u64> {
+    let price = |id: &str| {
+        tokens
+            .as_array()?
+            .iter()
+            .find(|t| t.get("assetId").and_then(Value::as_str) == Some(id))?
+            .get("price")?
+            .as_f64()
+            .filter(|p| p.is_finite() && *p > 0.0)
+    };
+    let (zec, d) = (price(ZEC_ASSET)?, price(dest)?);
+    let v = lot_zat as f64 / 1e8 * zec / d * 10f64.powi(decimals);
+    (v.is_finite() && v > 0.0 && v < u64::MAX as f64).then_some(v as u64)
+}
+
 /// Lamports a lot should give at the 1Click USD prices (`/v0/tokens`), before fees.
 pub fn expected_lamports(tokens: &Value, lot_zat: u64) -> Option<u64> {
     let price = |id: &str| {
@@ -511,5 +532,20 @@ mod tests {
         assert_eq!(parse_rfc3339("2026-10-13T07:35:30.634Z"), Some(1_791_876_930));
         assert_eq!(parse_rfc3339("2026-10-13T07:35:30+02:00"), None);
         assert_eq!(parse_rfc3339("garbage"), None);
+    }
+
+    #[test]
+    fn expected_eth_on_hood() {
+        // 0.5 ZEC at $1218.79 / ETH $2506.85 = 0.2431… ETH (18 decimals).
+        let t: Value = serde_json::from_str(
+            r#"[{"assetId":"nep141:zec.omft.near","price":1218.79},{"assetId":"nep141:hood.omft.near","price":2506.85}]"#,
+        )
+        .unwrap();
+        let wei = expected_native(&t, 50_000_000, HOOD_ETH_ASSET, 18).unwrap();
+        assert!(
+            (243_000_000_000_000_000..243_200_000_000_000_000).contains(&wei),
+            "{wei}"
+        );
+        assert!(unzeen_protocol::evm::canonical_address(DUMMY_EVM_RECIPIENT).as_deref() == Some(DUMMY_EVM_RECIPIENT));
     }
 }

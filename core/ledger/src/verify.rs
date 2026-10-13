@@ -93,7 +93,7 @@ pub struct SnapshotRow {
 pub struct ProofPiece {
     pub piece: u8,
     pub leaf_idx: u32,
-    pub value: u64,
+    pub value: u128,
     pub blind: Vec<u8>,
     pub path: Vec<(Vec<u8>, String)>,
 }
@@ -116,10 +116,16 @@ fn rand_below(n: u64) -> u64 {
     if n == 0 { 0 } else { rand::random::<u64>() % n }
 }
 
+fn rand_below_u128(n: u128) -> u128 {
+    if n == 0 { 0 } else { rand::random::<u128>() % n }
+}
+
 /// Split `rounded` (a multiple of `g`) into `s` pieces, multiples of `g`, summing to it.
-pub fn split_pieces(rounded: u64, g: u64, s: usize) -> Vec<u64> {
+pub fn split_pieces(rounded: u128, g: u128, s: usize) -> Vec<u128> {
     let units = rounded / g.max(1);
-    let mut cuts: Vec<u64> = (0..s.saturating_sub(1)).map(|_| rand_below(units + 1)).collect();
+    let mut cuts: Vec<u128> = (0..s.saturating_sub(1))
+        .map(|_| rand_below_u128(units.saturating_add(1)))
+        .collect();
     cuts.push(0);
     cuts.push(units);
     cuts.sort_unstable();
@@ -133,20 +139,27 @@ fn shuffle<T>(v: &mut [T]) {
     }
 }
 
-fn asset_bytes(asset: &str) -> Option<[u8; 32]> {
+/// 32-byte asset id: ZEC = zeros, an SPL mint = its 32 bytes, v3 only: an ERC-20 `0x…` = 12 zero
+/// bytes ‖ address.
+fn asset_bytes(asset: &str, v3: bool) -> Option<[u8; 32]> {
     if asset == "ZEC" {
         return Some(pv::ZEC_ASSET);
+    }
+    if asset.starts_with("0x") {
+        return v3
+            .then(|| unzeen_protocol::evm::parse_address(asset).map(|a| unzeen_protocol::evm::asset32(&a)))
+            .flatten();
     }
     bs58::decode(asset).into_vec().ok()?.try_into().ok()
 }
 
 /// (asset, decimals, granule, [(anon pubkey, value)])
-type Liab = (String, i16, u64, Vec<([u8; 32], u64)>);
+type Liab = (String, i16, u64, Vec<([u8; 32], u128)>);
 
 struct Piece {
     pk: [u8; 32],
     piece: u8,
-    value: u64,
+    value: u128,
 }
 
 /// Numeric `pool_meta` value published by the scanner (0 if absent).
@@ -327,6 +340,7 @@ impl Ledger {
                 Ok(Err(reason)) => skip(reason).await?,
                 // E14: a build that cannot succeed must not retry forever under the freeze.
                 Err(e) => {
+                    eprintln!("DBGV {e}");
                     tracing::warn!(error = e.kind(), "verify build failed");
                     skip("build_error").await?
                 }
@@ -367,6 +381,9 @@ impl Ledger {
             .ok_or(LedgerError::Range)?;
         let taken_at_sec = to_u64(s.get(1));
         let solana_slot = to_u64(s.get::<_, Option<i64>>(2).unwrap_or(0));
+        // v3 (u128 leaves, EVM asset ids) for Robinhood Chain; Solana snapshots stay v2.
+        let v3 = unzeen_protocol::ChainId::from_bytes(chain).is_some_and(|c| c.solana().is_none());
+        let tv = if v3 { pv::TreeVersion::V3 } else { pv::TreeVersion::V1 };
 
         // Liabilities: (asset, decimals, granule) -> [(pk, value)]. ZEC: one value per key =
         // balance + held + creator fees owed (claimable lamports of all its mints, summed per
@@ -382,7 +399,7 @@ impl Ledger {
                 &[],
             )
             .await?;
-        let mut zec: Vec<([u8; 32], u64)> = Vec::with_capacity(zec_rows.len());
+        let mut zec: Vec<([u8; 32], u128)> = Vec::with_capacity(zec_rows.len());
         for r in zec_rows {
             let pk: Vec<u8> = r.get(0);
             let Ok(pk) = pk.try_into() else { continue };
@@ -400,7 +417,7 @@ impl Ledger {
                     None => return Ok(Err("no_rate")),
                 }
             };
-            zec.push((pk, z.saturating_add(fees)));
+            zec.push((pk, u128::from(z.saturating_add(fees))));
         }
         let mut assets: Vec<Liab> = vec![("ZEC".into(), 8, pv::ZEC_GRANULE, zec)];
         let rows = tx
@@ -414,7 +431,7 @@ impl Ledger {
             .await?;
         for r in rows {
             let mint: String = r.get(0);
-            if asset_bytes(&mint).is_none() {
+            if asset_bytes(&mint, v3).is_none() {
                 // A liability that cannot be committed (e.g. a `0x…` ERC-20 before Verify v3) must
                 // never be dropped silently: skip the whole snapshot (review-numeric-hood п. 9).
                 return Ok(Err("unsupported_asset"));
@@ -425,9 +442,12 @@ impl Ledger {
             if assets.last().is_none_or(|a| a.0 != mint) {
                 assets.push((mint, dec, pv::MINT_GRANULE, vec![]));
             }
-            // Verify v1/v2 leaves are u64 (a Solana SPL amount always fits); a larger per-key
-            // balance (18-decimal ERC-20) needs Verify v3 and fails the snapshot loudly.
-            let v = r.get::<_, Num>(3).to_u64()?;
+            // v1/v2 leaves are u64 (a Solana SPL amount always fits); v3 leaves are u128.
+            let v = if v3 {
+                r.get::<_, Num>(3).to_u128()?
+            } else {
+                u128::from(r.get::<_, Num>(3).to_u64()?)
+            };
             assets.last_mut().expect("pushed").3.push((pk, v));
         }
 
@@ -436,9 +456,9 @@ impl Ledger {
         for (_, _, g, owners) in &assets {
             let mut ps = Vec::new();
             for (pk, v) in owners {
-                let rounded = pv::round_up(*v, *g);
+                let rounded = pv::round_up_u128(*v, u128::from(*g));
                 let s = 2 + rand_below(3) as usize;
-                for (i, value) in split_pieces(rounded, *g, s).into_iter().enumerate() {
+                for (i, value) in split_pieces(rounded, u128::from(*g), s).into_iter().enumerate() {
                     ps.push(Piece {
                         pk: *pk,
                         piece: i as u8,
@@ -482,7 +502,7 @@ impl Ledger {
 
         let mut roots: Vec<([u8; 32], Node)> = Vec::new();
         for ((asset, dec, g, _), ps) in assets.iter().zip(pieces) {
-            let ab = asset_bytes(asset).expect("checked");
+            let ab = asset_bytes(asset, v3).expect("checked");
             // Slots: real pieces + dummies, shuffled.
             let mut slots: Vec<Option<Piece>> = ps.into_iter().map(Some).collect();
             slots.resize_with(n, || None);
@@ -493,25 +513,31 @@ impl Ledger {
                 let blind: [u8; 32] = rand::random();
                 match slot {
                     Some(p) => {
-                        let h = pv::leaf_hash(chain, id as u32, &ab, &p.pk, p.piece, p.value, &blind);
-                        leaves.push(Node {
-                            hash: h,
-                            sum: p.value as u128,
-                        });
+                        let h = if v3 {
+                            pv::leaf_hash_v3(chain, id as u32, &ab, &p.pk, p.piece, p.value, &blind)
+                        } else {
+                            let v = u64::try_from(p.value).map_err(|_| LedgerError::Range)?;
+                            pv::leaf_hash(chain, id as u32, &ab, &p.pk, p.piece, v, &blind)
+                        };
+                        leaves.push(Node { hash: h, sum: p.value });
                         lpk.push(p.pk.to_vec());
                         lpiece.push(i16::from(p.piece));
                         lidx.push(i as i32);
-                        lval.push(to_i64(p.value)?);
+                        lval.push(p.value.to_string());
                         lblind.push(blind.to_vec());
                     }
                     None => {
                         let pk: [u8; 32] = rand::random();
-                        let h = pv::leaf_hash(chain, id as u32, &ab, &pk, 0, 0, &blind);
+                        let h = if v3 {
+                            pv::leaf_hash_v3(chain, id as u32, &ab, &pk, 0, 0, &blind)
+                        } else {
+                            pv::leaf_hash(chain, id as u32, &ab, &pk, 0, 0, &blind)
+                        };
                         leaves.push(Node { hash: h, sum: 0 });
                     }
                 }
             }
-            let levels = pv::build(leaves);
+            let levels = pv::build_v(tv, leaves);
             let root = levels.last().expect("root")[0];
             let (mut nl, mut ni, mut nh, mut ns) = (vec![], vec![], vec![], vec![]);
             for (l, lvl) in levels.iter().enumerate() {
@@ -530,7 +556,8 @@ impl Ledger {
             .await?;
             tx.execute(
                 "INSERT INTO verify_leaves (snapshot_id, asset, anon_pubkey, piece, leaf_idx, value, blind)
-                 SELECT $1, $2, * FROM unnest($3::bytea[], $4::smallint[], $5::int[], $6::bigint[], $7::bytea[])",
+                 SELECT $1, $2, p, pc, i, v::numeric, b
+                 FROM unnest($3::bytea[], $4::smallint[], $5::int[], $6::text[], $7::bytea[]) AS x(p, pc, i, v, b)",
                 &[&id, asset, &lpk, &lpiece, &lidx, &lval, &lblind],
             )
             .await?;
@@ -573,11 +600,7 @@ impl Ledger {
             let (mint, quote, dec, bridged): (String, String, i16, bool) = (q.get(0), q.get(1), q.get(2), q.get(3));
             let counted = quote == "ZEC";
             let dust: u64 = if counted { 100_000 } else { 10_000 };
-            let Some(mb) = bs58::decode(&mint)
-                .into_vec()
-                .ok()
-                .and_then(|v| <[u8; 32]>::try_from(v).ok())
-            else {
+            let Some(mb) = asset_bytes(&mint, v3).filter(|_| mint != "ZEC") else {
                 continue;
             };
             quote_facts.push(pv::QuoteAssetFact {
@@ -592,7 +615,12 @@ impl Ledger {
                 "dustBelow": dust.to_string(),
             }));
         }
-        let digest = pv::roots_digest_v2(&header, &roots, &quote_facts);
+        let digest = if v3 {
+            pv::roots_digest_v3(&header, &roots, &quote_facts)
+        } else {
+            pv::roots_digest_v2(&header, &roots, &quote_facts)
+        };
+        let digest_version: i16 = if v3 { 3 } else { 2 };
         // Anchor + operator signature: the attestation key (relayer), memo = hex digest only.
         let job: i64 = tx
             .query_one(
@@ -608,7 +636,7 @@ impl Ledger {
             "UPDATE verify_snapshots SET status = 'built', freeze_until = now(), zcash_height = $2,
                     zec_reserve_zat = $3, leaves = $4, roots_digest = $5, committed_lamports = $6,
                     rate_lamports_per_zec_sell = $7, attest_job_id = $8, rate_lamports_per_zec_buy = $9,
-                    quote_assets = $10, digest_version = 2
+                    quote_assets = $10, digest_version = $11
              WHERE id = $1",
             &[
                 &id,
@@ -621,6 +649,7 @@ impl Ledger {
                 &job,
                 &rate_buy,
                 &serde_json::Value::Array(quote_json),
+                &digest_version,
             ],
         )
         .await?;
@@ -892,7 +921,7 @@ impl Ledger {
             proofs.last_mut().expect("pushed").pieces.push(ProofPiece {
                 piece: r.get::<_, i16>(2) as u8,
                 leaf_idx: r.get::<_, i32>(3) as u32,
-                value: to_u64(r.get(4)),
+                value: r.get::<_, Num>(4).u128_or_zero(),
                 blind: r.get(5),
                 path: vec![],
             });
@@ -998,15 +1027,19 @@ mod tests {
     #[test]
     fn split_is_exact_and_granular() {
         for _ in 0..500 {
-            let g = 100_000;
-            let v = pv::round_up(rand_below(10_000_000_000), g);
+            let g = 100_000u128;
+            let v = pv::round_up_u128(u128::from(rand_below(10_000_000_000)), g);
             let s = 2 + rand_below(3) as usize;
             let p = split_pieces(v, g, s);
             assert_eq!(p.len(), s);
-            assert_eq!(p.iter().sum::<u64>(), v);
+            assert_eq!(p.iter().sum::<u128>(), v);
             assert!(p.iter().all(|x| x % g == 0));
         }
         assert_eq!(split_pieces(0, 100, 3), vec![0, 0, 0]);
+        // v3: 1e27-scale values split exactly with granule 1.
+        let v = 10u128.pow(27) + 12_345;
+        let p = split_pieces(v, 1, 4);
+        assert_eq!(p.iter().sum::<u128>(), v);
     }
 
     #[test]

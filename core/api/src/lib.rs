@@ -228,6 +228,9 @@ async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response
 /// R-core-6: signed responses are padded with a `pad` string to the next multiple of
 /// `bucket` bytes, so their size does not tell an observer what happened (an action queued vs
 /// executed, how many holdings).
+/// Fixed size of `GET /api/portfolio` (API v0.19): 64 KiB.
+pub const PORTFOLIO_BYTES: usize = 65_536;
+
 pub(crate) fn padded(mut v: Value, bucket: usize) -> Response {
     let len = serde_json::to_vec(&v).map_or(0, |b| b.len());
     // `,"pad":""` adds 9 bytes (object is never empty here).
@@ -382,12 +385,11 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
 }
 
 /// Largest `create` initial buy (lamports, after D10 rounding) within the creator cap.
-pub fn max_initial_buy_lamports(l: &config::LaunchConfig) -> u64 {
+pub fn max_initial_buy_lamports(l: &config::LaunchConfig) -> u128 {
     if l.cap_bps == 0 {
         return 0;
     }
-    l.curve()
-        .max_lamports_within(u64::try_from(l.cap_tokens()).unwrap_or(u64::MAX))
+    l.curve().max_lamports_within(l.cap_tokens())
 }
 
 /// v0.18 `PoolInfo.chain`: the chain this origin trades on (one origin = one `chainId`).
@@ -448,7 +450,7 @@ pub fn venues_block(st: &AppState) -> Value {
 /// Launch curve of `venue` for the creator rules: the network's curve written by the relayer
 /// (`launch_curves`, v0.6) or, until then, the pump.fun curve from env. Returns (curve, total
 /// supply, own row of this venue).
-pub async fn rules_curve(st: &AppState, venue: &str) -> ApiResult<(launch::Curve, u64, bool)> {
+pub async fn rules_curve(st: &AppState, venue: &str) -> ApiResult<(launch::Curve, u128, bool)> {
     let row = match st.ledger.launch_curve(st.cfg.cluster, venue).await? {
         Some(c) => Some((c, true)),
         None => st
@@ -475,18 +477,20 @@ pub async fn rules_curve(st: &AppState, venue: &str) -> ApiResult<(launch::Curve
 const DBC_CAP_NUM: u128 = 9_974;
 const DBC_CAP_DEN: u128 = 10_000;
 
-/// Max initial buy of `create` (lamports, 0.001 SOL steps) within the creator cap on `venue`.
-pub async fn max_initial_buy_for(st: &AppState, venue: &str) -> ApiResult<u64> {
+/// Max initial buy of `create` (native units in D10 steps of the chain: 0.001 SOL / 0.0001 ETH)
+/// within the creator cap on `venue`.
+pub async fn max_initial_buy_for(st: &AppState, venue: &str) -> ApiResult<u128> {
     let l = &st.cfg.launch;
     if l.cap_bps == 0 {
         return Ok(0);
     }
+    let step = u128::from(rate::buy_step(st.cfg.policy.chain.trade));
     let (curve, supply, own) = rules_curve(st, venue).await?;
-    let cap = ((supply as u128) * (l.cap_bps as u128) / 10_000) as u64;
-    let mut x = curve.max_lamports_within(cap);
+    let cap = supply.saturating_mul(l.cap_bps as u128) / 10_000;
+    let mut x = curve.max_units_within(cap, step);
     if venue == "meteora-dbc" && !own {
-        x = ((x as u128) * DBC_CAP_NUM / DBC_CAP_DEN) as u64;
-        x -= x % rate::LAMPORTS_STEP;
+        x = unzeen_fair::alloc::mul_div(x, DBC_CAP_NUM, DBC_CAP_DEN).unwrap_or(x);
+        x -= x % step;
     }
     Ok(x)
 }
@@ -499,15 +503,15 @@ pub fn max_initial_buy_zec_units(st: &AppState) -> u64 {
         return 0;
     }
     let curve = launch::Curve {
-        virtual_sol: st.cfg.quotes.zec_virtual_units,
+        virtual_sol: u128::from(st.cfg.quotes.zec_virtual_units),
         virtual_tokens: l.virtual_token_reserves,
     };
-    let cap = ((l.total_supply as u128) * (l.cap_bps as u128) / 10_000) as u64;
-    curve.max_lamports_within(cap)
+    let cap = l.total_supply.saturating_mul(l.cap_bps as u128) / 10_000;
+    u64::try_from(curve.max_lamports_within(cap)).unwrap_or(u64::MAX)
 }
 
 /// `PoolInfo.launchRules.maxInitialBuyLamports` (pump.fun, the default launch venue).
-pub async fn max_initial_buy(st: &AppState) -> ApiResult<u64> {
+pub async fn max_initial_buy(st: &AppState) -> ApiResult<u128> {
     max_initial_buy_for(st, fair::VENUE).await
 }
 
@@ -557,8 +561,11 @@ async fn portfolio(State(st): State<AppState>, method: Method, uri: Uri, headers
         let own = st.ledger.owner_scenarios(&a.pubkey).await?;
         v["scenarios"] = own.iter().map(scenarios::ops::scenario_json).collect::<Vec<_>>().into();
     }
-    // v0.19: 8 KiB buckets for everyone, so the size never tells whether a key has scenarios.
-    Ok(padded(v, 8192))
+    // Same size for every key (review-scenarios п. 10): one fixed bucket sized for the largest
+    // lists the server returns (5 scenarios × 12 steps, 20 actions with fills, 20 orders, 20
+    // deposits, fair-launch bids with proofs, ~50 holdings). Only a key with many more holdings
+    // goes to the next multiple.
+    Ok(padded(v, PORTFOLIO_BYTES))
 }
 
 // ------------------------------------------------------------------ actions

@@ -8,7 +8,7 @@ use unzeen_ledger::RateUsed;
 
 use crate::{
     AppState,
-    actions::solana_address,
+    actions::any_address,
     error::{ApiError, ApiResult},
     rate::apply_spread,
 };
@@ -24,7 +24,7 @@ struct Claim {
 /// `{"op":"claim","mint"?}`: claimable lamports → ZEC balance at the sell rate.
 pub async fn claim(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], hash: &[u8; 32]) -> ApiResult<Value> {
     let c: Claim = serde_json::from_value(raw).map_err(|_| ApiError::bad_request("invalid action body"))?;
-    let mint = c.mint.as_deref().map(|m| solana_address(m, "mint")).transpose()?;
+    let mint = c.mint.as_deref().map(|m| any_address(m, "mint")).transpose()?;
     let r = st
         .rate
         .get()

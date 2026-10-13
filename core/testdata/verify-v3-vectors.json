@@ -1,0 +1,121 @@
+{
+  "chainId": "0212",
+  "description": "Verify v3 (API v0.20): u128 leaf values, ERC-20 asset = 12 zero bytes ‖ address, v3 tags for leaf/node/snapshot. Integers big-endian; value u128 = 16 bytes.",
+  "header": {
+    "blockNumber": 12345678,
+    "leaves": 4,
+    "quoteAssets": [],
+    "takenAtSec": 1792022400,
+    "zcashHeight": 3110000,
+    "zecReserveZat": "90000000"
+  },
+  "proof": {
+    "asset": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+    "leafIndex": 1,
+    "path": [
+      {
+        "hash": "c23adb6a7ab949832cce4347aeb5a414e9e3f39ca94d5b8c4875043e023f8ea0",
+        "sum": "700000000000000000000000000"
+      },
+      {
+        "hash": "e06f1c84ddfab03d2780836fa2599cd44afdb7df77a3eda05c7791cfbace81d1",
+        "sum": "18446744073709551616"
+      }
+    ]
+  },
+  "rootsDigest": "0599aace63033323a97e37e390bd17f2156e2758e576e0ccb7228dcf450b9ae8",
+  "snapshotId": 3,
+  "tags": {
+    "leaf": "unzeen/verify/v3/leaf",
+    "node": "unzeen/verify/v3/node",
+    "snapshot": "unzeen/verify/v3/snapshot"
+  },
+  "token": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+  "tokenAsset32": "0000000000000000000000005aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+  "trees": {
+    "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed": {
+      "leaves": [
+        {
+          "anonPubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "blind": "5151515151515151515151515151515151515151515151515151515151515151",
+          "dummy": false,
+          "index": 0,
+          "leaf": "c23adb6a7ab949832cce4347aeb5a414e9e3f39ca94d5b8c4875043e023f8ea0",
+          "piece": 0,
+          "value": "700000000000000000000000000"
+        },
+        {
+          "anonPubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "blind": "5252525252525252525252525252525252525252525252525252525252525252",
+          "dummy": false,
+          "index": 1,
+          "leaf": "786342cf503cfdc24b90f3cb73c0f8f2c2bbfc1e9cdd013ecbb5f462a8fa53dd",
+          "piece": 1,
+          "value": "300000000000000000000000001"
+        },
+        {
+          "anonPubkey": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "blind": "5353535353535353535353535353535353535353535353535353535353535353",
+          "dummy": false,
+          "index": 2,
+          "leaf": "24e7ec583e6118ce15c8a8482406e540011d69903a330e4c49c27c242559a3a0",
+          "piece": 0,
+          "value": "18446744073709551616"
+        },
+        {
+          "anonPubkey": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+          "blind": "e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "dummy": true,
+          "index": 3,
+          "leaf": "bccd2a001f0fbad273973cfad886526aefdc9d3e04f0ed18f8bdd3f7943dd767",
+          "piece": 0,
+          "value": "0"
+        }
+      ],
+      "root": "7a3aee5064d0a9dbc92c8a9ba4d2f76aaad6867607f4fe591001f41a8ed84cb0",
+      "sum": "1000000018446744073709551617"
+    },
+    "ZEC": {
+      "leaves": [
+        {
+          "anonPubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "blind": "4141414141414141414141414141414141414141414141414141414141414141",
+          "dummy": false,
+          "index": 0,
+          "leaf": "0e3687d19ea89b45a5181304ab0c91a0a34631098833d1a0eafcf344f8eb865f",
+          "piece": 0,
+          "value": "60000000"
+        },
+        {
+          "anonPubkey": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "blind": "4444444444444444444444444444444444444444444444444444444444444444",
+          "dummy": false,
+          "index": 1,
+          "leaf": "3415342d26d46aa367f3c98915fdb249166cbf3ab902189daafc5b9e60612c96",
+          "piece": 0,
+          "value": "20000000"
+        },
+        {
+          "anonPubkey": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
+          "blind": "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+          "dummy": true,
+          "index": 2,
+          "leaf": "e8ce69cd867b8a3674c4b706e29178737054cb3776f2931468540905e072c38c",
+          "piece": 0,
+          "value": "0"
+        },
+        {
+          "anonPubkey": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+          "blind": "e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "dummy": true,
+          "index": 3,
+          "leaf": "519c891970cfdf48da022ff3f872256851f2e53feca292a927cb2324c5083d58",
+          "piece": 0,
+          "value": "0"
+        }
+      ],
+      "root": "1892b077cacfb1e3a888bb9aeb88cb3f687559f44d4d3dbf4ca23acd6d2393a1",
+      "sum": "80000000"
+    }
+  }
+}

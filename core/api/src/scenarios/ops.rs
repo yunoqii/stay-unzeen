@@ -74,19 +74,6 @@ pub fn validation_error(e: ValidationError) -> ApiError {
     }
 }
 
-/// Mask of an address for the plan echo (`Ab3d…9xYz`).
-pub fn mask(s: &str) -> String {
-    let c: Vec<char> = s.chars().collect();
-    if c.len() <= 8 {
-        return "…".into();
-    }
-    format!(
-        "{}…{}",
-        c[..4].iter().collect::<String>(),
-        c[c.len() - 4..].iter().collect::<String>()
-    )
-}
-
 fn aad(id: &[u8; 16], step: usize) -> Vec<u8> {
     let mut a = id.to_vec();
     a.extend_from_slice(&(step as u16).to_be_bytes());
@@ -143,14 +130,11 @@ pub fn split_sealed(plan: &Value) -> (Value, Vec<(usize, Value)>) {
         let mut secret = serde_json::Map::new();
         match ty.as_str() {
             "withdraw_token" | "withdraw_zec" => {
+                // Not even a fragment of the address stays on the server (review-scenarios п. 2):
+                // the echo says "sealed"; the device that signed the plan shows the address.
                 if let Some(to) = b.get("to").cloned() {
-                    secret.insert("to".into(), to.clone());
-                    b["to"] = match to {
-                        Value::Array(a) => {
-                            Value::Array(a.iter().map(|x| json!(mask(x.as_str().unwrap_or("")))).collect())
-                        }
-                        x => json!(mask(x.as_str().unwrap_or(""))),
-                    };
+                    secret.insert("to".into(), to);
+                    b["to"] = json!("sealed");
                 }
             }
             "create" => {
@@ -272,7 +256,22 @@ async fn server_checks(st: &AppState, steps: &[Value]) -> ApiResult<()> {
     Ok(())
 }
 
-pub async fn validation_ctx(st: &AppState, plan: &Value) -> ApiResult<Ctx> {
+pub async fn validation_ctx(st: &AppState, plan: &Value, pk: &[u8; 32]) -> ApiResult<Ctx> {
+    // own_result {orderId | actionId}: the key's own object, its mint counts as traded (P2).
+    let mut ref_mints = std::collections::HashMap::new();
+    let c = st.ledger.pg().get().await.map_err(unzeen_ledger::LedgerError::from)?;
+    for s in plan.get("steps").and_then(Value::as_array).into_iter().flatten() {
+        let r = &s["block"]["ref"];
+        for k in ["orderId", "actionId"] {
+            if s["block"]["type"] == "own_result"
+                && let Some(id) = r[k].as_str()
+                && let Ok(b) = <[u8; 16]>::try_from(hex::decode(id).unwrap_or_default())
+                && let Some(m) = unzeen_ledger::scenarios::ref_mint(&c, pk, &b).await?
+            {
+                ref_mints.insert(id.to_string(), m);
+            }
+        }
+    }
     let venues = crate::venues_block(st)
         .as_array()
         .into_iter()
@@ -289,6 +288,8 @@ pub async fn validation_ctx(st: &AppState, plan: &Value) -> ApiResult<Ctx> {
         chat: st.cfg.chat.enabled,
         full_trades: st.cfg.intel.full_trades,
         priced_mints: st.ledger.priced_mints(&literal_mints(plan)).await?,
+        ref_mints,
+        evm: matches!(st.cfg.policy.chain.trade, unzeen_protocol::TradeNet::Hood(_)),
     })
 }
 
@@ -303,7 +304,16 @@ pub async fn submit(
     let op: ScenarioOp = serde_json::from_value(raw).map_err(|_| ApiError::bad_request("invalid action body"))?;
     match op {
         ScenarioOp::ScenarioCreate { plan, replaces } => {
-            let ctx = validation_ctx(st, &plan).await?;
+            // A plan needs a funded key (review-scenarios п. 14): the pool-wide cap of active
+            // plans is not free to occupy with empty keys.
+            let avail = {
+                let c = st.ledger.pg().get().await.map_err(unzeen_ledger::LedgerError::from)?;
+                unzeen_ledger::scenarios::key_available_zat(&c, pk).await?
+            };
+            if avail < st.cfg.policy.min_action_zat {
+                return Err(unzeen_ledger::LedgerError::InsufficientBalance.into());
+            }
+            let ctx = validation_ctx(st, &plan, pk).await?;
             let sum = validate::validate(&plan, &ctx).map_err(validation_error)?;
             let steps = plan["steps"].as_array().expect("validated");
             server_checks(st, steps).await?;
@@ -386,13 +396,14 @@ pub fn scenario_json(v: &ScenarioView) -> Value {
             o
         })
         .collect();
+    // No `plan` echo (review-scenarios п. 2/10): the device that signed the plan keeps it;
+    // the server returns progress only, so every key's portfolio has the same size.
     let mut out = json!({
         "id": hex::encode(v.id),
         "status": v.status,
         "createdAt": v.created_at_ms,
         "expiresAt": v.expires_at_ms,
         "cursor": v.cursor,
-        "plan": v.plan,
         "steps": steps,
     });
     if let Some(e) = &v.error {
@@ -443,7 +454,7 @@ mod tests {
             { "id": 1, "block": { "type": "chat", "mint": "M", "text": "gm" } },
         ]});
         let (echo, sealed) = split_sealed(&plan);
-        assert_eq!(echo["steps"][0]["block"]["to"], json!(["So11…1112"]));
+        assert_eq!(echo["steps"][0]["block"]["to"], "sealed");
         assert_eq!(echo["steps"][1]["block"]["text"], "");
         assert_eq!(sealed.len(), 2);
         assert_eq!(sealed[1].1["text"], "gm");

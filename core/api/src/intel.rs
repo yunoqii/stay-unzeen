@@ -20,7 +20,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     AppState,
-    actions::solana_address,
+    actions::{any_address, solana_address},
     error::{ApiError, ApiResult},
     launch,
     market::{client, db, public},
@@ -93,7 +93,7 @@ pub async fn is_unzeen_launch(c: &Client, mint: &str) -> ApiResult<bool> {
 // ------------------------------------------------------------------ GET /api/tokens/:mint/safety
 
 pub async fn safety(State(st): State<AppState>, Path(mint): Path<String>) -> ApiResult<Response> {
-    let mint = solana_address(&mint, "mint")?;
+    let mint = any_address(&mint, "mint")?;
     let c = client(&st).await?;
     let row = c
         .query_opt(
