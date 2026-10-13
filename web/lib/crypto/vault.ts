@@ -135,7 +135,7 @@ export function isEncryptedVault(x: unknown): x is EncryptedVault {
   const v = x as Partial<EncryptedVault>;
   return (
     (v.v === 1 || v.v === 2) &&
-    (v.network === "devnet" || v.network === "mainnet") &&
+    (v.network === "devnet" || v.network === "mainnet" || v.network === "hood") &&
     typeof v.pubkey === "string" &&
     typeof v.ct === "string" &&
     v.kdf?.name === "PBKDF2" &&

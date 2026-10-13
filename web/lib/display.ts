@@ -12,8 +12,9 @@ import { trimNumber } from "@/lib/format";
 export type DisplayPref = "zec" | "native";
 export const DEFAULT_DISPLAY: DisplayPref = "zec";
 
-/** Native coin of the chain. Only Solana today; other chains come behind a flag with their own coin. */
-export type NativeCoin = "SOL";
+/** Native coin of the chain: SOL on Solana, ETH on Robinhood Chain (v0.18 PoolInfo.chain.native). */
+export type NativeCoin = "SOL" | "ETH";
+/** Default (Solana); components take the current one from useNative() / useDisplay().native. */
 export const NATIVE_COIN: NativeCoin = "SOL";
 
 export type DisplayUnit = "ZEC" | NativeCoin;
@@ -53,7 +54,7 @@ export function parseRates(r: Rates | null | undefined): DisplayRates | null {
     ts: Number.isFinite(r.ts) ? r.ts : 0,
     source: "rates",
   };
-  return out.zecSol || out.zecUsd ? out : null;
+  return out.zecSol || out.zecUsd || out.zecEth ? out : null;
 }
 
 /** Fallback while GET /api/rates is unavailable (503 before the first data): the pool's mid ZEC/SOL rate, no USD. */
@@ -61,6 +62,8 @@ export function ratesFromPool(pool: PoolInfo | null | undefined): DisplayRates |
   if (!pool) return null;
   const lamports = pos(pool.rate?.lamportsPerZec);
   if (!lamports) return null;
+  // v0.18: on Robinhood Chain the pool's rate is wei per ZEC.
+  if (pool.chain?.native.symbol === "ETH") return { zecSol: null, zecUsd: null, solUsd: null, ethUsd: null, zecEth: lamports / 10 ** pool.chain.native.decimals, ts: pool.rate?.ts ?? 0, source: "pool" };
   return { zecSol: lamports / 1e9, zecUsd: null, solUsd: null, ethUsd: null, zecEth: null, ts: pool.rate?.ts ?? 0, source: "pool" };
 }
 
@@ -72,6 +75,8 @@ export function ratesFromPool(pool: PoolInfo | null | undefined): DisplayRates |
  */
 export interface Display {
   pref: DisplayPref;
+  /** The chain's coin of the "sol" figures (*Lamports / solAmount / priceSol): SOL or ETH. */
+  native: NativeCoin;
   unit: DisplayUnit;
   /** SOL figures are converted (≈). */
   converted: boolean;
@@ -90,18 +95,21 @@ export interface Display {
   usdOfSol(solAmount: number): number | null;
 }
 
-export function makeDisplay(pref: DisplayPref, rates: DisplayRates | null, loading: boolean): Display {
-  const zecSol = rates?.zecSol ?? null;
+export function makeDisplay(pref: DisplayPref, rates: DisplayRates | null, loading: boolean, native: NativeCoin = NATIVE_COIN): Display {
+  // ZEC per native coin rate: ZEC/SOL on Solana, ZEC/ETH on Robinhood Chain.
+  const zecSol = (native === "ETH" ? rates?.zecEth : rates?.zecSol) ?? null;
+  const nativeUsd = native === "ETH" ? (rates?.ethUsd ?? null) : (rates?.solUsd ?? null);
   // ZEC pick: SOL figures need ZEC/SOL. Without one (and nothing coming), fall back to SOL rather than nothing.
   const wantZec = pref === "zec";
   const canConvert = zecSol !== null;
   const pending = !canConvert && loading;
-  const unit: DisplayUnit = wantZec && (canConvert || pending) ? "ZEC" : NATIVE_COIN;
+  const unit: DisplayUnit = wantZec && (canConvert || pending) ? "ZEC" : native;
   const converted = wantZec && canConvert;
-  const zecUnit: DisplayUnit = !wantZec && canConvert ? NATIVE_COIN : "ZEC";
+  const zecUnit: DisplayUnit = !wantZec && canConvert ? native : "ZEC";
   const zecConverted = !wantZec && canConvert;
   return {
     pref,
+    native,
     unit,
     converted,
     zecUnit,
@@ -111,7 +119,7 @@ export function makeDisplay(pref: DisplayPref, rates: DisplayRates | null, loadi
     sol: (n) => (!Number.isFinite(n) ? null : converted ? n / zecSol! : wantZec && pending ? null : n),
     zec: (n) => (!Number.isFinite(n) ? null : zecConverted ? n * zecSol! : n),
     usd: (z) => (rates?.zecUsd && Number.isFinite(z) ? z * rates.zecUsd : null),
-    usdOfSol: (n) => (!Number.isFinite(n) ? null : rates?.solUsd ? n * rates.solUsd : rates?.zecUsd && zecSol ? (n / zecSol) * rates.zecUsd : null),
+    usdOfSol: (n) => (!Number.isFinite(n) ? null : nativeUsd ? n * nativeUsd : rates?.zecUsd && zecSol ? (n / zecSol) * rates.zecUsd : null),
   };
 }
 

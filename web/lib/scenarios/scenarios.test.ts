@@ -97,9 +97,9 @@ describe("structure and limits", () => {
     expect(codes(plan([buy(), { type: "repeat", from: 1, times: 3 }]))).toContain("1:bad_repeat");
     expect(codes(plan([buy(), { type: "repeat", from: 0, times: 11 }]))).toContain("1:bad_repeat");
     expect(codes(plan([{ type: "deposit_received", minZat: "1000000" }, buy(), { type: "repeat", from: 0, times: 2 }]))).toContain("2:bad_repeat");
-    // client-only: a sealed step can't run twice (the server would accept it, the builder doesn't)
+    // a sealed step can't run twice: its address / text is deleted after the first use
     const sealed = validatePlan(plan([wait(60), { type: "withdraw_zec", to: UA, amount: { pct: 10, of: "balance" }, exec: "max" }, { type: "repeat", from: 0, times: 2 }]), ctx);
-    expect(sealed.issues).toEqual([expect.objectContaining({ step: 2, code: "repeat_sealed", kind: "client" })]);
+    expect(sealed.issues).toEqual([expect.objectContaining({ step: 2, code: "bad_repeat", kind: "invalid" })]);
   });
 
   it("references point to earlier steps of the right kind and unit", () => {
@@ -165,15 +165,15 @@ describe("privacy rules (422 scenario_rule)", () => {
     // check_safety can jump past the wait too
     const check: ScenarioBlock = { type: "check_safety", mint: PEPE, require: { authoritiesRevoked: true }, onFalse: { goto: 3 } };
     expect(codes(plan([buy(), check, wait(H, 2 * H), wd]))).toContain("3:withdraw_too_soon");
-    // a repeat brings a later buy back in front of the withdrawal
-    expect(codes(plan([wait(600, 1200), wd, buy(), { type: "repeat", from: 0, times: 2 }]))).toContain("1:withdraw_too_soon");
-    expect(codes(plan([wait(H, 2 * H), wd, buy(), { type: "repeat", from: 0, times: 2 }]))).not.toContain("1:withdraw_too_soon");
+    // waits add up along the path (v0.19): 2 × 30 min is enough, 2 × 20 min is not
+    expect(codes(plan([buy(), wait(1800, 2400), wait(1800, 2400), wd]))).toEqual([]);
+    expect(codes(plan([buy(), wait(1200, 2400), wait(1200, 2400), wd]))).toContain("3:withdraw_too_soon");
     // a rotation into the mint is a trade of it
     const swap: ScenarioBlock = { type: "swap", from: DBC, to: PEPE, amount: { pct: 100, of: "balance" }, guardSell: { slippageBps: 500 }, guardBuy: { slippageBps: 500 }, exec: "delayed" };
     expect(codes(plan([swap, wd]))).toContain("1:withdraw_too_soon");
-    // an order on the mint, and the own_result that sees it fill
+    // an order on the mint is a trade of it (its fill is public)
     const order: ScenarioBlock = { type: "order_place", order: { venue: "pumpfun", kind: "take_profit", mint: PEPE, amount: { pct: 100, of: "balance" }, triggerPriceSol: "1", exec: "delayed" } };
-    expect(codes(plan([order, wait(H, 2 * H), { type: "own_result", ref: { step: 0 }, on: "any" }, wd]))).toContain("3:withdraw_too_soon");
+    expect(codes(plan([order, { type: "own_result", ref: { step: 0 }, on: "any" }, wd]))).toContain("2:withdraw_too_soon");
     expect(codes(plan([order, { type: "own_result", ref: { step: 0 }, on: "any" }, wait(H, 2 * H), wd]))).toEqual([]);
   });
 

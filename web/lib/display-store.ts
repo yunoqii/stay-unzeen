@@ -8,6 +8,7 @@ import { useMemo, useSyncExternalStore } from "react";
 import { api, ApiError } from "@/lib/api/client";
 import { DEFAULT_DISPLAY, makeDisplay, parseRates, ratesFromPool, type Display, type DisplayPref, type DisplayRates } from "@/lib/display";
 import { getNetwork, subscribeNetwork, useNetwork, type Network } from "@/lib/network";
+import { useNative } from "@/lib/chain";
 
 // ---- display pick ----
 
@@ -148,5 +149,6 @@ export function useRates(): RatesState {
 export function useDisplay(): Display {
   const p = useDisplayPref();
   const { rates, loading } = useRates();
-  return useMemo(() => makeDisplay(p, rates, loading), [p, rates, loading]);
+  const native = useNative().symbol;
+  return useMemo(() => makeDisplay(p, rates, loading, native), [p, rates, loading, native]);
 }

@@ -353,7 +353,7 @@ export function Inspector({
         return (
           <>
             <Field label="To a shielded address" hint="Sealed: encrypted on the server with a key outside its database, deleted the moment the payout is queued.">
-              <Input aria-label="Shielded address" placeholder={env.network === "mainnet" ? "u1…" : "utest1…"} value={b.to} onChange={(e) => set({ to: e.target.value.trim() })} className="font-mono text-xs" spellCheck={false} autoComplete="off" />
+              <Input aria-label="Shielded address" placeholder={env.network === "devnet" ? "utest1…" : "u1…"} value={b.to} onChange={(e) => set({ to: e.target.value.trim() })} className="font-mono text-xs" spellCheck={false} autoComplete="off" />
             </Field>
             <AmountField env={env} uid={uid} value={b.amount} unit={{ kind: "zat" }} onChange={(amount) => set({ amount })} />
             <ExecField value={b.exec} onChange={(exec) => set({ exec: exec as "delayed" | "max" })} allowNow={false} />

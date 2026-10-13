@@ -279,7 +279,7 @@ export function AmountField({
       {mode === "abs" && "abs" in value && <UnitsInput label={label} value={value.abs} decimals={unit.kind === "zat" ? 8 : unit.decimals} suffix={what} onChange={(abs) => onChange({ abs })} />}
       {mode !== "abs" && (
         <div className="flex gap-1.5">
-          <div className="w-24 flex-none">
+          <div className="w-28 flex-none">
             <NumberInput label={`${label} percent`} value={pct} min={1} max={100} suffix="%" onChange={(n) => onChange({ ...(value as Exclude<AmountSpec, { abs: string }>), pct: n })} />
           </div>
           {mode === "step" && isStep((value as { of: unknown }).of) ? (

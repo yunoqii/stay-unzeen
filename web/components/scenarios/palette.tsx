@@ -51,7 +51,7 @@ export function Palette({ enabled, onAdd, onDragStart, onDragEnd, full }: { enab
                       <Icon size={15} weight="light" className="shrink-0 text-faint-foreground transition-colors group-hover:text-zec" aria-hidden />
                       <span className="truncate">{BLOCKS[t].label}</span>
                       {on ? (
-                        <span aria-hidden className="ml-auto font-mono text-[10px] text-faint-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                        <span aria-hidden className="ml-auto font-mono text-[10px] text-faint-foreground opacity-40 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
                           +
                         </span>
                       ) : (

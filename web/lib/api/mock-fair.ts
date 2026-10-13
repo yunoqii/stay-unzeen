@@ -45,9 +45,10 @@ const WINDOWS = [120, 300, 600, 1800];
 const TIERS: Record<Network, string[]> = {
   mainnet: ["5000000", "10000000", "25000000", "50000000", "100000000", "250000000", "500000000", "1000000000"],
   devnet: ["100000", "250000", "500000", "1000000", "2500000", "5000000"],
+  hood: [],
 };
 /** 25 % of supply on a fresh curve; devnet's curve is ~30x cheaper. */
-const MAX_TOTAL: Record<Network, bigint> = { mainnet: BigInt(7_500_000_000), devnet: BigInt(250_000_000) };
+const MAX_TOTAL: Record<Network, bigint> = { mainnet: BigInt(7_500_000_000), devnet: BigInt(250_000_000), hood: BigInt(0) };
 /** The demo's "Delayed epoch" before a new launch shows up publicly (core: 30-60 s). */
 const PUBLISH_MS: [number, number] = [5_000, 10_000];
 const ATTEST_MS = 4_000;

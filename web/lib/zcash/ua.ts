@@ -6,7 +6,7 @@
 
 import { blake2b } from "@noble/hashes/blake2.js";
 import { bech32m } from "@scure/base";
-import type { Network } from "@/lib/network";
+import { NETWORK_CONFIG, type Network } from "@/lib/network";
 
 // ---- F4Jumble (ZIP-316 §"Jumbling") ----
 
@@ -155,25 +155,27 @@ const SAPLING = /^(zs|ztestsapling|zregtestsapling)1[02-9ac-hj-np-z]+$/;
 const SPROUT = /^(zc|zt)[1-9A-HJ-NP-Za-km-z]{60,}$/;
 const UA_LIKE = /^(u|utest|uregtest)1[02-9ac-hj-np-z]+$/;
 
-export const zcashNetFor = (n: Network): ZcashNet => (n === "mainnet" ? "main" : "test");
+/** v0.18: the Zcash side of an origin (Robinhood Chain mainnet pairs with Zcash mainnet). */
+export const zcashNetFor = (n: Network): ZcashNet => NETWORK_CONFIG[n].zcash;
 
 /** Is `input` an acceptable shielded payout address on `network`? Messages are user-facing. */
 export function checkWithdrawUa(input: string, network: Network): WithdrawUaVerdict {
   const a = input.trim();
   const expected = zcashNetFor(network);
-  const here = network === "mainnet" ? "Mainnet" : "Devnet";
+  const here = expected === "main" ? "Mainnet" : "Devnet";
+  const prefix = expected === "main" ? "u1" : "utest1";
   if (!a) return { ok: false, reason: "empty", message: "Paste a shielded Unified Address." };
   if (T_ADDR.test(a) || TEX.test(a))
     return {
       ok: false,
       reason: "transparent",
-      message: `That's a transparent address. Payouts to it would be public. Paste a shielded Unified Address (starts with ${network === "mainnet" ? "u1" : "utest1"}).`,
+      message: `That's a transparent address. Payouts to it would be public. Paste a shielded Unified Address (starts with ${prefix}).`,
     };
   if (SAPLING.test(a.toLowerCase()) || SPROUT.test(a))
     return {
       ok: false,
       reason: "sapling",
-      message: `That's a Sapling address. Unzeen pays out from the Orchard / Ironwood pool only. Paste your wallet's Unified Address (${network === "mainnet" ? "u1" : "utest1"}…).`,
+      message: `That's a Sapling address. Unzeen pays out from the Orchard / Ironwood pool only. Paste your wallet's Unified Address (${prefix}…).`,
     };
   const lower = a.toLowerCase();
   if (a !== lower && a !== a.toUpperCase())

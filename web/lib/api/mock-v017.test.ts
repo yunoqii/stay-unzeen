@@ -14,7 +14,7 @@ import { fuzzTokenAmount, handle, mockPay, mockPool, sig3Down, splitAmount } fro
 
 const SK = hexToBytes("7a1f3c0de4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff");
 const signer = signerFromSecret(SK);
-const CHAIN: Record<Network, string> = { devnet: "0202", mainnet: "0101" };
+const CHAIN: Record<Network, string> = { devnet: "0202", mainnet: "0101", hood: "0111" };
 
 async function call<T>(network: Network, method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
   const b = body === undefined ? undefined : JSON.stringify(body);

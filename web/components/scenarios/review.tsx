@@ -102,7 +102,7 @@ export function Review({
             What it can take from your balance
           </h3>
           <dl className="mt-3 space-y-1.5 text-sm">
-            <Row label="Fixed amounts, all rounds" value={totals.fixedZat > BigInt(0) ? zecText(totals.fixedZat) : "—"} strong />
+            <Row label="Fixed amounts, all rounds" value={totals.fixedZat > BigInt(0) ? zecText(totals.fixedZat) : "None"} strong />
             {totals.shares.map((s) => (
               <Row key={s} label={s.split(": ")[0]} value={s.split(": ").slice(1).join(": ")} />
             ))}

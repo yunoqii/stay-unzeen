@@ -140,6 +140,7 @@ export function createChatMock(host: ChatHost, opts: ChatMockOptions = {}): Chat
   const keys: Record<Network, Uint8Array> = {
     devnet: sha256(new TextEncoder().encode("unzeen-mock/K_chat/devnet")),
     mainnet: sha256(new TextEncoder().encode("unzeen-mock/K_chat/mainnet")),
+    hood: sha256(new TextEncoder().encode("unzeen-mock/K_chat/hood")),
   };
   const msgs = new Map<string, Msg>();
   let seq = BigInt(0);

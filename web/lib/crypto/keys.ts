@@ -17,7 +17,8 @@ export { wordlist };
  * hardened (ed25519 has no non-hardened derivation). Coin type 133 = Zcash. Changing this changes
  * every user's key: treat as part of the protocol.
  */
-export const ANON_KEY_NET_INDEX: Record<Network, number> = { mainnet: 0, devnet: 1 };
+/** v0.18: 2 = Robinhood Chain mainnet (0111); 3 (0212, testnet) is not used by the UI. */
+export const ANON_KEY_NET_INDEX: Record<Network, number> = { mainnet: 0, devnet: 1, hood: 2 };
 
 export function anonKeyPath(network: Network): string {
   return `m/44'/133'/${ANON_KEY_NET_INDEX[network]}'/0'`;

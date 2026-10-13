@@ -44,7 +44,8 @@ export type Unz1Target =
   | { kind: "solana"; address: string };
 
 /** Byte 0: Zcash network (1 mainnet, 2 testnet). Byte 1: Solana cluster (1 mainnet-beta, 2 devnet). */
-export type ChainId = readonly [zcash: 1 | 2, solana: 1 | 2];
+/** v0.18: byte 1 = trading chain: 0x01 / 0x02 Solana mainnet-beta / devnet, 0x11 / 0x12 Robinhood Chain 4663 / 46630. */
+export type ChainId = readonly [zcash: 1 | 2, chain: 1 | 2 | 0x11 | 0x12];
 
 
 export interface Unz1Fields {

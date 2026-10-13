@@ -11,6 +11,7 @@ import { CaSearch } from "./ca-search";
 import { KeyStatus } from "./key-status";
 import { NetworkBanner } from "./network-banner";
 import { NetworkSwitch } from "./network-switch";
+import { ChainSwitch } from "./chain-switch";
 import { PortfolioSync } from "./portfolio-sync";
 import { CoverTraffic } from "./cover-traffic";
 import { ConnectionBanner } from "@/components/ui/states";
@@ -39,6 +40,7 @@ export function SiteHeader() {
             </span>
           )}
           <CaSearch />
+          <ChainSwitch />
           <NetworkSwitch />
           <KeyStatus />
           <PortfolioSync />

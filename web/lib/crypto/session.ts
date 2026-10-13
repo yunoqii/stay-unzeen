@@ -31,6 +31,7 @@ interface Slot {
 const slots: Record<Network, Slot> = {
   devnet: { vault: undefined, secret: null, pubkey: null },
   mainnet: { vault: undefined, secret: null, pubkey: null },
+  hood: { vault: undefined, secret: null, pubkey: null },
 };
 
 let snapshot: KeyState = { status: "loading" };

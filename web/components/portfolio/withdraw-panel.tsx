@@ -7,10 +7,12 @@ import { ArrowUpRight, CheckCircle, ShieldWarning, WarningCircle, X } from "@pho
 import { ApiError, errorText } from "@/lib/api/client";
 import type { PoolInfo, Portfolio, SignedAction, Token } from "@/lib/api/types";
 import { lastRate, submitAction, useAction, useActivityVersion } from "@/lib/activity";
-import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, shortAddr, unitsToNumber, ZEC_DECIMALS } from "@/lib/format";
+import { formatCompact, formatSol, formatUnits, formatZec, lamportsToSol, parseUnits, shortAddr, unitsToNumber, ZEC_DECIMALS } from "@/lib/format";
 import { ExecLane } from "@/components/trade/exec-lane";
 import { WITHDRAW_EXEC_DEFAULT, withExec, type WithdrawExecMode } from "@/lib/exec";
-import { useNetwork } from "@/lib/network";
+import { CHAIN_LABEL, chainOf, useNetwork } from "@/lib/network";
+import { nativeOf } from "@/lib/chain";
+import { checkEvmAddress } from "@/lib/evm";
 import { isSolanaAddress, payoutReviewed, PAYOUT_REVIEW_TEXT, WITHDRAW_ZEC_FEE_ZAT, withdrawTokenFee } from "@/lib/trade";
 import { checkWithdrawUa } from "@/lib/zcash/ua";
 import { cn } from "@/lib/utils";
@@ -47,6 +49,7 @@ export const WithdrawPanel = forwardRef<HTMLElement, Props>(function WithdrawPan
   ref,
 ) {
   const id = useId();
+  const network = useNetwork();
   return (
     <section ref={ref} aria-labelledby={`${id}-t`} className="scroll-mt-24 rounded-2xl border border-border-strong bg-card/80 p-5 sm:p-6">
       <div className="flex items-center justify-between gap-3">
@@ -76,12 +79,12 @@ export const WithdrawPanel = forwardRef<HTMLElement, Props>(function WithdrawPan
             )}
           >
             {tab === t && <motion.span layoutId={`${id}-tab`} className="absolute inset-0 rounded-full bg-surface-3" transition={{ type: "spring", bounce: 0, duration: 0.3 }} />}
-            <span className="relative">{t === "token" ? "Tokens → Solana" : "ZEC → shielded"}</span>
+            <span className="relative">{t === "token" ? `Tokens → ${CHAIN_LABEL[chainOf(network)]}` : "ZEC → shielded"}</span>
           </button>
         ))}
       </div>
       {tab === "token" ? (
-        <TokenWithdraw portfolio={portfolio} tokens={tokens} mint={mint} onMint={onMint} />
+        <TokenWithdraw portfolio={portfolio} tokens={tokens} mint={mint} onMint={onMint} pool={pool} />
       ) : (
         <ZecWithdraw portfolio={portfolio} pool={pool} />
       )}
@@ -91,8 +94,12 @@ export const WithdrawPanel = forwardRef<HTMLElement, Props>(function WithdrawPan
 
 // ---- tokens -> fresh Solana address(es) ----
 
-function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfolio; tokens: Token[] | null; mint: string | null; onMint: (m: string) => void }) {
+function TokenWithdraw({ portfolio, tokens, mint, onMint, pool }: { portfolio: Portfolio; tokens: Token[] | null; mint: string | null; onMint: (m: string) => void; pool?: PoolInfo | null }) {
   const network = useNetwork();
+  // v0.18: Robinhood Chain withdraws to 0x addresses (EIP-55); Solana to base58.
+  const evm = chainOf(network) === "hood";
+  const kind = evm ? "0x" : "Solana";
+  const native = nativeOf(network).symbol;
   useActivityVersion();
   const ids = useId();
   const owned = portfolio.holdings.filter((h) => h.amount !== "0");
@@ -139,13 +146,17 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
     }
   }
   const addrErrors = dests.map((a, i) => {
-    if (!a) return touched[i] ? "Paste a Solana address." : null;
-    if (!isSolanaAddress(a)) return "Not a Solana address.";
-    if (dests.indexOf(a) !== i) return "Use a different address for each part.";
+    if (!a) return touched[i] ? `Paste a ${kind} address.` : null;
+    if (evm) {
+      const v = checkEvmAddress(a);
+      if (!v.ok) return v.message;
+    } else if (!isSolanaAddress(a)) return "Not a Solana address.";
+    if (dests.findIndex((d) => d.toLowerCase() === a.toLowerCase()) !== i) return "Use a different address for each part.";
     return null;
   });
   const rate = lastRate(network, "buy");
-  const fee = withdrawTokenFee(n, rate);
+  const perPart = pool?.fees?.withdrawTokenGasLamports ? BigInt(pool.fees.withdrawTokenGasLamports) + BigInt(pool.fees.withdrawTokenCostLamports ?? "0") : null;
+  const fee = withdrawTokenFee(n, rate, evm ? perPart : null);
   const zecShort = fee.zat !== null && BigInt(portfolio.zecBalance) < fee.zat;
   const ready = parsed !== null && !amountError && dests.every((a, i) => a && !addrErrors[i]) && !busy && !portfolio.frozen;
 
@@ -274,14 +285,14 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
         {Array.from({ length: n }, (_, i) => (
           <div key={i}>
             <label htmlFor={`${ids}-to-${i}`} className="sr-only">
-              {n > 1 ? `Solana address ${i + 1}` : "Solana address"}
+              {n > 1 ? `${kind} address ${i + 1}` : `${kind} address`}
             </label>
             <input
               id={`${ids}-to-${i}`}
               autoComplete="off"
               autoCapitalize="off"
               spellCheck={false}
-              placeholder={n > 1 ? `Fresh Solana address ${i + 1}` : "Fresh Solana address"}
+              placeholder={evm ? (n > 1 ? `Fresh 0x address ${i + 1}` : "Fresh 0x… address") : n > 1 ? `Fresh Solana address ${i + 1}` : "Fresh Solana address"}
               value={addrs[i]}
               onChange={(e) => {
                 setError(null);
@@ -363,7 +374,7 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
 
       <dl className="space-y-1.5 text-xs">
         <Row k="Gas">
-          {formatSol(Number(fee.lamports) / 1e9)} SOL{n > 1 ? ` (${n} addresses)` : ""} dropped with the tokens
+          {formatSol(lamportsToSol(fee.lamports.toString()))} {native}{n > 1 ? ` (${n} addresses)` : ""} dropped with the tokens
           {fee.zat !== null && <span className="text-faint-foreground"> · ≈ {formatZec(fee.zat.toString())} ZEC from balance</span>}
         </Row>
         <Row k="Delay">
@@ -453,7 +464,7 @@ function ZecWithdraw({ portfolio, pool }: { portfolio: Portfolio; pool: PoolInfo
           autoComplete="off"
           autoCapitalize="off"
           spellCheck={false}
-          placeholder={network === "mainnet" ? "u1…  from ZODL or another shielded wallet" : "utest1…  from a testnet shielded wallet"}
+          placeholder={network !== "devnet" ? "u1…  from ZODL or another shielded wallet" : "utest1…  from a testnet shielded wallet"}
           value={to}
           onChange={(e) => {
             setError(null);

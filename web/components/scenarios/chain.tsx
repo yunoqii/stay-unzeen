@@ -174,7 +174,7 @@ export function Chain({
                 onClick={() => onSelect(s.uid)}
                 onKeyDown={(e) => onKey(e, s, i)}
                 aria-current={on ? "step" : undefined}
-                aria-describedby={issues.length ? `issue-${s.uid}` : undefined}
+                aria-describedby={issues.length ? issues.slice(0, 2).map((_, n) => `issue-${s.uid}-${n}`).join(" ") : undefined}
                 aria-label={`Step ${i + 1}: ${BLOCKS[s.block.type].label}. ${issues.length ? `${issues.length} problem${issues.length > 1 ? "s" : ""}.` : ""} Alt+arrows to move, Delete to remove.`}
                 className={cn(
                   "group flex w-full items-start gap-3 rounded-xl py-2 pr-3 text-left transition-colors duration-150 focus-visible:outline-none",
@@ -209,8 +209,8 @@ export function Chain({
                       {floors.map((f) => (
                         <FloorTape key={f.code} text={f.text} />
                       ))}
-                      {issues.slice(0, 2).map((x) => (
-                        <span key={x.code + x.message} id={`issue-${s.uid}`} className="text-[11px] leading-snug text-pretty text-destructive">
+                      {issues.slice(0, 2).map((x, n) => (
+                        <span key={x.code + x.message} id={`issue-${s.uid}-${n}`} className="text-[11px] leading-snug text-pretty text-destructive">
                           {x.message}
                         </span>
                       ))}

@@ -17,7 +17,11 @@ export function NetworkBanner() {
     >
       <p className="mx-auto flex h-(--banner-h) max-w-6xl items-center justify-center gap-1.5 px-4 sm:px-6">
         {cfg.realFunds ? <Warning size={13} weight="duotone" aria-hidden /> : <Flask size={13} weight="light" aria-hidden />}
-        {cfg.realFunds ? (
+        {process.env.NEXT_PUBLIC_HOOD === "1" && cfg.chain === "hood" ? (
+          <span>
+            <span className="font-medium">Robinhood Chain Mainnet</span> · Real funds · trades settle in ETH
+          </span>
+        ) : cfg.realFunds ? (
           <span>
             <span className="font-medium">Mainnet</span> · Real funds
           </span>

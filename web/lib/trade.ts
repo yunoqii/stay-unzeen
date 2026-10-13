@@ -4,6 +4,7 @@
 
 import { base58 } from "@scure/base";
 import type { SolRateUsed } from "@/lib/api/types";
+import { nativeOf } from "@/lib/network";
 
 const TEN = BigInt(10);
 const ZERO = BigInt(0);
@@ -40,14 +41,14 @@ export function quoteUnitsToTokens(units: bigint, price: string, decimals: numbe
   return (units * TEN ** BigInt(p.scale) * TEN ** BigInt(decimals)) / (p.num * TEN ** BigInt(quoteDecimals));
 }
 
-/** Lamports for `amount` base units at `priceSol` (SOL per whole token). Floor. */
-export function tokensToLamports(amount: bigint, priceSol: string, decimals: number): bigint {
-  return tokensToQuoteUnits(amount, priceSol, decimals, 9);
+/** Native base units (lamports; wei on Robinhood Chain, v0.18) for `amount` at `priceSol` (native per whole token). Floor. */
+export function tokensToLamports(amount: bigint, priceSol: string, decimals: number, nativeDecimals: number = nativeOf().decimals): bigint {
+  return tokensToQuoteUnits(amount, priceSol, decimals, nativeDecimals);
 }
 
 /** Base units bought with `lamports` at `priceSol`. Floor; 0 when the price is unknown. */
-export function lamportsToTokens(lamports: bigint, priceSol: string, decimals: number): bigint {
-  return quoteUnitsToTokens(lamports, priceSol, decimals, 9);
+export function lamportsToTokens(lamports: bigint, priceSol: string, decimals: number, nativeDecimals: number = nativeOf().decimals): bigint {
+  return quoteUnitsToTokens(lamports, priceSol, decimals, nativeDecimals);
 }
 
 export const zatToLamports = (zat: bigint, lamportsPerZec: bigint) => (zat * lamportsPerZec) / ZAT_PER_ZEC;
@@ -139,7 +140,7 @@ export const WITHDRAW_ZEC_FEE_ZAT = BigInt(15_000);
 export const PAYOUT_REVIEW_ABOVE_ZAT = BigInt(100_000_000);
 export const PAYOUT_REVIEW_TEXT = "Large payouts are reviewed by the operator";
 export function payoutReviewed(network: string, amountZat: bigint | string | null): boolean {
-  if (network !== "mainnet" || amountZat === null) return false;
+  if (network === "devnet" || amountZat === null) return false;
   const v = typeof amountZat === "bigint" ? amountZat : /^\d+$/.test(amountZat) ? BigInt(amountZat) : null;
   return v !== null && v > PAYOUT_REVIEW_ABOVE_ZAT;
 }
@@ -148,8 +149,12 @@ export const WITHDRAW_TOKEN_GAS_LAMPORTS = BigInt(2_000_000);
 /** WITHDRAW_TOKEN_COST_LAMPORTS: ATA rent + tx fee per part. */
 export const WITHDRAW_TOKEN_COST_LAMPORTS = BigInt(2_100_000);
 
-export function withdrawTokenFee(parts: number, rate: SolRateUsed | null): { lamports: bigint; zat: bigint | null } {
-  const lamports = BigInt(parts) * (WITHDRAW_TOKEN_GAS_LAMPORTS + WITHDRAW_TOKEN_COST_LAMPORTS);
+/**
+ * Gas of a token withdrawal in native base units and ZEC. `perPart` (v0.18, from PoolInfo.fees: gas + cost per
+ * part) wins over the Solana constants — on Robinhood Chain it is wei.
+ */
+export function withdrawTokenFee(parts: number, rate: SolRateUsed | null, perPart?: bigint | null): { lamports: bigint; zat: bigint | null } {
+  const lamports = BigInt(parts) * (perPart ?? WITHDRAW_TOKEN_GAS_LAMPORTS + WITHDRAW_TOKEN_COST_LAMPORTS);
   return { lamports, zat: rate ? lamportsToZatCeil(lamports, BigInt(rate.lamportsPerZec)) : null };
 }
 

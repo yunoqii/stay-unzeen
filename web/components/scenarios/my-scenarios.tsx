@@ -3,10 +3,10 @@
 // Your plans, straight from Portfolio.scenarios: the regular fixed-rhythm portfolio poll carries them, so
 // there is no per-plan request whose timing could say when a step ran (N-2). Start, cancel, stop all.
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { toast } from "sonner";
-import { CaretDown, HandTap, Stop, X } from "@phosphor-icons/react";
+import { CaretDown, CheckCircle, Circle, CircleDashed, CircleNotch, HandTap, MinusCircle, Stop, X, XCircle, type Icon as PhIcon } from "@phosphor-icons/react";
 import { api, ApiError, errorText } from "@/lib/api/client";
 import type { Scenario, ScenarioStepError, ScenarioStepState } from "@/lib/api/types";
 import { notifyAccepted } from "@/lib/activity";
@@ -19,6 +19,9 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/layout/page-shell";
 import { cn } from "@/lib/utils";
 import { BLOCK_ICON } from "./block-icon";
+import { FloorTape } from "./floor-tape";
+import { DEFAULT_SCENARIO_PARAMS } from "@/lib/scenarios/catalog";
+import { validatePlan } from "@/lib/scenarios/validate";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 
@@ -30,6 +33,20 @@ export const STATUS_LABEL: Record<Scenario["status"], string> = {
   cancelled: "Cancelled",
   expired: "Expired",
 };
+
+const STEP_ICON: Record<ScenarioStepState["status"], PhIcon> = {
+  pending: Circle,
+  waiting: CircleDashed,
+  running: CircleNotch,
+  done: CheckCircle,
+  skipped: MinusCircle,
+  failed: XCircle,
+};
+
+/** The floors of an echoed plan (they depend on its shape only, not on sealed values). */
+function floorsOf(plan: Scenario["plan"]) {
+  return validatePlan(plan, { params: DEFAULT_SCENARIO_PARAMS, now: 0, minDepositZat: "0", features: { chat: true, fullTrades: true }, priced: () => true }).floors;
+}
 
 const STEP_LABEL: Record<ScenarioStepState["status"], string> = {
   pending: "Pending",
@@ -155,6 +172,8 @@ function Card({ s, name, tok, now, busy, onStart, onCancel }: { s: Scenario; nam
   const done = s.steps.filter((x) => x.status === "done" || x.status === "skipped").length;
   const current = s.steps[s.cursor];
   const next = current?.nextAt;
+  const floors = useMemo(() => floorsOf(s.plan), [s.plan]);
+  const [confirm, setConfirm] = useState(false);
   return (
     <div className="p-4 sm:p-5">
       <div className="flex flex-wrap items-start gap-3">
@@ -178,12 +197,32 @@ function Card({ s, name, tok, now, busy, onStart, onCancel }: { s: Scenario; nam
               Start
             </Button>
           )}
-          {live && (
-            <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy} className="rounded-full">
-              <X weight="light" />
-              Cancel
-            </Button>
-          )}
+          {live &&
+            (confirm ? (
+              <span className="flex items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">Cancel? A step already in a batch still finishes.</span>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={busy}
+                  onClick={() => {
+                    setConfirm(false);
+                    onCancel();
+                  }}
+                  className="rounded-full"
+                >
+                  Cancel plan
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setConfirm(false)} className="rounded-full">
+                  Keep
+                </Button>
+              </span>
+            ) : (
+              <Button size="sm" variant="ghost" onClick={() => setConfirm(true)} disabled={busy} className="rounded-full">
+                <X weight="light" />
+                Cancel
+              </Button>
+            ))}
           <Button size="icon-sm" variant="ghost" aria-expanded={open} aria-label={open ? "Hide steps" : "Show steps"} onClick={() => setOpen((o) => !o)}>
             <CaretDown weight="light" className={cn("transition-transform duration-200", open && "rotate-180")} />
           </Button>
@@ -209,6 +248,8 @@ function Card({ s, name, tok, now, busy, onStart, onCancel }: { s: Scenario; nam
             {s.plan.steps.map((p, i) => {
               const st = s.steps[i];
               const Icon = BLOCK_ICON[p.block.type];
+              const StIcon = st ? STEP_ICON[st.status] : Circle;
+              const tapes = st && (st.status === "pending" || st.status === "waiting" || st.status === "running") ? floors.filter((f) => f.step === i) : [];
               return (
                 <li key={i} className="grid grid-cols-[22px_minmax(0,1fr)_auto] items-baseline gap-2 border-t border-border/60 py-2 first:border-t-0">
                   <span className="font-mono text-[11px] text-faint-foreground">{i + 1}</span>
@@ -220,9 +261,19 @@ function Card({ s, name, tok, now, busy, onStart, onCancel }: { s: Scenario; nam
                     </span>
                     <span className="block truncate text-[11px] text-muted-foreground">{describeBlock(s.plan, p.block, tok, { sealed: true })}</span>
                     {st?.error && <span className="block text-[11px] text-destructive">{stepErrorText(st.error)}</span>}
+                    {tapes.length > 0 && (
+                      <span className="mt-1 flex flex-col gap-0.5">
+                        {tapes.map((f) => (
+                          <FloorTape key={f.code} text={f.text} compact />
+                        ))}
+                      </span>
+                    )}
                   </span>
-                  <span className={cn("text-right text-[11px]", st?.status === "done" ? "text-foreground" : st?.status === "failed" ? "text-destructive" : st?.status === "waiting" || st?.status === "running" ? "text-zec" : "text-faint-foreground")}>
-                    {st ? STEP_LABEL[st.status] : "—"}
+                  <span className={cn("flex flex-col items-end text-right text-xs", st?.status === "done" ? "text-muted-foreground" : st?.status === "failed" ? "text-destructive" : st?.status === "waiting" || st?.status === "running" ? "text-zec" : "text-faint-foreground")}>
+                    <span className="inline-flex items-center gap-1">
+                      <StIcon size={12} weight={st?.status === "done" ? "fill" : "light"} className={cn(st?.status === "running" && "motion-safe:animate-spin")} aria-hidden />
+                      {st ? STEP_LABEL[st.status] : "—"}
+                    </span>
                     {st?.nextAt && (st.status === "waiting" || st.status === "running") ? <span className="block text-faint-foreground">{relative(st.nextAt, now)}</span> : null}
                   </span>
                 </li>

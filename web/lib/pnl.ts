@@ -8,6 +8,8 @@
 
 import type { OrderKind } from "@/lib/api/types";
 import { lamportsToZat, tokensToLamports, zecPairValueZat } from "@/lib/trade";
+import { unitsToNumber } from "@/lib/format";
+import { nativeOf } from "@/lib/network";
 
 const ZERO = BigInt(0);
 
@@ -92,7 +94,8 @@ export function computePosition(fills: readonly Fill[]): Position {
 /** Average entry price in SOL per whole token (null without a position). Display only. */
 export function avgEntrySol(p: Position, decimals: number): number | null {
   if (p.qty === ZERO || p.costLamports === ZERO) return null;
-  return Number(p.costLamports) / 1e9 / (Number(p.qty) / 10 ** decimals);
+  // v0.18: exact strings -> numbers (wei and 18-decimal amounts pass 2^53); native decimals of this origin.
+  return unitsToNumber(p.costLamports.toString(), nativeOf().decimals) / unitsToNumber(p.qty.toString(), decimals);
 }
 
 /** Average entry in ZEC per whole token (null without a position). Display only. */

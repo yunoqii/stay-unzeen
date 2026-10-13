@@ -14,6 +14,7 @@ export const MOCK_OPERATOR_PUBKEY = "FAnkQ1LzsJoRrGqQmdLD1w7QrMfy3DsGrYByHaeTzQ2
 const PINNED: Record<Network, string> = {
   devnet: (process.env.NEXT_PUBLIC_ATTESTATION_PUBKEY_DEVNET ?? "").trim(),
   mainnet: (process.env.NEXT_PUBLIC_ATTESTATION_PUBKEY_MAINNET ?? "").trim(),
+  hood: process.env.NEXT_PUBLIC_HOOD === "1" ? (process.env.NEXT_PUBLIC_ATTESTATION_PUBKEY_HOOD ?? "").trim() : "",
 };
 
 /** Pinned operator key of a network, or null when this build has none. */

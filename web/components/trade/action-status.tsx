@@ -7,6 +7,7 @@ import { ApiError, errorText } from "@/lib/api/client";
 import type { TrackedAction } from "@/lib/activity";
 import { queuedLabel } from "@/lib/exec";
 import { formatCompact, formatZec, shortAddr, unitsToNumber } from "@/lib/format";
+import { CHAIN_LABEL, chainOf } from "@/lib/network";
 import { payoutReviewed, PAYOUT_REVIEW_TEXT } from "@/lib/trade";
 import { cn } from "@/lib/utils";
 
@@ -28,7 +29,7 @@ export function ActionStatusCard({ action, className }: { action: TrackedAction;
       key: "queued",
       label: action.op === "claim" ? "No batch: ledger only" : queuedLabel(action.exec),
       detail: action.op === "claim"
-        ? "Creator fees move inside the pool's private ledger. Nothing is sent on Solana."
+        ? "Creator fees move inside the pool's private ledger. Nothing is sent on-chain."
         : action.op === "withdraw_zec" && payoutReviewed(action.network, action.amount)
         ? `${PAYOUT_REVIEW_TEXT}. It stays queued until approved; your other payouts are not held up.`
         : action.stale
@@ -47,7 +48,7 @@ export function ActionStatusCard({ action, className }: { action: TrackedAction;
       ? { key: "failed", label: "Failed", detail: errorText(new ApiError(st.error ?? "internal", "")) + " Your balance was returned." }
       : action.op === "claim"
         ? { key: "done", label: "Credited to your balance", detail: "A ledger entry at the pool’s sell rate. No on-chain transaction." }
-        : { key: "done", label: action.op.startsWith("withdraw") ? "Sent" : "Confirmed on Solana", detail: done ? <FillLine action={action} /> : undefined },
+        : { key: "done", label: action.op.startsWith("withdraw") ? "Sent" : `Confirmed on ${CHAIN_LABEL[chainOf()] || "Solana"}`, detail: done ? <FillLine action={action} /> : undefined },
   ];
 
   return (

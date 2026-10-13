@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useId, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowRight, Key, Lightning, LockKey, RocketLaunch, ShieldCheck, ShoppingBag, Stack, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, Feather, Key, Lightning, LockKey, RocketLaunch, ShieldCheck, ShoppingBag, Stack, WarningCircle } from "@phosphor-icons/react";
+import { useNative } from "@/lib/chain";
 import { ApiError, errorText } from "@/lib/api/client";
 import type { LaunchPlatform, PoolInfo, Quote, SignedAction, Venue } from "@/lib/api/types";
 import { submitAction, useAction } from "@/lib/activity";
@@ -26,13 +27,17 @@ import { RedactionTape } from "@/components/motion/redaction-tape";
 const EASE = [0.16, 1, 0.3, 1] as const;
 const ZERO = BigInt(0);
 
-type LaunchVenue = Extract<Venue, "pumpfun" | "meteora-dbc" | "raydium-launchlab" | "bags">;
+type LaunchVenue = Extract<Venue, "pumpfun" | "meteora-dbc" | "raydium-launchlab" | "bags" | "pons">;
 
 const VENUES: { id: LaunchVenue; icon: typeof RocketLaunch; body: string }[] = [
   { id: "pumpfun", icon: RocketLaunch, body: "Bonding curve that graduates to PumpSwap. The pool creates the token; no wallet of yours appears." },
   { id: "meteora-dbc", icon: Lightning, body: "Dynamic bonding curve with its own migration. Same privacy, different curve." },
   { id: "raydium-launchlab", icon: Stack, body: "Raydium's launchpad, under the platform you pick. Graduates to a Raydium pool." },
   { id: "bags", icon: ShoppingBag, body: "Bags launchpad on mainnet, SOL pairs only. Same privacy: a pool vault creates the token." },
+  // v0.18 Robinhood Chain: only in hood builds, listed only by a pool that creates there (PoolInfo.venues).
+  ...(process.env.NEXT_PUBLIC_HOOD === "1"
+    ? [{ id: "pons" as const, icon: Feather, body: "Pons V2 on Robinhood Chain. ETH bonding curve that graduates to Uniswap v4; a pool vault creates the token." }]
+    : []),
 ];
 
 const PLATFORMS: { id: LaunchPlatform; body: string }[] = [
@@ -54,14 +59,15 @@ const QUOTE_NOTE: Record<Quote, string> = {
  */
 function venueOn(pool: PoolInfo | null, v: LaunchVenue): boolean {
   if (pool?.venues) return !!pool.venues.find((x) => x.venue === v)?.create;
-  if (v === "bags") return false;
+  if (v === "bags" || v === "pons") return false;
   const by = pool?.launchRules?.maxInitialBuyLamportsByVenue;
   if (!by) return v !== "raydium-launchlab";
   return v in by;
 }
 
 /** Cards on the form: Bags appears only when the pool says it can create there (mainnet). */
-const shownVenues = (pool: PoolInfo | null) => VENUES.filter((v) => v.id !== "bags" || venueOn(pool, "bags"));
+const shownVenues = (pool: PoolInfo | null) =>
+  pool?.chain?.id === "hood" ? VENUES.filter((v) => v.id === "pons") : VENUES.filter((v) => (v.id !== "bags" || venueOn(pool, "bags")) && v.id !== "pons");
 
 const capPct = (pool: PoolInfo | null) => `${Number(((pool?.launchRules?.capBps ?? 500) / 100).toFixed(2))}%`;
 
@@ -206,6 +212,7 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
   const exec = execOverride ?? profileExec;
   const [venuePick, setVenue] = useState<LaunchVenue>("pumpfun");
   const venue: LaunchVenue = venueOn(pool, venuePick) ? venuePick : (VENUES.find((v) => venueOn(pool, v.id))?.id ?? "pumpfun");
+  const native = useNative().symbol;
   const [platform, setPlatform] = useState<LaunchPlatform>("unzeen");
   const quotes = launchQuotes(pool, venue);
   const info = venueInfo(pool, venue);
@@ -343,9 +350,9 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
           </AnimatePresence>
         </FormStep>
 
-        <FormStep n="03" title="Pair" hint={quotes.length === 1 ? "SOL only here" : undefined}>
+        <FormStep n="03" title="Pair" hint={quotes.length === 1 ? `${native} only here` : undefined}>
           <div role="radiogroup" aria-label="Pair" className="flex flex-wrap gap-1.5">
-            {(["SOL", "ZEC", "USDC", "USD1"] as const).map((q) => {
+            {(native === "ETH" ? (["SOL"] as const) : (["SOL", "ZEC", "USDC", "USD1"] as const)).map((q) => {
               const offered = quotes.includes(q);
               return (
                 <Chip
@@ -358,12 +365,12 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
                   title={offered ? undefined : `${venueLabel(venue)} has no ${q} pair on this pool`}
                   className={cn("font-mono", quote === q && q === "ZEC" && "shadow-[0_0_18px_-4px_rgba(244,183,40,0.45)]")}
                 >
-                  ${meta.symbol || "TICKER"}/{q}
+                  ${meta.symbol || "TICKER"}/{q === "SOL" ? native : q}
                 </Chip>
               );
             })}
           </div>
-          <p className="mt-2 text-xs text-pretty text-faint-foreground">{QUOTE_NOTE[quote]}</p>
+          <p className="mt-2 text-xs text-pretty text-faint-foreground">{process.env.NEXT_PUBLIC_HOOD === "1" && quote === "SOL" && native === "ETH" ? "The pair on Pons. Trades settle in ETH on the curve; buyers still pay from their ZEC balance." : QUOTE_NOTE[quote]}</p>
         </FormStep>
 
         <FormStep n="04" title="Your first buy" hint="optional">
@@ -410,7 +417,7 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
                   ? `Up to ${formatZec(maxZat.toString())} ZEC on the ZEC curve of ${VENUE_LABEL[venue]}, in the same transaction as the launch. Locked for the rule period.`
                   : `Spent in ZEC on the ZEC curve, in the same transaction as the launch. Capped at ${capPct(pool)} of supply; the pool checks the cap when it accepts.`
                 : maxZat !== null && maxLamports
-                ? `Up to ${formatZec(maxZat.toString())} ZEC on ${VENUE_LABEL[venue]} (≈ ${formatSol(lamportsToSol(maxLamports))} SOL on its curve). Bought in the same transaction as the launch, locked for the rule period.`
+                ? `Up to ${formatZec(maxZat.toString())} ZEC on ${VENUE_LABEL[venue]} (≈ ${formatSol(lamportsToSol(maxLamports))} ${native} on its curve). Bought in the same transaction as the launch, locked for the rule period.`
                 : "Bought in the same transaction as the launch."}
           </p>
           {info && !info.atomicFirstBuy && (
@@ -434,7 +441,7 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
         <FeedPreview meta={meta} venue={venue} quote={quote} platform={venue === "raydium-launchlab" ? platform : undefined} launched={!!minted} />
 
         <dl className="space-y-2 rounded-2xl border border-border p-4">
-          <SummaryRow label="Pair" value={`$${meta.symbol || "TICKER"}/${quote}`} />
+          <SummaryRow label="Pair" value={`$${meta.symbol || "TICKER"}/${quote === "SOL" ? native : quote}`} />
           <SummaryRow label="Launch fee" value={fee === null ? "—" : `${formatZec(fee.toString())} ZEC`} />
           <SummaryRow label="First buy" value={initial.ok && initial.zat ? `≈ ${formatZec(initial.zat.toString())} ZEC` : "none"} />
           {exec === "now" && <SummaryRow label="Now lane" value={nowZat > ZERO ? `${formatZec(nowZat.toString())} ZEC` : "—"} />}

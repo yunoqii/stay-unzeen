@@ -7,7 +7,8 @@ import { EXEC_COPY, EXEC_MODES, NOW_WARNING, setDefaultExec, useDefaultExec, typ
 import { NETWORK_CONFIG, useNetwork, type Network } from "@/lib/network";
 import { DEFAULT_BUY_PRESETS, normalizePreset, updateTradeSettings, useTradeSettings } from "@/lib/trade-settings";
 import { cn } from "@/lib/utils";
-import { formatRate, NATIVE_COIN } from "@/lib/display";
+import { formatRate } from "@/lib/display";
+import { nativeOf } from "@/lib/network";
 import { useRates } from "@/lib/display-store";
 import { DisplaySwitch } from "@/components/layout/display-switch";
 
@@ -182,8 +183,8 @@ function DisplayCurrency() {
         <DisplaySwitch aria-labelledby={`${id}-d`} />
       </div>
       <p className="mt-1 text-xs text-pretty text-faint-foreground">
-        Prices, market caps, volumes and PnL read in ZEC, the currency of your account. {NATIVE_COIN} shows them in the chain&rsquo;s own coin. Converted figures
-        carry &ldquo;≈&rdquo; at a public rate{rates?.zecSol ? ` (1 ZEC ≈ ${formatRate(rates.zecSol, 4)} ${NATIVE_COIN})` : ""}; your trades always run at the
+        Prices, market caps, volumes and PnL read in ZEC, the currency of your account. {nativeOf().symbol} shows them in the chain&rsquo;s own coin. Converted figures
+        carry &ldquo;≈&rdquo; at a public rate{(nativeOf().symbol === "ETH" ? rates?.zecEth : rates?.zecSol) ? ` (1 ZEC ≈ ${formatRate((nativeOf().symbol === "ETH" ? rates?.zecEth : rates?.zecSol)!, nativeOf().symbol === "ETH" ? 6 : 4)} ${nativeOf().symbol})` : ""}; your trades always run at the
         pool&rsquo;s own quote.
       </p>
     </div>

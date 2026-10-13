@@ -7,7 +7,7 @@ import { ApiError, errorText } from "@/lib/api/client";
 import type { PoolInfo, Portfolio, Token } from "@/lib/api/types";
 import { lastRate, submitAction } from "@/lib/activity";
 import { formatSol, formatZec, lamportsToSol, shortAddr } from "@/lib/format";
-import { useNetwork } from "@/lib/network";
+import { nativeOf, useNetwork } from "@/lib/network";
 import { canClaim, claimAmount, minClaimZat } from "@/lib/claim";
 import { Button } from "@/components/ui/button";
 import { Veiled } from "./peek";
@@ -82,7 +82,7 @@ export function CreatorFees({ claimable, tokens, pool }: { claimable: Portfolio[
                 <p className="tabular text-xs text-faint-foreground">
                   {a.lamports > N0 && (
                     <>
-                      <Veiled>{formatSol(lamportsToSol(a.lamports.toString()))}</Veiled> SOL
+                      <Veiled>{formatSol(lamportsToSol(a.lamports.toString()))}</Veiled> {nativeOf(network).symbol}
                     </>
                   )}
                   {a.lamports > N0 && a.zat > N0 && " + "}

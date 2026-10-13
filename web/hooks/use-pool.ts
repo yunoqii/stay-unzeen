@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, errorText } from "@/lib/api/client";
 import type { PoolInfo } from "@/lib/api/types";
-import { useNetwork, type Network } from "@/lib/network";
+import { rememberChain, useNetwork, type Network } from "@/lib/network";
 
 /** Public GET /api/pool for the selected network. */
 export function usePool() {
@@ -15,7 +15,11 @@ export function usePool() {
     let alive = true;
     api
       .getPool()
-      .then((pool) => alive && setState({ network, pool, error: null }))
+      .then((pool) => {
+        // v0.18: the pool's own chain (native coin, decimals) wins over the static default.
+        rememberChain(network, pool.chain);
+        if (alive) setState({ network, pool, error: null });
+      })
       .catch((e: unknown) => alive && setState({ network, pool: null, error: errorText(e) }));
     return () => {
       alive = false;

@@ -2,6 +2,7 @@
 
 import { ShieldCheck } from "@phosphor-icons/react";
 import { formatSol, formatZec, lamportsToSol } from "@/lib/format";
+import { nativeOf } from "@/lib/network";
 import { maxInitialBuyZat, ruleText, RULES_SCOPE } from "@/lib/launch-rules";
 import { usePool } from "@/hooks/use-pool";
 
@@ -41,7 +42,7 @@ export function LaunchRulesCard({ extra = [], firstBuyLabel = "Your first buy" }
         </p>
         <p className="tabular mt-1 text-xs text-faint-foreground">
           {r && r.maxInitialBuyLamports !== "0"
-            ? `${formatSol(lamportsToSol(r.maxInitialBuyLamports))} SOL on the curve at today's rate. Larger launch buys are refused.`
+            ? `${formatSol(lamportsToSol(r.maxInitialBuyLamports))} ${nativeOf().symbol} on the curve at today's rate. Larger launch buys are refused.`
             : "The pool publishes the limit with its rules."}
         </p>
       </div>

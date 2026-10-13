@@ -274,16 +274,31 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
       return mintKey(plan, m);
     };
 
-    /** P8: price-dependent checks only on a literal mint with a tick; the plan's own launch is fine. */
+    /** Pair of a mint in the plan: the pool's token facts for a literal, create.quote for the plan's own launch. */
+    const pairOf = (m: MintRef | undefined): string | null => {
+      const key = typeof m === "string" ? (m ? `m:${m}` : null) : mintKey(plan, m);
+      if (!key) return null;
+      if (key.startsWith("c:")) {
+        const c = steps[Number(key.slice(2))]?.block;
+        return c?.type === "create" ? (c.create?.quote ?? "SOL") : null;
+      }
+      return ctx.token?.(key.slice(2))?.quote ?? null;
+    };
+
+    /** P8: price-dependent checks only on a mint with a tick: a pool token that has one, or the plan's own SOL-pair launch. */
     const needPrice = (m: MintRef | undefined, what: string) => {
       const key = typeof m === "string" ? (m ? `m:${m}` : null) : mintKey(plan, m);
       const lit = literal(key);
-      if (lit && isSolanaAddress(lit) && !ctx.priced(lit))
-        bad(i, "unpriced_mint", `${label}: ${ctx.token?.(lit) ? `$${ctx.token(lit)!.symbol}` : "this token"} has no price tick, so ${what} can't be checked. Use a limit price.`, "rule");
+      const own = key?.startsWith("c:") ? pairOf(m) : null;
+      if ((lit && isSolanaAddress(lit) && !ctx.priced(lit)) || (own !== null && own !== "SOL"))
+        bad(i, "unpriced_mint", `${label}: ${lit && ctx.token?.(lit) ? `$${ctx.token(lit)!.symbol}` : "this token"} has no price tick, so ${what} can't be checked. Use a limit price.`, "rule");
     };
 
     const checkGuard = (g: Guard | undefined, m: MintRef | undefined, name = "price guard") => {
       if (!g || typeof g !== "object") return bad(i, "bad_guard", `${label}: set slippage or a limit price.`);
+      // v0.19: no price unit for USDC / USD1 pairs without reading the pool -> no price guard at all.
+      const pair = pairOf(m);
+      if (pair === "USDC" || pair === "USD1") return bad(i, "unsupported_pair", `${label}: price guards don't work on ${pair} pairs yet.`);
       if ("slippageBps" in g) {
         if (!Number.isInteger(g.slippageBps) || g.slippageBps < 50 || g.slippageBps > 5000) return bad(i, "bad_guard", `${label}: slippage must be 0.5–50 %.`);
         needPrice(m, "slippage");
@@ -292,14 +307,14 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
       } else bad(i, "bad_guard", `${label}: set slippage or a limit price.`);
     };
 
-    const checkAmount = (a: AmountSpec | undefined, unit: Unit, field = "amount") => {
+    const checkAmount = (a: AmountSpec | undefined, unit: Unit, field = "amount", min = true) => {
       if (!a || typeof a !== "object") return bad(i, "bad_amount", `${label}: set the ${field}.`);
       if ("abs" in a) {
         const v = String(a.abs);
         if (!UINT_RE.test(v)) return bad(i, "bad_amount", `${label}: the ${field} must be more than zero.`);
         if (unit.kind === "zat" ? BigInt(v) > I64_MAX : v.length > 38) return bad(i, "bad_amount", `${label}: the ${field} is too large.`);
-        if (unit.kind === "zat" && ctx.minActionZat && BigInt(v) < BigInt(ctx.minActionZat))
-          bad(i, "below_minimum", `${label}: below the pool minimum of ${Number(ctx.minActionZat) / 1e8} ZEC.`, "client");
+        if (unit.kind === "zat" && min && ctx.minActionZat && BigInt(v) < BigInt(ctx.minActionZat))
+          bad(i, "bad_amount", `${label}: below the pool minimum of ${Number(ctx.minActionZat) / 1e8} ZEC.`);
         return;
       }
       if (!Number.isInteger(a.pct) || a.pct < 1 || a.pct > 100) return bad(i, "bad_amount", `${label}: the share must be 1–100 %.`);
@@ -415,7 +430,7 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
         const key = checkMint(b.mint);
         checkVenue(b.venue, b.mint);
         if (b.side !== "buy" && b.side !== "sell") bad(i, "bad_field", `${label}: buy or sell?`);
-        checkAmount(b.total, b.side === "sell" ? { kind: "tokens", mint: key } : { kind: "zat" }, "total");
+        checkAmount(b.total, b.side === "sell" ? { kind: "tokens", mint: key } : { kind: "zat" }, "total", false);
         const ev = b.everySecs;
         range(
           Number.isInteger(b.slices) && b.slices >= 2 && b.slices <= 12 && !!ev && Number.isInteger(ev.min) && Number.isInteger(ev.max) && ev.min >= 600 && ev.max >= ev.min && b.slices * ev.max <= ttl,
@@ -438,7 +453,7 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
         const kinds = ctx.orders?.kinds ?? ["limit_buy", "limit_sell", "take_profit", "stop_loss", "bracket"];
         if (!kinds.includes(o.kind)) bad(i, "bad_field", `${label}: unknown order type.`);
         if (o.venue !== "pumpfun") bad(i, "bad_venue", `${label}: orders run on pump.fun only.`);
-        checkAmount(o.amount, o.kind === "limit_buy" ? { kind: "zat" } : { kind: "tokens", mint: key });
+        checkAmount(o.amount, o.kind === "limit_buy" ? { kind: "zat" } : { kind: "tokens", mint: key }, "amount", false);
         if (o.kind === "bracket") {
           range(price(o.tpPriceSol) && price(o.slPriceSol), "set the take-profit and stop-loss prices.");
           if (price(o.tpPriceSol) && price(o.slPriceSol)) range(Number(o.tpPriceSol) > Number(o.slPriceSol), "take-profit must be above stop-loss.");
@@ -452,7 +467,7 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
         const t = lit ? ctx.token?.(lit) : undefined;
         const created = key?.startsWith("c:") ? (steps[Number(key.slice(2))]?.block as Extract<ScenarioBlock, { type: "create" }>)?.create : null;
         if (ctx.token && ((lit && (!t || t.venue !== "pumpfun" || t.status !== "curve" || t.quote !== "SOL")) || (created && (created.venue !== "pumpfun" || (created.quote ?? "SOL") !== "SOL"))))
-          bad(i, "order_unsupported_mint", `${label}: orders work only for pump.fun SOL-curve tokens the pool trades.`, "client");
+          bad(i, "unsupported_mint", `${label}: orders work only for pump.fun SOL-curve tokens the pool trades.`);
         break;
       }
       case "order_cancel":
@@ -493,11 +508,11 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
         // order on it (placed or observed filled) — to this withdrawal there must be a wait with a guaranteed
         // minimum of ≥ 1 h.
         if (key) {
-          const hit = unsafePathFrom(plan, i, key, P);
-          if (hit !== null)
-            bad(i, "withdraw_too_soon", `Withdraw waits ≥${formatSecs(F.withdrawAfterTradeMinSecs)} after the trade. There is a way from step ${hit + 1} to here without a wait of at least ${formatSecs(F.withdrawAfterTradeMinSecs)} — “bought → withdrew 40 s later” links your new address to the buy.`, "rule");
-          else if (tradesOf(plan, key).length) {
-            const shortest = shortestWaitTo(plan, i, key, P);
+          // v0.19: the guaranteed waits along every path add up to ≥ 1 h.
+          const shortest = tradesOf(plan, key).length ? shortestWaitTo(plan, i, key, P) : Infinity;
+          if (shortest < F.withdrawAfterTradeMinSecs)
+            bad(i, "withdraw_too_soon", `Withdraw waits ≥${formatSecs(F.withdrawAfterTradeMinSecs)} after the trade. On some path (next step, a skip, a go-to or a repeat) the waits since a trade of this token add up to less — “bought → withdrew 40 s later” links your new address to the buy.`, "rule");
+          else if (shortest !== Infinity) {
             if (shortest < 12 * H) warn(i, "withdraw_soon", "Less than 12 h between the trade and the withdrawal on some path. Longer is safer.");
             floor(i, "withdraw_after_trade", `Withdraw waits ≥${formatSecs(F.withdrawAfterTradeMinSecs)} after the trade, plus random ${formatRange(...F.withdrawExtraSecs)}`);
           }
@@ -514,7 +529,7 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
         checkAmount(b.amount, { kind: "zat" });
         checkExec(b.exec, false);
         if (b.exec !== "max") warn(i, "withdraw_not_max", "Max privacy (5–15 min) hides a withdrawal better than Delayed.");
-        if (ctx.network === "mainnet" && b.amount && "abs" in b.amount && UINT_RE.test(b.amount.abs) && BigInt(b.amount.abs) > PAYOUT_REVIEW_ABOVE_ZAT) warn(i, "payout_review", "Above 1 ZEC the payout waits for the operator's review.");
+        if (ctx.network && ctx.network !== "devnet" && b.amount && "abs" in b.amount && UINT_RE.test(b.amount.abs) && BigInt(b.amount.abs) > PAYOUT_REVIEW_ABOVE_ZAT) warn(i, "payout_review", "Above 1 ZEC the payout waits for the operator's review.");
         break;
       case "check_safety": {
         checkMint(b.mint);
@@ -537,7 +552,7 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
             bad(i, "bad_repeat", `${label}: cannot run a start, a deposit, a launch or another repeat again.`);
           else if (inside.some((t) => t === "withdraw_zec" || t === "withdraw_token" || t === "chat"))
             // Sealed values (addresses, chat text) are deleted once used: a second round could not rebuild them.
-            bad(i, "repeat_sealed", `${label}: withdrawals and chat messages run once — their sealed address or text is deleted after use.`, "client");
+            bad(i, "bad_repeat", `${label}: withdrawals and chat messages run once — their sealed address or text is deleted after use.`);
           if (steps.slice(b.from, i).some((x) => tradedKeys(plan, x).length && hasAbs(x.block))) floor(i, "repeat_jitter", `Each round ±${F.repeatJitterPct} % on fixed amounts`);
         }
         break;
@@ -636,7 +651,11 @@ function successors(plan: ScenarioPlan, i: number): number[] {
   }
   const b = s.block;
   if (b?.type === "check_safety" && typeof b.onFalse === "object") out.add(b.onFalse.goto);
-  if (b?.type === "repeat" && Number.isInteger(b.from) && b.from >= 0 && b.from < i) out.add(b.from);
+  if (b?.type === "repeat" && Number.isInteger(b.from) && b.from >= 0 && b.from < i && Number.isInteger(b.times) && b.times >= 2 && b.times <= 10) {
+    const body = plan.steps.slice(b.from, i).map((x) => String(x.block?.type));
+    // An invalid body is reported as bad_repeat; its back edge does not exist.
+    if (!body.some((t) => ["manual_start", "deposit_received", "create", "repeat", "withdraw_token", "withdraw_zec", "chat"].includes(t) || isFair(t))) out.add(b.from);
+  }
   return [...out].filter((x) => Number.isInteger(x) && x >= 0 && x <= plan.steps.length);
 }
 
@@ -648,30 +667,8 @@ function tradesOf(plan: ScenarioPlan, key: string): number[] {
     if (!b) return;
     if (tradedKeys(plan, s).includes(key)) out.push(i);
     else if (b.type === "order_place" && mintKey(plan, b.order?.mint) === key) out.push(i);
-    else if (b.type === "own_result" && b.ref && "step" in b.ref) {
-      const o = plan.steps[b.ref.step]?.block;
-      if (o?.type === "order_place" && mintKey(plan, o.order?.mint) === key) out.push(i);
-    }
   });
   return out;
-}
-
-/** A trade step from which `target` is reachable without passing a wait of ≥ withdrawAfterTradeMinSecs, or null. */
-function unsafePathFrom(plan: ScenarioPlan, target: number, key: string, p: ScenarioParams): number | null {
-  const min = p.floors.withdrawAfterTradeMinSecs;
-  for (const t of tradesOf(plan, key)) {
-    const seen = new Set<number>();
-    const stack = successors(plan, t);
-    while (stack.length) {
-      const n = stack.pop()!;
-      if (n === target) return t;
-      if (n >= plan.steps.length || seen.has(n)) continue;
-      seen.add(n);
-      if (guaranteedWait(plan.steps[n].block, p) >= min) continue; // this path is safe from here on
-      stack.push(...successors(plan, n));
-    }
-  }
-  return null;
 }
 
 /** The smallest total guaranteed wait over all paths from a trade of `key` to `target` (for the 12 h hint). */

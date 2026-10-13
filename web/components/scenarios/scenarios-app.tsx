@@ -174,7 +174,6 @@ function Scenarios() {
       notifyAccepted();
       setSigned({ id: r.id, manual: r.status === "waiting_start" });
       setView("signed");
-      toast.success(r.status === "waiting_start" ? "Signed. Press Start when you're ready." : "Signed. The pool runs it from here.");
     } catch (e) {
       const d = e instanceof ApiError ? (e.details as Partial<ScenarioErrorDetails> | undefined) : undefined;
       if (d && typeof d.step === "number" && draft.steps[d.step]) {
@@ -236,7 +235,7 @@ function Scenarios() {
           </motion.div>
         ) : (
           <motion.div key="build" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.25, ease: EASE }} className="space-y-6">
-            <TemplatePicker active={draft.template} onPick={pickTemplate} enabled={enabled} />
+            <TemplatePicker active={draft.template} onPick={pickTemplate} enabled={enabled} compact={draft.steps.length > 0} />
 
             <div className="ledger lg:grid-cols-[216px_minmax(0,1fr)] xl:grid-cols-[216px_minmax(0,1fr)_360px]">
               {/* palette */}
@@ -244,7 +243,10 @@ function Scenarios() {
                 <div className="lg:sticky lg:top-20">
                   <p className="px-4 pt-4 text-xs text-muted-foreground lg:hidden">Add a block</p>
                   <Palette enabled={enabled} full={full} onAdd={(t) => add(t)} onDragStart={(t) => setDrag({ kind: "new", type: t })} onDragEnd={() => setDrag(null)} />
-                  <p className="hidden px-4 pb-5 text-[11px] text-pretty text-faint-foreground lg:block">Drag onto the chain, or press to add after the selected step.</p>
+                  <div className="hidden space-y-1 px-4 pb-5 text-[11px] text-pretty text-faint-foreground lg:block">
+                    <p>Drag onto the chain, or press to add after the selected step.</p>
+                    <p className="font-mono text-[10px]">↑↓ select · Alt+↑↓ move · Del remove</p>
+                  </div>
                 </div>
               </aside>
 
@@ -275,6 +277,7 @@ function Scenarios() {
                         title: h === 168 && hasWithdraw ? "7 days only for plans without a withdrawal" : undefined,
                       }))}
                     />
+                    {hasWithdraw && (params.ttlSecs.maxNoWithdraw ?? 0) > params.ttlSecs.max && <p className="text-[11px] text-faint-foreground">7 d only for plans without a withdrawal.</p>}
                     <p className="tabular font-mono text-[11px] text-faint-foreground">
                       <span className={cn(full && "text-zec")}>
                         {draft.steps.length}/{params.maxSteps} blocks
@@ -311,7 +314,20 @@ function Scenarios() {
                     ) : blocking.length ? (
                       <span className="flex items-center gap-1.5 text-muted-foreground">
                         <WarningCircle size={14} weight="light" className="shrink-0 text-destructive" aria-hidden />
-                        {planIssues[0] ? planIssues[0].message : `${blocking.length} ${blocking.length === 1 ? "thing" : "things"} to fix — see the marked ${new Set(blocking.map((b) => b.step)).size === 1 ? "step" : "steps"}.`}
+                        {planIssues[0] ? (
+                          planIssues[0].message
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const first = draft.steps[blocking.find((b) => b.step >= 0)!.step];
+                              if (first) setSelected(first.uid);
+                            }}
+                            className="rounded underline-offset-4 hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                          >
+                            {blocking.length} {blocking.length === 1 ? "thing" : "things"} to fix — show step {blocking.find((b) => b.step >= 0)!.step + 1}
+                          </button>
+                        )}
                       </span>
                     ) : (
                       <span className="flex items-center gap-1.5 text-muted-foreground">

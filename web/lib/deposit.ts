@@ -27,9 +27,9 @@ export function poolChainId(pool: PoolInfo, network: Network): ChainId {
   const cfg = NETWORK_CONFIG[network];
   if (pool.chainId.toLowerCase() !== cfg.chainIdHex)
     throw new PoolMismatchError(`pool chainId "${pool.chainId}" is not ${cfg.label} (${cfg.chainIdHex})`);
-  if (pool.network !== (cfg.realFunds ? "main" : "test"))
+  if (pool.network !== cfg.zcash)
     throw new PoolMismatchError(`pool network "${pool.network}" does not match ${cfg.label}`);
-  const prefix = pool.network === "main" ? /^u1/ : /^utest1/;
+  const prefix = cfg.zcash === "main" ? /^u1/ : /^utest1/;
   if (!prefix.test(pool.address)) throw new PoolMismatchError("pool address is not a Unified Address for its network");
   return [parseInt(cfg.chainIdHex.slice(0, 2), 16), parseInt(cfg.chainIdHex.slice(2), 16)] as unknown as ChainId;
 }

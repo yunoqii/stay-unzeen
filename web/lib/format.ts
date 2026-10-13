@@ -1,4 +1,5 @@
 import type { Venue } from "./api/types";
+import { nativeOf } from "@/lib/network";
 
 export const VENUE_LABEL: Record<Venue, string> = {
   pumpfun: "pump.fun",
@@ -6,6 +7,7 @@ export const VENUE_LABEL: Record<Venue, string> = {
   jupiter: "Jupiter",
   "raydium-launchlab": "LaunchLab",
   bags: "Bags",
+  pons: "Pons",
 };
 
 /**
@@ -31,7 +33,8 @@ export function unitsToNumber(amount: string, decimals: number): number {
 export const SOL_DECIMALS = 9;
 export const ZEC_DECIMALS = 8;
 
-export const lamportsToSol = (lamports: string) => unitsToNumber(lamports, SOL_DECIMALS);
+/** Native base units (lamports, or wei on Robinhood Chain — v0.18) -> number of the chain's coin. Display only. */
+export const lamportsToSol = (lamports: string) => unitsToNumber(lamports, nativeOf().decimals);
 export const zatToZec = (zat: string) => unitsToNumber(zat, ZEC_DECIMALS);
 
 /**
@@ -69,7 +72,8 @@ export function formatSol(v: string | number): string {
   const n = typeof v === "string" ? Number(v) : v;
   if (!Number.isFinite(n)) return "—";
   if (n === 0) return "0";
-  if (Math.abs(n) < 0.0001) return n.toExponential(2);
+  // Tiny amounts (gas in ETH, dust): 0.0₄9 instead of 9.00e-5.
+  if (Math.abs(n) < 0.0001) return (n < 0 ? "-" : "") + formatPrice(Math.abs(n));
   return trimNumber(n, n < 1 ? 4 : 2);
 }
 

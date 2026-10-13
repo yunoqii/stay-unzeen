@@ -5,6 +5,7 @@ import { useRates } from "@/lib/display-store";
 import { timeAgo } from "@/lib/format";
 import { useNow } from "@/hooks/use-now";
 import { cn } from "@/lib/utils";
+import { useNative } from "@/lib/chain";
 import { DisplaySwitch } from "./display-switch";
 
 /**
@@ -15,6 +16,7 @@ export function RatesStrip() {
   const { rates, loading } = useRates();
   const now = useNow(10_000);
   const usd = rates?.source === "rates" ? rates : null;
+  const eth = useNative().symbol === "ETH";
 
   return (
     <div className="border-b border-border/60">
@@ -25,9 +27,19 @@ export function RatesStrip() {
           className="-mx-1 flex w-full min-w-0 items-center gap-x-4 overflow-x-auto px-1 font-mono text-[11px] whitespace-nowrap text-faint-foreground [mask-image:linear-gradient(to_right,black_88%,transparent)] [scrollbar-width:none] sm:w-auto sm:flex-1 sm:gap-x-5 sm:[mask-image:none]"
         >
           <Rate label="ZEC" value={usd ? `$${formatRate(usd.zecUsd)}` : null} accent loading={loading} />
-          <Rate label="SOL" value={usd ? `$${formatRate(usd.solUsd)}` : null} loading={loading} />
-          <Rate label="ETH" value={usd ? `$${formatRate(usd.ethUsd, 0)}` : null} loading={loading} />
-          <Rate label="ZEC/SOL" value={rates?.zecSol ? formatRate(rates.zecSol, 4) : null} loading={loading} />
+          {eth ? (
+            <>
+              <Rate label="ETH" value={usd ? `$${formatRate(usd.ethUsd, 0)}` : null} loading={loading} />
+              <Rate label="SOL" value={usd ? `$${formatRate(usd.solUsd)}` : null} loading={loading} />
+              <Rate label="ZEC/ETH" value={rates?.zecEth ? formatRate(rates.zecEth, 6) : null} loading={loading} />
+            </>
+          ) : (
+            <>
+              <Rate label="SOL" value={usd ? `$${formatRate(usd.solUsd)}` : null} loading={loading} />
+              <Rate label="ETH" value={usd ? `$${formatRate(usd.ethUsd, 0)}` : null} loading={loading} />
+              <Rate label="ZEC/SOL" value={rates?.zecSol ? formatRate(rates.zecSol, 4) : null} loading={loading} />
+            </>
+          )}
           {rates && rates.ts > 0 && now !== null && (
             <span className="text-faint-foreground/80" title="Public reference rate, refreshed every minute. Trades use the pool's own quote.">
               ≈ {timeAgo(rates.ts, now)} ago

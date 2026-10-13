@@ -2,17 +2,18 @@
 
 import { useId } from "react";
 import { motion } from "motion/react";
-import { NATIVE_COIN, type DisplayPref } from "@/lib/display";
+import type { DisplayPref } from "@/lib/display";
+import { useNative } from "@/lib/chain";
 import { setDisplayPref, useDisplayPref } from "@/lib/display-store";
 import { cn } from "@/lib/utils";
 
 const PREFS: readonly DisplayPref[] = ["zec", "native"];
-const LABEL: Record<DisplayPref, string> = { zec: "ZEC", native: NATIVE_COIN };
 
 /** ZEC (default) <-> the chain's native coin. Saved in this browser only. */
 export function DisplaySwitch({ className, size = "sm", "aria-labelledby": labelledBy }: { className?: string; size?: "xs" | "sm"; "aria-labelledby"?: string }) {
   const pref = useDisplayPref();
   const pillId = useId();
+  const LABEL: Record<DisplayPref, string> = { zec: "ZEC", native: useNative().symbol };
   return (
     <div
       role="radiogroup"

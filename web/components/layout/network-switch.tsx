@@ -3,15 +3,20 @@
 import { useId } from "react";
 import { motion } from "motion/react";
 import { toast } from "sonner";
-import { NETWORKS, NETWORK_CONFIG, setNetwork, useNetwork, type Network } from "@/lib/network";
+import { chainOf, NETWORKS, NETWORK_CONFIG, setNetwork, useNetwork, type Network } from "@/lib/network";
 import { cn } from "@/lib/utils";
 
-const SHORT: Record<Network, string> = { devnet: "Dev", mainnet: "Main" };
+const SHORT: Record<Network, string> = { devnet: "Dev", mainnet: "Main", hood: "Main" };
 
 /** Devnet <-> Mainnet. Each side has its own API, explorer, pool and anon key. */
 export function NetworkSwitch() {
   const network = useNetwork();
   const pillId = useId();
+  // Networks of the selected chain only (v0.18): Solana has Devnet + Mainnet, Robinhood Chain Mainnet only.
+  const chain = chainOf(network);
+  const list = NETWORKS.filter((n) => NETWORK_CONFIG[n].chain === chain);
+  // One network only (Robinhood Chain: Mainnet): nothing to switch; the banner says which money is at stake.
+  if (list.length < 2) return null;
 
   const choose = (n: Network) => {
     if (n === network) return;
@@ -28,13 +33,13 @@ export function NetworkSwitch() {
       onKeyDown={(e) => {
         if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
           e.preventDefault();
-          const next = NETWORKS[(NETWORKS.indexOf(network) + 1) % NETWORKS.length];
+          const next = list[(list.indexOf(network) + 1) % list.length];
           choose(next);
           (e.currentTarget.querySelector(`[data-network="${next}"]`) as HTMLElement | null)?.focus();
         }
       }}
     >
-      {NETWORKS.map((n) => {
+      {list.map((n) => {
         const active = n === network;
         const real = NETWORK_CONFIG[n].realFunds;
         return (

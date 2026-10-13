@@ -35,7 +35,7 @@ export interface TrackedAction {
 }
 
 const items = new Map<string, TrackedAction>();
-const rates: Record<Network, { buy?: SolRateUsed; sell?: SolRateUsed }> = { devnet: {}, mainnet: {} };
+const rates: Record<Network, { buy?: SolRateUsed; sell?: SolRateUsed }> = { devnet: {}, mainnet: {}, hood: {} };
 let version = 0;
 let snapshot: TrackedAction[] = [];
 const listeners = new Set<() => void>();

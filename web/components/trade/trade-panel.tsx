@@ -10,7 +10,7 @@ import type { SignedAction, Token, Venue } from "@/lib/api/types";
 import { lastRate, submitAction, useAction, useActivityVersion } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, unitsToNumber, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
-import { useNetwork } from "@/lib/network";
+import { nativeOf, useNetwork } from "@/lib/network";
 import { nowFee as poolNowFee, resolveExec, useDefaultExec, withExec, type ExecMode, type NowFee } from "@/lib/exec";
 import { lamportsToZatCeil, quoteBuy, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
 import { useRecentBuys } from "@/hooks/use-recent-buys";
@@ -440,13 +440,15 @@ function Quote({
   // Trade size in the pair's own unit: ZEC SPL for ZEC pairs, the quote (with a small SOL equivalent) for USDC / USD1.
   const size = (lamports: bigint | null, quoteUnits: bigint | null): React.ReactNode => {
     if (quoteUnits !== null) return `≈ ${formatQuote(Number(quoteUnits) / 10 ** pair.decimals, pair.quote)} ${pair.quote}`;
-    const sol = Number(lamports ?? BigInt(0)) / 1e9;
-    if (pair.quote === "SOL") return `≈ ${formatSol(sol)} SOL`;
-    if (pair.perSol === null) return `≈ ${formatSol(sol)} SOL`;
+    // v0.18: native base units (lamports, or wei on Robinhood Chain) through the exact string.
+    const nat = nativeOf();
+    const sol = unitsToNumber((lamports ?? BigInt(0)).toString(), nat.decimals);
+    if (pair.quote === "SOL") return `≈ ${formatSol(sol)} ${nat.symbol}`;
+    if (pair.perSol === null) return `≈ ${formatSol(sol)} ${nat.symbol}`;
     return (
       <span key="size">
         ≈ {formatQuote(sol * pair.perSol, pair.quote)} {pair.quote}
-        <span className="text-faint-foreground"> · {formatSol(sol)} SOL</span>
+        <span className="text-faint-foreground"> · {formatSol(sol)} {nativeOf().symbol}</span>
       </span>
     );
   };
@@ -473,7 +475,7 @@ function Quote({
         `${formatZec(nowFee.fee.zat.toString())} ZEC from balance`
       ) : (
         <span key="fee">
-          {formatSol(Number(nowFee.fee.lamports) / 1e9)} SOL
+          {formatSol(unitsToNumber(nowFee.fee.lamports.toString(), nativeOf().decimals))} {nativeOf().symbol}
           {rate !== null && <span className="text-faint-foreground"> · ≈ {formatZec(lamportsToZatCeil(nowFee.fee.lamports, rate).toString())} ZEC from balance</span>}
         </span>
       ),

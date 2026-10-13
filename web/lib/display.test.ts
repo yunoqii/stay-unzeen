@@ -15,7 +15,7 @@ describe("display rates", () => {
 
   it("derives ZEC/SOL from USD when the cross is missing, rejects zero and garbage", () => {
     expect(parseRates({ ...RATES, pairs: { ...RATES.pairs, "ZEC/SOL": "0" } })!.zecSol).toBeCloseTo(1.8);
-    expect(parseRates({ ...RATES, pairs: { ...RATES.pairs, "ZEC/SOL": "x" }, usd: { ZEC: "0", SOL: "0", ETH: "0" } })).toBeNull();
+    expect(parseRates({ ...RATES, pairs: { "ZEC/SOL": "x", "ZEC/ETH": "0" }, usd: { ZEC: "0", SOL: "0", ETH: "0" } })).toBeNull();
     expect(parseRates(null)).toBeNull();
   });
 
@@ -83,5 +83,22 @@ describe("formatUsd", () => {
     expect(formatUsd(2_500_000)).toBe("$2.5M");
     expect(formatUsd(0.001)).toBe("<$0.01");
     expect(formatUsd(null)).toBe("—");
+  });
+});
+
+describe("display on Robinhood Chain (v0.18)", () => {
+  it("converts ETH figures with ZEC/ETH and labels the native coin ETH", () => {
+    const r = parseRates(RATES);
+    const d = makeDisplay("native", r, false, "ETH");
+    expect(d.unit).toBe("ETH");
+    const z = makeDisplay("zec", r, false, "ETH");
+    expect(z.unit).toBe("ZEC");
+    expect(z.sol(0.064615)).toBeCloseTo(1, 6);
+    expect(z.usdOfSol(1)).toBe(3900);
+  });
+
+  it("falls back to the pool's wei-per-ZEC rate", () => {
+    const pool = { chain: { id: "hood", network: "hood", mainnet: true, native: { symbol: "ETH", decimals: 18 } }, rate: { lamportsPerZec: "65000000000000000", ts: 1 } } as unknown as PoolInfo;
+    expect(ratesFromPool(pool)).toMatchObject({ zecEth: 0.065, zecSol: null });
   });
 });

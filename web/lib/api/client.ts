@@ -293,7 +293,7 @@ const real = makeApi(httpCall, wsSubscribe);
 
 const mocked = makeApi(mockCall, (onEvent, onStatus, opts) => {
   onStatus?.("live");
-  return mock.subscribeFeed(onEvent, opts?.mint);
+  return mock.subscribeFeed(onEvent, opts?.mint, networkConfig().id);
 });
 
 export const api: Api = API_MODE === "real" ? real : mocked;

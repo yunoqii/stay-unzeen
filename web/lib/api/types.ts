@@ -6,7 +6,8 @@
 //   - timestamps: unix ms, except Candle.time (unix seconds)
 
 /** v0.13: + raydium-launchlab (LaunchLab: platforms Unzeen / bonk.fun / stonk.fun) and bags (reserved, 503 until enabled). */
-export type Venue = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "bags";
+/** v0.18: + pons (Pons V2 on Robinhood Chain; a Solana server answers 503 venue_unavailable). */
+export type Venue = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "bags" | "pons";
 
 /** v0.13: the curve's pair. ZEC = ZEC SPL (bridged, A7bd…QXaS). */
 export type Quote = "SOL" | "USDC" | "USD1" | "ZEC";

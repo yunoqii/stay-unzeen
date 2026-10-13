@@ -5,12 +5,28 @@ import { formatSecs } from "@/lib/scenarios/catalog";
 import type { ScenarioBlockType } from "@/lib/api/types";
 import { TEMPLATES, type TemplateId } from "@/lib/scenarios/templates";
 import { cn } from "@/lib/utils";
+import { Chip } from "@/components/ui/chip";
 
 /**
  * The four shared templates. Same constants for everyone: picking one makes your timing look like everyone
  * else's who picked it. The server is never told a plan came from a template.
  */
-export function TemplatePicker({ active, onPick, enabled }: { active?: string; onPick: (id: TemplateId) => void; enabled: ReadonlySet<ScenarioBlockType> }) {
+export function TemplatePicker({ active, onPick, enabled, compact }: { active?: string; onPick: (id: TemplateId) => void; enabled: ReadonlySet<ScenarioBlockType>; compact?: boolean }) {
+  // Once a chain exists the cards fold into one row, so the builder starts higher on the screen.
+  if (compact)
+    return (
+      <section aria-label="Templates" className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-xs text-muted-foreground">Start over from a template</span>
+        {TEMPLATES.map((t) => {
+          const ready = t.build({}).blocks.every((b) => enabled.has(b.block.type));
+          return (
+            <Chip key={t.id} active={active === t.id} disabled={!ready} onClick={() => onPick(t.id)} title={ready ? t.line : "Uses blocks this pool hasn't switched on yet"}>
+              {t.name}
+            </Chip>
+          );
+        })}
+      </section>
+    );
   return (
     <section aria-labelledby="tpl-title">
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">

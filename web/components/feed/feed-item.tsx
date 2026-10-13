@@ -6,7 +6,7 @@ import { motion } from "motion/react";
 import { ArrowUpRight } from "@phosphor-icons/react";
 import type { FeedEvent } from "@/lib/api/types";
 import { formatCompact, formatSol, lamportsToSol, timeAgo, unitsToNumber } from "@/lib/format";
-import { explorerTx, useNetwork } from "@/lib/network";
+import { explorerName, explorerTx, useNetwork } from "@/lib/network";
 import { cn } from "@/lib/utils";
 import { CountUp } from "@/components/motion/count-up";
 import { CollapseIdentity } from "@/components/motion/collapse-identity";
@@ -121,7 +121,7 @@ const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-0.5 font-mono transition-colors hover:text-muted-foreground"
-              aria-label="View transaction on Solscan"
+              aria-label={`View transaction on ${explorerName(network)}`}
             >
               {event.solanaTx.slice(0, 6)}
               <span className="hidden max-w-0 overflow-hidden whitespace-nowrap opacity-0 blur-[3px] transition-[max-width,opacity,filter] duration-300 ease-shadow group-hover:max-w-40 group-hover:opacity-100 group-hover:blur-none motion-reduce:transition-none sm:inline-block">

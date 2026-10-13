@@ -10,6 +10,8 @@ function apiOrigins(): string[] {
     process.env.NEXT_PUBLIC_API_URL_MAINNET,
     process.env.NEXT_PUBLIC_WS_URL_DEVNET,
     process.env.NEXT_PUBLIC_WS_URL_MAINNET,
+    process.env.NEXT_PUBLIC_API_URL_HOOD,
+    process.env.NEXT_PUBLIC_WS_URL_HOOD,
   ];
   const out = new Set<string>();
   for (const u of urls) {
@@ -68,6 +70,8 @@ const nextConfig: NextConfig = {
   // lookup, and the code behind it is not dropped from the bundle).
   env: {
     NEXT_PUBLIC_MOCK_FAIR_LAUNCH: process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH ?? "",
+    // API v0.18 Robinhood Chain origin (default off: no hood code or names in the bundle).
+    NEXT_PUBLIC_HOOD: process.env.NEXT_PUBLIC_HOOD ?? "",
     NEXT_PUBLIC_FAIR_LAUNCH_BUILD: process.env.NEXT_PUBLIC_FAIR_LAUNCH_BUILD ?? "",
     NEXT_PUBLIC_MOCK_CREATE_DISABLED: process.env.NEXT_PUBLIC_MOCK_CREATE_DISABLED ?? "",
     // Dev-only failure injection (lib/api/chaos.ts): must be inlined so a public build drops it.

@@ -21,6 +21,7 @@ import { DEFAULT_SCENARIO_PARAMS } from "@/lib/scenarios/catalog";
 import type { ValidateCtx } from "@/lib/scenarios/validate";
 import type { FairHost, FairMock } from "./mock-fair";
 import type { VerifyMock } from "./mock-verify";
+import type { HoodMock } from "./mock-hood";
 import { ZEC_SPL_MINT } from "@/lib/quotes";
 import type {
   ActionReceipt,
@@ -104,7 +105,7 @@ function plain(n: number, sig: number): string {
 }
 
 // pump.fun = 6 decimals; Meteora DBC mocks use 9 so the UI is forced to honour `decimals`.
-const DECIMALS: Record<Venue, number> = { pumpfun: 6, "meteora-dbc": 9, jupiter: 6, "raydium-launchlab": 6, bags: 6 };
+const DECIMALS: Record<Venue, number> = { pumpfun: 6, "meteora-dbc": 9, jupiter: 6, "raydium-launchlab": 6, bags: 6, pons: 18 };
 
 // ---- non-SOL pairs (API v0.13–v0.14) ----
 
@@ -445,7 +446,7 @@ function poolAddress(network: Network): string {
   // Looks like a UA (bech32 charset); not a real address.
   const rnd = seeded("unzeen-mock-pool:" + network);
   const cs = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-  let out = network === "mainnet" ? "u1" : "utest1";
+  let out = network === "devnet" ? "utest1" : "u1";
   for (let i = 0; i < 106; i++) out += cs[Math.floor(rnd() * cs.length)];
   return out;
 }
@@ -565,6 +566,7 @@ export function mockRates(now: number): Rates {
 }
 
 export function mockPool(network: Network): PoolInfo {
+  if (process.env.NEXT_PUBLIC_HOOD === "1" && network === "hood" && hood) return hood.pool();
   const extra = {
     createEnabled: CREATE_ENABLED,
     // v0.7: with the flag off the key is absent altogether (absent = off). The condition is written on
@@ -1780,6 +1782,7 @@ export async function handle(
 ): Promise<unknown> {
   init(Date.now());
   await loadFair();
+  if (process.env.NEXT_PUBLIC_HOOD === "1" && network === "hood") await loadHood();
   // Dev-only failure injection; the literal check keeps it out of every other build.
   if (process.env.NEXT_PUBLIC_MOCK_CHAOS === "1") await (await import("./chaos")).chaosGate(!!headers[HEADER_NONCE]);
   await delay(rand(120, 380));
@@ -1788,6 +1791,11 @@ export async function handle(
   catchUpTicks(Date.now());
   chat.tick(Date.now());
   if (SCENARIOS_ON) scenarios.tick(Date.now());
+  if (process.env.NEXT_PUBLIC_HOOD === "1" && network === "hood") {
+    await loadHood();
+    const r = await hoodRoute(method, pathWithQuery, body, headers);
+    if (r !== NOT_HOOD) return r;
+  }
   const url = new URL(pathWithQuery, "http://mock.local");
   const p = url.pathname;
   const q = url.searchParams;
@@ -2044,7 +2052,19 @@ function publish(ev: FeedEvent) {
   feedSubs.forEach((f) => f(ev));
 }
 
-export function subscribeFeed(onEvent: (e: FeedEvent) => void, mint?: string): () => void {
+export function subscribeFeed(onEvent: (e: FeedEvent) => void, mint?: string, network?: Network): () => void {
+  if (process.env.NEXT_PUBLIC_HOOD === "1" && network === "hood") {
+    // Robinhood Chain origin: its own feed (the module loads on the first API call of that origin).
+    let un: (() => void) | null = null;
+    let stop = false;
+    void loadHood()?.then(() => {
+      if (!stop && hood) un = hood.subscribe(onEvent, mint);
+    });
+    return () => {
+      stop = true;
+      un?.();
+    };
+  }
   init(Date.now());
   let timer: ReturnType<typeof setTimeout>;
   let stopped = false;
@@ -2348,4 +2368,89 @@ if (SCENARIOS_ON && typeof window !== "undefined") {
   setInterval(() => {
     if (state) scenarios.tick(Date.now());
   }, 2_000);
+}
+
+// ---- Robinhood Chain origin (API v0.18), only in builds with NEXT_PUBLIC_HOOD=1 ----
+// Its own tokens / feed / trading (lib/api/mock-hood.ts, a lazy chunk); accounts, deposits, shielded
+// payouts and signatures go through the code above with network "hood" (chainId 0111).
+
+let hood: HoodMock | null = null;
+let hoodLoading: Promise<void> | null = null;
+const NOT_HOOD = Symbol("not-hood");
+
+function loadHood(): Promise<void> | void {
+  if (process.env.NEXT_PUBLIC_HOOD !== "1") return;
+  return (hoodLoading ??= import("./mock-hood").then((m) => {
+    hood = m.createHoodMock({
+      account: (pubkey) => account("hood", pubkey),
+      basePool: () => ({ ...mockPool("mainnet"), address: poolAddress("hood") }),
+      zecPerEth: () => Number(mockRates(Date.now()).pairs["ZEC/ETH"]),
+    });
+  }));
+}
+
+const HOOD_OPS = new Set(["buy", "sell", "create", "withdraw_token"]);
+
+async function hoodRoute(method: "GET" | "POST", pathWithQuery: string, body: string | undefined, headers: Partial<SignedHeaders>): Promise<unknown> {
+  const h = hood!;
+  const url = new URL(pathWithQuery, "http://mock.local");
+  const p = url.pathname;
+  const q = url.searchParams;
+  let m: RegExpMatchArray | null;
+  if (method === "GET") {
+    if (p === "/api/pool") return h.pool();
+    if (p === "/api/feed") return h.feed(Number(q.get("limit") ?? 50));
+    if (p === "/api/tokens") return q.has("source") ? [] : h.tokens();
+    if (p === "/api/stats") return h.stats();
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)$/))) {
+      const t = h.token(decodeURIComponent(m[1]));
+      if (!t) throw new ApiError("not_found", "unknown token", 404);
+      return t;
+    }
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)\/safety$/))) {
+      const s = h.safety(decodeURIComponent(m[1]));
+      if (!s) throw new ApiError("not_found", "unknown token", 404);
+      return s;
+    }
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)\/trades$/))) return h.trades(decodeURIComponent(m[1]), q.get("filter"), Number(q.get("limit") ?? 50));
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)\/candles$/))) {
+      const tf = (q.get("tf") ?? "5m") as CandleTimeframe;
+      const n = (k: string) => (q.get(k) ? Number(q.get(k)) : undefined);
+      return h.candles(decodeURIComponent(m[1]), tf, n("from"), n("to"));
+    }
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)\/chat$/))) throw new ApiError("not_found", "no chat on this chain yet", 404);
+    if (p.startsWith("/api/verify")) throw new ApiError("feature_disabled", "Verify is not on this chain yet", 404);
+    if ((m = p.match(/^\/api\/actions\/([^/]+)$/))) {
+      const pub = authorize("hood", method, pathWithQuery, body, headers);
+      const own = h.action(pub, decodeURIComponent(m[1]));
+      if (own) return own;
+      return NOT_HOOD;
+    }
+    if (p === "/api/portfolio") {
+      const pub = authorize("hood", method, pathWithQuery, body, headers);
+      const base = portfolioOf("hood", pub);
+      return { ...base, actions: [...(base.actions ?? []), ...h.actions(pub)], orders: [], scenarios: undefined };
+    }
+    return NOT_HOOD;
+  }
+  if (method === "POST" && p === "/api/actions") {
+    let action: SignedAction | null = null;
+    try {
+      action = body ? (JSON.parse(body) as SignedAction) : null;
+    } catch {
+      /* the main path answers bad_request */
+    }
+    if (!action || !HOOD_OPS.has(action.op)) {
+      if (action && (action.op.startsWith("order_") || action.op.startsWith("scenario_") || action.op === "chat" || action.op === "claim"))
+        throw new ApiError("bad_request", `${action.op} is not available on this chain yet`, 400);
+      return NOT_HOOD; // withdraw_zec, noop: the shared path
+    }
+    const { pubkey, nonceKey, now } = verify("hood", method, pathWithQuery, body, headers);
+    if (seenNonces.has(nonceKey)) throw new ApiError("replay", "nonce already used", 409);
+    execDelay(action, true);
+    const receipt = h.submit(pubkey, action);
+    seenNonces.set(nonceKey, now + 120_000);
+    return receipt;
+  }
+  return NOT_HOOD;
 }

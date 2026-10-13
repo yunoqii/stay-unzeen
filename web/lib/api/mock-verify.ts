@@ -136,7 +136,7 @@ interface Holder {
 }
 
 export function createVerifyMock(host: VerifyHost): VerifyMock {
-  const snaps: Record<Network, Snap[] | null> = { devnet: null, mainnet: null };
+  const snaps: Record<Network, Snap[] | null> = { devnet: null, mainnet: null, hood: null };
   const proofCalls = new Map<string, number[]>();
 
   const vaultSeeds = (network: Network) => Array.from({ length: 4 }, (_, i) => seedOf(`unzeen/mock/vault:${network}:${i}`));

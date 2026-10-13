@@ -10,10 +10,11 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { api } from "@/lib/api/client";
 import { fillsOf } from "@/lib/history/reduce";
 import { useHistory } from "@/lib/history/store";
-import { isSolanaAddress } from "@/lib/trade";
+import { addressKind, isChainAddress } from "@/lib/chain";
+import { useNetwork } from "@/lib/network";
 import { cn } from "@/lib/utils";
 import type { FeedEvent, TokenWithTrades } from "@/lib/api/types";
-import { formatCompact, formatPrice, shortAddr, timeAgo, unitsToNumber } from "@/lib/format";
+import { formatCompact, formatPrice, lamportsToSol, shortAddr, timeAgo, unitsToNumber } from "@/lib/format";
 import { eventQuote, quoteOfMint, quotePerSol, tokenQuote } from "@/lib/quotes";
 import type { Quote } from "@/lib/api/types";
 import { QuoteBadge } from "./quote-badge";
@@ -39,17 +40,18 @@ import { VenueTag } from "./venue-tag";
 
 export function TokenView({ params }: { params: Promise<{ mint: string }> }) {
   const { mint: raw } = use(params);
+  const network = useNetwork();
   let mint = raw;
   try {
     mint = decodeURIComponent(raw);
   } catch {
     /* keep raw: fails validation below */
   }
-  if (!isSolanaAddress(mint))
+  if (!isChainAddress(mint, network))
     return (
       <Frame>
-        <EmptyState title="Not a Solana address">
-          <span className="font-mono break-all">{shortAddr(mint, 8, 8)}</span> is not base58 of 32 bytes. Check the contract address and try again.
+        <EmptyState title={process.env.NEXT_PUBLIC_HOOD === "1" && addressKind(network) === "0x" ? "Not a Robinhood Chain address" : "Not a Solana address"}>
+          <span className="font-mono break-all">{shortAddr(mint, 8, 8)}</span> {addressKind(network) === "0x" ? "is not a 0x address with a valid checksum" : "is not base58 of 32 bytes"}. Check the contract address and try again.
         </EmptyState>
       </Frame>
     );
@@ -270,7 +272,7 @@ function useLivePrice(token: TokenWithTrades, events: FeedEvent[]): { sol: strin
   if (!e || token.trades.some((t) => t.id === e.id)) return base;
   const tokens = unitsToNumber(e.tokenAmount, e.decimals);
   if (!(tokens > 0)) return base;
-  const sol = unitsToNumber(e.solAmount, 9);
+  const sol = lamportsToSol(e.solAmount);
   const q = eventQuote(e);
   return {
     sol: sol > 0 ? plain(sol / tokens) : base.sol,

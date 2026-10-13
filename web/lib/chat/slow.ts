@@ -4,6 +4,7 @@
 // last 10 minutes. Judged only from local data (encrypted history + this tab's actions), never asked.
 
 import { unitsToNumber } from "@/lib/format";
+import { nativeOf } from "@/lib/network";
 
 export const SLOW_WINDOW_MS = 10 * 60_000;
 const DAY_MS = 24 * 3_600_000;
@@ -32,7 +33,7 @@ export function ownAmounts(entries: readonly OwnFill[], now: number): number[] {
     if (f.zecSpent) out.push(Number(f.zecSpent) / 1e8);
     if (f.zecCredited) out.push(Number(f.zecCredited) / 1e8);
     // v0.18: token / lamport amounts may exceed 2^53 — convert through the exact decimal string, not Number().
-    if (f.solAmount) out.push(unitsToNumber(f.solAmount, 9));
+    if (f.solAmount) out.push(unitsToNumber(f.solAmount, nativeOf().decimals));
     if (f.tokenAmount && e.decimals !== undefined) out.push(unitsToNumber(f.tokenAmount, e.decimals));
   }
   return out.filter((n) => Number.isFinite(n) && n > 0);
