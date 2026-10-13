@@ -8,6 +8,7 @@ import { api, errorText } from "@/lib/api/client";
 import type { TokenTrade, TradeFilter } from "@/lib/api/types";
 import { formatCompact, formatSol, lamportsToSol, shortAddr, timeAgo, unitsToNumber } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
+import { eventQuote, formatQuote } from "@/lib/quotes";
 import { cn } from "@/lib/utils";
 import type { LiveFeed as LiveFeedState } from "@/hooks/use-live-feed";
 import { useNow } from "@/hooks/use-now";
@@ -186,9 +187,20 @@ function TradeRow({ trade, now }: { trade: TokenTrade; now: number | null }) {
       <span className="tabular text-right text-muted-foreground">
         {formatCompact(unitsToNumber(trade.tokenAmount, trade.decimals))}
         <span className="text-faint-foreground"> · </span>
-        <span className="text-foreground/90">{formatSol(lamportsToSol(trade.solAmount))} SOL</span>
+        <TradeAmount trade={trade} />
       </span>
       <span className="tabular w-8 shrink-0 text-right font-mono text-[11px] text-faint-foreground">{now === null ? "" : timeAgo(trade.ts, now)}</span>
     </motion.li>
+  );
+}
+
+/** Trade size in the pair's quote (v0.13), SOL otherwise. */
+function TradeAmount({ trade }: { trade: TokenTrade }) {
+  const q = eventQuote(trade);
+  if (!q) return <span className="text-foreground/90">{formatSol(lamportsToSol(trade.solAmount))} SOL</span>;
+  return (
+    <span className="text-foreground/90">
+      {formatQuote(q.amount, q.quote)} {q.quote}
+    </span>
   );
 }

@@ -1,10 +1,13 @@
 // /tokens: filtering and sorting happen here, in the browser, over one public list that is the same
 // for everyone (FEATURES.md 9). Nothing about the filters ever reaches the server.
 
-import type { DiscoveryToken, Token, TokenListItem, Venue } from "@/lib/api/types";
+import type { DiscoveryToken, Quote, Token, TokenListItem, Venue } from "@/lib/api/types";
 
-/** A row of /tokens: pool list items have every field; Discovery rows lack the pool-only ones. */
-export type ListedToken = Token & Partial<Pick<TokenListItem, "unzeenLaunch" | "volume24hSol" | "unzeenTrades24h" | "curveProgressPct">>;
+/**
+ * A row of /tokens: pool list items have every field; Discovery rows lack the pool-only ones, and their
+ * pair is unknown (the indexer snapshot has no quote), so `quote` is optional here.
+ */
+export type ListedToken = Omit<Token, "quote"> & { quote?: Quote } & Partial<Pick<TokenListItem, "unzeenLaunch" | "volume24hSol" | "unzeenTrades24h" | "curveProgressPct">>;
 
 /** Discovery rows in the same shape (no pool volume / trades: the pool has not traded them). */
 export function fromDiscovery(d: DiscoveryToken): ListedToken {
@@ -14,6 +17,8 @@ export function fromDiscovery(d: DiscoveryToken): ListedToken {
 }
 
 export type VenueFilter = "all" | Venue;
+/** v0.13 pair filter. A row without a known pair matches only "all". */
+export type QuoteFilter = "all" | Quote;
 export type StatusFilter = "all" | "curve" | "near" | "graduated";
 export type SortKey = "volume" | "mcap" | "age" | "trades";
 
@@ -23,17 +28,23 @@ export const NEAR_GRADUATION_PCT = 80;
 export interface TokenFilters {
   unzeenOnly: boolean;
   venue: VenueFilter;
+  quote: QuoteFilter;
   status: StatusFilter;
   sort: SortKey;
   query: string;
 }
 
-export const DEFAULT_FILTERS: TokenFilters = { unzeenOnly: false, venue: "all", status: "all", sort: "volume", query: "" };
+export const DEFAULT_FILTERS: TokenFilters = { unzeenOnly: false, venue: "all", quote: "all", status: "all", sort: "volume", query: "" };
 
 const num = (s: string | undefined) => {
   const n = Number(s);
   return Number.isFinite(n) ? n : 0;
 };
+
+/** Pool rows always carry a pair (the client fills "SOL" for older servers); Discovery rows: unknown (null). */
+export function rowQuote(t: ListedToken): Quote | null {
+  return t.quote ?? null;
+}
 
 export function isNearGraduation(t: ListedToken): boolean {
   return t.status === "curve" && num(t.curveProgressPct) >= NEAR_GRADUATION_PCT;
@@ -60,6 +71,7 @@ export function filterTokens(list: readonly ListedToken[], f: TokenFilters): Lis
   return list
     .filter((t) => !f.unzeenOnly || t.unzeenLaunch === true)
     .filter((t) => f.venue === "all" || t.venue === f.venue)
+    .filter((t) => f.quote === "all" || rowQuote(t) === f.quote)
     .filter((t) => {
       if (f.status === "all") return true;
       if (f.status === "graduated") return t.status === "graduated";

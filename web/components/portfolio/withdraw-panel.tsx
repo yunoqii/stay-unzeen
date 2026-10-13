@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { TokenGlyph } from "@/components/tokens/token-glyph";
 import { ActionStatusCard } from "@/components/trade/action-status";
 import { Veiled } from "./peek";
+import { ScatterParts } from "./scatter-parts";
 
 export type WithdrawTab = "token" | "zec";
 const DELAYS_MIN = [5, 15, 60, 240];
@@ -167,7 +168,12 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
     );
     try {
       const it = await submitAction(network, action, { op: "withdraw_token", mint: selected.mint, symbol: token.symbol, decimals: token.decimals, amount: parsed.toString(), parts: n });
-      setGhost({ symbol: token.symbol, image: token.image, label: formatCompact(unitsToNumber(parsed.toString(), token.decimals)) });
+      setGhost({
+        symbol: token.symbol,
+        image: token.image,
+        label: formatCompact(unitsToNumber(parsed.toString(), token.decimals)),
+        ...(smart && parts > 1 ? { addrs: dests.slice(0, parts), maxDelayMin: maxDelay } : {}),
+      });
       setSentId(it.id);
       setAmount("");
       setAddrs(["", "", "", "", ""]);
@@ -539,6 +545,9 @@ interface Ghost {
   symbol: string;
   image?: string;
   label: string;
+  /** Smart withdraw: one fresh address per part (M4 split and scatter). */
+  addrs?: string[];
+  maxDelayMin?: number;
 }
 
 /** After sending: the tokens dissolve out of view, then the status takes their place. */
@@ -549,10 +558,12 @@ function Sent({ action, ghost, onAgain }: { action: Parameters<typeof ActionStat
     const t = setTimeout(() => setShowGhost(false), 450);
     return () => clearTimeout(t);
   }, [showGhost]);
+  const scatter = ghost?.addrs && ghost.addrs.length > 1 ? ghost : null;
   return (
     <div className="mt-5 space-y-4">
+      {scatter && <ScatterParts label={`${scatter.label} $${scatter.symbol}`} addrs={scatter.addrs!} maxDelayMin={scatter.maxDelayMin ?? 15} />}
       <AnimatePresence mode="wait" initial={false}>
-        {showGhost && ghost ? (
+        {showGhost && ghost && !scatter ? (
           <motion.div key="ghost" {...dissolve} className="flex items-center justify-center gap-3 py-6" aria-hidden>
             <TokenGlyph symbol={ghost.symbol} image={ghost.image} className="size-12 rounded-full text-xs" />
             <span className="tabular text-3xl font-medium tracking-tight">

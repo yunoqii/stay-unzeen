@@ -4,6 +4,7 @@ import { createContext, useContext, useState } from "react";
 import { Eye, EyeSlash } from "@phosphor-icons/react";
 import { cn } from "@/lib/utils";
 import { DecryptText } from "@/components/motion/decrypt-text";
+import { RedactionTape } from "@/components/motion/redaction-tape";
 
 /** Privacy mode: amounts are veiled by default, shown only while the user peeks. Never persisted. */
 const PeekContext = createContext<{ shown: boolean; toggle: () => void }>({ shown: false, toggle: () => {} });
@@ -37,11 +38,13 @@ export function Veiled({ children, className }: { children: React.ReactNode; cla
         aria-hidden={!shown}
         className={cn(
           "inline-block transition-[filter,opacity] duration-(--motion-base) ease-shadow select-none",
+          // M6 (motion-v2): redaction tape is the veil; the blur stays underneath as the fallback.
           shown ? "opacity-100 blur-none select-auto" : "opacity-70 blur-veil",
         )}
       >
         {shown && text !== null ? <DecryptText text={text} /> : !shown && text !== null ? VEIL : children}
       </span>
+      <RedactionTape state={shown ? "lifted" : "covered"} instant className="-inset-x-0.5 inset-y-[0.1em] opacity-80" />
       {!shown && <span className="sr-only">hidden</span>}
     </span>
   );

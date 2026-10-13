@@ -34,8 +34,10 @@ function eclipseMode(): EclipseMode {
 
 const EclipseGL = dynamic(() => import("./eclipse-gl"), { ssr: false });
 
+const CONTACT_EASE = [0.22, 1, 0.36, 1] as const;
+
 /** Static eclipse (CSS) first; then the poster, the loop or the WebGL one on top, by device. */
-function Eclipse() {
+function Eclipse({ contact }: { contact: boolean }) {
   const [mode, setMode] = useState<EclipseMode | null>(null);
   const [ready, setReady] = useState(false);
   const [visible, setVisible] = useState(true);
@@ -74,10 +76,34 @@ function Eclipse() {
     else v.pause();
   }, [mode, visible]);
 
+  // M3 in the CSS / video modes: the whole eclipse slides into phase, a bead flashes at the last point of
+  // contact and the glow (corona) settles. The WebGL eclipse does the same with uniforms.
+  const css = contact && mode !== null && mode !== "gl" && mode !== "static";
   return (
     <div ref={box} aria-hidden className="pointer-events-none absolute -top-44 right-[-14rem] size-[24rem] opacity-70 sm:-top-44 sm:right-[-6rem] sm:size-[30rem] sm:opacity-100 lg:right-0">
       {/* Ambient glow in Zcash yellow. */}
-      <div className="uz-glow absolute inset-[-35%] rounded-full bg-[radial-gradient(closest-side,rgb(244_183_40/0.14),rgb(244_183_40/0.05)_45%,transparent_70%)] blur-2xl" />
+      <motion.div
+        className="absolute inset-[-35%]"
+        initial={false}
+        animate={contact && mode !== "static" ? { opacity: [0, 0, 1] } : { opacity: 1 }}
+        transition={{ duration: 1.95, times: [0, 0.54, 1], ease: "easeOut" }}
+      >
+        <div className="uz-glow absolute inset-0 rounded-full bg-[radial-gradient(closest-side,rgb(244_183_40/0.14),rgb(244_183_40/0.05)_45%,transparent_70%)] blur-2xl" />
+      </motion.div>
+      {css && (
+        <motion.div
+          className="absolute top-[13%] right-[17%] z-10 size-[12%] rounded-full bg-[radial-gradient(closest-side,#fff6dc,rgb(244_183_40/0.9)_25%,transparent)]"
+          initial={{ opacity: 0, scale: 0.6 }}
+          animate={{ opacity: [0, 1, 0], scale: [0.6, 1.15, 1] }}
+          transition={{ duration: 0.7, delay: 1.05, times: [0, 0.35, 1], ease: "easeOut" }}
+        />
+      )}
+      <motion.div
+        className="absolute inset-0"
+        initial={css ? { x: "-3%", y: "2%" } : false}
+        animate={{ x: "0%", y: "0%" }}
+        transition={{ duration: 1.4, ease: CONTACT_EASE }}
+      >
       <div className={cn("absolute inset-0 transition-opacity duration-700", ready && "opacity-0")}>
         <div className="absolute inset-0 rounded-full bg-[radial-gradient(closest-side,transparent_88%,rgb(244_183_40/0.35)_95%,transparent)] blur-2xl" />
         <div className="absolute inset-[6%] rounded-full shadow-[0_0_0_1px_rgb(244_183_40/0.55),0_0_60px_6px_rgb(244_183_40/0.18)]" />
@@ -113,17 +139,18 @@ function Eclipse() {
       )}
       {mode === "gl" && (
         <div className={cn("absolute inset-[-16.667%] opacity-0 transition-opacity duration-700", ready && "opacity-100")}>
-          <EclipseGL active={visible} onReady={() => setReady(true)} />
+          <EclipseGL active={visible} contact={contact} onReady={() => setReady(true)} />
         </div>
       )}
+      </motion.div>
     </div>
   );
 }
 
-export function Hero({ onBuy }: { onBuy?: () => void }) {
+export function Hero({ onBuy, contact = false }: { onBuy?: () => void; contact?: boolean }) {
   return (
     <section className="relative overflow-hidden border-b border-border/60">
-      <Eclipse />
+      <Eclipse contact={contact} />
       <div className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-b from-transparent to-background" aria-hidden />
       <div className="relative mx-auto max-w-6xl px-4 pt-8 pb-8 sm:px-6 sm:pt-12 sm:pb-10">
         <p className="mb-4 font-mono text-xs tracking-wider text-faint-foreground uppercase">

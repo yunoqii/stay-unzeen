@@ -28,7 +28,9 @@ import type {
   TokenTrade,
   TokenWithTrades,
   TradeFilter,
+  Token,
 } from "./types";
+import { isPending } from "./types";
 
 export { ApiError, errorText } from "./errors";
 
@@ -53,6 +55,9 @@ function qs(params: Record<string, string | number | undefined>): string {
 }
 
 const enc = encodeURIComponent;
+
+/** Absent `quote` (servers before v0.13) means a SOL pair. */
+const withQuote = <T extends { quote?: Token["quote"] }>(t: T): T => (!t.quote ? { ...t, quote: "SOL" } : t);
 
 export interface TradesQuery {
   before?: string;
@@ -189,10 +194,12 @@ function makeApi(rawSend: <T>(call: Call) => Promise<T>, subscribeFeed: Api["sub
 
   return {
     getFeed: (limit = 50) => get(`/api/feed${qs({ limit })}`),
-    getTokens: () => get("/api/tokens"),
+    // v0.13: a server before non-SOL pairs sends no `quote`; that is a SOL pair.
+    getTokens: async () => (await get<TokenListItem[]>("/api/tokens")).map(withQuote),
     getToken: async (mint) => {
       try {
-        return await get<TokenWithTrades | PendingResponse>(`/api/tokens/${enc(mint)}`);
+        const t = await get<TokenWithTrades | PendingResponse>(`/api/tokens/${enc(mint)}`);
+        return isPending(t) ? t : withQuote(t);
       } catch (e) {
         if (e instanceof ApiError && e.code === "not_found") return null;
         throw e;

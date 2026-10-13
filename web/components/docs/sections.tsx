@@ -170,7 +170,14 @@ export const SECTIONS: DocSection[] = [
           <li>The pool checks prices about once a minute. A stop-loss fires after two checks in a row at or below its price.</li>
           <li>A triggered order trades in Delayed or Max privacy, never Now. Slippage is measured from the price check that triggered it.</li>
           <li>Orders expire after at most 72 hours. Cancel any open order at any time; the reserved amount comes back at once.</li>
-          <li>Orders work for pump.fun tokens on the bonding curve that the pool already trades.</li>
+          <li>
+            A <Strong>bracket</Strong> puts a take-profit and a stop-loss on one position with one hold: whichever hits first sells, and the other is cancelled.
+          </li>
+          <li>
+            <Strong>Retry after slippage</Strong> sends an order back to open when its trade misses the slippage limit, up to 3 times. A stop-loss with retry may still not
+            exit in a crash.
+          </li>
+          <li>Orders work for SOL-paired pump.fun tokens on the bonding curve that the pool already trades. Tokens paired with ZEC, USDC or USD1 are bought and sold directly.</li>
         </List>
       </>
     ),

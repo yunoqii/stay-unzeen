@@ -14,12 +14,12 @@ import { creatorMaxTier } from "@/lib/fair/tiers";
 import { validateMeta } from "@/lib/launch";
 import type { Network } from "@/lib/network";
 import { ApiError } from "./errors";
-import type { ActionReceipt, FairBid, FairLaunch, FairLaunchParams, OwnFairLaunch, PoolInfo, RateUsed, SignedAction } from "./types";
+import type { ActionReceipt, FairBid, FairLaunch, FairLaunchParams, OwnFairLaunch, PoolInfo, SignedAction, SolRateUsed } from "./types";
 
 export interface FairHost {
   pool(network: Network): PoolInfo;
   balance(network: Network, pubkey: string): { zecBalance: bigint; zecHeld: bigint; frozen: boolean };
-  buyRate(): RateUsed;
+  buyRate(): SolRateUsed;
   /** launchRules.maxInitialBuyLamports of the mock pool. */
   creatorMaxLamports: string;
   createFeeZat: bigint;

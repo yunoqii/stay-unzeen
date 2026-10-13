@@ -13,6 +13,8 @@ import { FeedItem } from "./feed-item";
 interface Props {
   events: FeedEvent[];
   fresh: ReadonlySet<string>;
+  /** M3 opening cascade: event id -> order among the first rows. */
+  intro?: ReadonlyMap<string, number>;
   loading: boolean;
   error: string | null;
   dense?: boolean;
@@ -20,7 +22,7 @@ interface Props {
   onRetry?: () => void;
 }
 
-export function LiveFeed({ events, fresh, loading, error, dense, emptyText = "Nothing yet. The pool is quiet.", onRetry }: Props) {
+export function LiveFeed({ events, fresh, intro, loading, error, dense, emptyText = "Nothing yet. The pool is quiet.", onRetry }: Props) {
   const now = useNow(1000);
   if (loading) return <FeedSkeleton dense={dense} />;
   if (error) return <ErrorState error={error} title="Feed unavailable" onRetry={onRetry} compact className="m-4" />;
@@ -30,7 +32,7 @@ export function LiveFeed({ events, fresh, loading, error, dense, emptyText = "No
     <ol aria-live="polite" aria-relevant="additions" className="relative">
       <AnimatePresence initial={false} mode="popLayout">
         {events.map((e) => (
-          <FeedItem key={e.id} event={e} now={now} fresh={fresh.has(e.id)} dense={dense} />
+          <FeedItem key={e.id} event={e} now={now} fresh={fresh.has(e.id)} dense={dense} intro={intro?.get(e.id)} />
         ))}
       </AnimatePresence>
     </ol>

@@ -319,7 +319,7 @@ function AssetPanel({
       {p && p.error && <p className="text-xs text-sell">Piece {p.piece + 1}: {p.error}</p>}
       {p && p.steps.length > 0 && (
         <div className="border border-border bg-[var(--uz-ink-1)] p-4 sm:p-5">
-          <MerkleTrace key={`${a.asset}:${p.piece}`} result={p} decimals={a.decimals} unit={unit} rootHash={tree?.root ?? ""} />
+          <MerkleTrace key={`${a.asset}:${p.piece}`} result={p} decimals={a.decimals} unit={unit} rootHash={tree?.root ?? ""} snapshotId={snap.id} />
         </div>
       )}
       <p className="mt-3 text-[11px] text-faint-foreground">Computed in this browser with SHA-256. Nothing was sent anywhere and nothing was stored.</p>

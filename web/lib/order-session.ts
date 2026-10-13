@@ -15,7 +15,7 @@ import { notifyAccepted } from "@/lib/activity";
 import { getSigner } from "@/lib/crypto/session";
 import type { HistoryEntry } from "@/lib/history/crypto";
 import type { Network } from "@/lib/network";
-import { isLive, isSellKind, ORDER_LABEL } from "./orders";
+import { firedAs, isLive, isSellKind, ORDER_LABEL } from "./orders";
 
 export interface SessionOrder {
   order: Order;
@@ -48,13 +48,20 @@ export function rememberSymbol(mint: string, symbol: string) {
 const label = (o: Order) => `${ORDER_LABEL[o.kind]} ${symbols.has(o.mint) ? "$" + symbols.get(o.mint) : "order"}`;
 
 function announce(prev: Order, next: Order) {
+  // v0.15: a trade that failed on slippage sent the order back to open (rearm).
+  if (next.status === "open" && (next.rearms ?? 0) > (prev.rearms ?? 0)) {
+    toast(`${label(next)}: retrying`, { description: `The trade missed your slippage limit. The order is open again with the same hold (retry ${next.rearms}).` });
+    return;
+  }
   if (prev.status === next.status) {
     if (!prev.armed && next.armed) toast(`${label(next)}: armed`, { description: "The price is at your trigger. One more check in a row and it sells." });
     return;
   }
   switch (next.status) {
     case "triggered":
-      toast(`${label(next)}: triggered`, { description: `${isSellKind(next.kind) ? "Selling" : "Buying"} in the next batch. On-chain it reads “unzeen”.` });
+      toast(`${label(next)}: triggered`, {
+        description: `${next.kind === "bracket" ? (next.leg === "sl" ? "Stop-loss leg: selling" : "Take-profit leg: selling") : isSellKind(next.kind) ? "Selling" : "Buying"} in the next batch.${next.kind === "bracket" ? " The other leg is cancelled." : ""} On-chain it reads “unzeen”.`,
+      });
       break;
     case "filled":
       toast.success(`${label(next)}: filled`, { description: "Unzeen made the trade from your private balance." });
@@ -86,7 +93,7 @@ export function applyPolledOrders(network: Network, pubkey: string, list: Order[
       changed = true;
     }
     if (o.actionId && (o.status === "triggered" || o.status === "filled")) {
-      fromOrders.push({ id: o.actionId, kind: isSellKind(o.kind) ? "sell" : "buy", mint: o.mint, symbol: symbols.get(o.mint), via: o.kind, submittedAt: now });
+      fromOrders.push({ id: o.actionId, kind: isSellKind(o.kind) ? "sell" : "buy", mint: o.mint, symbol: symbols.get(o.mint), via: firedAs(o), submittedAt: now });
     }
   }
   for (const [key, s] of seen) {

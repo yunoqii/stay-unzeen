@@ -102,13 +102,15 @@ export function compareWithPortfolio(own: Pick<OwnCheck, "result" | "proof">, sn
 }
 
 /**
- * v0.10: creator fees owed sit in the creator's ZEC leaf: ceil(Σ claimable lamports × 1e8 / rateLamportsPerZecBuy).
- * No rate in the snapshot = nothing to add (the server skips a snapshot with claimable but no rate).
+ * v0.10: creator fees owed sit in the creator's ZEC leaf: ceil(Σ claimable lamports × 1e8 / rateLamportsPerZecBuy),
+ * v0.14: plus Σ claimable zecAmount (ZEC pairs) as is. No rate in the snapshot = the lamport part adds nothing
+ * (the server skips a snapshot with claimable lamports but no rate).
  */
-export function claimableZat(claimable: Pick<Portfolio["claimable"][number], "solAmount">[], rateLamportsPerZecBuy?: string): bigint {
-  const rate = rateLamportsPerZecBuy && /^\d+$/.test(rateLamportsPerZecBuy) ? BigInt(rateLamportsPerZecBuy) : BigInt(0);
-  if (rate === BigInt(0)) return BigInt(0);
-  const lamports = claimable.reduce((s, c) => s + (/^\d+$/.test(c.solAmount) ? BigInt(c.solAmount) : BigInt(0)), BigInt(0));
-  if (lamports === BigInt(0)) return BigInt(0);
-  return (lamports * BigInt(100_000_000) + rate - BigInt(1)) / rate;
+export function claimableZat(claimable: Pick<Portfolio["claimable"][number], "solAmount" | "zecAmount">[], rateLamportsPerZecBuy?: string): bigint {
+  const u = (v: string | undefined) => (v && /^\d+$/.test(v) ? BigInt(v) : BigInt(0));
+  const zat = claimable.reduce((s, c) => s + u(c.zecAmount), BigInt(0));
+  const rate = u(rateLamportsPerZecBuy);
+  const lamports = claimable.reduce((s, c) => s + u(c.solAmount), BigInt(0));
+  if (rate === BigInt(0) || lamports === BigInt(0)) return zat;
+  return zat + (lamports * BigInt(100_000_000) + rate - BigInt(1)) / rate;
 }

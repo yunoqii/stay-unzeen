@@ -1,10 +1,11 @@
 "use client";
 
 import { motion, useReducedMotion } from "motion/react";
-import { CheckCircle, WarningCircle } from "@phosphor-icons/react";
-import { coverageBps, type SolvencyRow } from "@/lib/verify/merkle-sum";
+import { WarningCircle } from "@phosphor-icons/react";
+import { coverageBps, type QuoteHolding, type SolvencyRow } from "@/lib/verify/merkle-sum";
 import { assetLabel, fmtAmount, fmtPct } from "@/lib/verify/display";
 import { cn } from "@/lib/utils";
+import { shortAddr } from "@/lib/format";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 
@@ -57,15 +58,26 @@ function Row({ r, label, i }: { r: SolvencyRow; label: string; i: number }) {
           {zec && r.provenZat !== undefined && r.attestedZat !== undefined && (
             <>
               {" · "}
-              <span className="text-muted-foreground">{fmtAmount(r.provenZat, 8)} proven</span> + {fmtAmount(r.attestedZat, 8)} attested
+              <span className="text-muted-foreground">{fmtAmount(r.provenZat, 8)} proven</span>
+              {r.bridgedZat !== undefined && r.bridgedZat > BigInt(0) && <> + {fmtAmount(r.bridgedZat, 8)} bridged</>} + {fmtAmount(r.attestedZat, 8)} attested
             </>
           )}
         </p>
       </div>
       <div className="col-span-2 md:col-span-1">
         <span className={cn("inline-flex items-center gap-1.5 text-xs", ok ? "text-foreground" : "text-sell")}>
-          {ok ? <CheckCircle size={13} weight="fill" className="text-zec" aria-hidden /> : <WarningCircle size={13} weight="fill" aria-hidden />}
-          {unknown ? "Unknown asset" : !r.vaultsSigned ? "Unsigned vault" : !r.covered ? "Not covered" : zec ? "Proven SOL + attested ZEC" : "Proven"}
+          {ok ? <span aria-hidden className="size-1.5 rounded-full bg-zec" /> : <WarningCircle size={13} weight="fill" aria-hidden />}
+          {unknown
+            ? "Unknown asset"
+            : !r.vaultsSigned
+              ? "Unsigned vault"
+              : !r.covered
+                ? "Not covered"
+                : zec
+                  ? r.bridgedZat !== undefined && r.bridgedZat > BigInt(0)
+                    ? "Proven SOL + bridged ZEC + attested ZEC"
+                    : "Proven SOL + attested ZEC"
+                  : "Proven"}
         </span>
         {unknown && <p className="mt-1 text-[11px] text-pretty text-faint-foreground">Not ZEC or a Solana mint: this page can&apos;t check it.</p>}
         {zec && (
@@ -106,22 +118,66 @@ function Bar({ r, i }: { r: SolvencyRow; i: number }) {
     r.kind === "proven_attested"
       ? [
           { w: pct(r.provenZat ?? BigInt(0)), cls: "bg-zec" },
-          { w: pct(r.attestedZat ?? BigInt(0)), cls: "hatch-zec border border-zec/40" },
+          { w: pct(r.bridgedZat ?? BigInt(0)), cls: "bg-zec/55" },
+          { w: pct(r.attestedZat ?? BigInt(0)), cls: "bg-[repeating-linear-gradient(to_right,var(--uz-zec)_0_3px,transparent_3px_5px)]" },
         ]
       : [{ w: pct(r.assets), cls: "bg-zec" }];
   return (
-    <div className="relative h-2 w-full overflow-hidden rounded-sm bg-surface-2" aria-hidden>
+    // M9 "Thin proof" (motion-v2): yellow is light, not paint. A 2 px line fills to its value once, staggered by row.
+    <div className="relative flex h-2.5 w-full items-center" aria-hidden>
+      <span className="absolute inset-x-0 h-px bg-surface-3" />
       <motion.div
-        className="flex h-full origin-left"
+        className="relative flex h-[2px] w-full origin-left"
         initial={reduce ? false : { scaleX: 0 }}
         animate={{ scaleX: 1 }}
-        transition={{ duration: 0.5, delay: 0.05 * i, ease: EASE }}
+        transition={{ duration: 0.6, delay: 0.06 * i, ease: EASE }}
       >
         {segs.map((s, k) => (
           <span key={k} className={cn("h-full", s.cls)} style={{ width: `${s.w}%` }} />
         ))}
       </motion.div>
       <span className="absolute inset-y-0 w-px bg-foreground/80" style={{ left: `calc(${line}% - 1px)` }} />
+    </div>
+  );
+}
+
+/**
+ * v0.13 quote assets of non-SOL pairs on the vaults. Only ZEC SPL counts towards the ZEC cover, one to one,
+ * and it is a bridged asset: the bridge issuer could fail it. USDC / USD1 are listed so nothing is hidden,
+ * but never counted (conservative: their value in ZEC would need a rate this page can't prove).
+ */
+export function QuoteAssetsTable({ rows }: { rows: QuoteHolding[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="mt-4 border border-border">
+      <div className="flex items-baseline justify-between gap-3 border-b border-border px-4 py-2.5">
+        <h3 className="font-mono text-[10px] tracking-wider text-faint-foreground uppercase">Quote assets on the vaults</h3>
+        <span className="text-[11px] text-faint-foreground">pairs not to SOL</span>
+      </div>
+      <ul className="divide-y divide-border">
+        {rows.map((q) => (
+          <li key={q.mint} className="grid grid-cols-2 gap-x-4 gap-y-1 px-4 py-3 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,2.4fr)] md:items-center">
+            <span className="min-w-0">
+              <span className="font-medium">{q.quote === "ZEC" ? "ZEC SPL" : q.quote}</span>
+              {q.bridged && <span className="ml-2 rounded-sm border border-zec/40 px-1 py-px font-mono text-[10px] text-zec uppercase">bridged</span>}
+              <span className="block font-mono text-[10px] text-faint-foreground">{shortAddr(q.mint, 4, 4)}</span>
+            </span>
+            <span className="text-right font-mono text-sm tabular md:text-right">{fmtAmount(q.total, q.decimals, 2)}</span>
+            <p className="col-span-2 text-[11px] text-pretty text-faint-foreground md:col-span-1">
+              {q.counted ? (
+                <>
+                  <span className="text-muted-foreground">Counted 1:1 towards ZEC</span> ({fmtAmount(q.countedZat, 8, 3)} ZEC after dust). Bridged: its value depends on the bridge issuer, so it is
+                  shown apart from proven SOL.
+                </>
+              ) : (
+                <>
+                  <span className="text-muted-foreground">Shown, not counted.</span> Conservative: no liability is backed by it here.
+                </>
+              )}
+            </p>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

@@ -8,7 +8,7 @@
 import { useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { api, ApiError, errorText } from "@/lib/api/client";
-import type { ActionReceipt, ActionState, ActionStatus, ExecMode, RateUsed, SignedAction } from "@/lib/api/types";
+import type { ActionReceipt, ActionState, ActionStatus, ExecMode, RateUsed, SignedAction, SolRateUsed } from "@/lib/api/types";
 import { getSigner } from "@/lib/crypto/session";
 import type { Network } from "@/lib/network";
 import { recordSubmitted } from "@/lib/history/store";
@@ -35,7 +35,7 @@ export interface TrackedAction {
 }
 
 const items = new Map<string, TrackedAction>();
-const rates: Record<Network, { buy?: RateUsed; sell?: RateUsed }> = { devnet: {}, mainnet: {} };
+const rates: Record<Network, { buy?: SolRateUsed; sell?: SolRateUsed }> = { devnet: {}, mainnet: {} };
 let version = 0;
 let snapshot: TrackedAction[] = [];
 const listeners = new Set<() => void>();
@@ -52,14 +52,15 @@ function subscribe(l: () => void) {
 }
 
 function rememberRate(network: Network, op: TrackedOp, rate?: RateUsed) {
-  if (!rate) return;
+  // v0.13: ZEC-pair actions run at 1:1 parity and carry no ZEC/SOL rate: nothing to remember.
+  if (!rate || !rate.lamportsPerZec) return;
   const side = op === "sell" ? "sell" : "buy";
   const prev = rates[network][side];
-  if (!prev || rate.ts >= prev.ts) rates[network][side] = rate;
+  if (!prev || rate.ts >= prev.ts) rates[network][side] = rate as SolRateUsed;
 }
 
 /** Most recent rate the pool fixed for this network and side (or the other side as a fallback). */
-export function lastRate(network: Network, side: "buy" | "sell"): RateUsed | null {
+export function lastRate(network: Network, side: "buy" | "sell"): SolRateUsed | null {
   return rates[network][side] ?? rates[network][side === "buy" ? "sell" : "buy"] ?? null;
 }
 

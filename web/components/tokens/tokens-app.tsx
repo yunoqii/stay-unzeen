@@ -8,7 +8,7 @@ import { api, errorText } from "@/lib/api/client";
 import type { DiscoveryToken } from "@/lib/api/types";
 import { formatCompact, formatPrice, timeAgo } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
-import { DEFAULT_FILTERS, filterTokens, fromDiscovery, type ListedToken, isNearGraduation, NEAR_GRADUATION_PCT, type SortKey, type StatusFilter, type TokenFilters, type VenueFilter } from "@/lib/token-list";
+import { DEFAULT_FILTERS, filterTokens, fromDiscovery, type ListedToken, isNearGraduation, NEAR_GRADUATION_PCT, type QuoteFilter, type SortKey, type StatusFilter, type TokenFilters, type VenueFilter } from "@/lib/token-list";
 import { onTabListKeyDown } from "@/lib/tabs";
 import { cn } from "@/lib/utils";
 import { useNow } from "@/hooks/use-now";
@@ -18,6 +18,7 @@ import { EmptyState } from "@/components/layout/page-shell";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/states";
 import { TokenGlyph } from "./token-glyph";
+import { QuoteBadge } from "./quote-badge";
 import { VenueTag } from "./venue-tag";
 
 type Source = "pool" | "discovery";
@@ -26,7 +27,15 @@ const VENUES: { id: VenueFilter; label: string }[] = [
   { id: "all", label: "All venues" },
   { id: "pumpfun", label: "pump.fun" },
   { id: "meteora-dbc", label: "Meteora DBC" },
+  { id: "raydium-launchlab", label: "Raydium LaunchLab" },
   { id: "jupiter", label: "Other" },
+];
+const PAIRS: { id: QuoteFilter; label: string }[] = [
+  { id: "all", label: "Any pair" },
+  { id: "SOL", label: "SOL pairs" },
+  { id: "ZEC", label: "ZEC pairs" },
+  { id: "USDC", label: "USDC pairs" },
+  { id: "USD1", label: "USD1 pairs" },
 ];
 const STATUSES: { id: StatusFilter; label: string }[] = [
   { id: "all", label: "Any status" },
@@ -78,7 +87,7 @@ export function TokensApp() {
   const set = <K extends keyof TokenFilters>(k: K, v: TokenFilters[K]) => setF((x) => ({ ...x, [k]: v }));
   const shown = useMemo(() => (tokens ? filterTokens(tokens, f) : null), [tokens, f]);
   const now = useNow(10_000);
-  const filtered = f.unzeenOnly || f.venue !== "all" || f.status !== "all" || f.query.trim() !== "";
+  const filtered = f.unzeenOnly || f.venue !== "all" || f.quote !== "all" || f.status !== "all" || f.query.trim() !== "";
 
   return (
     <div className="space-y-4">
@@ -141,6 +150,7 @@ export function TokensApp() {
           Launched via Unzeen
         </button>
         <Select label="Venue" value={f.venue} options={VENUES} onChange={(v) => set("venue", v)} />
+        <Select label="Pair" value={f.quote} options={PAIRS} onChange={(v) => set("quote", v)} />
         <Select label="Status" value={f.status} options={STATUSES} onChange={(v) => set("status", v)} />
         <Select label="Sort by" value={f.sort} options={SORTS} onChange={(v) => set("sort", v)} />
         {filtered && (
@@ -172,7 +182,11 @@ export function TokensApp() {
         </div>
       ) : shown.length === 0 ? (
         <EmptyState art title={filtered ? "Nothing matches these filters." : "No tokens yet."}>
-          {filtered ? "Try another venue or status, or clear the search." : "Once unzeen trades a token, it shows up here."}
+          {filtered
+            ? src === "discovery" && f.quote !== "all"
+              ? "Discovery rows don't say which pair they trade against. Pick Any pair, or switch to Pool."
+              : "Try another venue, pair or status, or clear the search."
+            : "Once unzeen trades a token, it shows up here."}
         </EmptyState>
       ) : (
         <div className="ledger overflow-x-auto">
@@ -220,6 +234,7 @@ function Row({ t, now }: { t: ListedToken; now: number | null }) {
           <span className="min-w-0">
             <span className="flex items-center gap-1.5">
               <span className="font-medium">${t.symbol}</span>
+              <QuoteBadge quote={t.quote} />
               {t.unzeenLaunch && <SealCheck size={13} weight="fill" className="text-zec" aria-label="Launched via Unzeen" />}
             </span>
             <span className="block max-w-[14rem] truncate text-xs text-muted-foreground">{t.name}</span>
@@ -227,7 +242,7 @@ function Row({ t, now }: { t: ListedToken; now: number | null }) {
         </Link>
       </td>
       <td className="px-4 py-3 text-xs">
-        <VenueTag venue={t.venue} />
+        <VenueTag venue={t.venue} platform={t.platform} />
       </td>
       <td className="px-4 py-3 text-xs">
         {t.status === "graduated" ? (
@@ -244,13 +259,31 @@ function Row({ t, now }: { t: ListedToken; now: number | null }) {
         )}
       </td>
       <td className="tabular px-4 py-3 text-right">
-        {formatCompact(Number(t.marketCapSol))} <span className="text-xs text-faint-foreground">SOL</span>
-        <span className="block text-[11px] text-faint-foreground">{formatPrice(t.priceSol)}</span>
+        {Number(t.marketCapSol) > 0 ? (
+          <>
+            {formatCompact(Number(t.marketCapSol))} <span className="text-xs text-faint-foreground">SOL</span>
+          </>
+        ) : (
+          <span className="text-faint-foreground">—</span>
+        )}
+        <RowPrice t={t} />
       </td>
       <td className="tabular px-4 py-3 text-right">{t.volume24hSol === undefined ? <span className="text-faint-foreground">—</span> : <>{formatCompact(Number(t.volume24hSol))} <span className="text-xs text-faint-foreground">SOL</span></>}</td>
       <td className="tabular px-4 py-3 text-right">{t.unzeenTrades24h === undefined ? <span className="text-faint-foreground">—</span> : t.unzeenTrades24h}</td>
       <td className="tabular px-4 py-3 text-right font-mono text-xs text-faint-foreground">{now === null ? "" : timeAgo(t.createdAt, now)}</td>
     </tr>
+  );
+}
+
+/** Price under the market cap: in the pair's own quote when it has one (ZEC pairs never via SOL). */
+function RowPrice({ t }: { t: ListedToken }) {
+  const q = t.quote ?? "SOL";
+  const inQuote = q !== "SOL" && Number(t.priceQuote) > 0;
+  return (
+    <span className="block text-[11px] text-faint-foreground">
+      {inQuote ? formatPrice(t.priceQuote!) : formatPrice(t.priceSol)}
+      {q !== "SOL" && (inQuote || Number(t.priceSol) > 0) && <span className="ml-1">{inQuote ? q : "SOL"}</span>}
+    </span>
   );
 }
 

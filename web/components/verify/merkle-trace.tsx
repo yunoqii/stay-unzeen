@@ -1,30 +1,35 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { ArrowCounterClockwise, CheckCircle, XCircle } from "@phosphor-icons/react";
 import type { PieceResult } from "@/lib/verify/merkle-sum";
 import { fmtAmount } from "@/lib/verify/display";
 import { cn } from "@/lib/utils";
+import { DecryptText } from "@/components/motion/decrypt-text";
 
 // The real climb of one piece of your balance, leaf -> root, as recomputed in this browser.
 // One row per level, root on top. On each row: the node you computed (hash + Σ) on one side, the
 // sibling from the proof on the other, where the leafIndex bit puts it. Siblings are hatched: they
 // are other people's subtrees, you only ever see their totals.
 // Tracing lights the path bottom-up, one level at a time (state feedback, no decoration).
+// Motion v2 M5 "Your leaf, nobody else's": siblings are redaction tape (a leaf is there, whose is unknown),
+// the hairline path climbs in ~900 ms, each node lights with scale 1.6 → 1 as the line reaches it, and the
+// root's hash decrypts last. Reduced motion: final state at once.
 
 const EASE = [0.65, 0, 0.35, 1] as const;
-const STEP = 0.07;
+/** The whole climb takes about this long, whatever the depth. */
+const PATH_S = 0.9;
 
 const short = (h: string) => `${h.slice(0, 8)}…${h.slice(-4)}`;
 
-export function MerkleTrace({ result, decimals, unit, rootHash }: { result: PieceResult; decimals: number; unit: string; rootHash: string }) {
+export function MerkleTrace({ result, decimals, unit, rootHash, snapshotId }: { result: PieceResult; decimals: number; unit: string; rootHash: string; snapshotId?: number }) {
   const reduce = useReducedMotion();
   const [run, setRun] = useState(0);
   const id = useId();
-  const step = reduce ? 0 : STEP;
   const steps = result.steps;
   const depth = steps.length;
+  const step = reduce ? 0 : PATH_S / Math.max(1, depth);
   const amt = (v: bigint) => `${fmtAmount(v, decimals, 4)} ${unit}`;
   const ok = result.ok;
   // Rows top -> bottom: root (t = depth), ..., first parent (t = 1), leaf (t = 0).
@@ -64,7 +69,12 @@ export function MerkleTrace({ result, decimals, unit, rootHash }: { result: Piec
                 root {ok ? "matches" : "differs"}
               </span>
               <span className="text-muted-foreground">Σ {rows[0] ? amt(rows[0].node.sum) : amt(result.value)}</span>
-              <span className="text-faint-foreground">{short(rows[0]?.node.hash ?? rootHash)}</span>
+              {reduce ? (
+                <span className="text-faint-foreground">{short(rows[0]?.node.hash ?? rootHash)}</span>
+              ) : (
+                <RootHash text={short(rows[0]?.node.hash ?? rootHash)} delayS={depth * step} />
+              )}
+              {snapshotId !== undefined && <span className="text-faint-foreground">root #{snapshotId}</span>}
             </Label>
           }
           connector={false}
@@ -92,6 +102,7 @@ export function MerkleTrace({ result, decimals, unit, rootHash }: { result: Piec
               center={<Dot t={below} step={step} leaf={isLeaf} ok />}
               leftSide={s.siblingSide === "left" ? sib : own}
               rightSide={s.siblingSide === "left" ? own : sib}
+              last={below === depth - 1}
               connector
             />
           );
@@ -109,6 +120,7 @@ function Row({
   rightSide,
   connector,
   lit,
+  last = false,
 }: {
   t: number;
   step: number;
@@ -117,6 +129,8 @@ function Row({
   rightSide: React.ReactNode;
   connector: boolean;
   lit: boolean;
+  /** The segment that reaches the root. */
+  last?: boolean;
 }) {
   return (
     <li className="grid grid-cols-[minmax(0,1fr)_1.75rem_minmax(0,1fr)] items-center">
@@ -129,7 +143,8 @@ function Row({
               className={cn("absolute bottom-1/2 h-11 w-px origin-bottom", lit ? "bg-zec" : "bg-sell")}
               initial={{ scaleY: 0 }}
               animate={{ scaleY: 1 }}
-              transition={{ duration: step || 0.01, delay: t * step + step * 0.5, ease: EASE }}
+              // Segments chain into one line climbing from the leaf: linear inside, the curve sits on the whole climb.
+              transition={{ duration: step || 0.01, delay: t * step, ease: t === 0 ? [EASE[0], EASE[1], 1, 1] : last ? [0, 0, EASE[2], EASE[3]] : "linear" }}
             />
           </>
         )}
@@ -148,9 +163,9 @@ function Dot({ t, step, big, leaf, ok }: { t: number; step: number; big?: boolea
         big ? "size-3.5" : leaf ? "size-3 rounded-[3px]" : "size-2.5",
         ok ? "border-zec bg-zec" : "border-sell bg-sell",
       )}
-      initial={{ opacity: 0.25, scale: 0.6 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.2, delay: t * step }}
+      initial={step ? { opacity: 0.25, scale: 1 } : false}
+      animate={step ? { opacity: [0.25, 1, 1], scale: [1, 1.6, 1] } : { opacity: 1, scale: 1 }}
+      transition={{ duration: 0.3, delay: t * step, times: [0, 0.01, 1], ease: [0.16, 1, 0.3, 1] }}
     />
   );
 }
@@ -168,16 +183,31 @@ function Label({ t, step, strong, children }: { t: number; step: number; strong?
   );
 }
 
+/** Someone else's subtree: a strip of redaction tape (a leaf is there, whose is unknown) and only its total. */
 function Sibling({ t, step, sum, hash }: { t: number; step: number; sum: string; hash: string }) {
   return (
     <motion.span
-      className="hatch flex min-w-0 max-w-full flex-col rounded-md border border-border px-2 py-1 font-mono text-[10px] leading-tight text-faint-foreground tabular"
+      className="flex min-w-0 max-w-full items-center gap-2 font-mono text-[10px] leading-tight text-faint-foreground tabular"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.25, delay: t * step }}
+      title={`Someone else's subtree: Σ ${sum} · ${hash}`}
     >
-      <span className="truncate text-muted-foreground">Σ {sum}</span>
-      <span className="truncate">{hash}</span>
+      <span aria-hidden className="redaction-tape relative block h-3.5 w-[3.25rem] shrink-0 rounded-[2px] opacity-55" />
+      <span className="flex min-w-0 flex-col">
+        <span className="truncate text-muted-foreground">Σ {sum}</span>
+        <span className="truncate">{hash}</span>
+      </span>
     </motion.span>
   );
+}
+
+/** The root's hash decrypts once the line reaches it (420 ms). */
+function RootHash({ text, delayS }: { text: string; delayS: number }) {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setOn(true), delayS * 1000);
+    return () => clearTimeout(t);
+  }, [delayS]);
+  return <span className="text-faint-foreground">{on ? <DecryptText text={text} durationMs={420} /> : "░▒▓░▒▓░▒…▓░▒▓"}</span>;
 }

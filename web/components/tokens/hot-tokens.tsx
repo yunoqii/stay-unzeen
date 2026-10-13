@@ -12,6 +12,7 @@ import { EmptyState } from "@/components/layout/page-shell";
 import { captureShared, sharedProps } from "@/components/motion/shared-element";
 import { Tilt } from "@/components/motion/tilt";
 import { TokenGlyph } from "./token-glyph";
+import { QuoteBadge } from "./quote-badge";
 import { VenueTag } from "./venue-tag";
 
 const WINDOW_MS = 10 * 60_000;
@@ -75,16 +76,23 @@ export function HotTokens({ tokens, events, now, limit = 6 }: Props) {
                 <span {...sharedProps(`ticker-${token.mint}`)} className="font-medium">
                   ${token.symbol}
                 </span>
+                <QuoteBadge quote={token.quote} className="self-center" />
                 <span className="truncate text-xs text-faint-foreground">{token.name}</span>
               </p>
               <p className="mt-0.5 flex items-center gap-2 text-xs">
-                <VenueTag venue={token.venue} />
+                <VenueTag venue={token.venue} platform={token.platform} />
                 {token.status === "graduated" && <span className="text-faint-foreground">· graduated</span>}
               </p>
             </div>
             <div className="text-right">
               <p className="tabular text-sm">
-                {formatCompact(Number(token.marketCapSol))} <span className="text-faint-foreground">SOL</span>
+                {Number(token.marketCapSol) > 0 ? (
+                  <>
+                    {formatCompact(Number(token.marketCapSol))} <span className="text-faint-foreground">SOL</span>
+                  </>
+                ) : (
+                  <span className="text-faint-foreground">—</span>
+                )}
               </p>
               <p
                 className={cn(

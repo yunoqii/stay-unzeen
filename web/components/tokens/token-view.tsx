@@ -2,15 +2,19 @@
 
 import { ErrorState } from "@/components/ui/states";
 import Link from "next/link";
-import { use, useMemo } from "react";
+import { use, useMemo, useState } from "react";
 import { ArrowLeft } from "@phosphor-icons/react";
 import { CopyButton } from "@/components/ui/copy-button";
 import { api } from "@/lib/api/client";
 import { fillsOf } from "@/lib/history/reduce";
 import { useHistory } from "@/lib/history/store";
 import { isSolanaAddress } from "@/lib/trade";
+import { cn } from "@/lib/utils";
 import type { FeedEvent, TokenWithTrades } from "@/lib/api/types";
 import { formatCompact, formatPrice, shortAddr, timeAgo } from "@/lib/format";
+import { eventQuote, quotePerSol, tokenQuote } from "@/lib/quotes";
+import type { Quote } from "@/lib/api/types";
+import { QuoteBadge } from "./quote-badge";
 import { useLiveFeed } from "@/hooks/use-live-feed";
 import { useNow } from "@/hooks/use-now";
 import { usePending } from "@/hooks/use-pending";
@@ -88,7 +92,17 @@ function TokenByMint({ mint }: { mint: string }) {
 function TokenLoaded({ token }: { token: TokenWithTrades }) {
   const feed = useLiveFeed({ mint: token.mint, initial: token.trades, limit: 100 });
   const now = useNow(1000);
-  const priceSol = useLivePrice(token, feed.events);
+  const { sol: priceSol, quote: priceQuote } = useLivePrice(token, feed.events);
+  const quote = tokenQuote(token);
+  // v0.13: non-SOL pairs read in their own quote by default; SOL is the comparable view (switchable).
+  const [denomPick, setDenom] = useState<"quote" | "SOL">("quote");
+  const scale = quotePerSol(token);
+  const quoteView = quote !== "SOL" && denomPick === "quote";
+  const chartDenom = quoteView && scale !== null ? { unit: quote, scale } : { unit: "SOL", scale: 1 };
+  const shownPrice = quoteView ? priceQuote : priceSol;
+  const mcapSol = Number(token.marketCapSol);
+  const shownMcap = !(mcapSol > 0) ? null : quoteView ? (scale !== null ? mcapSol * scale : null) : mcapSol;
+  const denomSwitch = quote !== "SOL" ? <DenomSwitch quote={quote} value={denomPick} onChange={setDenom} solAvailable={Number(priceSol) > 0} /> : null;
   const history = useHistory();
   const { shown } = usePeek();
   const safety = useSafety(token.mint);
@@ -101,7 +115,14 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
     () =>
       (portfolio?.orders ?? [])
         .filter((o) => o.mint === token.mint && o.status === "open")
-        .map((o) => ({ id: o.id, price: Number(o.triggerPriceSol), label: ORDER_LABEL[o.kind] })),
+        .flatMap((o) =>
+          o.kind === "bracket"
+            ? [
+                { id: `${o.id}:tp`, price: Number(o.triggerPriceSol), label: "Bracket TP" },
+                ...(o.slPriceSol ? [{ id: `${o.id}:sl`, price: Number(o.slPriceSol), label: o.armed ? "Bracket SL · armed" : "Bracket SL" }] : []),
+              ]
+            : [{ id: o.id, price: Number(o.triggerPriceSol), label: ORDER_LABEL[o.kind] }],
+        ),
     [portfolio?.orders, token.mint],
   );
 
@@ -122,10 +143,11 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
             <SharedTarget id={`ticker-${token.mint}`} className="inline-block">
               <span className="text-3xl font-medium tracking-tight">${token.symbol}</span>
             </SharedTarget>
+            <QuoteBadge quote={quote} className="h-5 self-center text-[11px]" />
             <span className="text-lg text-muted-foreground">{token.name}</span>
           </h1>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-            <VenueTag venue={token.venue} />
+            <VenueTag venue={token.venue} platform={token.platform} />
             <span className="text-faint-foreground">
               {token.status === "graduated" ? "graduated" : curve === null ? "on bonding curve" : <span className="tabular">curve {curve}%</span>}
             </span>
@@ -136,21 +158,23 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
         </div>
       </header>
 
+      {quote === "ZEC" && <ZecPairNote />}
+
       <dl className="ledger mt-8 grid-cols-3">
-        <Stat label="Price" value={formatPrice(priceSol)} unit="SOL" />
-        <Stat label="Market cap" value={formatCompact(Number(token.marketCapSol))} unit="SOL" />
+        <Stat label="Price" value={shownPrice === undefined ? "—" : formatPrice(shownPrice)} unit={quoteView ? quote : "SOL"} />
+        <Stat label="Market cap" value={shownMcap === null ? "—" : formatCompact(shownMcap)} unit={quoteView ? quote : "SOL"} />
         <Stat label="Created" value={now === null ? "" : timeAgo(token.createdAt, now)} unit="ago" />
       </dl>
 
       <div aria-hidden className="hatch mt-6 h-3" />
       <div className="ledger grid lg:grid-cols-[minmax(0,1fr)_360px] lg:grid-rows-[auto_1fr]">
         <div className="min-w-0">
-          <PriceChart mint={token.mint} trades={feed.events} markers={ownFills} triggers={triggers} showMarkers={shown} />
+          <PriceChart mint={token.mint} trades={feed.events} markers={ownFills} triggers={triggers} showMarkers={shown} denom={chartDenom} denomSwitch={denomSwitch} />
         </div>
 
         <aside className="flex flex-col gap-px bg-border lg:col-start-2 lg:row-span-2 lg:row-start-1 [&>*]:bg-background">
-          <TradePanel token={token} priceSol={priceSol} />
-          <PositionCard token={token} priceSol={priceSol} />
+          <TradePanel token={token} priceSol={priceSol} priceQuote={priceQuote} />
+          <PositionCard token={token} priceSol={priceSol} priceQuote={priceQuote} />
           <SafetyPanel state={safety} />
           <div className="hatch hidden min-h-6 flex-1 opacity-50 lg:block" aria-hidden />
         </aside>
@@ -205,13 +229,67 @@ export function TokenViewSkeleton() {
   );
 }
 
-/** Price of the latest trade we saw on the socket, else the token's own priceSol. Plain decimal string. */
-function useLivePrice(token: TokenWithTrades, events: FeedEvent[]): string {
-  const e = events.find((x) => x.kind !== "create");
-  if (!e || token.trades.some((t) => t.id === e.id)) return token.priceSol;
-  const tokens = Number(e.tokenAmount) / 10 ** e.decimals;
-  const sol = Number(e.solAmount) / 1e9;
-  if (!(tokens > 0) || !(sol > 0)) return token.priceSol;
-  const p = sol / tokens;
+/** Plain decimal string with ~6 significant digits (no e-notation). */
+function plain(p: number): string {
   return p.toFixed(Math.min(20, Math.max(0, 5 - Math.floor(Math.log10(p)))));
+}
+
+/**
+ * Price of the latest trade we saw on the socket, else the token's own prices. SOL: the SOL (equivalent)
+ * per token; quote (v0.13, non-SOL pairs): the pair's own price from the trade's quote amount.
+ */
+function useLivePrice(token: TokenWithTrades, events: FeedEvent[]): { sol: string; quote: string | undefined } {
+  const base = { sol: token.priceSol, quote: Number(token.priceQuote) > 0 ? token.priceQuote : undefined };
+  const e = events.find((x) => x.kind !== "create");
+  if (!e || token.trades.some((t) => t.id === e.id)) return base;
+  const tokens = Number(e.tokenAmount) / 10 ** e.decimals;
+  if (!(tokens > 0)) return base;
+  const sol = Number(e.solAmount) / 1e9;
+  const q = eventQuote(e);
+  return {
+    sol: sol > 0 ? plain(sol / tokens) : base.sol,
+    quote: q && q.quote === token.quote && q.amount > 0 ? plain(q.amount / tokens) : base.quote,
+  };
+}
+
+/** Price unit of a non-SOL pair: its quote (default) or the SOL equivalent. */
+function DenomSwitch({ quote, value, onChange, solAvailable }: { quote: Quote; value: "quote" | "SOL"; onChange: (v: "quote" | "SOL") => void; solAvailable: boolean }) {
+  return (
+    <div role="radiogroup" aria-label="Price unit" className="flex gap-0.5 rounded-full border border-border p-0.5">
+      {(["quote", "SOL"] as const).map((v) => {
+        const on = value === v;
+        const off = v === "SOL" && !solAvailable;
+        return (
+          <button
+            key={v}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            disabled={off}
+            title={off ? "No SOL equivalent for this pair yet" : v === "SOL" ? "SOL equivalent at the pool's ZEC/SOL rate" : `Priced in ${quote}`}
+            onClick={() => onChange(v)}
+            className={cn(
+              "hit rounded-full px-2 py-0.5 font-mono text-[11px] transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-40",
+              on ? "bg-surface-3 text-foreground" : "text-faint-foreground hover:text-muted-foreground",
+            )}
+          >
+            {v === "quote" ? quote : "SOL"}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The ZEC-pair story, said once, quietly: the whole trade stays in ZEC. */
+function ZecPairNote() {
+  return (
+    <p className="mt-5 flex max-w-2xl items-start gap-2.5 text-sm text-pretty text-muted-foreground">
+      <span aria-hidden className="mt-[7px] size-1.5 shrink-0 rounded-full bg-zec shadow-[0_0_10px_2px_rgba(244,183,40,0.35)]" />
+      <span>
+        <span className="text-foreground">Paid in ZEC, priced in ZEC.</span> This token trades against ZEC on Solana (bridged ZEC SPL). Your shielded balance buys it one to one, with no
+        SOL rate in between.
+      </span>
+    </p>
+  );
 }

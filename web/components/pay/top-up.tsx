@@ -22,6 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { KeyGate } from "@/components/key/key-gate";
 import { PaySteps, type PayStep } from "./pay-steps";
 import { QrRing } from "./qr-ring";
+import { ShieldLedger } from "./shield-ledger";
 
 const PRESETS = ["0.1", "0.5", "1"];
 /** Zcash target block time. */
@@ -143,7 +144,7 @@ function DepositRequest({
           : `Credited after ${pool.confirmations} confirmations, about ${etaMin} min.`,
     },
     {
-      label: "Credited",
+      label: phase.step === "credited" ? "Credited · shielded, unlinkable" : "Credited",
       detail:
         phase.step === "credited" ? (
           <>
@@ -251,6 +252,14 @@ function DepositRequest({
               <ArrowSquareOut weight="light" />
             </a>
           </Button>
+        )}
+
+        {(phase.step === "seen" || phase.step === "credited") && (
+          <ShieldLedger
+            incomingZat={phase.step === "credited" ? phase.deposit.amountZat : amountZat}
+            balanceZat={phase.step === "credited" ? phase.balanceZat : null}
+            credited={phase.step === "credited"}
+          />
         )}
 
         <div className="rounded-2xl border border-border bg-card/60 p-2">

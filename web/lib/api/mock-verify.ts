@@ -28,7 +28,9 @@ export interface VerifyHost {
   /** v0.10: lamports per ZEC on the buy side (creators' claimable -> ZEC liabilities, ceil). */
   rateBuy(): bigint;
   /** Every mock account with a balance right now: available + held. */
-  accounts(network: Network): { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[]; claimLamports?: bigint }[];
+  accounts(network: Network): { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[]; claimLamports?: bigint; claimZat?: bigint }[];
+  /** v0.13: the pool's quote assets on this network (non-SOL pairs). Absent / empty: no quoteAssets in snapshots. */
+  quoteAssets?(network: Network): { mint: string; quote: "ZEC" | "USDC" | "USD1"; decimals: number; bridged: boolean }[];
   /** Tokens the mock market knows (synthetic holders pick from these). */
   tokens(): { mint: string; decimals: number }[];
   /** Signed-request check with nonce replay, as in core. Returns the header pubkey. */
@@ -159,7 +161,8 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
       const balances = new Map<AssetId, bigint>();
       // v0.10: creator fees owed are in the creator's ZEC leaf: ceil(claimable × 1e8 / rateLamportsPerZecBuy).
       const rateBuy = host.rateBuy();
-      const claimZat = a.claimLamports && a.claimLamports > N0 ? (a.claimLamports * ZAT + rateBuy - BigInt(1)) / rateBuy : N0;
+      // v0.14: plus ZEC-pair fees owed, in zatoshis as they are.
+      const claimZat = (a.claimLamports && a.claimLamports > N0 ? (a.claimLamports * ZAT + rateBuy - BigInt(1)) / rateBuy : N0) + (a.claimZat ?? N0);
       if (a.zat + claimZat > N0) balances.set("ZEC", a.zat + claimZat);
       for (const t of a.tokens) if (t.amount > N0) balances.set(t.mint, (balances.get(t.mint) ?? N0) + t.amount);
       return { pubkey: a.pubkey, balances };
@@ -240,9 +243,29 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
     const zecLiab = BigInt(trees.find((t) => t.asset === "ZEC")?.sum ?? "0");
     const rate = host.rateSell();
     const reserve = ((zecLiab * BigInt(58 + Math.floor(rnd() * 10))) / BigInt(100) / RESERVE_STEP) * RESERVE_STEP;
+    // v0.13: quote assets on the vaults. ZEC SPL (bridged) covers ~6-10 % of ZEC 1:1, one vault holds dust
+    // below dustBelow (not counted); USDC / USD1 sit there too but never count.
+    const qa = host.quoteAssets?.(network) ?? [];
+    const quoteAssets: NonNullable<VerifySnapshot["quoteAssets"]> = [];
+    let bridgedZat = N0;
+    for (const q of qa) {
+      if (quoteAssets.some((x) => x.mint === q.mint)) continue;
+      const dustBelow = q.quote === "ZEC" ? BigInt(100_000) : BigInt(10) ** BigInt(q.decimals);
+      quoteAssets.push({ mint: q.mint, quote: q.quote, decimals: q.decimals, bridged: q.bridged, counted: q.quote === "ZEC", dustBelow: dustBelow.toString() });
+      if (q.quote === "ZEC") {
+        const main = (zecLiab * BigInt(6 + Math.floor(rnd() * 5))) / BigInt(100);
+        const a = Math.floor(rnd() * seeds.length);
+        if (main > N0) vaultTokens[a].push({ mint: q.mint, amount: main });
+        vaultTokens[(a + 2) % seeds.length].push({ mint: q.mint, amount: dustBelow / BigInt(3) }); // dust: shown, not counted
+        bridgedZat += main >= dustBelow ? main : N0;
+      } else {
+        vaultTokens[Math.floor(rnd() * seeds.length)].push({ mint: q.mint, amount: BigInt(Math.floor((40 + rnd() * 900) * 10 ** q.decimals)) });
+      }
+    }
     // v0.10: only the gas of queued token withdrawals.
     const committed = BigInt(Math.floor((0.002 + rnd() * 0.02) * 1e9));
-    const lamportsNeeded = ((zecLiab - reserve) * rate) / ZAT;
+    const solPart = zecLiab - reserve - bridgedZat;
+    const lamportsNeeded = ((solPart > N0 ? solPart : N0) * rate) / ZAT;
     const lamportsTotal = (lamportsNeeded * BigInt(108 + Math.floor(rnd() * 10))) / BigInt(100) + committed + BigInt(250_000_000);
     const weights = seeds.map(() => 1 + rnd() * 3);
     const wsum = weights.reduce((x, y) => x + y, 0);
@@ -274,6 +297,7 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
       rateLamportsPerZecSell: rate.toString(),
       rateLamportsPerZecBuy: host.rateBuy().toString(),
       zecReserve: { amountZat: reserve.toString(), height: zcashHeight, attested: true as const },
+      ...(quoteAssets.length ? { quoteAssets } : {}),
     };
     const digest = rootsDigest(base);
     const pub: VerifySnapshot = { ...base, rootsDigest: digest };

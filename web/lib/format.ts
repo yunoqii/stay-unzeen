@@ -4,6 +4,8 @@ export const VENUE_LABEL: Record<Venue, string> = {
   pumpfun: "pump.fun",
   "meteora-dbc": "Meteora",
   jupiter: "Jupiter",
+  "raydium-launchlab": "LaunchLab",
+  bags: "Bags",
 };
 
 /**

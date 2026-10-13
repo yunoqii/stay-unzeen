@@ -14,6 +14,8 @@ import { CopyButton } from "@/components/ui/copy-button";
  */
 export function VaultList({ snap, check, symbols }: { snap: VerifySnapshot; check: SnapshotCheck; symbols: Map<string, string> }) {
   const decimals = new Map(snap.trees.map((t) => [t.asset, t.decimals]));
+  // v0.13: the pool's quote assets sit on the vaults too (no liability tree): name them, use their decimals.
+  const quotes = new Map((snap.quoteAssets ?? []).map((q) => [q.mint, q]));
   return (
     <ul className="ledger sm:grid-cols-2 lg:grid-cols-4">
       {snap.vaults.map((v) => {
@@ -36,8 +38,21 @@ export function VaultList({ snap, check, symbols }: { snap: VerifySnapshot; chec
               <ul className="mt-3 space-y-1 border-t border-border/60 pt-3 text-xs">
                 {v.tokens.map((t) => (
                   <li key={t.mint} className="flex justify-between gap-3">
-                    <span className="truncate text-muted-foreground">{assetLabel(t.mint, symbols)}</span>
-                    <span className="font-mono text-foreground/90 tabular">{fmtAmount(parseUint(t.amount) ?? BigInt(0), decimals.get(t.mint) ?? 6, 0)}</span>
+                    <span className="truncate text-muted-foreground">
+                      {quotes.has(t.mint) ? (
+                        <>
+                          {quotes.get(t.mint)!.quote === "ZEC" ? "ZEC SPL" : quotes.get(t.mint)!.quote}
+                          <span className="text-faint-foreground"> · {quotes.get(t.mint)!.bridged ? "bridged" : "quote"}</span>
+                        </>
+                      ) : (
+                        assetLabel(t.mint, symbols)
+                      )}
+                    </span>
+                    <span className="font-mono text-foreground/90 tabular">
+                      {quotes.has(t.mint)
+                        ? fmtAmount(parseUint(t.amount) ?? BigInt(0), quotes.get(t.mint)!.decimals, 2)
+                        : fmtAmount(parseUint(t.amount) ?? BigInt(0), decimals.get(t.mint) ?? 6, 0)}
+                    </span>
                   </li>
                 ))}
               </ul>

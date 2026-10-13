@@ -32,7 +32,9 @@ const SIG_LEN = 64;
 export const UNZ1_OPS = { buy: 1, sell: 2, create: 3, withdraw: 4, deposit: 5 } as const;
 export type Unz1Op = keyof typeof UNZ1_OPS;
 
-export const UNZ1_VENUES: Record<Venue | "none", number> = { none: 0, pumpfun: 1, "meteora-dbc": 2, jupiter: 3 };
+/** Venue codes of memo v1 (deposits use "none"; later venues have no memo code). */
+export type Unz1Venue = Extract<Venue, "pumpfun" | "meteora-dbc" | "jupiter"> | "none";
+export const UNZ1_VENUES: Record<Unz1Venue, number> = { none: 0, pumpfun: 1, "meteora-dbc": 2, jupiter: 3 };
 
 export type Unz1Target =
   | { kind: "none" }
@@ -47,7 +49,7 @@ export type ChainId = readonly [zcash: 1 | 2, solana: 1 | 2];
 
 export interface Unz1Fields {
   op: Unz1Op;
-  venue: Venue | "none";
+  venue: Unz1Venue;
   /**
    * buy/sell/withdraw: base58 mint. create: pass `meta` instead. deposit: omit (zeros).
    */
@@ -166,7 +168,7 @@ export function unz1MemoString(f: Unz1Fields, secretKey: Uint8Array, chainId: Ch
 const OP_BY_CODE = Object.fromEntries(Object.entries(UNZ1_OPS).map(([k, v]) => [v, k])) as Record<number, Unz1Op>;
 const VENUE_BY_CODE = Object.fromEntries(Object.entries(UNZ1_VENUES).map(([k, v]) => [v, k])) as Record<
   number,
-  Venue | "none"
+  Unz1Venue
 >;
 
 /** Parse and verify. Throws on malformed bytes; `valid` reports the signature check. */

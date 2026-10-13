@@ -18,6 +18,7 @@ import { ApiError } from "./errors";
 import { CHAT_OPS, createChatMock, mockChatParams } from "./mock-chat";
 import type { FairHost, FairMock } from "./mock-fair";
 import type { VerifyMock } from "./mock-verify";
+import { ZEC_SPL_MINT } from "@/lib/quotes";
 import type {
   ActionReceipt,
   ActionStatus,
@@ -36,8 +37,13 @@ import type {
   PoolInfo,
   Portfolio,
   PendingResponse,
+  LaunchPlatform,
+  VenueInfo,
+  Quote,
+  QuoteAsset,
   RateUsed,
   SignedAction,
+  SolRateUsed,
   Token,
   TokenListItem,
   TokenSafety,
@@ -92,7 +98,65 @@ function plain(n: number, sig: number): string {
 }
 
 // pump.fun = 6 decimals; Meteora DBC mocks use 9 so the UI is forced to honour `decimals`.
-const DECIMALS: Record<Venue, number> = { pumpfun: 6, "meteora-dbc": 9, jupiter: 6 };
+const DECIMALS: Record<Venue, number> = { pumpfun: 6, "meteora-dbc": 9, jupiter: 6, "raydium-launchlab": 6, bags: 6 };
+
+// ---- non-SOL pairs (API v0.13–v0.14) ----
+
+/** SOL per 1 unit of each quote in the mock market (ZEC = the pool's mid rate, dollars at $150/SOL). */
+const SOL_PER_QUOTE: Record<Quote, number> = { SOL: 1, ZEC: 1.8, USDC: 1 / 150, USD1: 1 / 150 };
+const Q_DECIMALS: Record<Quote, number> = { SOL: 9, ZEC: 8, USDC: 6, USD1: 6 };
+/** ZEC SPL parity spread (core default UNZEEN_ZEC_SPL_SPREAD_BPS = 30). */
+const ZEC_SPREAD_BPS = BigInt(30);
+const USD1_MINT = "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB";
+/** devnet USDC: pump.fun and Raydium / Meteora use different mints (core known_quotes). */
+const USDC_PUMP_DEVNET = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+const USDC_DEVNET = "USDCoctVLVnvTXBEuP9s8hntucdJokbo17RwHuNXemT";
+const USDC_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+/** NEXT_PUBLIC_MOCK_QUOTES=0: a server with only SOL pairs (PoolInfo.quotes empty). */
+const QUOTES_ON = process.env.NEXT_PUBLIC_MOCK_QUOTES !== "0";
+
+/** PoolInfo.quotes of the mock. Both networks get every pair so the UI can be exercised on devnet. */
+/** v0.16 PoolInfo.venues: bags and jupiter are mainnet-only; bags takes SOL pairs, its first buy is not atomic. */
+export function mockVenues(network: Network): VenueInfo[] {
+  const main = network === "mainnet";
+  const quotes = mockQuotes(network);
+  const pairs = (v: Venue): Quote[] => ["SOL", ...(["ZEC", "USDC", "USD1"] as const).filter((q) => quotes.some((x) => x.quote === q && x.venues.includes(v)))];
+  const pad = (v: Venue): VenueInfo => ({ venue: v, trade: true, create: CREATE_ENABLED, quotes: CREATE_ENABLED ? pairs(v) : [], atomicFirstBuy: true, creatorFees: true, mainnetOnly: false });
+  return [
+    pad("pumpfun"),
+    pad("meteora-dbc"),
+    pad("raydium-launchlab"),
+    { venue: "bags", trade: main, create: main && CREATE_ENABLED, quotes: main && CREATE_ENABLED ? ["SOL"] : [], atomicFirstBuy: false, creatorFees: false, mainnetOnly: true },
+    { venue: "jupiter", trade: main, create: false, quotes: [], atomicFirstBuy: true, creatorFees: false, mainnetOnly: true },
+  ];
+}
+
+export function mockQuotes(network: Network): QuoteAsset[] {
+  if (!QUOTES_ON) return [];
+  const usdc: QuoteAsset[] =
+    network === "mainnet"
+      ? [{ quote: "USDC", mint: USDC_MAINNET, decimals: 6, bridged: false, venues: ["pumpfun", "meteora-dbc", "raydium-launchlab"] }]
+      : [
+          { quote: "USDC", mint: USDC_DEVNET, decimals: 6, bridged: false, venues: ["meteora-dbc", "raydium-launchlab"] },
+          { quote: "USDC", mint: USDC_PUMP_DEVNET, decimals: 6, bridged: false, venues: ["pumpfun"] },
+        ];
+  return [
+    { quote: "ZEC", mint: ZEC_SPL_MINT, decimals: 8, bridged: true, venues: ["pumpfun", "raydium-launchlab"], spreadBps: Number(ZEC_SPREAD_BPS) },
+    ...usdc,
+    { quote: "USD1", mint: USD1_MINT, decimals: 6, bridged: false, venues: ["meteora-dbc", "raydium-launchlab"] },
+  ];
+}
+
+/** The quote mint a token of `venue` uses (mock state is shared by both networks: devnet mints for USDC). */
+function quoteMintFor(quote: Quote, venue: Venue): string | undefined {
+  if (quote === "ZEC") return ZEC_SPL_MINT;
+  if (quote === "USD1") return USD1_MINT;
+  if (quote === "USDC") return venue === "pumpfun" ? USDC_PUMP_DEVNET : USDC_DEVNET;
+  return undefined;
+}
+
+/** SOL amount -> integer string of quote base units. */
+const solToQuoteUnits = (sol: number, quote: Quote) => BigInt(Math.round((sol / SOL_PER_QUOTE[quote]) * 10 ** Q_DECIMALS[quote])).toString();
 
 /** Whole tokens (2 dp precision) -> integer string in base units. */
 function toBaseUnits(whole: number, decimals: number): string {
@@ -104,12 +168,14 @@ const toLamports = (sol: number) => BigInt(Math.round(sol * 1e9)).toString();
 
 interface MockTokenState {
   token: Token;
-  price: number; // SOL per whole token
+  price: number; // SOL (equivalent) per whole token; the quote price is price / SOL_PER_QUOTE[quote]
   supply: number; // whole tokens
   heat: number; // relative trade frequency
+  /** v0.14: the SOL equivalent of the market cap is not known yet ("0"). */
+  mcapUnknown?: boolean;
 }
 
-const SEED: Array<{ symbol: string; name: string; venue: Venue; status: Token["status"]; price: number; heat: number }> = [
+const SEED: Array<{ symbol: string; name: string; venue: Venue; status: Token["status"]; price: number; heat: number; quote?: Quote; platform?: LaunchPlatform; mcapUnknown?: boolean }> = [
   { symbol: "PEPE", name: "Pepe in the Dark", venue: "pumpfun", status: "curve", price: 3.4e-7, heat: 5 },
   { symbol: "GHOST", name: "Ghost Protocol", venue: "pumpfun", status: "curve", price: 1.1e-6, heat: 4 },
   { symbol: "UMBRA", name: "Umbra", venue: "meteora-dbc", status: "curve", price: 8.2e-6, heat: 3 },
@@ -117,6 +183,12 @@ const SEED: Array<{ symbol: string; name: string; venue: Venue; status: Token["s
   { symbol: "VEIL", name: "Veil Cat", venue: "meteora-dbc", status: "curve", price: 2.7e-7, heat: 2 },
   { symbol: "MOTH", name: "Moth to the Flame", venue: "pumpfun", status: "curve", price: 5.9e-7, heat: 2 },
   { symbol: "WRAITH", name: "Wraith", venue: "meteora-dbc", status: "graduated", price: 1.9e-5, heat: 1 },
+  // v0.13 non-SOL pairs and LaunchLab platforms
+  { symbol: "SHIELD", name: "Shielded Cat", venue: "pumpfun", status: "curve", price: 6.2e-7, heat: 4, quote: "ZEC" },
+  { symbol: "DARK", name: "Dark Forest", venue: "raydium-launchlab", status: "curve", price: 2.1e-6, heat: 3, quote: "ZEC", platform: "unzeen", mcapUnknown: true },
+  { symbol: "LANTERN", name: "Lantern", venue: "meteora-dbc", status: "curve", price: 4.5e-6, heat: 2, quote: "USDC" },
+  { symbol: "BONKSHADE", name: "Bonk Shade", venue: "raydium-launchlab", status: "curve", price: 9.1e-7, heat: 2, platform: "bonk" },
+  { symbol: "STILL", name: "Still Water", venue: "raydium-launchlab", status: "curve", price: 1.4e-6, heat: 1, quote: "USD1", platform: "stonk" },
 ];
 
 const NEW_TOKEN_NAMES: Array<[string, string]> = [
@@ -150,10 +222,13 @@ function init(now: number) {
       priceSol: "0",
       marketCapSol: "0",
       createdAt: now - (i + 1) * rand(25, 90) * 60_000,
+      ...pairFields(s.quote ?? "SOL", s.venue),
+      ...(s.platform ? { platform: s.platform } : {}),
     },
     price: s.price,
     supply: SUPPLY,
     heat: s.heat,
+    ...(s.mcapUnknown ? { mcapUnknown: true } : {}),
   }));
   syncTokenFields();
 
@@ -167,11 +242,24 @@ function init(now: number) {
   history = backfill.reverse();
 }
 
+/** Token.quote / quoteMint of a pair (SOL pairs carry only quote: "SOL"). */
+function pairFields(quote: Quote, venue: Venue): Pick<Token, "quote" | "quoteMint"> {
+  const mint = quoteMintFor(quote, venue);
+  return mint ? { quote, quoteMint: mint } : { quote };
+}
+
 function syncTokenFields() {
   for (const s of state!) {
     s.token.priceSol = plain(s.price, 4);
-    s.token.marketCapSol = trimDecimals(s.price * s.supply, 2);
+    s.token.marketCapSol = s.mcapUnknown ? "0" : trimDecimals(s.price * s.supply, 2);
+    if (s.token.quote !== "SOL") s.token.priceQuote = plain(s.price / SOL_PER_QUOTE[s.token.quote], 4);
   }
+}
+
+/** quoteMint / quoteAmount of a trade on a non-SOL pair (solAmount stays the SOL equivalent). */
+function quoteOfTrade(t: Token, sol: number, units?: bigint): Pick<FeedEvent, "quoteMint" | "quoteAmount"> {
+  if (t.quote === "SOL" || !t.quoteMint) return {};
+  return { quoteMint: t.quoteMint, quoteAmount: units !== undefined ? units.toString() : solToQuoteUnits(sol, t.quote) };
 }
 
 function pickToken(): MockTokenState {
@@ -189,8 +277,19 @@ function makeTradeEvent(ts: number, mutate = true): FeedEvent {
   const s = pickToken();
   const kind: FeedEvent["kind"] = Math.random() < 0.72 ? "buy" : "sell";
   // Rounded amounts, as the relayer rounds to blur deposit sizes.
-  const raw = logRand(0.05, 6);
-  const sol = Number(trimDecimals(raw, raw >= 1 ? 1 : 2));
+  const q = s.token.quote;
+  let sol: number;
+  let units: bigint | undefined;
+  if (q === "SOL") {
+    const raw = logRand(0.05, 6);
+    sol = Number(trimDecimals(raw, raw >= 1 ? 1 : 2));
+  } else {
+    // Round in the pair's own unit ("3.1 ZEC", "45 USDC"); the SOL equivalent follows.
+    const raw = q === "ZEC" ? logRand(0.03, 3.5) : logRand(8, 900);
+    const amount = Number(trimDecimals(raw, q === "ZEC" ? (raw >= 1 ? 1 : 2) : 0));
+    units = BigInt(Math.round(amount * 10 ** Q_DECIMALS[q]));
+    sol = amount * SOL_PER_QUOTE[q];
+  }
   const tokens = sol / s.price;
   if (mutate) {
     const impact = sol / Math.max(30, s.price * s.supply) / 2;
@@ -208,6 +307,7 @@ function makeTradeEvent(ts: number, mutate = true): FeedEvent {
     decimals: s.token.decimals,
     solanaTx: b58(88),
     ts,
+    ...quoteOfTrade(s.token, sol, units),
   };
 }
 
@@ -228,6 +328,7 @@ function makeCreateEvent(ts: number): FeedEvent | null {
       priceSol: "0",
       marketCapSol: "0",
       createdAt: ts,
+      quote: "SOL",
     },
     price,
     supply: SUPPLY,
@@ -344,6 +445,9 @@ const MOCK_MAX_INITIAL_BUY_LAMPORTS = BigInt(1_500_000_000);
 /** v0.6 per-venue cap: meteora-dbc narrowed by 5/5.013 (its 1 % fee vs ~1.25 %), as core does for now. */
 const mockVenueCap = (venue: string) => (venue === "meteora-dbc" ? (MOCK_MAX_INITIAL_BUY_LAMPORTS * BigInt(5000)) / BigInt(5013) : MOCK_MAX_INITIAL_BUY_LAMPORTS);
 
+/** v0.11 PoolInfo.minClaimZat (core default MIN_CLAIM_ZAT = 10 000). */
+const MIN_CLAIM_ZAT = BigInt(10_000);
+
 /** Flat fee of exec "now" (field name pending in docs/API.md). Shown in quotes; the mock does not charge it. */
 const NOW_FEE_ZAT = "5000";
 const FEES = { nowFeeZat: NOW_FEE_ZAT, createFeeZat: "100000", withdrawZecFeeZat: "15000" };
@@ -368,17 +472,24 @@ export function mockPool(network: Network): PoolInfo {
       : { features: { fullTrades: FULL_FEED, ...CHAT_FEATURES } }),
     ...(CHAT_ON ? { chat: mockChatParams(network) } : {}),
     orders: ORDER_PARAMS,
+    quotes: mockQuotes(network),
+    venues: mockVenues(network),
     launchRules: {
       lockSecs: 86_400,
       capBps: 500,
       maxInitialBuyLamports: MOCK_MAX_INITIAL_BUY_LAMPORTS.toString(),
-      maxInitialBuyLamportsByVenue: { pumpfun: MOCK_MAX_INITIAL_BUY_LAMPORTS.toString(), "meteora-dbc": mockVenueCap("meteora-dbc").toString() },
+      maxInitialBuyLamportsByVenue: {
+        pumpfun: MOCK_MAX_INITIAL_BUY_LAMPORTS.toString(),
+        "meteora-dbc": mockVenueCap("meteora-dbc").toString(),
+        "raydium-launchlab": mockVenueCap("raydium-launchlab").toString(),
+        ...(network === "mainnet" ? { bags: mockVenueCap("meteora-dbc").toString() } : {}),
+      },
     },
   };
   const rate = { lamportsPerZec: MID_LAMPORTS_PER_ZEC.toString(), lamportsPerZecBuy: mockRate(true).lamportsPerZec, lamportsPerZecSell: mockRate(false).lamportsPerZec, spreadBps: Number(SPREAD_BPS), source: "fixed" as const, ts: Math.floor(Date.now() / 60_000) * 60_000 };
   return network === "mainnet"
-    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: FEES, rate, ...extra }
-    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", confirmations: 3, fees: FEES, rate, ...extra };
+    ? { address: poolAddress(network), network: "main", chainId: "0101", minDepositZat: "1000000", minActionZat: "100000", minClaimZat: MIN_CLAIM_ZAT.toString(), confirmations: 3, fees: FEES, rate, ...extra }
+    : { address: poolAddress(network), network: "test", chainId: "0202", minDepositZat: "1000000", minActionZat: "100000", minClaimZat: MIN_CLAIM_ZAT.toString(), confirmations: 3, fees: FEES, rate, ...extra };
 }
 
 interface MockAccount {
@@ -389,6 +500,8 @@ interface MockAccount {
   deposits: DepositInfo[];
   /** v0.7 creator fees owed, lamports per mint this key launched. */
   claimable: Map<string, bigint>;
+  /** v0.14 creator fees of ZEC pairs owed, zatoshis per mint (credited 1:1). */
+  claimableZat: Map<string, bigint>;
 }
 
 const accounts = new Map<string, MockAccount>(); // `${network}:${pubkey}`
@@ -407,6 +520,7 @@ function account(network: Network, pubkey: string): MockAccount {
       holdings: picks.map((s) => ({ mint: s.token.mint, amount: toBaseUnits((rnd() * 4 + 0.2) / s.price, s.token.decimals), held: "0" })),
       deposits: [],
       claimable: new Map(),
+      claimableZat: new Map(),
     };
     accounts.set(key, a);
   }
@@ -420,7 +534,9 @@ function portfolioOf(network: Network, pubkey: string): Portfolio {
     zecHeld: a.zecHeld.toString(),
     frozen: a.frozen,
     holdings: a.holdings.map((h) => ({ ...h })),
-    claimable: [...a.claimable].filter(([, v]) => v > N0).map(([mint, v]) => ({ mint, solAmount: v.toString() })),
+    claimable: [...new Set([...a.claimable.keys(), ...a.claimableZat.keys()])]
+      .map((mint) => ({ mint, solAmount: (a.claimable.get(mint) ?? N0).toString(), zecAmount: (a.claimableZat.get(mint) ?? N0).toString() }))
+      .filter((c) => c.solAmount !== "0" || c.zecAmount !== "0"),
     deposits: a.deposits.slice(0, 20).map((d) => ({ ...d })),
     // Every own action rides along with the regular poll (order_* never: an order shows in `orders`).
     actions: [...actions.values()]
@@ -588,9 +704,36 @@ const CREATE_FEE_ZAT = BigInt(100_000);
 const WITHDRAW_ZEC_FEE_ZAT = BigInt(15_000);
 const WITHDRAW_TOKEN_LAMPORTS_PER_PART = BigInt(2_000_000 + 2_100_000);
 
-function mockRate(buy: boolean): RateUsed {
+function mockRate(buy: boolean): SolRateUsed {
   const v = (MID_LAMPORTS_PER_ZEC * (BigInt(10_000) + (buy ? -SPREAD_BPS : SPREAD_BPS))) / BigInt(10_000);
   return { lamportsPerZec: v.toString(), source: "fixed", ts: Date.now() };
+}
+
+const BPS = BigInt(10_000);
+/** Max ZEC SPL of a ZEC-pair launch buy within the 5 % cap: 2.7189 ZEC virtual × cap / (1.073e9 − cap). */
+const MOCK_MAX_INITIAL_BUY_ZEC_UNITS = (BigInt(271_890_000) * BigInt(50_000_000)) / BigInt(1_073_000_000 - 50_000_000);
+
+/** v0.13 ZEC SPL parity: buy 1e8·(1 − s), sell 1e8·(1 + s) ZEC SPL units per ZEC; no lamportsPerZec. */
+function parityRate(buy: boolean): RateUsed {
+  const v = (ZAT * (BPS + (buy ? -ZEC_SPREAD_BPS : ZEC_SPREAD_BPS))) / BPS;
+  return { quote: "ZEC", quotePerZec: v.toString(), source: "parity", ts: Date.now() };
+}
+
+const rateFor = (s: MockTokenState, buy: boolean): RateUsed => (s.token.quote === "ZEC" ? parityRate(buy) : mockRate(buy));
+
+/** Zatoshis a sell of `amount` credits at the current price: parity for ZEC pairs, the SOL rate otherwise. */
+function sellZat(s: MockTokenState, amount: bigint, rate: RateUsed): bigint {
+  const sol = formatUnitsNum(amount, s.token.decimals) * s.price;
+  if (s.token.quote === "ZEC") {
+    const spl = BigInt(Math.floor((sol / SOL_PER_QUOTE.ZEC) * 1e8));
+    return (spl * ZAT) / BigInt(rate.quotePerZec!);
+  }
+  return (BigInt(Math.floor(sol * 1e9)) * ZAT) / BigInt(rate.lamportsPerZec!);
+}
+
+/** Demo of 503 pool_liquidity on a non-SOL pair: the pool's stock of the quote is short above 5 ZEC worth. */
+function checkPairLiquidity(s: MockTokenState, zecIn: bigint) {
+  if (s.token.quote !== "SOL" && zecIn > BigInt(5) * ZAT) throw new ApiError("pool_liquidity", `not enough ${s.token.quote} on the vaults`, 503);
 }
 
 /**
@@ -674,10 +817,13 @@ function tidyHoldings(a: MockAccount) {
 }
 
 function tradeToken(mint: string, venue: string): MockTokenState {
-  if (!["pumpfun", "meteora-dbc", "jupiter"].includes(venue)) throw new ApiError("bad_request", "venue: expected pumpfun | meteora-dbc | jupiter", 400);
+  if (venue === "bags") throw new ApiError("venue_unavailable", "bags is mainnet only", 503); // mock tokens are never on bags
+  if (!["pumpfun", "meteora-dbc", "jupiter", "raydium-launchlab"].includes(venue)) throw new ApiError("bad_request", "venue: expected pumpfun | meteora-dbc | raydium-launchlab | jupiter", 400);
   if (!isSolanaAddress(mint)) throw new ApiError("bad_request", "mint: not a Solana address", 400);
   const s = findToken(mint);
   if (venue !== "jupiter" && s.token.venue !== venue) throw new ApiError("bad_request", `token trades on ${s.token.venue}, not ${venue}`, 400);
+  // v0.13: Jupiter does not route ZEC SPL pairs.
+  if (venue === "jupiter" && s.token.quote === "ZEC") throw new ApiError("bad_request", "jupiter: not for ZEC pairs", 400);
   if (s.token.status === "graduated" && venue !== "jupiter") throw new ApiError("graduated", "token left the bonding curve", 409);
   return s;
 }
@@ -699,18 +845,19 @@ function accept(network: Network, pubkey: string, action: SignedAction): Omit<Mo
       const zecIn = amountOf(action.zecIn, "zecIn");
       amountOf(action.minOut, "minOut", false);
       if (zecIn < minAction) throw new ApiError("below_minimum", "zecIn below PoolInfo.minActionZat", 422);
-      tradeToken(action.mint, action.venue);
+      const s = tradeToken(action.mint, action.venue);
+      checkPairLiquidity(s, zecIn);
       if (a.zecBalance < zecIn) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
       a.zecBalance -= zecIn;
       a.zecHeld += zecIn;
-      return { ...base, holdZat: zecIn, ...queued(mockRate(true)) };
+      return { ...base, holdZat: zecIn, ...queued(rateFor(s, true)) };
     }
     case "sell": {
       const amount = amountOf(action.amount, "amount");
       const minZecOut = amountOf(action.minZecOut, "minZecOut", false);
       const s = tradeToken(action.mint, action.venue);
-      const rate = mockRate(false);
-      const est = (BigInt(Math.floor(Number(formatUnitsNum(amount, s.token.decimals)) * s.price * 1e9)) * ZAT) / BigInt(rate.lamportsPerZec);
+      const rate = rateFor(s, false);
+      const est = sellZat(s, amount, rate);
       if (minZecOut < minAction && est < minAction)
         throw new ApiError("below_minimum", "sell value below PoolInfo.minActionZat (raise amount or minZecOut)", 422);
       const h = holdingOf(a, action.mint);
@@ -722,14 +869,31 @@ function accept(network: Network, pubkey: string, action: SignedAction): Omit<Mo
     case "create": {
       const initial = action.initialBuyZec === undefined ? N0 : amountOf(action.initialBuyZec, "initialBuyZec", false);
       if (action.venue === "jupiter") throw new ApiError("bad_request", "create: jupiter is not a launchpad", 400);
+      // v0.16: bags is mainnet-only and SOL-only.
+      if (action.venue === "bags" && network !== "mainnet") throw new ApiError("venue_unavailable", "bags is mainnet only", 503);
+      if (action.venue === "bags" && (action.quote ?? "SOL") !== "SOL") throw new ApiError("bad_request", "bags: SOL pairs only", 400);
+      if (!["pumpfun", "meteora-dbc", "raydium-launchlab", "bags"].includes(action.venue)) throw new ApiError("bad_request", "venue: pumpfun | meteora-dbc | raydium-launchlab", 400);
       if (!CREATE_ENABLED) throw new ApiError("venue_unavailable", "create is not enabled", 503);
+      // v0.13 pair and LaunchLab platform.
+      const quote = action.quote ?? "SOL";
+      if (!["SOL", "USDC", "USD1", "ZEC"].includes(quote)) throw new ApiError("bad_request", "quote: SOL | USDC | USD1 | ZEC", 400);
+      if (quote !== "SOL") {
+        const listed = pool.quotes?.some((q) => q.quote === quote);
+        if (!listed) throw new ApiError("venue_unavailable", `${quote} pairs are not enabled`, 503);
+        if (!pool.quotes!.some((q) => q.quote === quote && q.venues.includes(action.venue))) throw new ApiError("bad_request", `${action.venue} has no ${quote} pair`, 400);
+      }
+      if (action.platform !== undefined && (action.venue !== "raydium-launchlab" || !["unzeen", "bonk", "stonk"].includes(action.platform)))
+        throw new ApiError("bad_request", "platform: unzeen | bonk | stonk, raydium-launchlab only", 400);
       if (initial > N0 && initial < minAction) throw new ApiError("below_minimum", "initialBuyZec below PoolInfo.minActionZat", 422);
-      if ((initial * BigInt(mockRate(true).lamportsPerZec)) / ZAT > mockVenueCap(action.venue)) throw new ApiError("creator_cap", "initial buy above launchRules.maxInitialBuyLamportsByVenue", 422);
+      if (quote === "ZEC") {
+        // ZEC curve: same token reserves, ZEC virtual reserves (core: UNZEEN_LAUNCH_VIRTUAL_ZEC_UNITS).
+        if (initial > N0 && (initial * (BPS - ZEC_SPREAD_BPS)) / BPS > MOCK_MAX_INITIAL_BUY_ZEC_UNITS) throw new ApiError("creator_cap", "initial buy above the ZEC curve cap", 422);
+      } else if ((initial * BigInt(mockRate(true).lamportsPerZec)) / ZAT > mockVenueCap(action.venue)) throw new ApiError("creator_cap", "initial buy above launchRules.maxInitialBuyLamportsByVenue", 422);
       const total = initial + CREATE_FEE_ZAT;
       if (a.zecBalance < total) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
       a.zecBalance -= total;
       a.zecHeld += total;
-      return { ...base, holdZat: total, ...queued(mockRate(true)) };
+      return { ...base, holdZat: total, ...queued(quote === "ZEC" ? parityRate(true) : mockRate(true)) };
     }
     case "withdraw_zec": {
       const v = checkWithdrawUa(String(action.to ?? ""), network);
@@ -802,7 +966,10 @@ function execute(act: MockAction) {
 
   if (x.op === "buy") {
     const s = findToken(x.mint);
-    const lamports = (BigInt(x.zecIn) * BigInt(rate!.lamportsPerZec)) / ZAT;
+    const zecPair = s.token.quote === "ZEC";
+    // ZEC pair: zecIn × (1 − s) of ZEC SPL at parity (8 decimals = zat); others: lamports at the ZEC/SOL rate.
+    const spl = zecPair ? (BigInt(x.zecIn) * BigInt(rate!.quotePerZec!)) / ZAT : N0;
+    const lamports = zecPair ? BigInt(Math.round((Number(spl) / 1e8) * SOL_PER_QUOTE.ZEC * 1e9)) : (BigInt(x.zecIn) * BigInt(rate!.lamportsPerZec!)) / ZAT;
     const sol = Number(lamports) / 1e9;
     const out = BigInt(toBaseUnits(sol / s.price, s.token.decimals));
     if (out < BigInt(x.minOut)) return fail(act, a, "slippage");
@@ -812,28 +979,49 @@ function execute(act: MockAction) {
     s.heat = Math.max(s.heat, 1);
     s.price *= 1 + sol / Math.max(30, s.price * s.supply) / 2;
     syncTokenFields();
-    publish({ id: b58(16), kind: "buy", venue: s.token.venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
-    act.status = { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, solanaTx: tx, rate, fill: { tokenAmount: out.toString(), solAmount: lamports.toString(), zecSpent: x.zecIn } };
+    const pair = quoteOfTrade(s.token, sol, zecPair ? spl : undefined);
+    publish({ id: b58(16), kind: "buy", venue: s.token.venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now, ...pair });
+    const fill = zecPair ? { quoteAmount: spl.toString(), quoteMint: s.token.quoteMint } : { solAmount: lamports.toString() };
+    act.status = { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, solanaTx: tx, rate, fill: { tokenAmount: out.toString(), ...fill, zecSpent: x.zecIn } };
   } else if (x.op === "sell") {
     const s = findToken(x.mint);
     const amount = BigInt(x.amount);
+    const zecPair = s.token.quote === "ZEC";
     const sol = formatUnitsNum(amount, s.token.decimals) * s.price;
     const lamports = BigInt(Math.floor(sol * 1e9));
-    const zec = (lamports * ZAT) / BigInt(rate!.lamportsPerZec);
+    const spl = zecPair ? BigInt(Math.floor((sol / SOL_PER_QUOTE.ZEC) * 1e8)) : N0;
+    const zec = sellZat(s, amount, rate!);
     if (zec < BigInt(x.minZecOut)) return fail(act, a, "slippage");
     releaseTokens(a, act, amount);
     a.zecBalance += zec;
     s.price *= 1 - sol / Math.max(30, s.price * s.supply) / 2;
     syncTokenFields();
-    publish({ id: b58(16), kind: "sell", venue: s.token.venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: amount.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
-    act.status = { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, solanaTx: tx, rate, fill: { tokenAmount: amount.toString(), solAmount: lamports.toString(), zecCredited: zec.toString() } };
+    const pair = quoteOfTrade(s.token, sol, zecPair ? spl : undefined);
+    publish({ id: b58(16), kind: "sell", venue: s.token.venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: amount.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now, ...pair });
+    const fill = zecPair ? { quoteAmount: spl.toString(), quoteMint: s.token.quoteMint } : { solAmount: lamports.toString() };
+    act.status = { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, solanaTx: tx, rate, fill: { tokenAmount: amount.toString(), ...fill, zecCredited: zec.toString() } };
   } else if (x.op === "create") {
     const initial = act.holdZat - CREATE_FEE_ZAT;
-    const lamports = (initial * BigInt(rate!.lamportsPerZec)) / ZAT;
+    const quote = x.quote ?? "SOL";
+    const spl = quote === "ZEC" ? (initial * BigInt(rate!.quotePerZec!)) / ZAT : N0;
+    const lamports = quote === "ZEC" ? BigInt(Math.round((Number(spl) / 1e8) * SOL_PER_QUOTE.ZEC * 1e9)) : (initial * BigInt(rate!.lamportsPerZec!)) / ZAT;
     const venue: Venue = x.venue;
     const price = 2.8e-8;
     const s: MockTokenState = {
-      token: { mint: mintFor(venue, x.meta.symbol + ":" + act.id), symbol: x.meta.symbol, name: x.meta.name, image: x.meta.image, venue, status: "curve", decimals: DECIMALS[venue], priceSol: "0", marketCapSol: "0", createdAt: now },
+      token: {
+        mint: mintFor(venue, x.meta.symbol + ":" + act.id),
+        symbol: x.meta.symbol,
+        name: x.meta.name,
+        image: x.meta.image,
+        venue,
+        status: "curve",
+        decimals: DECIMALS[venue],
+        priceSol: "0",
+        marketCapSol: "0",
+        createdAt: now,
+        ...pairFields(quote, venue),
+        ...(venue === "raydium-launchlab" ? { platform: x.platform ?? "unzeen" } : {}),
+      },
       price,
       supply: SUPPLY,
       heat: 3,
@@ -846,8 +1034,10 @@ function execute(act: MockAction) {
     creators.set(s.token.mint, { network: act.network, pubkey: act.pubkey, lockedAmount: out, lockUntil: Math.ceil((now + 86_400_000) / 3_600_000) * 3_600_000, claimed: N0 });
     releaseZat(a, act, act.holdZat);
     if (out > N0) holdingOf(a, s.token.mint).amount = out.toString();
-    publish({ id: b58(16), kind: "create", venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
-    act.status = { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, solanaTx: tx, rate, fill: { tokenAmount: out.toString(), solAmount: lamports.toString(), zecSpent: initial.toString(), mint: s.token.mint } };
+    const pair = lamports > N0 ? quoteOfTrade(s.token, Number(lamports) / 1e9, quote === "ZEC" ? spl : undefined) : {};
+    publish({ id: b58(16), kind: "create", venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now, ...pair });
+    const fill = quote === "ZEC" ? { quoteAmount: spl.toString(), quoteMint: s.token.quoteMint } : { solAmount: lamports.toString() };
+    act.status = { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, solanaTx: tx, rate, fill: { tokenAmount: out.toString(), ...fill, zecSpent: initial.toString(), mint: s.token.mint } };
   } else if (x.op === "withdraw_token") {
     // Separate transfers from another vault; not a trade, so nothing in the feed.
     releaseZat(a, act, act.holdZat);
@@ -928,18 +1118,19 @@ function submit(network: Network, method: "POST", path: string, body: string | u
 // ---- private orders (v0.8) and creator fees (v0.7 claim) ----
 
 const ORDER_PARAMS: OrdersParams = {
-  kinds: ["limit_buy", "limit_sell", "take_profit", "stop_loss"],
+  kinds: ["limit_buy", "limit_sell", "take_profit", "stop_loss", "bracket"],
   venues: ["pumpfun"],
   maxOpenPerKey: 10,
   maxOpenPerMint: 4,
   maxTtlSecs: 259_200,
   defaultTtlSecs: 86_400,
-  defaultSlippageBps: { limit_buy: 500, limit_sell: 500, take_profit: 500, stop_loss: 1500 },
+  defaultSlippageBps: { limit_buy: 500, limit_sell: 500, take_profit: 500, stop_loss: 1500, bracket: 500 },
+  maxRearms: 3,
   slConfirmTicks: 2,
   priceTick: { minSecs: 45, maxSecs: 75 },
 };
 const ORDER_KINDS = new Set<string>(ORDER_PARAMS.kinds);
-const SELL_KINDS = new Set<OrderKind>(["limit_sell", "take_profit", "stop_loss"]);
+const SELL_KINDS = new Set<OrderKind>(["limit_sell", "take_profit", "stop_loss", "bracket"]);
 const HOUR = 3_600_000;
 /** Closed orders stay in Portfolio.orders for 24 h (D1), then their amounts and price are erased. */
 const ORDER_KEEP_MS = 24 * HOUR;
@@ -964,9 +1155,10 @@ interface MockOrder {
 
 const orders = new Map<string, MockOrder>();
 /** Mints launched through the pool -> their (anonymous) creator key. Never exposed publicly. */
-const creators = new Map<string, { network: Network; pubkey: string; lockedAmount: bigint; lockUntil: number; claimed: bigint }>();
-/** Fees earned since the last collector run, per mint. */
+const creators = new Map<string, { network: Network; pubkey: string; lockedAmount: bigint; lockUntil: number; claimed: bigint; claimedZat?: bigint }>();
+/** Fees earned since the last collector run, per mint: lamports (SOL / USDC / USD1 pairs) or zat (ZEC pairs). */
 const pendingFees = new Map<string, bigint>();
+const pendingFeesZat = new Map<string, bigint>();
 let lastOrderTick: number | null = null;
 let lastSweep: number | null = null;
 
@@ -1012,20 +1204,33 @@ function lamportsAt(amount: bigint, decimals: number, priceSol: number): bigint 
 function createOrder(network: Network, pubkey: string, x: Extract<SignedAction, { op: "order_create" }>, now: number): MockOrder {
   const pool = mockPool(network);
   if (x.venue !== "pumpfun") throw new ApiError("bad_request", "venue: orders are pumpfun only", 400);
-  if (!ORDER_KINDS.has(x.kind)) throw new ApiError("bad_request", "kind: limit_buy | limit_sell | take_profit | stop_loss", 400);
+  if (!ORDER_KINDS.has(x.kind)) throw new ApiError("bad_request", "kind: limit_buy | limit_sell | take_profit | stop_loss | bracket", 400);
   if (!isSolanaAddress(String(x.mint))) throw new ApiError("bad_request", "mint: not a Solana address", 400);
-  const t = String(x.triggerPriceSol ?? "");
-  if (!DECIMAL_RE.test(t) || !(Number(t) > 0) || sigDigits(t) > 18) throw new ApiError("bad_request", "triggerPriceSol: positive decimal, <= 18 significant digits", 400);
+  const price = (v: unknown, field: string) => {
+    const p = String(v ?? "");
+    if (!DECIMAL_RE.test(p) || !(Number(p) > 0) || sigDigits(p) > 18) throw new ApiError("bad_request", `${field}: positive decimal, <= 18 significant digits`, 400);
+    return p;
+  };
+  // v0.15 bracket: tpPriceSol + slPriceSol (tp > sl), never triggerPriceSol; the single kinds the other way round.
+  const bracket = x.kind === "bracket";
+  if (bracket && x.triggerPriceSol !== undefined) throw new ApiError("bad_request", "bracket: use tpPriceSol / slPriceSol, not triggerPriceSol", 400);
+  if (!bracket && (x.tpPriceSol !== undefined || x.slPriceSol !== undefined || x.slSlippageBps !== undefined)) throw new ApiError("bad_request", "tpPriceSol / slPriceSol / slSlippageBps: bracket only", 400);
+  const t = bracket ? price(x.tpPriceSol, "tpPriceSol") : price(x.triggerPriceSol, "triggerPriceSol");
+  const sl = bracket ? price(x.slPriceSol, "slPriceSol") : null;
+  if (sl !== null && !(Number(t) > Number(sl))) throw new ApiError("bad_request", "tpPriceSol must be above slPriceSol", 400);
+  if (x.rearm !== undefined && typeof x.rearm !== "boolean") throw new ApiError("bad_request", "rearm: boolean", 400);
   const amount = amountOf(x.amount, "amount");
-  const slippageBps = x.slippageBps ?? ORDER_PARAMS.defaultSlippageBps[x.kind];
+  const slippageBps = x.slippageBps ?? (bracket ? ORDER_PARAMS.defaultSlippageBps.bracket! : ORDER_PARAMS.defaultSlippageBps[x.kind as Exclude<OrderKind, "bracket">]);
   if (!Number.isInteger(slippageBps) || slippageBps < 50 || slippageBps > 5000) throw new ApiError("bad_request", "slippageBps: 50..5000", 400);
+  const slSlippageBps = bracket ? (x.slSlippageBps ?? ORDER_PARAMS.defaultSlippageBps.stop_loss) : undefined;
+  if (slSlippageBps !== undefined && (!Number.isInteger(slSlippageBps) || slSlippageBps < 50 || slSlippageBps > 5000)) throw new ApiError("bad_request", "slSlippageBps: 50..5000", 400);
   const ttl = x.ttlSecs ?? ORDER_PARAMS.defaultTtlSecs;
   if (!Number.isInteger(ttl) || ttl < 3600 || ttl > ORDER_PARAMS.maxTtlSecs) throw new ApiError("bad_request", `ttlSecs: 3600..${ORDER_PARAMS.maxTtlSecs}`, 400);
   const exec = x.exec ?? "delayed";
   if (exec !== "delayed" && exec !== "max") throw new ApiError("bad_request", 'exec: orders take "delayed" | "max"', 400);
   // Only mints the pool already trades (public GET /api/tokens), on the pump.fun curve.
   const s = state!.find((y) => y.token.mint === x.mint);
-  if (!s || s.heat === 0 || s.token.venue !== "pumpfun" || s.token.status !== "curve") throw new ApiError("order_unsupported_mint", "mint not supported for orders", 422);
+  if (!s || s.heat === 0 || s.token.venue !== "pumpfun" || s.token.status !== "curve" || s.token.quote !== "SOL") throw new ApiError("order_unsupported_mint", "mint not supported for orders", 422);
   const a = account(network, pubkey);
   if (a.frozen) throw new ApiError("balance_frozen", "balance frozen", 423);
   const open = [...orders.values()].filter((o) => o.network === network && o.pubkey === pubkey && o.pub.status === "open");
@@ -1038,7 +1243,8 @@ function createOrder(network: Network, pubkey: string, x: Extract<SignedAction, 
     a.zecBalance -= amount;
     a.zecHeld += amount;
   } else {
-    const value = (lamportsAt(amount, s.token.decimals, Number(t)) * ZAT) / BigInt(mockRate(false).lamportsPerZec);
+    // bracket: valued at its stop-loss price (the lower one).
+    const value = (lamportsAt(amount, s.token.decimals, Number(sl ?? t)) * ZAT) / BigInt(mockRate(false).lamportsPerZec);
     if (value < minAction) throw new ApiError("below_minimum", "amount × trigger below PoolInfo.minActionZat", 422);
     const h = holdingOf(a, x.mint);
     if (BigInt(h.amount) < amount) {
@@ -1060,6 +1266,9 @@ function createOrder(network: Network, pubkey: string, x: Extract<SignedAction, 
       amount: amount.toString(),
       slippageBps,
       exec,
+      ...(sl !== null ? { slPriceSol: sl, slSlippageBps } : {}),
+      ...(x.rearm ? { rearm: true as const } : {}),
+      rearms: 0,
       status: "open",
       createdAt: Math.floor(now / 60_000) * 60_000,
       expiresAt: Math.ceil((now + ttl * 1000) / HOUR) * HOUR,
@@ -1088,15 +1297,21 @@ function ledgerOp(network: Network, pubkey: string, x: SignedAction, now: number
     if (x.mint !== undefined && !isSolanaAddress(String(x.mint))) throw new ApiError("bad_request", "mint: not a Solana address", 400);
     const a = account(network, pubkey);
     if (a.frozen) throw new ApiError("balance_frozen", "balance frozen", 423);
-    const mints = x.mint === undefined ? [...a.claimable.keys()] : [x.mint];
+    const mints = x.mint === undefined ? [...new Set([...a.claimable.keys(), ...a.claimableZat.keys()])] : [x.mint];
     const lamports = mints.reduce((sum, m) => sum + (a.claimable.get(m) ?? N0), N0);
+    const zatOwed = mints.reduce((sum, m) => sum + (a.claimableZat.get(m) ?? N0), N0);
     const rate = mockRate(false);
-    const zat = (lamports * ZAT) / BigInt(rate.lamportsPerZec);
-    if (zat === N0 || zat < BigInt(mockPool(network).minActionZat)) throw new ApiError("below_minimum", "nothing to claim above PoolInfo.minActionZat", 422);
+    // v0.14: floor(lamports × 1e8 / sell rate) + zat; minClaimZat applies to the sum.
+    const zat = (lamports * ZAT) / BigInt(rate.lamportsPerZec) + zatOwed;
+    if (zat === N0 || zat < MIN_CLAIM_ZAT) throw new ApiError("below_minimum", "nothing to claim above PoolInfo.minClaimZat", 422);
     for (const m of mints) {
       const c = creators.get(m);
-      if (c && c.network === network && c.pubkey === pubkey) c.claimed += a.claimable.get(m) ?? N0;
+      if (c && c.network === network && c.pubkey === pubkey) {
+        c.claimed += a.claimable.get(m) ?? N0;
+        c.claimedZat = (c.claimedZat ?? N0) + (a.claimableZat.get(m) ?? N0);
+      }
       a.claimable.delete(m);
+      a.claimableZat.delete(m);
     }
     a.zecBalance += zat;
     const id = hex16();
@@ -1129,6 +1344,24 @@ function orderTick(now: number) {
     }
     const trigger = Number(o.pub.triggerPriceSol);
     const p = s.price;
+    if (o.pub.kind === "bracket") {
+      // v0.15 OCO: TP (p ≥ tp) fires at once and resets the SL arming; SL (p ≤ sl) needs two ticks in a row.
+      if (p >= trigger) {
+        delete o.pub.armed;
+        fireOrder(o, s, "tp");
+        continue;
+      }
+      if (p > Number(o.pub.slPriceSol)) {
+        delete o.pub.armed;
+        continue;
+      }
+      if (!o.pub.armed) {
+        o.pub.armed = true;
+        continue;
+      }
+      fireOrder(o, s, "sl");
+      continue;
+    }
     const hit = o.pub.kind === "limit_buy" || o.pub.kind === "stop_loss" ? p <= trigger : p >= trigger;
     if (o.pub.kind === "stop_loss") {
       if (!hit) {
@@ -1145,12 +1378,19 @@ function orderTick(now: number) {
 }
 
 /** The order becomes an ordinary buy/sell in the next batch; the hold moves over unchanged. */
-function fireOrder(o: MockOrder, s: MockTokenState) {
-  const slip = o.pub.slippageBps / 10_000;
-  const trigger = Number(o.pub.triggerPriceSol);
+function fireOrder(o: MockOrder, s: MockTokenState, leg?: "tp" | "sl") {
+  const slLeg = leg === "sl";
+  const slip = (slLeg ? o.pub.slSlippageBps! : o.pub.slippageBps) / 10_000;
+  const trigger = Number(slLeg ? o.pub.slPriceSol : o.pub.triggerPriceSol);
   const amount = BigInt(o.pub.amount);
+  if (leg) o.pub.leg = leg;
+  // Server guard of a stop-loss (and the SL leg): sells only while p ≥ trigger · (1 − slippage).
+  if ((o.pub.kind === "stop_loss" || slLeg) && s.price < trigger * (1 - slip)) {
+    delete o.pub.armed;
+    return slippageMiss(o, Date.now());
+  }
   let action: SignedAction;
-  let rate: RateUsed;
+  let rate: SolRateUsed;
   if (o.pub.kind === "limit_buy") {
     rate = mockRate(true);
     const lamports = (amount * BigInt(rate.lamportsPerZec)) / ZAT;
@@ -1186,13 +1426,62 @@ function settleOrderOf(act: MockAction) {
   for (const o of orders.values()) {
     if (o.pub.actionId !== act.id || o.pub.status !== "triggered") continue;
     if (act.status.status === "executed") closeOrder(o, "filled", Date.now());
-    else if (act.status.status === "failed") closeOrder(o, "failed", Date.now(), act.status.error);
+    else if (act.status.status === "failed" && act.status.error === "slippage") {
+      // The failed trade already returned the hold to the balance: an order that re-arms takes it back.
+      if (canRearm(o, Date.now())) holdOrder(o);
+      slippageMiss(o, Date.now());
+    } else if (act.status.status === "failed") closeOrder(o, "failed", Date.now(), act.status.error);
   }
+}
+
+const canRearm = (o: MockOrder, now: number) => !!o.pub.rearm && (o.pub.rearms ?? 0) < (ORDER_PARAMS.maxRearms ?? 3) && now < o.pub.expiresAt;
+
+/** Re-take an order's hold (limit_buy: zat; sells: tokens). */
+function holdOrder(o: MockOrder) {
+  const a = account(o.network, o.pubkey);
+  const v = BigInt(o.pub.amount);
+  if (o.pub.kind === "limit_buy") {
+    a.zecBalance -= v;
+    a.zecHeld += v;
+  } else {
+    const h = holdingOf(a, o.pub.mint);
+    h.amount = (BigInt(h.amount) - v).toString();
+    h.held = (BigInt(h.held) + v).toString();
+  }
+}
+
+/**
+ * v0.15: a slippage miss (on-chain, or the stop-loss guard) sends a rearm order back to open with the same
+ * hold, up to maxRearms times and before expiresAt; otherwise it fails and the hold returns. The caller
+ * has made sure the hold is on the order.
+ */
+function slippageMiss(o: MockOrder, now: number) {
+  if (canRearm(o, now)) {
+    o.pub.status = "open";
+    o.pub.rearms = (o.pub.rearms ?? 0) + 1;
+    delete o.pub.actionId;
+    delete o.pub.leg;
+    delete o.pub.armed;
+    return;
+  }
+  if (o.pub.status === "open") {
+    // Guard miss before any trade: the hold is still on the order.
+    releaseOrder(o);
+    tidyHoldings(account(o.network, o.pubkey));
+  }
+  closeOrder(o, "failed", now, "slippage");
 }
 
 /** Creator fee of a trade on a token launched through the pool: pending until the collector runs. */
 function accrueCreatorFee(ev: FeedEvent) {
-  if (ev.kind === "create" || !creators.has(ev.mint)) return;
+  // v0.16: Bags creator fees are not collected (PoolInfo.venues[bags].creatorFees = false).
+  if (ev.kind === "create" || !creators.has(ev.mint) || ev.venue === "bags") return;
+  // v0.14: a ZEC pair's fee comes in ZEC SPL and is credited 1:1 in zat (8 decimals); others in lamports.
+  if (ev.quoteMint === ZEC_SPL_MINT && ev.quoteAmount) {
+    const fee = (BigInt(ev.quoteAmount) * CREATOR_FEE_BPS) / BigInt(10_000);
+    if (fee > N0) pendingFeesZat.set(ev.mint, (pendingFeesZat.get(ev.mint) ?? N0) + fee);
+    return;
+  }
   const fee = (BigInt(ev.solAmount) * CREATOR_FEE_BPS) / BigInt(10_000);
   if (fee > N0) pendingFees.set(ev.mint, (pendingFees.get(ev.mint) ?? N0) + fee);
 }
@@ -1206,6 +1495,13 @@ function sweepFees() {
     a.claimable.set(mint, (a.claimable.get(mint) ?? N0) + fee);
   }
   pendingFees.clear();
+  for (const [mint, fee] of pendingFeesZat) {
+    const c = creators.get(mint);
+    if (!c) continue;
+    const a = account(c.network, c.pubkey);
+    a.claimableZat.set(mint, (a.claimableZat.get(mint) ?? N0) + fee);
+  }
+  pendingFeesZat.clear();
 }
 
 /** Fixed schedules, independent of requests: price ticks for orders, the fee collector. */
@@ -1243,7 +1539,12 @@ function creatorCabinet(network: Network, pubkey: string, now: number): CreatorC
       status: t.status,
       ...(t.status === "curve" ? { curveProgressPct: pct(Math.min(99, 3 + (st.price / 2.8e-8 - 1) * 12)) } : {}),
       createdAt: t.createdAt,
-      fees: { claimableLamports: (a.claimable.get(mint) ?? N0).toString(), claimedLamports: c.claimed.toString() },
+      fees: {
+        claimableLamports: (a.claimable.get(mint) ?? N0).toString(),
+        claimedLamports: c.claimed.toString(),
+        claimableZat: (a.claimableZat.get(mint) ?? N0).toString(),
+        claimedZat: (c.claimedZat ?? N0).toString(),
+      },
       volumeLamports: trades.reduce((x, e) => x + BigInt(e.solAmount), N0).toString(),
       trades: trades.length,
       holders: trades.length === 0 ? null : 1 + Math.floor(trades.length * (1.5 + rnd())),
@@ -1268,6 +1569,13 @@ export function mockSetPrice(mint: string, priceSol: number) {
   init(Date.now());
   findToken(mint).price = priceSol;
   syncTokenFields();
+}
+
+/** TEST / DEMO: credit ZEC-pair creator fees (zat, v0.14) straight to a key's claimable balance. */
+export function mockCreditCreatorFeesZat(network: Network, pubkey: string, mint: string, zat: bigint) {
+  init(Date.now());
+  const a = account(network, pubkey);
+  a.claimableZat.set(mint, (a.claimableZat.get(mint) ?? N0) + zat);
 }
 
 /** TEST / DEMO: credit creator fees straight to a key's claimable balance. */
@@ -1423,7 +1731,7 @@ function resolveMint(mint: string): MockTokenState | PendingResponse {
   const rnd = seeded("cold:" + mint);
   const [symbol, name] = COLD_NAMES[Math.floor(rnd() * COLD_NAMES.length)];
   const s: MockTokenState = {
-    token: { mint, symbol, name, venue: "pumpfun", status: "curve", decimals: 6, priceSol: "0", marketCapSol: "0", createdAt: at - Math.floor(rnd() * 6 * 3_600_000) },
+    token: { mint, symbol, name, venue: "pumpfun", status: "curve", decimals: 6, priceSol: "0", marketCapSol: "0", createdAt: at - Math.floor(rnd() * 6 * 3_600_000), quote: "SOL" },
     price: logRand(2e-8, 4e-7),
     supply: SUPPLY,
     heat: 0, // no unzeen trades until someone buys through the pool
@@ -1602,7 +1910,7 @@ const fairHost: FairHost = {
     const now = Date.now();
     const venue: Venue = "pumpfun";
     const s: MockTokenState = {
-      token: { mint: mintFor(venue, x.symbol + ":" + hex16()), symbol: x.symbol, name: x.name, image: x.image, venue, status: "curve", decimals: DECIMALS[venue], priceSol: "0", marketCapSol: "0", createdAt: now },
+      token: { mint: mintFor(venue, x.symbol + ":" + hex16()), symbol: x.symbol, name: x.name, image: x.image, venue, status: "curve", decimals: DECIMALS[venue], priceSol: "0", marketCapSol: "0", createdAt: now, quote: "SOL" },
       price: FAIR_TOKEN_PRICE,
       supply: SUPPLY,
       heat: 3,
@@ -1637,16 +1945,18 @@ function loadVerify(): Promise<VerifyMock> {
       rateSell: () => BigInt(mockRate(false).lamportsPerZec),
       rateBuy: () => BigInt(mockRate(true).lamportsPerZec),
       accounts(network) {
-        const out: { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[]; claimLamports: bigint }[] = [];
+        const out: { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[]; claimLamports: bigint; claimZat: bigint }[] = [];
         for (const [key, a] of accounts) {
           const [net, pubkey] = key.split(":");
           if (net !== network) continue;
           const claimLamports = [...a.claimable.values()].reduce((x, y) => x + y, N0);
-          out.push({ pubkey, zat: a.zecBalance + a.zecHeld, tokens: a.holdings.map((h) => ({ mint: h.mint, amount: BigInt(h.amount) + BigInt(h.held) })), claimLamports });
+          const claimZat = [...a.claimableZat.values()].reduce((x, y) => x + y, N0);
+          out.push({ pubkey, zat: a.zecBalance + a.zecHeld, tokens: a.holdings.map((h) => ({ mint: h.mint, amount: BigInt(h.amount) + BigInt(h.held) })), claimLamports, claimZat });
         }
         return out;
       },
       tokens: () => (state ?? []).map((s) => ({ mint: s.token.mint, decimals: s.token.decimals })),
+      quoteAssets: (network) => mockQuotes(network).map((q) => ({ mint: q.mint, quote: q.quote, decimals: q.decimals, bridged: q.bridged })),
       authorize: (network, method, path, body, headers) => authorize(network, method, path, body, headers),
     }),
   ));

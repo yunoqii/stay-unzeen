@@ -4,10 +4,14 @@ import Link from "next/link";
 import { ArrowDown, WarningCircle } from "@phosphor-icons/react";
 import { ApiError, errorText } from "@/lib/api/client";
 import { formatZec } from "@/lib/format";
+import type { Quote } from "@/lib/api/types";
 import { cn } from "@/lib/utils";
 
-export function ErrorNote({ error, minAction }: { error: ApiError; minAction: bigint | null }) {
+export function ErrorNote({ error, minAction, pair }: { error: ApiError; minAction: bigint | null; pair?: Quote }) {
   let text = errorText(error);
+  // v0.13: on a non-SOL pair the pool settles in that asset; a shortfall there is the pool's, never your balance's.
+  if (error.code === "pool_liquidity" && pair && pair !== "SOL")
+    text = `The pool can't fill ${pair}-paired trades right now. Nothing left your balance. Try again in a few minutes, or a smaller amount.`;
   if (error.code === "below_minimum" && minAction !== null) text = `Below the pool minimum of ${formatZec(minAction.toString())} ZEC worth. Try a larger amount.`;
   if (error.code === "slippage") text = "The price moved past your limit. Raise max slippage or try a smaller amount.";
   return (

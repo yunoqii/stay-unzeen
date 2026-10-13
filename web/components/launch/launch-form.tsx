@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { useId, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowRight, Key, Lightning, LockKey, RocketLaunch, ShieldCheck } from "@phosphor-icons/react";
+import { ArrowRight, Key, Lightning, LockKey, RocketLaunch, ShieldCheck, ShoppingBag, Stack, WarningCircle } from "@phosphor-icons/react";
 import { ApiError, errorText } from "@/lib/api/client";
-import type { PoolInfo, SignedAction, Venue } from "@/lib/api/types";
+import type { LaunchPlatform, PoolInfo, Quote, SignedAction, Venue } from "@/lib/api/types";
 import { submitAction, useAction } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
 import { nowFee, useDefaultExec, withExec, type ExecMode } from "@/lib/exec";
@@ -13,6 +13,7 @@ import { formatSol, formatUnits, formatZec, lamportsToSol, VENUE_LABEL, ZEC_DECI
 import { checkInitialBuy, validateMeta, type MetaInput } from "@/lib/launch";
 import { maxInitialBuyLamports, maxInitialBuyZat } from "@/lib/launch-rules";
 import { useNetwork } from "@/lib/network";
+import { launchQuotes, PLATFORM_LABEL, venueInfo, venueLabel } from "@/lib/quotes";
 import { cn } from "@/lib/utils";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { Button } from "@/components/ui/button";
@@ -20,14 +21,49 @@ import { Chip } from "@/components/ui/chip";
 import { ActionStatusCard } from "@/components/trade/action-status";
 import { ExecSwitch } from "@/components/trade/exec-switch";
 import { TokenMetaFields } from "./token-meta-fields";
+import { RedactionTape } from "@/components/motion/redaction-tape";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 const ZERO = BigInt(0);
 
-const VENUES: { id: Exclude<Venue, "jupiter">; icon: typeof RocketLaunch; body: string }[] = [
+type LaunchVenue = Extract<Venue, "pumpfun" | "meteora-dbc" | "raydium-launchlab" | "bags">;
+
+const VENUES: { id: LaunchVenue; icon: typeof RocketLaunch; body: string }[] = [
   { id: "pumpfun", icon: RocketLaunch, body: "Bonding curve that graduates to PumpSwap. The pool creates the token; no wallet of yours appears." },
   { id: "meteora-dbc", icon: Lightning, body: "Dynamic bonding curve with its own migration. Same privacy, different curve." },
+  { id: "raydium-launchlab", icon: Stack, body: "Raydium's launchpad, under the platform you pick. Graduates to a Raydium pool." },
+  { id: "bags", icon: ShoppingBag, body: "Bags launchpad on mainnet, SOL pairs only. Same privacy: a pool vault creates the token." },
 ];
+
+const PLATFORMS: { id: LaunchPlatform; body: string }[] = [
+  { id: "unzeen", body: "Unzeen's own LaunchLab platform." },
+  { id: "bonk", body: "Listed on bonk.fun." },
+  { id: "stonk", body: "Listed on stonk.fun." },
+];
+
+const QUOTE_NOTE: Record<Quote, string> = {
+  SOL: "The default pair. Trades settle in SOL on the curve.",
+  ZEC: "Paid in ZEC, priced in ZEC. Buyers' shielded ZEC meets the curve one to one, with no SOL rate in between. ZEC on Solana is bridged.",
+  USDC: "Priced in dollars. Buyers still pay from their ZEC balance.",
+  USD1: "Priced in dollars (USD1). Buyers still pay from their ZEC balance.",
+};
+
+/**
+ * Venues the pool launches on. v0.16: PoolInfo.venues[].create. Older servers: the keys of
+ * launchRules.maxInitialBuyLamportsByVenue (v0.6), else the two classics. Bags only ever from PoolInfo.venues.
+ */
+function venueOn(pool: PoolInfo | null, v: LaunchVenue): boolean {
+  if (pool?.venues) return !!pool.venues.find((x) => x.venue === v)?.create;
+  if (v === "bags") return false;
+  const by = pool?.launchRules?.maxInitialBuyLamportsByVenue;
+  if (!by) return v !== "raydium-launchlab";
+  return v in by;
+}
+
+/** Cards on the form: Bags appears only when the pool says it can create there (mainnet). */
+const shownVenues = (pool: PoolInfo | null) => VENUES.filter((v) => v.id !== "bags" || venueOn(pool, "bags"));
+
+const capPct = (pool: PoolInfo | null) => `${Number(((pool?.launchRules?.capBps ?? 500) / 100).toFixed(2))}%`;
 
 /** Numbered section of the launch form. */
 export function FormStep({ n, title, hint, children, className }: { n: string; title: string; hint?: React.ReactNode; children: React.ReactNode; className?: string }) {
@@ -48,11 +84,45 @@ export function FormStep({ n, title, hint, children, className }: { n: string; t
   );
 }
 
-/** How the launch will read in the public feed: the only thing anyone else ever sees. */
-export function FeedPreview({ meta, venue, verb = "launched" }: { meta: MetaInput; venue: Venue; verb?: string }) {
+/**
+ * How the launch will read in the public feed: the only thing anyone else ever sees. M8 "Creator slot"
+ * (motion-v2): the "who" slot is taped over for good, the creator is anonymous from the first second; the
+ * row only reflows as the ticker is typed. `launched` flashes the row once when the launch executes.
+ */
+export function FeedPreview({
+  meta,
+  venue,
+  verb = "launched",
+  quote = "SOL",
+  platform,
+  launched = false,
+}: {
+  meta: MetaInput;
+  venue: Venue;
+  verb?: string;
+  quote?: Quote;
+  platform?: LaunchPlatform;
+  launched?: boolean;
+}) {
   const sym = meta.symbol || "TICKER";
   return (
-    <div className="flex items-center gap-3 rounded-2xl border border-border bg-surface-1 p-3">
+    <motion.div
+      layout
+      transition={{ layout: { type: "spring", bounce: 0, duration: 0.3 } }}
+      className="relative flex items-center gap-3 overflow-hidden rounded-2xl border border-border bg-surface-1 p-3"
+    >
+      <AnimatePresence>
+        {launched && (
+          <motion.span
+            key="flash"
+            aria-hidden
+            className="pointer-events-none absolute inset-0 bg-[var(--uz-zec-a2)]"
+            initial={{ opacity: 1 }}
+            animate={{ opacity: 0 }}
+            transition={{ duration: 0.6, ease: "linear" }}
+          />
+        )}
+      </AnimatePresence>
       <span className="relative size-10 shrink-0 overflow-hidden rounded-xl border border-border bg-surface-2">
         {meta.image ? (
           // eslint-disable-next-line @next/next/no-img-element
@@ -63,14 +133,21 @@ export function FeedPreview({ meta, venue, verb = "launched" }: { meta: MetaInpu
           </span>
         )}
       </span>
-      <p className="min-w-0 text-sm">
-        <span className="text-foreground">unzeen</span> <span className="text-muted-foreground">{verb}</span>{" "}
+      <p className="relative min-w-0 text-sm">
+        <span className="relative inline-block text-foreground" aria-label="unzeen">
+          <span aria-hidden className="opacity-0">
+            unzeen
+          </span>
+          <RedactionTape state="covered" instant className="-inset-x-0.5 inset-y-[0.15em]" />
+        </span>{" "}
+        <span className="text-muted-foreground">{verb}</span>{" "}
         <span className={cn("font-medium", !meta.symbol && "text-faint-foreground")}>${sym}</span>
         <span className="block truncate text-xs text-faint-foreground">
-          {meta.name.trim() || "Token name"} · {VENUE_LABEL[venue]} · just now
+          {meta.name.trim() || "Token name"} · {venueLabel(venue, platform)}
+          {quote !== "SOL" && ` · ${quote} pair`} · just now
         </span>
       </p>
-    </div>
+    </motion.div>
   );
 }
 
@@ -127,7 +204,14 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
   const profileExec = useDefaultExec(network);
   const [execOverride, setExecOverride] = useState<ExecMode | null>(null);
   const exec = execOverride ?? profileExec;
-  const [venue, setVenue] = useState<Exclude<Venue, "jupiter">>("pumpfun");
+  const [venuePick, setVenue] = useState<LaunchVenue>("pumpfun");
+  const venue: LaunchVenue = venueOn(pool, venuePick) ? venuePick : (VENUES.find((v) => venueOn(pool, v.id))?.id ?? "pumpfun");
+  const [platform, setPlatform] = useState<LaunchPlatform>("unzeen");
+  const quotes = launchQuotes(pool, venue);
+  const info = venueInfo(pool, venue);
+  const [quotePick, setQuote] = useState<Quote>("SOL");
+  // A pair the picked venue does not offer falls back to SOL (the pick is kept for when it comes back).
+  const quote: Quote = quotes.includes(quotePick) ? quotePick : "SOL";
   const [buy, setBuy] = useState("");
   const [tried, setTried] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -138,8 +222,9 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
 
   const metaErrors = useMemo(() => validateMeta(meta), [meta]);
   const metaOk = Object.keys(metaErrors).length === 0;
-  const initial = checkInitialBuy(buy, pool, venue);
-  const maxZat = maxInitialBuyZat(pool, venue);
+  const initial = checkInitialBuy(buy, pool, venue, quote);
+  // ZEC pairs are capped on their own curve, unpublished: the server checks it (creator_cap).
+  const maxZat = quote === "ZEC" ? null : maxInitialBuyZat(pool, venue);
   const maxLamports = maxInitialBuyLamports(pool, venue);
   const fee = pool?.fees?.createFeeZat && /^\d+$/.test(pool.fees.createFeeZat) ? BigInt(pool.fees.createFeeZat) : null;
   const nf = exec === "now" ? nowFee(pool) : null;
@@ -167,6 +252,8 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
         venue,
         meta: { name: meta.name.trim(), symbol: meta.symbol, ...(meta.image ? { image: meta.image } : {}) },
         ...(initial.zat ? { initialBuyZec: initial.zat.toString() } : {}),
+        ...(quote !== "SOL" ? { quote } : {}),
+        ...(venue === "raydium-launchlab" ? { platform } : {}),
       },
       exec,
     );
@@ -193,20 +280,23 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
         </FormStep>
 
         <FormStep n="02" title="Venue">
-          <div role="radiogroup" aria-label="Venue" className="grid gap-2 sm:grid-cols-2">
-            {VENUES.map(({ id, icon: Icon, body }) => {
+          <div role="radiogroup" aria-label="Venue" className={cn("grid gap-2", shownVenues(pool).length > 3 ? "sm:grid-cols-2" : "sm:grid-cols-3")}>
+            {shownVenues(pool).map(({ id, icon: Icon, body }) => {
               const on = venue === id;
+              const available = venueOn(pool, id);
               return (
                 <button
                   key={id}
                   type="button"
                   role="radio"
                   aria-checked={on}
-                  disabled={busy}
+                  disabled={busy || !available}
+                  title={available ? undefined : "Not switched on for this pool"}
                   onClick={() => setVenue(id)}
                   className={cn(
                     "group relative rounded-2xl border p-4 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
                     on ? "border-zec/50 bg-zec/[0.04]" : "border-border hover:border-border-strong hover:bg-surface-1",
+                    !available && "opacity-45 hover:border-border hover:bg-transparent",
                   )}
                 >
                   <span className="flex items-center justify-between">
@@ -215,15 +305,64 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
                       {on && <motion.span layoutId={`${ids}-venue`} className="size-2 rounded-full bg-zec" transition={{ type: "spring", bounce: 0, duration: 0.25 }} />}
                     </span>
                   </span>
-                  <span className="mt-3 block text-sm font-medium">{VENUE_LABEL[id]}</span>
-                  <span className="mt-1 block text-xs text-pretty text-muted-foreground">{body}</span>
+                  <span className="mt-3 block text-sm font-medium">{id === "raydium-launchlab" ? "Raydium LaunchLab" : VENUE_LABEL[id]}</span>
+                  <span className="mt-1 block text-xs text-pretty text-muted-foreground">{available ? body : "Not switched on for this pool yet."}</span>
                 </button>
               );
             })}
           </div>
+          <AnimatePresence initial={false}>
+            {venue === "raydium-launchlab" && (
+              <motion.div
+                key="platform"
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.22, ease: EASE }}
+                style={{ overflow: "hidden" }}
+              >
+                <div className="pt-3">
+                  <p id={`${ids}-plat`} className="mb-2 text-xs text-muted-foreground">
+                    Platform
+                  </p>
+                  <div role="radiogroup" aria-labelledby={`${ids}-plat`} className="flex flex-wrap gap-1.5">
+                    {PLATFORMS.map((p) => (
+                      <Chip key={p.id} role="radio" aria-checked={platform === p.id} active={platform === p.id} onClick={() => setPlatform(p.id)} disabled={busy} title={p.body}>
+                        {PLATFORM_LABEL[p.id]}
+                      </Chip>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs text-faint-foreground">{PLATFORMS.find((p) => p.id === platform)?.body} The creator on-chain is still a pool vault.</p>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </FormStep>
 
-        <FormStep n="03" title="Your first buy" hint="optional">
+        <FormStep n="03" title="Pair" hint={quotes.length === 1 ? "SOL only here" : undefined}>
+          <div role="radiogroup" aria-label="Pair" className="flex flex-wrap gap-1.5">
+            {(["SOL", "ZEC", "USDC", "USD1"] as const).map((q) => {
+              const offered = quotes.includes(q);
+              return (
+                <Chip
+                  key={q}
+                  role="radio"
+                  aria-checked={quote === q}
+                  active={quote === q}
+                  disabled={busy || !offered}
+                  onClick={() => setQuote(q)}
+                  title={offered ? undefined : `${venueLabel(venue)} has no ${q} pair on this pool`}
+                  className={cn("font-mono", quote === q && q === "ZEC" && "shadow-[0_0_18px_-4px_rgba(244,183,40,0.45)]")}
+                >
+                  ${meta.symbol || "TICKER"}/{q}
+                </Chip>
+              );
+            })}
+          </div>
+          <p className="mt-2 text-xs text-pretty text-faint-foreground">{QUOTE_NOTE[quote]}</p>
+        </FormStep>
+
+        <FormStep n="04" title="Your first buy" hint="optional">
           <div
             className={cn(
               "flex h-14 items-center rounded-2xl border bg-surface-1 px-4 transition-colors duration-150 focus-within:border-ring",
@@ -262,22 +401,34 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
           <p id={`${ids}-buy-h`} className={cn("mt-2 text-xs text-pretty", initial.ok ? "text-faint-foreground" : "text-sell")}>
             {!initial.ok
               ? initial.error
-              : maxZat !== null && maxLamports
+              : quote === "ZEC"
+                ? `Spent in ZEC on the ZEC curve, in the same transaction as the launch. Capped at ${capPct(pool)} of supply; the pool checks the cap when it accepts.`
+                : maxZat !== null && maxLamports
                 ? `Up to ${formatZec(maxZat.toString())} ZEC on ${VENUE_LABEL[venue]} (≈ ${formatSol(lamportsToSol(maxLamports))} SOL on its curve). Bought in the same transaction as the launch, locked for the rule period.`
                 : "Bought in the same transaction as the launch."}
           </p>
+          {info && !info.atomicFirstBuy && (
+            <p role="note" className="mt-3 flex gap-2 rounded-xl border border-zec/30 bg-zec-soft px-3 py-2.5 text-xs text-pretty text-zec">
+              <WarningCircle size={14} weight="light" className="mt-px shrink-0" aria-hidden />
+              <span>First buy is not atomic: it lands right after the launch, a sniper can get in between.</span>
+            </p>
+          )}
+          {info && !info.creatorFees && (
+            <p className="mt-2 text-xs text-pretty text-faint-foreground">Creator fees on Bags go to Bags fee share: nothing to claim here for this launch.</p>
+          )}
         </FormStep>
 
-        <FormStep n="04" title="Execution">
+        <FormStep n="05" title="Execution">
           <ExecSwitch value={exec} onChange={(m) => setExecOverride(m === profileExec ? null : m)} profileDefault={profileExec} />
         </FormStep>
       </div>
 
       <aside className="min-w-0 space-y-4 lg:sticky lg:top-[calc(var(--header-h)+1.5rem)] lg:self-start">
         <p className="text-xs text-muted-foreground">In the feed</p>
-        <FeedPreview meta={meta} venue={venue} />
+        <FeedPreview meta={meta} venue={venue} quote={quote} platform={venue === "raydium-launchlab" ? platform : undefined} launched={!!minted} />
 
         <dl className="space-y-2 rounded-2xl border border-border p-4">
+          <SummaryRow label="Pair" value={`$${meta.symbol || "TICKER"}/${quote}`} />
           <SummaryRow label="Launch fee" value={fee === null ? "—" : `${formatZec(fee.toString())} ZEC`} />
           <SummaryRow label="First buy" value={initial.ok && initial.zat ? `≈ ${formatZec(initial.zat.toString())} ZEC` : "none"} />
           {exec === "now" && <SummaryRow label="Now lane" value={nowZat > ZERO ? `${formatZec(nowZat.toString())} ZEC` : "—"} />}
@@ -348,6 +499,11 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
               className="space-y-2"
             >
               <ActionStatusCard action={active} />
+              {inFlight && info && !info.atomicFirstBuy && (
+                <p className="text-[11px] text-pretty text-faint-foreground">
+                  On {VENUE_LABEL[venue]} this runs as two transactions, the launch and then your first buy, so it can stay queued or sent a little longer.
+                </p>
+              )}
               {minted && (
                 <Button asChild variant="outline" className="h-10 w-full rounded-full">
                   <Link href={`/token/${minted}`}>

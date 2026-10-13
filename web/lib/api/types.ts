@@ -1,11 +1,48 @@
-// Mirrors docs/API.md v0.9 (token intel, fair-launch and Verify blocks at the bottom). Do not diverge: change the contract first.
+// Mirrors docs/API.md v0.14 (token intel, fair-launch and Verify blocks at the bottom). Do not diverge: change the contract first.
 //
 // Units (docs/API.md "Единицы сумм"):
 //   - spendable amounts: integer strings in BASE units (token base units, lamports, zatoshis)
 //   - prices / stats: decimal strings in UI units
 //   - timestamps: unix ms, except Candle.time (unix seconds)
 
-export type Venue = "pumpfun" | "meteora-dbc" | "jupiter";
+/** v0.13: + raydium-launchlab (LaunchLab: platforms Unzeen / bonk.fun / stonk.fun) and bags (reserved, 503 until enabled). */
+export type Venue = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "bags";
+
+/** v0.13: the curve's pair. ZEC = ZEC SPL (bridged, A7bd…QXaS). */
+export type Quote = "SOL" | "USDC" | "USD1" | "ZEC";
+
+/** v0.13: LaunchLab platform config (only with venue "raydium-launchlab"). */
+export type LaunchPlatform = "unzeen" | "bonk" | "stonk";
+
+/** v0.16: PoolInfo.venues[] */
+export interface VenueInfo {
+  venue: Venue;
+  /** buy / sell accepted (false: mainnet-only venue on devnet, or actions off on this network). */
+  trade: boolean;
+  /** create accepted (trade && createEnabled && a launchpad; jupiter always false). */
+  create: boolean;
+  /** Pairs create takes here: "SOL" + the enabled ones from PoolInfo.quotes; empty when create is false. */
+  quotes: Quote[];
+  /** false (bags): the first buy is a separate trade after the launch, and can be front-run. */
+  atomicFirstBuy: boolean;
+  /** false (bags, jupiter): no creator fees reach claimable. */
+  creatorFees: boolean;
+  mainnetOnly: boolean;
+}
+
+/** v0.13: PoolInfo.quotes[]: a non-SOL pair enabled on this network. No entry = pair unavailable. */
+export interface QuoteAsset {
+  quote: Exclude<Quote, "SOL">;
+  /** base58; on devnet pump.fun and Raydium use different USDC mints (separate entries). */
+  mint: string;
+  decimals: number;
+  /** ZEC SPL: true (bridged asset, issuer risk). */
+  bridged: boolean;
+  /** Venues with this pair. */
+  venues: Venue[];
+  /** ZEC only: spread of the 1:1 parity, bps. */
+  spreadBps?: number;
+}
 
 /**
  * Execution mode of buy / sell / withdraw (owner decision 12.10, docs/ARCHITECTURE.md):
@@ -33,6 +70,10 @@ export interface FeedEvent {
   decimals: number; // token decimals (pump.fun = 6)
   solanaTx: string; // public signature, visible in explorers
   ts: number; // unix ms
+  /** v0.13: only on non-SOL pairs. */
+  quoteMint?: string;
+  /** v0.13: quote base units (integer); solAmount is then the SOL equivalent at trade time, or "0". */
+  quoteAmount?: string;
   // no user data, only "unzeen"
 }
 
@@ -44,9 +85,17 @@ export interface Token {
   venue: Venue;
   status: "curve" | "graduated";
   decimals: number;
-  priceSol: DecimalString; // SOL per 1 whole token
-  marketCapSol: DecimalString;
+  priceSol: DecimalString; // SOL per 1 whole token (SOL equivalent for non-SOL pairs, may be "0")
+  marketCapSol: DecimalString; // SOL equivalent for non-SOL pairs, may be "0"
   createdAt: number; // unix ms
+  /** v0.13: the curve's pair ("SOL" for every older token; treat absent as "SOL"). */
+  quote: Quote;
+  /** v0.13: absent for SOL. */
+  quoteMint?: string;
+  /** v0.13: quote per 1 whole token (UI units), when the relayer recorded it. */
+  priceQuote?: DecimalString;
+  /** v0.13: only with venue "raydium-launchlab". */
+  platform?: LaunchPlatform;
 }
 
 /** v0.12: element of GET /api/tokens (Token + the fields the /tokens filters need). */
@@ -104,6 +153,8 @@ export interface PoolInfo {
   minDepositZat: Zatoshis;
   /** Minimum amount of an action from the balance (zecIn / withdraw_zec). */
   minActionZat: Zatoshis;
+  /** v0.11: minimum of a claim (ZEC equivalent of claimable), <= minActionZat. */
+  minClaimZat?: Zatoshis;
   /** K: blocks until a deposit is credited (default 3). */
   confirmations: number;
   /** v0.4 fees. The flat fee of exec "now" (`nowFeeZat` or `nowFeeLamports`) is pending in docs/API.md. */
@@ -135,6 +186,10 @@ export interface PoolInfo {
   fairLaunch?: FairLaunchParams;
   /** v0.8: private orders (limit / take-profit / stop-loss). Absent = the server has no orders. */
   orders?: OrdersParams;
+  /** v0.13: enabled non-SOL pairs (empty / absent = SOL only). */
+  quotes?: QuoteAsset[];
+  /** v0.16: enabled venues (UNZEEN_VENUES order) and what each takes right now. Absent on older servers. */
+  venues?: VenueInfo[];
   /** v0.5: creator rules of Unzeen launches, enforced by the ledger. 0 = rule off. */
   launchRules?: {
     lockSecs: number;
@@ -175,8 +230,11 @@ export interface Portfolio {
   frozen: boolean;
   /** amount: available; held: reserved by queued sell / withdraw_token. */
   holdings: { mint: string; amount: TokenBaseUnits; held: TokenBaseUnits }[];
-  /** v0.7: creator fees owed to this key, per mint it launched (lamports). `claim` credits them as ZEC. */
-  claimable: { mint: string; solAmount: Lamports }[];
+  /**
+   * v0.7: creator fees owed to this key, per mint it launched. solAmount: lamports (SOL / USDC / USD1 pairs);
+   * v0.14 zecAmount: zatoshis (ZEC pairs, credited 1:1). `claim` credits both as ZEC.
+   */
+  claimable: { mint: string; solAmount: Lamports; zecAmount?: Zatoshis }[];
   /** Last 20, newest first. */
   deposits: DepositInfo[];
   /**
@@ -204,6 +262,10 @@ export type SignedAction =
       meta: { name: string; symbol: string; image?: string };
       initialBuyZec?: Zatoshis;
       exec?: ExecMode;
+      /** v0.13: the pair (default "SOL"); the venue must list it in PoolInfo.quotes. */
+      quote?: Quote;
+      /** v0.13: only raydium-launchlab (default "unzeen"). */
+      platform?: LaunchPlatform;
     }
   // v0.7: creator fees -> ZEC balance, ledger only (no on-chain tx). Response { id, status: "executed", rate }.
   | { op: "claim"; mint?: string }
@@ -222,11 +284,19 @@ export type SignedAction =
       venue: "pumpfun";
       mint: string;
       kind: OrderKind;
-      /** SOL per whole token (like Token.priceSol), > 0, at most 18 significant digits. */
-      triggerPriceSol: DecimalString;
+      /** SOL per whole token (like Token.priceSol), > 0, at most 18 significant digits. Every kind except bracket (there: 400). */
+      triggerPriceSol?: DecimalString;
+      /** v0.15 bracket only (required): take-profit leg price, same format. */
+      tpPriceSol?: DecimalString;
+      /** v0.15 bracket only (required): stop-loss leg price, < tpPriceSol. */
+      slPriceSol?: DecimalString;
+      /** v0.15 bracket only: slippage of the SL leg, 50..5000; default defaultSlippageBps.stop_loss. */
+      slSlippageBps?: number;
+      /** v0.15: re-arm after a slippage failure (at most PoolInfo.orders.maxRearms times, until expiresAt). Default false. */
+      rearm?: boolean;
       /** limit_buy: zatoshis; the sell kinds: token base units. */
       amount: string;
-      /** 50..5000; default PoolInfo.orders.defaultSlippageBps[kind]. v0.10: measured from the price tick that triggers it (minOut rounded down to 3 significant digits by the server). */
+      /** 50..5000; default PoolInfo.orders.defaultSlippageBps[kind] (bracket: the TP leg). v0.10: measured from the price tick that triggers it (minOut rounded down to 3 significant digits by the server). */
       slippageBps?: number;
       /** 3600..PoolInfo.orders.maxTtlSecs; default 86400. expiresAt is rounded UP to the hour. */
       ttlSecs?: number;
@@ -259,11 +329,18 @@ export type ActionKind = "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_
 
 /** Rate fixed when the action was accepted. */
 export interface RateUsed {
-  /** Lamports per 1 ZEC, pool spread included. */
-  lamportsPerZec: Lamports;
-  source: "near-1click" | "fixed"; // fixed: devnet only
+  /** Lamports per 1 ZEC, pool spread included. v0.13: absent on ZEC pairs. */
+  lamportsPerZec?: Lamports;
+  /** v0.13: the action ran on a ZEC SPL pair (1:1 parity, no SOL rate). */
+  quote?: "ZEC";
+  /** v0.13: ZEC SPL base units per 1 ZEC, spread included (buy 1e8·(1−s), sell 1e8·(1+s)). */
+  quotePerZec?: string;
+  source: "near-1click" | "fixed" | "parity"; // fixed: devnet only; parity: ZEC SPL 1:1
   ts: number;
 }
+
+/** A rate with a ZEC/SOL price (every pair except ZEC). */
+export type SolRateUsed = RateUsed & { lamportsPerZec: Lamports };
 
 /** POST /api/actions. */
 export interface ActionReceipt {
@@ -290,13 +367,17 @@ export interface ActionStatus {
   fill?: {
     tokenAmount: TokenBaseUnits;
     solAmount?: Lamports;
+    /** v0.13: ZEC pairs: ZEC SPL base units of the trade (instead of solAmount). */
+    quoteAmount?: string;
+    quoteMint?: string;
     zecSpent?: Zatoshis;
     zecCredited?: Zatoshis;
     mint?: string; // create: new mint
   };
 }
 
-export type OrderKind = "limit_buy" | "limit_sell" | "take_profit" | "stop_loss";
+/** v0.15: + bracket (take-profit and stop-loss on one position, one cancels the other). */
+export type OrderKind = "limit_buy" | "limit_sell" | "take_profit" | "stop_loss" | "bracket";
 
 export type OrderStatus = "open" | "triggered" | "filled" | "cancelled" | "expired" | "failed";
 
@@ -306,17 +387,28 @@ export interface Order {
   venue: "pumpfun";
   mint: string;
   kind: OrderKind;
+  /** bracket (v0.15): the TP leg price. */
   triggerPriceSol: DecimalString;
   /** limit_buy: zatoshis; the sell kinds: token base units. */
   amount: string;
+  /** bracket: the TP leg. */
   slippageBps: number;
   exec: "delayed" | "max";
+  /** v0.15 bracket only. */
+  slPriceSol?: DecimalString;
+  slSlippageBps?: number;
+  /** v0.15 bracket only: which leg fired (triggered / filled, and failed after firing). */
+  leg?: "tp" | "sl";
+  /** v0.15: re-arm after slippage is on. */
+  rearm?: true;
+  /** v0.15: times re-armed so far (0..maxRearms); absent from servers before v0.15. */
+  rearms?: number;
   status: OrderStatus;
   /** unix ms, rounded down to the minute. */
   createdAt: number;
   /** unix ms, rounded up to the hour. */
   expiresAt: number;
-  /** stop_loss: the condition held on one tick, waiting for the next one in a row. */
+  /** stop_loss / the SL leg of a bracket: the condition held on one tick, waiting for the next one in a row. */
   armed?: true;
   /** triggered / filled / failed after the trigger: the trade's status is in Portfolio.actions. */
   actionId?: string;
@@ -331,7 +423,10 @@ export interface OrdersParams {
   maxOpenPerMint: number;
   maxTtlSecs: number;
   defaultTtlSecs: number;
-  defaultSlippageBps: Record<OrderKind, number>;
+  /** v0.15 bracket: its TP leg (500); its SL leg uses stop_loss. Absent on servers before v0.15. */
+  defaultSlippageBps: Record<Exclude<OrderKind, "bracket">, number> & { bracket?: number };
+  /** v0.15: how many times an order with rearm returns to open after slippage (3). */
+  maxRearms?: number;
   /** stop_loss fires after this many ticks in a row at or below the trigger. */
   slConfirmTicks: number;
   /** Indexer price tick, seconds ("checks about once a minute"). */
@@ -410,6 +505,10 @@ export interface CreatorToken {
     claimableLamports: Lamports;
     /** Claimed so far for this mint (since v0.9). */
     claimedLamports: Lamports;
+    /** v0.14: = Portfolio.claimable[mint].zecAmount (ZEC pairs; otherwise "0"). */
+    claimableZat?: Zatoshis;
+    /** v0.14: claimed so far in zatoshis for this mint. */
+    claimedZat?: Zatoshis;
   };
   /** Pool trade volume of the mint (buy + sell), all time. */
   volumeLamports: Lamports;
@@ -733,8 +832,23 @@ export interface VerifySnapshot extends VerifySnapshotSummary {
   rateLamportsPerZecSell?: Lamports;
   /** v0.10: rate creators' claimable lamports were converted into ZEC liabilities at (ceil). */
   rateLamportsPerZecBuy?: Lamports;
+  /** v0.13: the pool's quote assets (their ATA balances are in vaults[].tokens). Never in the liability trees. */
+  quoteAssets?: VerifyQuoteAsset[];
   /** Rounded DOWN to 0.01 ZEC. Stated by the operator, not proven. */
   zecReserve: { amountZat: Zatoshis; height: number; attested: true };
+}
+
+/** v0.13: VerifySnapshot.quoteAssets[] */
+export interface VerifyQuoteAsset {
+  mint: string;
+  quote: "ZEC" | "USDC" | "USD1";
+  decimals: number;
+  /** ZEC SPL: bridged. */
+  bridged: boolean;
+  /** true only for ZEC SPL: counts towards the ZEC cover 1:1. USDC / USD1 are shown, never counted. */
+  counted: boolean;
+  /** A vault balance below this is dust and does not count (base units). */
+  dustBelow: string;
 }
 
 export interface VerifyPathNode {

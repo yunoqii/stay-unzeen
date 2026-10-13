@@ -216,7 +216,10 @@ describe("mock v0.7/v0.8: creator fees claim", () => {
     mockCreditCreatorFees("devnet", signer.pubkey, t.mint, BigInt(50_000_000));
     mockCreditCreatorFees("devnet", signer.pubkey, u.mint, BigInt(100)); // dust
     let p = await portfolio();
-    expect(p.claimable).toEqual(expect.arrayContaining([{ mint: t.mint, solAmount: "50000000" }, { mint: u.mint, solAmount: "100" }]));
+    expect(p.claimable).toEqual(expect.arrayContaining([
+        { mint: t.mint, solAmount: "50000000", zecAmount: "0" },
+        { mint: u.mint, solAmount: "100", zecAmount: "0" },
+      ]));
     await expect(post({ op: "claim", mint: u.mint })).rejects.toMatchObject({ code: "below_minimum" });
 
     const rate = BigInt(mockPool("devnet").rate!.lamportsPerZecSell);
@@ -225,7 +228,7 @@ describe("mock v0.7/v0.8: creator fees claim", () => {
     const credited = (BigInt(50_000_000) * BigInt(100_000_000)) / rate;
     p = await portfolio();
     expect(BigInt(p.zecBalance)).toBe(BigInt(10_000_000) + credited);
-    expect(p.claimable).toEqual([{ mint: u.mint, solAmount: "100" }]);
+    expect(p.claimable).toEqual([{ mint: u.mint, solAmount: "100", zecAmount: "0" }]);
     expect(p.actions!.find((a) => a.id === r.id)).toMatchObject({ kind: "claim", status: "executed" });
     expect((await call<ActionStatus>("GET", `/api/actions/${r.id}`)).status).toBe("executed");
   });
@@ -265,7 +268,7 @@ describe("mock v0.9: creator cabinet and daily stats", () => {
     expect(JSON.stringify(cab).length % 4096).toBe(0);
     expect(cab.tokens).toHaveLength(1);
     const t = cab.tokens[0];
-    expect(t).toMatchObject({ mint, symbol: "CAB", venue: "pumpfun", status: "curve", fees: { claimableLamports: "40000000", claimedLamports: "0" } });
+    expect(t).toMatchObject({ mint, symbol: "CAB", venue: "pumpfun", status: "curve", fees: { claimableLamports: "40000000", claimedLamports: "0", claimableZat: "0", claimedZat: "0" } });
     expect(t.lock.lockedAmount).toBe(st.fill!.tokenAmount);
     expect(t.lock.until! % 3_600_000).toBe(0);
     expect(t.cap.capBps).toBe(500);
@@ -273,7 +276,7 @@ describe("mock v0.9: creator cabinet and daily stats", () => {
 
     await post({ op: "claim", mint });
     const after = (await call<CreatorCabinet>("GET", "/api/creator")).tokens[0];
-    expect(after.fees).toEqual({ claimableLamports: "0", claimedLamports: "40000000" });
+    expect(after.fees).toEqual({ claimableLamports: "0", claimedLamports: "40000000", claimableZat: "0", claimedZat: "0" });
     // the lock ends after 24 h
     vi.advanceTimersByTime(25 * 3_600_000);
     expect((await call<CreatorCabinet>("GET", "/api/creator")).tokens[0].lock).toEqual({ lockedAmount: "0", until: null });

@@ -12,7 +12,9 @@ import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, unitsToNumber, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
 import { nowFee as poolNowFee, resolveExec, useDefaultExec, withExec, type ExecMode, type NowFee } from "@/lib/exec";
-import { lamportsToZatCeil, quoteBuy, quoteSell } from "@/lib/trade";
+import { lamportsToZatCeil, quoteBuy, quoteBuyZecPair, quoteSell, quoteSellZecPair } from "@/lib/trade";
+import { formatQuote, QUOTE_DECIMALS, quoteAsset, quotePerSol, tokenQuote, zecSpreadBps } from "@/lib/quotes";
+import type { Quote as Pair } from "@/lib/api/types";
 import { isSlippageBps, MAX_SLIPPAGE_BPS, SELL_PRESETS, SLIPPAGE_CHOICES_BPS, updateTradeSettings, useTradeSettings } from "@/lib/trade-settings";
 import { cn } from "@/lib/utils";
 import { usePool } from "@/hooks/use-pool";
@@ -29,7 +31,7 @@ type Side = "buy" | "sell";
 type Tab = Side | "orders";
 const TAB_LABEL: Record<Tab, string> = { buy: "Buy", sell: "Sell", orders: "Orders" };
 
-export function TradePanel({ token, priceSol }: { token: Token; priceSol: string }) {
+export function TradePanel({ token, priceSol, priceQuote }: { token: Token; priceSol: string; priceQuote?: string }) {
   const key = useKeyState();
   const [side, setSide] = useState<Tab>("buy");
   const tabsId = useId();
@@ -77,7 +79,7 @@ export function TradePanel({ token, priceSol }: { token: Token; priceSol: string
       ) : side === "orders" && support.ok ? (
         <OrdersPanel key={key.pubkey} token={token} priceSol={priceSol} support={support} />
       ) : side !== "orders" ? (
-        <OrderForm key={`${side}:${key.pubkey}`} side={side} token={token} priceSol={priceSol} />
+        <OrderForm key={`${side}:${key.pubkey}`} side={side} token={token} priceSol={priceSol} priceQuote={priceQuote} />
       ) : null}
     </section>
   );
@@ -101,7 +103,7 @@ export function KeyPrompt({ mint, locked }: { mint: string; locked: boolean }) {
   );
 }
 
-function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceSol: string }) {
+function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: Token; priceSol: string; priceQuote?: string }) {
   const network = useNetwork();
   const { portfolio } = usePortfolio();
   const { pool } = usePool();
@@ -123,8 +125,15 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
   const decimals = isBuy ? ZEC_DECIMALS : token.decimals;
   const unit = isBuy ? "ZEC" : `$${token.symbol}`;
   const graduated = token.status === "graduated";
-  const venue: Venue = graduated && token.venue !== "jupiter" ? "jupiter" : token.venue;
+  // v0.13: Jupiter routes SOL / USDC / USD1 pairs after graduation, never ZEC pairs (400).
+  const venue: Venue = graduated && token.venue !== "jupiter" && tokenQuote(token) !== "ZEC" ? "jupiter" : token.venue;
   const rate = lastRate(network, side);
+  // v0.13: the pair. ZEC pairs run at 1:1 parity with the pool's spread (no SOL rate); USDC / USD1 pairs use the
+  // ZEC/SOL rate like SOL pairs, against the token's SOL-equivalent price.
+  const pair = tokenQuote(token);
+  const zecPair = pair === "ZEC";
+  const spread = zecSpreadBps(pool);
+  const pairDecimals = quoteAsset(pool, pair, token.venue)?.decimals ?? QUOTE_DECIMALS[pair];
 
   const zecBalance = portfolio ? BigInt(portfolio.zecBalance) : null;
   const holding = portfolio ? BigInt(portfolio.holdings.find((h) => h.mint === token.mint)?.amount ?? "0") : null;
@@ -151,9 +160,15 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
     const quote =
       parsed === null || inputError
         ? null
-        : isBuy
-          ? quoteBuy(parsed, rate, priceSol, token.decimals, slippage)
-          : quoteSell(parsed, rate, priceSol, token.decimals, slippage);
+        : zecPair
+          ? spread === null
+            ? null
+            : isBuy
+              ? quoteBuyZecPair(parsed, spread, priceQuote, token.decimals, pairDecimals, slippage)
+              : quoteSellZecPair(parsed, spread, priceQuote, token.decimals, pairDecimals, slippage)
+          : isBuy
+            ? quoteBuy(parsed, rate, priceSol, token.decimals, slippage)
+            : quoteSell(parsed, rate, priceSol, token.decimals, slippage);
     return { parsed, inputError, quote };
   };
   const { parsed, inputError, quote } = evaluate(amount);
@@ -298,6 +313,7 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
         rate={rate ? BigInt(rate.lamportsPerZec) : null}
         slippage={slippage}
         nowFee={exec === "now" ? { fee: poolNowFee(pool) } : null}
+        pair={{ quote: pair, decimals: pairDecimals, perSol: quotePerSol({ priceSol, priceQuote }), spread }}
       />
 
       <PanelSettings slippage={slippage} onSlippage={setSlippage} />
@@ -327,7 +343,7 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
             transition={{ duration: 0.2 }}
             style={{ overflow: "hidden" }}
           >
-            <ErrorNote error={error} minAction={minAction} />
+            <ErrorNote error={error} minAction={minAction} pair={pair} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -349,6 +365,17 @@ function OrderForm({ side, token, priceSol }: { side: Side; token: Token; priceS
   );
 }
 
+type AnyQuote = ReturnType<typeof quoteBuy> | ReturnType<typeof quoteSell> | ReturnType<typeof quoteBuyZecPair> | ReturnType<typeof quoteSellZecPair>;
+
+interface PairInfo {
+  quote: Pair;
+  decimals: number;
+  /** Quote per SOL from the token's own prices (USDC / USD1 trade size), null when unknown. */
+  perSol: number | null;
+  /** ZEC parity spread, bps. */
+  spread: number | null;
+}
+
 function Quote({
   side,
   token,
@@ -357,17 +384,20 @@ function Quote({
   rate,
   slippage,
   nowFee,
+  pair,
 }: {
   side: Side;
   token: Token;
-  quote: ReturnType<typeof quoteBuy> | ReturnType<typeof quoteSell>;
+  quote: AnyQuote;
   hasAmount: boolean;
   rate: bigint | null;
   slippage: number;
   /** Shown when exec is "now"; fee null = the pool does not publish it yet. */
   nowFee: { fee: NowFee | null } | null;
+  pair: PairInfo;
 }) {
   const sym = `$${token.symbol}`;
+  const zecPair = pair.quote === "ZEC";
   if (!hasAmount)
     return (
       <div className="flex items-center justify-between rounded-xl border border-dashed border-border px-3 py-3 text-sm text-faint-foreground">
@@ -375,28 +405,45 @@ function Quote({
         <span>—</span>
       </div>
     );
-  if (!rate || !quote)
+  if (!quote || (!zecPair && !rate))
     return (
       <div className="flex gap-2 rounded-xl border border-border px-3 py-3 text-xs text-pretty text-muted-foreground">
         <Info size={14} weight="light" className="mt-px shrink-0" aria-hidden />
         <span>
-          No quote yet: the pool fixes the ZEC/SOL rate when it accepts your first order, so this one has no price limit. Later
-          orders get a quote and your slippage limit.
+          {zecPair
+            ? "No ZEC price for this pair yet, so this order has no price limit. It fills at the pool's 1:1 ZEC parity once a price exists."
+            : !rate
+              ? "No quote yet: the pool fixes the ZEC/SOL rate when it accepts your first order, so this one has no price limit. Later orders get a quote and your slippage limit."
+              : "No price for this token yet, so this order has no price limit."}
         </span>
       </div>
     );
+  // Trade size in the pair's own unit: ZEC SPL for ZEC pairs, the quote (with a small SOL equivalent) for USDC / USD1.
+  const size = (lamports: bigint | null, quoteUnits: bigint | null): React.ReactNode => {
+    if (quoteUnits !== null) return `≈ ${formatQuote(Number(quoteUnits) / 10 ** pair.decimals, pair.quote)} ${pair.quote}`;
+    const sol = Number(lamports ?? BigInt(0)) / 1e9;
+    if (pair.quote === "SOL") return `≈ ${formatSol(sol)} SOL`;
+    if (pair.perSol === null) return `≈ ${formatSol(sol)} SOL`;
+    return (
+      <span key="size">
+        ≈ {formatQuote(sol * pair.perSol, pair.quote)} {pair.quote}
+        <span className="text-faint-foreground"> · {formatSol(sol)} SOL</span>
+      </span>
+    );
+  };
   const rows: Array<[string, React.ReactNode]> =
     "tokensOut" in quote
       ? [
           ["You get", <span key="v" className="text-foreground">≈ {formatCompact(unitsToNumber(quote.tokensOut.toString(), token.decimals))} {sym}</span>],
-          ["Trade size", `≈ ${formatSol(Number(quote.lamports) / 1e9)} SOL`],
+          ["Trade size", size("lamports" in quote ? quote.lamports : null, "quoteUnits" in quote ? quote.quoteUnits : null)],
           [`Min received · ${slippage / 100}%`, `${formatCompact(unitsToNumber(quote.minOut.toString(), token.decimals))} ${sym}`],
         ]
       : [
           ["You receive", <span key="v" className="text-foreground">≈ {formatZec(quote.zecOut.toString())} ZEC</span>],
-          ["Trade size", `≈ ${formatSol(Number(quote.lamports) / 1e9)} SOL`],
+          ["Trade size", size("lamports" in quote ? quote.lamports : null, "quoteUnits" in quote ? quote.quoteUnits : null)],
           [`Min received · ${slippage / 100}%`, `${formatZec(quote.minZecOut.toString())} ZEC`],
         ];
+  if (zecPair && pair.spread !== null) rows.push(["ZEC parity", `1:1 · ${pair.spread / 100}% spread`]);
   if (nowFee)
     rows.push([
       "Priority fee · Now",
@@ -419,12 +466,14 @@ function Quote({
           <dd className="tabular text-right text-muted-foreground">{v}</dd>
         </div>
       ))}
-      <p className="pt-1 text-[11px] text-faint-foreground">At the current price and the last rate the pool fixed. Final rate locks when the pool accepts; min received is rounded down.</p>
+      <p className="pt-1 text-[11px] text-pretty text-faint-foreground">
+        {zecPair
+          ? "Paid in ZEC, priced in ZEC: no SOL rate in between. At the current price; the amount locks when the pool accepts, min received is rounded down."
+          : "At the current price and the last rate the pool fixed. Final rate locks when the pool accepts; min received is rounded down."}
+      </p>
     </dl>
   );
 }
-
-
 
 /**
  * Panel settings: max slippage (saved per network in this browser). Priority is the execution mode

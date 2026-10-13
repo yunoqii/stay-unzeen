@@ -7,7 +7,8 @@ import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatPrice, formatZec, unitsToNumber } from "@/lib/format";
 import { expiredCount, fillsOf } from "@/lib/history/reduce";
 import { useHistory } from "@/lib/history/store";
-import { avgEntrySol, computePosition, unrealized } from "@/lib/pnl";
+import { avgEntrySol, avgEntryZec, computePosition, unrealized, unrealizedZecPair } from "@/lib/pnl";
+import { QUOTE_DECIMALS, quoteAsset, tokenQuote, zecSpreadBps } from "@/lib/quotes";
 import { lastRate } from "@/lib/activity";
 import { useNetwork } from "@/lib/network";
 import { cn } from "@/lib/utils";
@@ -22,7 +23,7 @@ const ZERO = BigInt(0);
  * Your position in this token: size, average entry, PnL. Computed only here, from your own executed
  * actions kept encrypted on this device (lib/history). Veiled until "Peek", like balances.
  */
-export function PositionCard({ token, priceSol }: { token: Token; priceSol: string }) {
+export function PositionCard({ token, priceSol, priceQuote }: { token: Token; priceSol: string; priceQuote?: string }) {
   const key = useKeyState();
   const history = useHistory();
   const { portfolio } = usePortfolio();
@@ -38,12 +39,18 @@ export function PositionCard({ token, priceSol }: { token: Token; priceSol: stri
   const expired = expiredCount(history.entries, token.mint);
   if (history.status === "ready" && fills.length === 0 && (held === null || held === ZERO)) return null;
 
-  const sellRate = pool?.rate ? BigInt(pool.rate.lamportsPerZecSell) : lastRate(network, "sell") ? BigInt(lastRate(network, "sell")!.lamportsPerZec) : ZERO;
-  const u = unrealized(pos, priceSol, token.decimals, sellRate);
+  const last = lastRate(network, "sell");
+  const sellRate = pool?.rate ? BigInt(pool.rate.lamportsPerZecSell) : last ? BigInt(last.lamportsPerZec) : ZERO;
+  // v0.13: a ZEC pair is marked at its own ZEC price through the 1:1 parity, never via SOL.
+  const zecPair = tokenQuote(token) === "ZEC";
+  const spread = zecSpreadBps(pool);
+  const qDec = quoteAsset(pool, "ZEC", token.venue)?.decimals ?? QUOTE_DECIMALS.ZEC;
+  const mark = (p: typeof pos) => (zecPair ? (spread === null ? null : unrealizedZecPair(p, priceQuote, token.decimals, spread, qDec)) : unrealized(p, priceSol, token.decimals, sellRate));
+  const u = mark(pos);
   // Value = what you hold now (the pool's ledger), not what this device's history explains: a position bought
   // before the history began (or partly sold since) still has a value even when its PnL can't be computed.
-  const value = held !== null && held > ZERO ? unrealized({ ...pos, qty: held }, priceSol, token.decimals, sellRate) : u;
-  const entry = avgEntrySol(pos, token.decimals);
+  const value = held !== null && held > ZERO ? mark({ ...pos, qty: held }) : u;
+  const entry = zecPair ? avgEntryZec(pos, token.decimals) : avgEntrySol(pos, token.decimals);
   const incomplete = pos.incomplete || expired > 0 || (held !== null && held > pos.qty);
   const pnl = u ? u.pnlZat + pos.realizedZat : pos.realizedZat;
   const sign = pnl > ZERO ? "+" : "";
@@ -67,7 +74,7 @@ export function PositionCard({ token, priceSol }: { token: Token; priceSol: stri
             </Veiled>
           </Cell>
           <Cell label="Avg entry">
-            <Veiled>{entry === null ? "—" : `${formatPrice(entry)} SOL`}</Veiled>
+            <Veiled>{entry === null ? "—" : `${formatPrice(entry)} ${zecPair ? "ZEC" : "SOL"}`}</Veiled>
           </Cell>
           <Cell label="Value">
             <Veiled>{value ? `≈ ${formatZec(value.valueZat.toString())} ZEC` : "—"}</Veiled>

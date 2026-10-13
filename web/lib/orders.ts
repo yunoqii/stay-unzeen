@@ -6,13 +6,14 @@
 import type { Order, OrderKind, OrdersParams, PoolInfo, Token } from "@/lib/api/types";
 import { amountsMatch } from "@/lib/trade";
 
-export const ORDER_KINDS: readonly OrderKind[] = ["limit_buy", "limit_sell", "take_profit", "stop_loss"];
+export const ORDER_KINDS: readonly OrderKind[] = ["limit_buy", "limit_sell", "take_profit", "stop_loss", "bracket"];
 
 export const ORDER_LABEL: Record<OrderKind, string> = {
   limit_buy: "Limit buy",
   limit_sell: "Limit sell",
   take_profit: "Take profit",
   stop_loss: "Stop-loss",
+  bracket: "Bracket",
 };
 
 /** One line on what the order does, for the form and the lists. */
@@ -21,7 +22,33 @@ export const ORDER_RULE: Record<OrderKind, string> = {
   limit_sell: "Sells when the price rises to your trigger or above.",
   take_profit: "Sells when the price rises to your target.",
   stop_loss: "Sells when the price stays at or below your trigger on two checks in a row.",
+  bracket: "Take profit above, stop-loss below, on one position. Whichever hits first sells; the other is cancelled.",
 };
+
+/** v0.15 honest line next to the re-arm checkbox (maxRearms from PoolInfo.orders, 3 by default). */
+export const rearmNote = (maxRearms = 3) =>
+  `Retries after slippage up to ${maxRearms} time${maxRearms === 1 ? "" : "s"}. A stop-loss with retry may still not exit in a crash.`;
+
+/** Default slippage of a kind (servers before v0.15 have no bracket entry: TP default 500). */
+export function defaultSlippage(params: Pick<OrdersParams, "defaultSlippageBps">, kind: OrderKind): number {
+  return kind === "bracket" ? (params.defaultSlippageBps.bracket ?? 500) : params.defaultSlippageBps[kind];
+}
+
+/** The leg of a bracket that fired, as the single kind it behaved like (chart markers, history). */
+export function firedAs(o: Pick<Order, "kind" | "leg">): Exclude<OrderKind, "bracket"> {
+  if (o.kind !== "bracket") return o.kind;
+  return o.leg === "sl" ? "stop_loss" : "take_profit";
+}
+
+/** v0.15 bracket legs: both valid prices and TP strictly above SL (the server answers 400 otherwise). */
+export function checkBracket(tp: string, sl: string): string | null {
+  const a = checkTrigger(tp);
+  if (a) return a;
+  const b = checkTrigger(sl);
+  if (b) return b;
+  if (tp.trim() && sl.trim() && !(Number(tp) > Number(sl))) return "The take-profit price must be above the stop-loss price.";
+  return null;
+}
 
 export const isSellKind = (k: OrderKind) => k !== "limit_buy";
 /** Which side of the current price the condition waits for. */
@@ -40,9 +67,19 @@ export type OrderSupport = { ok: true; params: OrdersParams } | { ok: false; rea
  * Orders only for mints the pool already trades (listed in the public GET /api/tokens), on the pump.fun
  * curve, and only if the server has orders at all (PoolInfo.orders). Otherwise the tab says why.
  */
-export function orderSupport(token: Pick<Token, "mint" | "venue" | "status">, pool: Pick<PoolInfo, "orders"> | null, listed: readonly Pick<Token, "mint">[] | null): OrderSupport {
+export function orderSupport(
+  token: Pick<Token, "mint" | "venue" | "status"> & { quote?: Token["quote"] },
+  pool: Pick<PoolInfo, "orders"> | null,
+  listed: readonly Pick<Token, "mint">[] | null,
+): OrderSupport {
   const params = pool?.orders;
   if (!params) return { ok: false, reason: "Private orders aren't switched on for this pool yet." };
+  // v0.13: orders (and their SOL trigger prices) exist only on SOL pairs; the server answers order_unsupported_mint.
+  if (token.quote && token.quote !== "SOL")
+    return {
+      ok: false,
+      reason: `Private orders work on SOL pairs only, and this token trades against ${token.quote}. Buy and sell it directly; limit, take-profit and stop-loss stay with SOL-paired tokens.`,
+    };
   if (!params.venues.includes(token.venue as "pumpfun")) return { ok: false, reason: "Orders work only for pump.fun tokens for now." };
   if (token.status !== "curve") return { ok: false, reason: "This token left the bonding curve. Orders work only while a token is on the pump.fun curve." };
   if (listed && !listed.some((t) => t.mint === token.mint))
@@ -129,7 +166,10 @@ export const TRIGGER_PRESETS: Record<OrderKind, number[]> = {
   limit_sell: [10, 25, 50],
   take_profit: [25, 50, 100],
   stop_loss: [-5, -10, -20],
+  bracket: [25, 50, 100],
 };
+/** Presets of a bracket's SL leg. */
+export const SL_LEG_PRESETS = [-5, -10, -20];
 
 // ---- ttl ----
 

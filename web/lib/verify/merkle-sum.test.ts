@@ -239,7 +239,7 @@ describe("verify vectors: creatorSnapshot (API v0.10)", () => {
     const res = mjs.check({ anonPubkey: pk, snapshot: s, proof }, C.snapshot.operatorPubkey);
     expect(res.ok).toBe(true);
     expect(res.lines.some((l) => l.startsWith("WAIT signed, anchor pending"))).toBe(true);
-    expect(res.lines.some((l) => l.includes(`proven (SOL) + ${C.solvency.zec.reserveZat} attested`) && l.includes(C.solvency.zec.solCoverZat))).toBe(true);
+    expect(res.lines.some((l) => l.includes(`proven (SOL) + 0 bridged (ZEC SPL) + ${C.solvency.zec.reserveZat} attested`) && l.includes(C.solvency.zec.solCoverZat))).toBe(true);
   });
 });
 

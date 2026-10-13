@@ -9,8 +9,10 @@ import { formatCompact, formatSol, lamportsToSol, timeAgo, unitsToNumber } from 
 import { explorerTx, useNetwork } from "@/lib/network";
 import { cn } from "@/lib/utils";
 import { CountUp } from "@/components/motion/count-up";
-import { ScrambleText } from "@/components/motion/scramble-text";
+import { CollapseIdentity } from "@/components/motion/collapse-identity";
+import { QuoteBadge } from "@/components/tokens/quote-badge";
 import { VenueTag } from "@/components/tokens/venue-tag";
+import { eventQuote, formatQuote } from "@/lib/quotes";
 
 const VERB: Record<FeedEvent["kind"], string> = {
   buy: "bought",
@@ -24,11 +26,20 @@ interface Props {
   /** Fresh = arrived over the socket; animate it in. */
   fresh: boolean;
   dense?: boolean;
+  /** M3 opening cascade: index among the first rows that collapse in turn (once per session). */
+  intro?: number;
 }
 
-const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event, now, fresh, dense }, ref) {
+const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event, now, fresh, dense, intro }, ref) {
   const tokenNum = unitsToNumber(event.tokenAmount, event.decimals);
   const solNum = lamportsToSol(event.solAmount);
+  // v0.13: a non-SOL pair reads in its own quote ("for 3.1 ZEC", "for 45 USDC"); solAmount is only the SOL
+  // equivalent then (or "0"). ZEC pairs never show a SOL figure: paid in ZEC, priced in ZEC.
+  const q = eventQuote(event);
+  const amount = q ? q.amount : solNum;
+  const unit = q ? q.quote : "SOL";
+  const solHint = q && q.quote !== "ZEC" && solNum > 0 ? solNum : null;
+  const silentCreate = event.kind === "create" && !(amount > 0);
   const network = useNetwork();
   const isBuy = event.kind === "buy";
   const isSell = event.kind === "sell";
@@ -60,8 +71,8 @@ const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event
               dense ? "text-[15px]" : "text-[17px] sm:text-xl",
             )}
           >
-            {fresh ? (
-              <ScrambleText text="unzeen" className="text-foreground/90" />
+            {fresh || intro !== undefined ? (
+              <CollapseIdentity id={event.id} play className="text-foreground/90" {...(intro !== undefined ? { delayMs: 200 + intro * 300, exclusive: false } : {})} />
             ) : (
               <span className="text-foreground/90">unzeen</span>
             )}{" "}
@@ -76,19 +87,28 @@ const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event
               className="font-medium text-foreground underline-offset-4 hover:underline focus-visible:underline focus-visible:outline-none"
             >
               ${event.symbol}
-            </Link>{" "}
-            {event.kind === "create" ? "with" : "for"}{" "}
-            <Num
-              fresh={fresh}
-              value={solNum}
-              format={formatSol}
-              className={cn("font-medium", isBuy && "text-buy", isSell && "text-sell", event.kind === "create" && "text-zec")}
-            />{" "}
-            <span className="text-faint-foreground">SOL</span>
+            </Link>
+            {!silentCreate && (
+              <>
+                {" "}
+                {event.kind === "create" ? "with" : "for"}{" "}
+                <Num
+                  fresh={fresh}
+                  value={amount}
+                  format={q ? (n) => formatQuote(n, q.quote) : formatSol}
+                  className={cn("font-medium", isBuy && "text-buy", isSell && "text-sell", event.kind === "create" && "text-zec")}
+                />{" "}
+                <span className={cn(unit === "ZEC" ? "text-zec/80" : "text-faint-foreground")}>{unit}</span>
+                {solHint !== null && (
+                  <span className="tabular ml-1.5 align-middle text-xs whitespace-nowrap text-faint-foreground">≈ {formatSol(solHint)} SOL</span>
+                )}
+              </>
+            )}
           </p>
 
           <div className="mt-1.5 flex items-center gap-2 text-xs text-faint-foreground">
             <VenueTag venue={event.venue} />
+            {q && <QuoteBadge quote={q.quote} />}
             <span aria-hidden>·</span>
             <a
               href={explorerTx(event.solanaTx, network)}

@@ -410,3 +410,29 @@ Adapted for unzeen: recoloured to Zcash yellow + fog, thinner strokes, reduced-m
   border-radius: 0;
   background-color: var(--background);
 }
+
+/* Motion v2: redaction tape (docs/design/motion-v2.md, shared by M1, M2, M5, M6, M8). */
+:root {
+  --uz-zec-deep: var(--uz-zec-ink);
+}
+.redaction-tape {
+  background: var(--uz-zec-deep) repeating-linear-gradient(-45deg, var(--uz-zec) 0 1.4px, transparent 1.4px 6px);
+  box-shadow: inset 0 0 0 1px rgb(244 183 40 / 0.7);
+}
+
+/* M7 "Someone was here": the taped line of the empty state drifts, slowly, only while visible. */
+.uz-drift {
+  background: repeating-linear-gradient(-45deg, rgb(244 183 40 / 0.5) 0 1.2px, transparent 1.2px 6px);
+  background-size: 8.49px 8.49px;
+  animation: uz-drift 14s linear infinite;
+}
+@keyframes uz-drift {
+  to {
+    background-position: 84.9px 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .uz-drift {
+    animation: none;
+  }
+}

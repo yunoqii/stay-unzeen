@@ -265,6 +265,11 @@ export interface SolvencyRow {
   provenZat?: bigint;
   /** ZEC only: the operator's statement (zat). */
   attestedZat?: bigint;
+  /**
+   * ZEC only (v0.13): ZEC SPL on the signed vaults, counted 1:1 (quoteAssets with counted: true, dust
+   * below dustBelow per vault left out). Proven on Solana, but a bridged asset: the bridge issuer's risk.
+   */
+  bridgedZat?: bigint;
   covered: boolean;
   /**
    * "proven": mint covered by signed vaults. "proven_attested": ZEC (spare vault SOL proven + ZEC attested).
@@ -279,14 +284,59 @@ export interface SolvencyRow {
 
 const ZAT_PER_ZEC = BigInt(100_000_000);
 
-export function solvency(s: VerifySnapshot, check: Pick<SnapshotCheck, "vaults">): SolvencyRow[] {
-  // Only vaults whose signature verified count towards the cover, each address once (review E12).
+/** Vaults whose signature verified, each address once (review E12). Only these count towards any cover. */
+function signedVaults(s: VerifySnapshot, check: Pick<SnapshotCheck, "vaults">) {
   const seen = new Set<string>();
-  const signed = s.vaults.filter((v) => {
+  return s.vaults.filter((v) => {
     if (seen.has(v.address)) return false;
     seen.add(v.address);
     return check.vaults[v.address];
   });
+}
+
+export interface QuoteHolding {
+  mint: string;
+  quote: "ZEC" | "USDC" | "USD1";
+  decimals: number;
+  bridged: boolean;
+  /** Counts towards the ZEC cover (only ZEC SPL, API v0.13). USDC / USD1: shown, never counted. */
+  counted: boolean;
+  /** Σ over the signed vaults, base units. */
+  total: bigint;
+  /** What the cover takes: Σ of vault balances at or above dustBelow; 0 when not counted. */
+  countedAmount: bigint;
+  /** In zatoshis (counted ZEC SPL only, rescaled from its decimals). */
+  countedZat: bigint;
+}
+
+/** v0.13 quote assets of the pool on the signed vaults (snapshot.quoteAssets). Empty without the field. */
+export function quoteHoldings(s: VerifySnapshot, check: Pick<SnapshotCheck, "vaults">): QuoteHolding[] {
+  const signed = signedVaults(s, check);
+  const seen = new Set<string>();
+  const out: QuoteHolding[] = [];
+  for (const q of s.quoteAssets ?? []) {
+    if (seen.has(q.mint)) continue; // a mint listed twice counts once
+    seen.add(q.mint);
+    const dust = parseUint(q.dustBelow) ?? BigInt(0);
+    // Only ZEC SPL is ever counted, whatever the flag says for another quote.
+    const counted = q.counted === true && q.quote === "ZEC";
+    let total = BigInt(0);
+    let countedAmount = BigInt(0);
+    for (const v of signed) {
+      const bal = v.tokens.filter((t) => t.mint === q.mint).reduce((n, t) => n + (parseUint(t.amount) ?? BigInt(0)), BigInt(0));
+      total += bal;
+      if (counted && bal >= dust) countedAmount += bal;
+    }
+    const d = Number.isInteger(q.decimals) && q.decimals >= 0 && q.decimals <= 18 ? q.decimals : 8;
+    const countedZat = d >= 8 ? countedAmount / BigInt(10) ** BigInt(d - 8) : countedAmount * BigInt(10) ** BigInt(8 - d);
+    out.push({ mint: q.mint, quote: q.quote, decimals: d, bridged: q.bridged, counted, total, countedAmount, countedZat });
+  }
+  return out;
+}
+
+export function solvency(s: VerifySnapshot, check: Pick<SnapshotCheck, "vaults">): SolvencyRow[] {
+  // Only vaults whose signature verified count towards the cover, each address once (review E12).
+  const signed = signedVaults(s, check);
   const vaultsSigned = signed.length === s.vaults.length && s.vaults.length > 0;
   const tokenTotals = new Map<string, bigint>();
   let lamports = BigInt(0);
@@ -305,8 +355,10 @@ export function solvency(s: VerifySnapshot, check: Pick<SnapshotCheck, "vaults">
       const rate = parseUint(s.rateLamportsPerZecSell ?? "");
       const provenZat = rate && rate > BigInt(0) ? (spare * ZAT_PER_ZEC) / rate : BigInt(0);
       const attestedZat = parseUint(s.zecReserve.amountZat) ?? BigInt(0);
-      const assets = provenZat + attestedZat;
-      return { asset: t.asset, decimals: t.decimals, liabilities, assets, provenZat, attestedZat, covered: liabilities <= assets, kind: "proven_attested", vaultsSigned };
+      // v0.13: ZEC SPL 1:1 ("bridged"); USDC / USD1 never count (conservative).
+      const bridgedZat = quoteHoldings(s, check).reduce((n, q) => n + q.countedZat, BigInt(0));
+      const assets = provenZat + attestedZat + bridgedZat;
+      return { asset: t.asset, decimals: t.decimals, liabilities, assets, provenZat, attestedZat, bridgedZat, covered: liabilities <= assets, kind: "proven_attested", vaultsSigned };
     }
     const assets = tokenTotals.get(t.asset) ?? BigInt(0);
     return { asset: t.asset, decimals: t.decimals, liabilities, assets, covered: liabilities <= assets, kind: "proven", vaultsSigned };

@@ -7,7 +7,7 @@
 // only for the displayed price per token.
 
 import type { OrderKind } from "@/lib/api/types";
-import { lamportsToZat, tokensToLamports } from "@/lib/trade";
+import { lamportsToZat, tokensToLamports, zecPairValueZat } from "@/lib/trade";
 
 const ZERO = BigInt(0);
 
@@ -18,8 +18,10 @@ export interface Fill {
   ts: number;
   /** Base units received (buy/create), sold (sell) or sent out (withdraw_token). */
   tokenAmount: string;
-  /** Lamports of the trade (none for withdraw_token). */
+  /** Lamports of the trade (none for withdraw_token; none on ZEC pairs). */
   solAmount?: string;
+  /** v0.13: ZEC pairs: ZEC SPL base units of the trade (instead of solAmount). */
+  quoteAmount?: string;
   zecSpent?: string;
   zecCredited?: string;
   /** v0.8: the trade came from one of your private orders (marker label on the chart). */
@@ -114,7 +116,20 @@ export interface Unrealized {
 export function unrealized(p: Position, priceSol: string, decimals: number, lamportsPerZecSell: bigint): Unrealized | null {
   if (p.qty === ZERO || lamportsPerZecSell <= ZERO) return null;
   const lamports = tokensToLamports(p.qty, priceSol, decimals);
-  const valueZat = lamportsToZat(lamports, lamportsPerZecSell);
+  return markedAt(p, lamportsToZat(lamports, lamportsPerZecSell));
+}
+
+/**
+ * v0.13 ZEC pairs: mark at the pair's own price (Token.priceQuote, ZEC per token) through the 1:1 parity
+ * (sell side, spread included). No SOL rate anywhere.
+ */
+export function unrealizedZecPair(p: Position, priceQuote: string | undefined, decimals: number, spreadBps: number, quoteDecimals = 8): Unrealized | null {
+  if (p.qty === ZERO) return null;
+  const v = zecPairValueZat(p.qty, spreadBps, priceQuote, decimals, quoteDecimals);
+  return v === null ? null : markedAt(p, v);
+}
+
+function markedAt(p: Position, valueZat: bigint): Unrealized {
   const pnlZat = valueZat - p.costZat;
   const pnlPct = p.costZat === ZERO ? null : (Number(pnlZat) / Number(p.costZat)) * 100;
   return { valueZat, pnlZat, pnlPct };

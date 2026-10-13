@@ -115,11 +115,13 @@ export function FairCreateForm({ pool, meta, onMeta }: { pool: PoolInfo; meta: M
           <p className="text-xs text-muted-foreground">In the feed, after the round</p>
           <FeedPreview meta={meta} venue="pumpfun" />
           <dl className="space-y-2 rounded-2xl border border-border p-4">
+            <SummaryRow label="Pair" value={`$${meta.symbol || "TICKER"}/SOL`} />
             <SummaryRow label="Launch fee" value={fee === null ? "—" : `${formatZec(fee.toString())} ZEC`} strong />
             <SummaryRow label="If nothing launches" value="fee returned" />
             <SummaryRow label="Your own bid" value={capTier !== null ? `up to ${formatZec(capTier.toString())} ZEC hold` : "next step"} />
             <SummaryRow label="Balance" value={!unlocked ? "locked" : balance === null ? "…" : `${formatZec(balance.toString())} ZEC`} className={cn(short && "[&_dd]:text-sell")} />
           </dl>
+          <p className="text-[11px] text-pretty text-faint-foreground">Sealed launches pair with SOL on pump.fun. For a ZEC, USDC or USD1 pair, use an instant launch.</p>
           <p className="text-[11px] text-pretty text-faint-foreground">
             The launch appears publicly at the next batch boundary, not the moment you sign, so its timing does not point at you.
           </p>

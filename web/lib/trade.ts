@@ -3,12 +3,11 @@
 // Estimates use the current token price (no curve impact): slippage covers the rest.
 
 import { base58 } from "@scure/base";
-import type { RateUsed } from "@/lib/api/types";
+import type { SolRateUsed } from "@/lib/api/types";
 
 const TEN = BigInt(10);
 const ZERO = BigInt(0);
 const ZAT_PER_ZEC = BigInt(100_000_000);
-const LAMPORTS_PER_SOL = BigInt(1_000_000_000);
 const BPS = BigInt(10_000);
 
 /** Decimal string (plain or e-notation) -> exact fraction num / 10^scale. */
@@ -27,18 +26,28 @@ export function parseDecimal(s: string): { num: bigint; scale: number } | null {
   return { num, scale };
 }
 
+/** Quote base units (quote with `quoteDecimals`) for `amount` token base units at `price` (quote per whole token). Floor. */
+export function tokensToQuoteUnits(amount: bigint, price: string, decimals: number, quoteDecimals: number): bigint {
+  const p = parseDecimal(price);
+  if (!p) return ZERO;
+  return (amount * p.num * TEN ** BigInt(quoteDecimals)) / (TEN ** BigInt(p.scale) * TEN ** BigInt(decimals));
+}
+
+/** Token base units bought with `units` of the quote at `price`. Floor; 0 when the price is unknown. */
+export function quoteUnitsToTokens(units: bigint, price: string, decimals: number, quoteDecimals: number): bigint {
+  const p = parseDecimal(price);
+  if (!p || p.num === ZERO) return ZERO;
+  return (units * TEN ** BigInt(p.scale) * TEN ** BigInt(decimals)) / (p.num * TEN ** BigInt(quoteDecimals));
+}
+
 /** Lamports for `amount` base units at `priceSol` (SOL per whole token). Floor. */
 export function tokensToLamports(amount: bigint, priceSol: string, decimals: number): bigint {
-  const p = parseDecimal(priceSol);
-  if (!p) return ZERO;
-  return (amount * p.num * LAMPORTS_PER_SOL) / (TEN ** BigInt(p.scale) * TEN ** BigInt(decimals));
+  return tokensToQuoteUnits(amount, priceSol, decimals, 9);
 }
 
 /** Base units bought with `lamports` at `priceSol`. Floor; 0 when the price is unknown. */
 export function lamportsToTokens(lamports: bigint, priceSol: string, decimals: number): bigint {
-  const p = parseDecimal(priceSol);
-  if (!p || p.num === ZERO) return ZERO;
-  return (lamports * TEN ** BigInt(p.scale) * TEN ** BigInt(decimals)) / (p.num * LAMPORTS_PER_SOL);
+  return quoteUnitsToTokens(lamports, priceSol, decimals, 9);
 }
 
 export const zatToLamports = (zat: bigint, lamportsPerZec: bigint) => (zat * lamportsPerZec) / ZAT_PER_ZEC;
@@ -57,7 +66,7 @@ export interface BuyQuote {
   minOut: bigint;
 }
 
-export function quoteBuy(zecIn: bigint, rate: RateUsed | null, priceSol: string, decimals: number, slippageBps: number): BuyQuote | null {
+export function quoteBuy(zecIn: bigint, rate: SolRateUsed | null, priceSol: string, decimals: number, slippageBps: number): BuyQuote | null {
   if (!rate) return null;
   const lamports = zatToLamports(zecIn, BigInt(rate.lamportsPerZec));
   const tokensOut = lamportsToTokens(lamports, priceSol, decimals);
@@ -70,11 +79,52 @@ export interface SellQuote {
   minZecOut: bigint;
 }
 
-export function quoteSell(amount: bigint, rate: RateUsed | null, priceSol: string, decimals: number, slippageBps: number): SellQuote | null {
+export function quoteSell(amount: bigint, rate: SolRateUsed | null, priceSol: string, decimals: number, slippageBps: number): SellQuote | null {
   if (!rate) return null;
   const lamports = tokensToLamports(amount, priceSol, decimals);
   const zecOut = lamportsToZat(lamports, BigInt(rate.lamportsPerZec));
   return { lamports, zecOut, minZecOut: withSlippage(zecOut, slippageBps) };
+}
+
+// ---- ZEC SPL pairs (API v0.13): 1:1 parity with ZEC, no SOL rate ----
+// buy spends zecIn × (1 − s) of ZEC SPL; sell credits ZEC SPL × 1/(1 + s) zatoshis; s = PoolInfo.quotes[ZEC].spreadBps.
+
+/** Zatoshis -> quote base units at parity (ZEC SPL has 8 decimals like ZEC; scaled anyway). */
+const zatToQuoteUnits = (zat: bigint, quoteDecimals: number) =>
+  quoteDecimals >= 8 ? zat * TEN ** BigInt(quoteDecimals - 8) : zat / TEN ** BigInt(8 - quoteDecimals);
+const quoteUnitsToZat = (units: bigint, quoteDecimals: number) =>
+  quoteDecimals >= 8 ? units / TEN ** BigInt(quoteDecimals - 8) : units * TEN ** BigInt(8 - quoteDecimals);
+
+export interface ZecPairBuyQuote {
+  /** ZEC SPL base units the trade spends. */
+  quoteUnits: bigint;
+  tokensOut: bigint;
+  minOut: bigint;
+}
+
+export function quoteBuyZecPair(zecIn: bigint, spreadBps: number, priceQuote: string | undefined, decimals: number, quoteDecimals: number, slippageBps: number): ZecPairBuyQuote | null {
+  if (!priceQuote || !(Number(priceQuote) > 0)) return null;
+  const quoteUnits = zatToQuoteUnits((zecIn * (BPS - BigInt(spreadBps))) / BPS, quoteDecimals);
+  const tokensOut = quoteUnitsToTokens(quoteUnits, priceQuote, decimals, quoteDecimals);
+  return { quoteUnits, tokensOut, minOut: withSlippage(tokensOut, slippageBps) };
+}
+
+export interface ZecPairSellQuote {
+  quoteUnits: bigint;
+  zecOut: bigint;
+  minZecOut: bigint;
+}
+
+export function quoteSellZecPair(amount: bigint, spreadBps: number, priceQuote: string | undefined, decimals: number, quoteDecimals: number, slippageBps: number): ZecPairSellQuote | null {
+  if (!priceQuote || !(Number(priceQuote) > 0)) return null;
+  const quoteUnits = tokensToQuoteUnits(amount, priceQuote, decimals, quoteDecimals);
+  const zecOut = (quoteUnitsToZat(quoteUnits, quoteDecimals) * BPS) / (BPS + BigInt(spreadBps));
+  return { quoteUnits, zecOut, minZecOut: withSlippage(zecOut, slippageBps) };
+}
+
+/** What `amount` tokens are worth in zatoshis on a ZEC pair (sell side of the parity). Display only. */
+export function zecPairValueZat(amount: bigint, spreadBps: number, priceQuote: string | undefined, decimals: number, quoteDecimals = 8): bigint | null {
+  return quoteSellZecPair(amount, spreadBps, priceQuote, decimals, quoteDecimals, 0)?.zecOut ?? null;
 }
 
 // ---- pool fees (defaults of core/api config; the API does not publish them yet) ----
@@ -86,7 +136,7 @@ export const WITHDRAW_TOKEN_GAS_LAMPORTS = BigInt(2_000_000);
 /** WITHDRAW_TOKEN_COST_LAMPORTS: ATA rent + tx fee per part. */
 export const WITHDRAW_TOKEN_COST_LAMPORTS = BigInt(2_100_000);
 
-export function withdrawTokenFee(parts: number, rate: RateUsed | null): { lamports: bigint; zat: bigint | null } {
+export function withdrawTokenFee(parts: number, rate: SolRateUsed | null): { lamports: bigint; zat: bigint | null } {
   const lamports = BigInt(parts) * (WITHDRAW_TOKEN_GAS_LAMPORTS + WITHDRAW_TOKEN_COST_LAMPORTS);
   return { lamports, zat: rate ? lamportsToZatCeil(lamports, BigInt(rate.lamportsPerZec)) : null };
 }

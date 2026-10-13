@@ -10,6 +10,7 @@ import type { Fill } from "@/lib/pnl";
 import { formatPrice, lamportsToSol, unitsToNumber } from "@/lib/format";
 import { ORDER_LABEL } from "@/lib/orders";
 import { useNetwork } from "@/lib/network";
+import { eventQuote } from "@/lib/quotes";
 import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -29,14 +30,25 @@ const hourLabel = new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2
 const dayLabel = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
 const fullTime = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 
-const toBar = (c: Candle): Bar => ({
+const toBar = (c: Candle, scale = 1): Bar => ({
   time: c.time,
-  open: Number(c.open),
-  high: Number(c.high),
-  low: Number(c.low),
-  close: Number(c.close),
+  open: Number(c.open) * scale,
+  high: Number(c.high) * scale,
+  low: Number(c.low) * scale,
+  close: Number(c.close) * scale,
   volume: Number(c.volume),
 });
+
+/**
+ * Unit of the price axis. Candles are SOL (API); a non-SOL pair can be drawn in its own quote:
+ * history bars scaled by `scale` (quote per SOL from the token's public prices), live trades priced from
+ * their own quote amount, so the newest bars are exact.
+ */
+export interface ChartDenom {
+  unit: string;
+  /** Multiplies SOL prices into `unit` (1 for SOL). */
+  scale: number;
+}
 
 function cssVar(name: string, fallback: string) {
   if (typeof window === "undefined") return fallback;
@@ -54,8 +66,13 @@ export function PriceChart({
   markers = [],
   triggers = [],
   showMarkers = false,
+  denom = { unit: "SOL", scale: 1 },
+  denomSwitch,
 }: {
   mint: string;
+  denom?: ChartDenom;
+  /** Optional control rendered in the header (price unit switch of non-SOL pairs). */
+  denomSwitch?: React.ReactNode;
   trades: FeedEvent[];
   markers?: readonly Fill[];
   /** v0.8: your open orders' trigger prices, drawn as dashed lines (local only, behind Peek like markers). */
@@ -205,7 +222,7 @@ export function PriceChart({
       .getCandles(mint, { tf })
       .then((list) => {
         if (!alive || !candles.current || !volume.current) return;
-        const bars = list.map(toBar);
+        const bars = list.map((c) => toBar(c, denom.scale));
         const { up, down } = colors.current;
         candles.current.setData(bars.map((b) => ({ time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close })));
         volume.current.setData(bars.map((b) => volumeBar(b, up, down)));
@@ -219,7 +236,7 @@ export function PriceChart({
     return () => {
       alive = false;
     };
-  }, [mint, tf, network, readyTick]);
+  }, [mint, tf, network, readyTick, denom.unit, denom.scale]);
 
   // Live: fold new trades into the current bar (or open the next one).
   useEffect(() => {
@@ -233,8 +250,10 @@ export function PriceChart({
       applied.current.add(e.id);
       const tokens = unitsToNumber(e.tokenAmount, e.decimals);
       const sol = lamportsToSol(e.solAmount);
-      if (!(tokens > 0) || !(sol > 0)) continue;
-      const price = sol / tokens;
+      const q = denom.unit !== "SOL" ? eventQuote(e) : null;
+      const paid = q && q.quote === denom.unit ? q.amount : sol * denom.scale;
+      if (!(tokens > 0) || !(paid > 0)) continue;
+      const price = paid / tokens;
       const prev = last.current;
       const bar: Bar =
         prev && prev.time === t
@@ -244,14 +263,17 @@ export function PriceChart({
       candles.current?.update({ time: bar.time as UTCTimestamp, open: bar.open, high: bar.high, low: bar.low, close: bar.close } satisfies CandlestickData);
       volume.current?.update(volumeBar(bar, colors.current.up, colors.current.down));
     }
-  }, [trades, tf, state]);
+  }, [trades, tf, state, denom.unit, denom.scale]);
 
   return (
     <section aria-labelledby="chart-title">
       <header className="flex items-center justify-between gap-3 border-b border-border/60 px-4 py-2.5">
-        <h2 id="chart-title" className="text-sm font-medium">
-          Price <span className="font-normal text-faint-foreground">· SOL</span>
-        </h2>
+        <div className="flex items-center gap-2">
+          <h2 id="chart-title" className="text-sm font-medium">
+            Price <span className="font-normal text-faint-foreground">· {denom.unit}</span>
+          </h2>
+          {denomSwitch}
+        </div>
         <div role="tablist" aria-label="Timeframe" onKeyDown={onTabListKeyDown} className="flex gap-0.5 rounded-full border border-border p-0.5">
           {TIMEFRAMES.map((t) => (
             <button
@@ -285,7 +307,10 @@ export function PriceChart({
           </p>
         )}
       </div>
-      <p className="border-t border-border/60 px-4 py-2 text-[11px] text-faint-foreground">Chart: TradingView Lightweight Charts™</p>
+      <p className="border-t border-border/60 px-4 py-2 text-[11px] text-pretty text-faint-foreground">
+        {denom.unit !== "SOL" && <>Earlier bars converted at the current {denom.unit}/SOL price; new trades in {denom.unit}. Volume in SOL equivalent. </>}
+        Chart: TradingView Lightweight Charts™
+      </p>
     </section>
   );
 }

@@ -8,14 +8,14 @@ import { mockTakeSnapshot } from "@/lib/api/mock";
 import type { VerifySnapshot, VerifySnapshotSummary } from "@/lib/api/types";
 import { useNetwork, type Network } from "@/lib/network";
 import { getLatestSnapshot, getSnapshot, getSnapshotHistory, HISTORY_PAGE } from "@/lib/verify/api";
-import { checkSnapshot, solvency } from "@/lib/verify/merkle-sum";
+import { checkSnapshot, quoteHoldings, solvency } from "@/lib/verify/merkle-sum";
 import { pinnedOperator } from "@/lib/verify/pinned";
 import { EmptyState } from "@/components/layout/page-shell";
 import { Skeleton } from "@/components/ui/skeleton";
 import { OwnProof } from "./own-proof";
 import { RootHistory } from "./root-history";
 import { SnapshotHeader } from "./snapshot-header";
-import { SolvencyTable } from "./solvency-table";
+import { QuoteAssetsTable, SolvencyTable } from "./solvency-table";
 import { VaultList } from "./vault-list";
 
 /** While the latest root waits for its memo-tx: re-read the public snapshot on a fixed rhythm. */
@@ -89,6 +89,7 @@ function VerifyView({ network }: { network: Network }) {
 
   const check = useMemo(() => (snap ? checkSnapshot(snap, pinnedOperator(network)) : null), [snap, network]);
   const rows = useMemo(() => (snap && check ? solvency(snap, check) : []), [snap, check]);
+  const quoteRows = useMemo(() => (snap && check ? quoteHoldings(snap, check) : []), [snap, check]);
 
   const select = useCallback(
     (id: number) => {
@@ -177,6 +178,7 @@ function VerifyView({ network }: { network: Network }) {
       <section aria-labelledby="solv-t">
         <SectionTitle id="solv-t" title="Solvency" note="Liabilities are the root sums. Assets are what the signed vaults hold at the same slot." />
         <SolvencyTable rows={rows} symbols={symbols} />
+        <QuoteAssetsTable rows={quoteRows} />
       </section>
 
       <div className="grid grid-cols-1 gap-12 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-8">

@@ -2,7 +2,8 @@
 
 import { onTabListKeyDown } from "@/lib/tabs";
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useContactIntro } from "@/hooks/use-contact-intro";
 import { ArrowRight } from "@phosphor-icons/react";
 import { motion } from "motion/react";
 import { useLiveFeed } from "@/hooks/use-live-feed";
@@ -23,6 +24,16 @@ export function HomeClient() {
   const now = useNow(5000);
   const [tab, setTab] = useState<Tab>("feed");
   const hotRef = useRef<HTMLElement>(null);
+  // M3: once per session the eclipse comes into contact and the first three rows collapse into "unzeen".
+  const contact = useContactIntro();
+  const [intro, setIntro] = useState<ReadonlyMap<string, number> | undefined>(undefined);
+  const hasEvents = feed.events.length > 0;
+  const head = feed.events.slice(0, 3).map((e) => e.id).join(",");
+  useEffect(() => {
+    if (!contact || intro || !hasEvents) return;
+    const t = setTimeout(() => setIntro(new Map(head.split(",").map((id, i) => [id, i]))), 0);
+    return () => clearTimeout(t);
+  }, [contact, intro, hasEvents, head]);
 
   const onBuy = () => {
     setTab("hot");
@@ -32,7 +43,7 @@ export function HomeClient() {
   return (
     <>
       <CursorShadow />
-      <Hero onBuy={onBuy} />
+      <Hero onBuy={onBuy} contact={contact} />
 
       <div className="relative mx-auto max-w-6xl px-0 pt-6 sm:px-6 lg:pt-10">
         <div role="tablist" aria-label="Home sections" onKeyDown={onTabListKeyDown} className="mx-4 mb-4 flex gap-1 rounded-full border border-border p-1 sm:mx-0 lg:hidden">
@@ -72,7 +83,7 @@ export function HomeClient() {
               </h2>
               <FeedStatusDot status={feed.status} beat={feed.events[0]?.id} updatedAt={feed.updatedAt} />
             </header>
-            <LiveFeed events={feed.events} fresh={feed.fresh} loading={feed.loading} error={feed.error} onRetry={feed.retry} />
+            <LiveFeed events={feed.events} fresh={feed.fresh} intro={intro} loading={feed.loading} error={feed.error} onRetry={feed.retry} />
           </section>
 
           <aside

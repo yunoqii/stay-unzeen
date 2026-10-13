@@ -1,7 +1,7 @@
 // Launch form rules (docs/API.md "Правила исполнения действий", create): checked here so the button
 // says what is wrong before anything is signed; core checks the same and answers 400/422 anyway.
 
-import type { PoolInfo } from "@/lib/api/types";
+import type { PoolInfo, Quote } from "@/lib/api/types";
 import { formatZec, parseUnits, ZEC_DECIMALS } from "@/lib/format";
 import { maxInitialBuyZat } from "@/lib/launch-rules";
 
@@ -46,8 +46,12 @@ export type InitialBuy =
 /**
  * Optional first buy of `create`, in ZEC. Empty = no first buy. Capped at maxInitialBuyZat (launchRules
  * at the pool's buy rate); at least minActionZat when set.
+ *
+ * v0.13: SOL, USDC and USD1 pairs use the venue's lamport cap (the ledger keeps them in lamports). A ZEC pair
+ * is capped on its own ZEC curve, which the pool does not publish: no client-side cap, the server answers
+ * 422 creator_cap above it.
  */
-export function checkInitialBuy(value: string, pool: Pick<PoolInfo, "launchRules" | "rate" | "minActionZat"> | null, venue?: string): InitialBuy {
+export function checkInitialBuy(value: string, pool: Pick<PoolInfo, "launchRules" | "rate" | "minActionZat"> | null, venue?: string, quote: Quote = "SOL"): InitialBuy {
   const v = value.trim();
   if (!v) return { ok: true, zat: null };
   let zat: bigint;
@@ -58,6 +62,7 @@ export function checkInitialBuy(value: string, pool: Pick<PoolInfo, "launchRules
   }
   if (zat === BigInt(0)) return { ok: true, zat: null };
   if (pool && zat < BigInt(pool.minActionZat)) return { ok: false, error: `At least ${formatZec(pool.minActionZat)} ZEC, or leave it empty.` };
+  if (quote === "ZEC") return { ok: true, zat };
   const max = maxInitialBuyZat(pool, venue);
   if (max === null) return { ok: false, error: "The pool has not published its first-buy limit yet. Launch without a first buy, or try again shortly." };
   if (zat > max) return { ok: false, error: `Up to ${formatZec(max.toString())} ZEC: the creator can hold at most the capped share of supply.` };

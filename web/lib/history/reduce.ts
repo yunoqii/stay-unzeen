@@ -37,6 +37,7 @@ export function applyStatuses(entries: HistoryEntry[], polled: readonly Polled[]
       // executedAt (v0.5) is rounded to the minute by the server; older servers: when we saw it.
       const fill: Fill = { kind: e.kind, ts: typeof hit.executedAt === "number" ? hit.executedAt : now, tokenAmount: f.tokenAmount };
       if (f.solAmount !== undefined) fill.solAmount = f.solAmount;
+      if (f.quoteAmount !== undefined) fill.quoteAmount = f.quoteAmount;
       if (f.zecSpent !== undefined) fill.zecSpent = f.zecSpent;
       if (f.zecCredited !== undefined) fill.zecCredited = f.zecCredited;
       if (e.via) fill.via = e.via;

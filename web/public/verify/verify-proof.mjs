@@ -15,8 +15,10 @@
 //   4. every piece of your balance climbs its Merkle-sum path to the tree root (hash and sum); pieces
 //      and leaf positions are distinct and inside the tree, values are multiples of the tree's granule;
 //   5. solvency: mints by signed vault balances; ZEC by spare vault SOL (Σ lamports − committedLamports,
-//      converted at rateLamportsPerZecSell: proven) + reserve (attested by the operator). Creator fees
-//      owed are inside the creators' ZEC leaves (API v0.10), there is no SOL tree.
+//      converted at rateLamportsPerZecSell: proven) + ZEC SPL on the vaults (API v0.13 quoteAssets with
+//      counted: true, 1:1, each vault balance below dustBelow left out: bridged) + reserve (attested by the
+//      operator). USDC / USD1 quote assets are never counted. Creator fees owed are inside the creators'
+//      ZEC leaves (API v0.10, v0.14), there is no SOL tree.
 // Asset ids: "ZEC" (32 zero bytes) or a base58 mint (32 bytes). Any other id (including "SOL") is
 // reported as a failed check, never a crash.
 // A signed snapshot may not be anchored yet (v0.10: the operator signs before the memo-tx).
@@ -207,6 +209,19 @@ export function check(file, operator, opts = {}) {
   const lamports = signed.reduce((n, v) => n + (isUint(v.lamports) ? BigInt(v.lamports) : 0n), 0n);
   const committedL = isUint(s.committedLamports) ? BigInt(s.committedLamports) : 0n;
   const spare = lamports > committedL ? lamports - committedL : 0n;
+  // v0.13: only ZEC SPL counts (bridged), per vault at or above dustBelow; USDC / USD1 never.
+  let bridged = 0n;
+  const seenQ = new Set();
+  for (const q of Array.isArray(s.quoteAssets) ? s.quoteAssets : []) {
+    if (!q || q.counted !== true || q.quote !== "ZEC" || seenQ.has(q.mint)) continue;
+    seenQ.add(q.mint);
+    const dust = isUint(q.dustBelow) ? BigInt(q.dustBelow) : 0n;
+    const d = Number.isInteger(q.decimals) && q.decimals >= 0 && q.decimals <= 18 ? q.decimals : 8;
+    for (const v of signed) {
+      const bal = v.tokens.filter((x) => x.mint === q.mint).reduce((n, x) => n + (isUint(x.amount) ? BigInt(x.amount) : 0n), 0n);
+      if (bal >= dust) bridged += d >= 8 ? bal / 10n ** BigInt(d - 8) : bal * 10n ** BigInt(8 - d);
+    }
+  }
   for (const t of s.trees) {
     if (!asset32(t.asset)) {
       all = ok(false, `${String(t.asset).slice(0, 48)}: unknown asset id, can't check solvency`) && all;
@@ -214,7 +229,7 @@ export function check(file, operator, opts = {}) {
       const proven = s.rateLamportsPerZecSell ? (spare * 100_000_000n) / BigInt(s.rateLamportsPerZecSell) : 0n;
       const attested = BigInt(s.zecReserve.amountZat);
       // Informational: part of the ZEC cover is the operator's statement, so it does not set the exit code.
-      ok(BigInt(t.sum) <= proven + attested, `ZEC liabilities ${t.sum} <= ${proven} proven (SOL) + ${attested} attested (operator) zat  [informational: attested part]`);
+      ok(BigInt(t.sum) <= proven + bridged + attested, `ZEC liabilities ${t.sum} <= ${proven} proven (SOL) + ${bridged} bridged (ZEC SPL) + ${attested} attested (operator) zat  [informational: attested part]`);
     } else {
       const held = signed.flatMap((v) => v.tokens).filter((x) => x.mint === t.asset).reduce((n, x) => n + (isUint(x.amount) ? BigInt(x.amount) : 0n), 0n);
       all = ok(BigInt(t.sum) <= held, `${t.asset} liabilities ${t.sum} <= vaults ${held}`) && all;

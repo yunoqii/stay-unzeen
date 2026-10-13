@@ -12,7 +12,7 @@ import { lastRate, submitAction } from "@/lib/activity";
 import { getSigner, useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatZec, lamportsToSol, unitsToNumber, VENUE_LABEL } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
-import { lamportsToZat } from "@/lib/trade";
+import { canClaim as canClaimFees, claimAmount, minClaimZat } from "@/lib/claim";
 import { cn } from "@/lib/utils";
 import { usePool } from "@/hooks/use-pool";
 import { useNow } from "@/hooks/use-now";
@@ -122,8 +122,8 @@ function Cabinet() {
         ))}
       </ul>
       <p className="border-t border-border/60 pt-4 text-xs text-pretty text-faint-foreground">
-        Fees are collected by the pool every 6–12 h, for every creator at once. Fees from your launch buy stay with the pool. Claiming credits ZEC at the pool’s
-        sell rate inside the ledger: no on-chain transaction ties your launches together. Your position and lock are shown only here, never on the public token
+        Fees are collected by the pool every 6–12 h, for every creator at once. Fees from your launch buy stay with the pool. Claiming credits ZEC inside the ledger,
+        SOL fees at the pool’s sell rate and fees of ZEC pairs one to one: no on-chain transaction ties your launches together. Your position and lock are shown only here, never on the public token
         page.
       </p>
     </div>
@@ -137,11 +137,18 @@ function TokenCard({ t, pool, index, onClaimed }: { t: CreatorToken; pool: PoolI
   const [claiming, setClaiming] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const claimable = /^\d+$/.test(t.fees.claimableLamports) ? BigInt(t.fees.claimableLamports) : N0;
-  const sellRate = pool?.rate ? BigInt(pool.rate.lamportsPerZecSell) : lastRate(network, "sell") ? BigInt(lastRate(network, "sell")!.lamportsPerZec) : null;
-  const claimZat = sellRate ? lamportsToZat(claimable, sellRate) : null;
-  const minAction = pool ? BigInt(pool.minActionZat) : null;
-  const canClaim = claimable > N0 && (claimZat === null || minAction === null || claimZat >= minAction);
+  const last = lastRate(network, "sell");
+  const sellRate = pool?.rate ? BigInt(pool.rate.lamportsPerZecSell) : last ? BigInt(last.lamportsPerZec) : null;
+  // v0.14: lamports (SOL / USDC / USD1 pairs) + zatoshis (ZEC pairs, 1:1); the minimum applies to the sum.
+  const owed = claimAmount(t.fees.claimableLamports, t.fees.claimableZat, sellRate);
+  const claimable = owed.lamports;
+  const claimZat = owed.totalZat;
+  const hasOwed = owed.lamports > N0 || owed.zat > N0;
+  const canClaim = canClaimFees(owed, minClaimZat(pool));
+  const claimedZat = /^\d+$/.test(t.fees.claimedZat ?? "") ? BigInt(t.fees.claimedZat!) : N0;
+  const claimedLamports = /^\d+$/.test(t.fees.claimedLamports) ? BigInt(t.fees.claimedLamports) : N0;
+  // A ZEC pair owes and pays in ZEC: lead with ZEC there, never with a SOL figure it does not have.
+  const zecFirst = owed.zat > N0 || (owed.lamports === N0 && claimedZat > N0 && claimedLamports === N0);
 
   const cap = BigInt(t.cap.capTokens || "0");
   const pos = BigInt(t.cap.positionTokens || "0");
@@ -185,13 +192,29 @@ function TokenCard({ t, pool, index, onClaimed }: { t: CreatorToken; pool: PoolI
         </div>
         <div>
           <p className="text-xs text-faint-foreground">Creator fees to claim</p>
-          <p className="tabular mt-1 text-3xl font-medium tracking-tight">
-            <Veiled>{formatSol(lamportsToSol(claimable.toString()))}</Veiled> <span className="text-base font-normal text-muted-foreground">SOL</span>
-          </p>
-          {claimZat !== null && claimable > N0 && (
-            <p className="tabular text-xs text-faint-foreground">
-              ≈ <Veiled>{formatZec(claimZat.toString())}</Veiled> ZEC at the pool’s sell rate
+          {zecFirst ? (
+            <p className="tabular mt-1 text-3xl font-medium tracking-tight">
+              <Veiled>{formatZec(owed.zat.toString())}</Veiled> <span className="text-base font-normal text-muted-foreground">ZEC</span>
             </p>
+          ) : (
+            <p className="tabular mt-1 text-3xl font-medium tracking-tight">
+              <Veiled>{formatSol(lamportsToSol(claimable.toString()))}</Veiled> <span className="text-base font-normal text-muted-foreground">SOL</span>
+            </p>
+          )}
+          {zecFirst && claimable > N0 && (
+            <p className="tabular text-xs text-faint-foreground">
+              + <Veiled>{formatSol(lamportsToSol(claimable.toString()))}</Veiled> SOL
+            </p>
+          )}
+          {zecFirst && claimable === N0 ? (
+            <p className="text-xs text-faint-foreground">Paid in ZEC, credited one to one. No SOL rate in between.</p>
+          ) : (
+            claimZat !== null &&
+            claimable > N0 && (
+              <p className="tabular text-xs text-faint-foreground">
+                ≈ <Veiled>{formatZec(claimZat.toString())}</Veiled> ZEC {owed.zat > N0 ? "in total" : "at the pool’s sell rate"}
+              </p>
+            )
           )}
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <Button onClick={claim} disabled={!canClaim || claiming} className={cn("h-10 rounded-full px-5", claiming && "busy-hatch disabled:opacity-90")}>
@@ -201,7 +224,7 @@ function TokenCard({ t, pool, index, onClaimed }: { t: CreatorToken; pool: PoolI
               Token page <ArrowUpRight size={12} aria-hidden />
             </Link>
           </div>
-          {!canClaim && claimable > N0 && <p className="mt-2 text-xs text-faint-foreground">Below the pool minimum for now. It keeps building up.</p>}
+          {!canClaim && hasOwed && <p className="mt-2 text-xs text-faint-foreground">Below the pool minimum for now. It keeps building up.</p>}
           {err && (
             <p role="alert" className="mt-2 text-xs text-sell">
               {err}
@@ -211,8 +234,12 @@ function TokenCard({ t, pool, index, onClaimed }: { t: CreatorToken; pool: PoolI
       </div>
 
       <dl className="ledger-flat grid grid-cols-2 gap-px bg-border sm:grid-cols-3">
-        <Fact label="Claimed so far" value={<Veiled>{formatSol(lamportsToSol(t.fees.claimedLamports))}</Veiled>} unit="SOL" />
-        <Fact label="Pool volume" value={formatSol(lamportsToSol(t.volumeLamports))} unit="SOL" />
+        {zecFirst ? (
+          <Fact label="Claimed so far" value={<Veiled>{formatZec(claimedZat.toString())}</Veiled>} unit={claimedLamports > N0 ? `ZEC + ${formatSol(lamportsToSol(claimedLamports.toString()))} SOL` : "ZEC"} />
+        ) : (
+          <Fact label="Claimed so far" value={<Veiled>{formatSol(lamportsToSol(t.fees.claimedLamports))}</Veiled>} unit={claimedZat > N0 ? `SOL + ${formatZec(claimedZat.toString())} ZEC` : "SOL"} />
+        )}
+        <Fact label="Pool volume" value={formatSol(lamportsToSol(t.volumeLamports))} unit={zecFirst ? "SOL equivalent" : "SOL"} />
         <Fact label="Pool trades" value={t.trades.toLocaleString("en-US")} />
         <Fact label="Holders" value={t.holders === null ? "—" : t.holders.toLocaleString("en-US")} unit={t.holders === null ? "not counted yet" : "from the last tick"} />
         <Fact

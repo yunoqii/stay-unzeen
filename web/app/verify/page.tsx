@@ -88,6 +88,16 @@ export default function VerifyPage() {
                 </span>
               </li>
               <li className="flex gap-3">
+                <span className="mt-1.5 size-2 shrink-0 rounded-sm bg-zec/55" aria-hidden />
+                <span>
+                  <span className="text-foreground">Bridged:</span>{" "}
+                  <span className="text-muted-foreground">
+                    ZEC SPL on the vaults (what ZEC-paired tokens trade against), counted one to one. It is on Solana and signed, but its value rests on the bridge issuer. USDC and USD1 on
+                    the vaults are listed, never counted.
+                  </span>
+                </span>
+              </li>
+              <li className="flex gap-3">
                 <span className="hatch-zec mt-1.5 size-2 shrink-0 rounded-sm border border-zec/40" aria-hidden />
                 <span>
                   <span className="text-foreground">Attested:</span> <span className="text-muted-foreground">the ZEC reserve, signed by the operator and anchored on Solana, so it cannot be changed or shown differently later.</span>

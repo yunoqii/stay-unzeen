@@ -14,8 +14,12 @@ import { useHistory } from "@/lib/history/store";
 import { useNetwork } from "@/lib/network";
 import { cancelOrder, placeOrder, useSessionOrders } from "@/lib/order-session";
 import {
+  checkBracket,
   checkTrigger,
   clampTtlHours,
+  defaultSlippage,
+  rearmNote,
+  SL_LEG_PRESETS,
   expiresIn,
   isLive,
   isSellKind,
@@ -84,6 +88,10 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
   const [ttlH, setTtlH] = useState(() => Math.round(params.defaultTtlSecs / 3600));
   const [exec, setExec] = useState<OrderExec>(profileExec === "max" ? "max" : "delayed");
   const [slipOverride, setSlipOverride] = useState<Partial<Record<OrderKind, number>>>({});
+  // v0.15 bracket: the SL leg (price + its own slippage) and re-arm after slippage (any kind).
+  const [slPrice, setSlPrice] = useState("");
+  const [slSlip, setSlSlip] = useState<number | null>(null);
+  const [rearm, setRearm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [placed, setPlaced] = useState<string | null>(null);
@@ -91,7 +99,10 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
   const sell = isSellKind(kind);
   const decimals = sell ? token.decimals : ZEC_DECIMALS;
   const unit = sell ? `$${token.symbol}` : "ZEC";
-  const slippage = slipOverride[kind] ?? params.defaultSlippageBps[kind];
+  const slippage = slipOverride[kind] ?? defaultSlippage(params, kind);
+  const bracket = kind === "bracket";
+  const slSlippage = slSlip ?? params.defaultSlippageBps.stop_loss;
+  const maxRearms = params.maxRearms ?? 3;
 
   const fills = useMemo(() => fillsOf(history.entries, token.mint), [history.entries, token.mint]);
   const entry = useMemo(() => avgEntrySol(computePosition(fills), token.decimals), [fills, token.decimals]);
@@ -108,6 +119,8 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
 
   // ---- validation ----
   const triggerError = checkTrigger(trigger);
+  const slError = bracket ? checkTrigger(slPrice) : null;
+  const pairError = bracket && !triggerError && !slError ? checkBracket(trigger, slPrice) : null;
   let parsed: bigint | null = null;
   let amountError: string | null = null;
   if (amount.trim() !== "") {
@@ -127,12 +140,24 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
   const dist = trigger && !triggerError ? pctFrom(priceSol, trigger) : null;
   const sameAsBuy = sell && parsed !== null && !amountError ? sellMatchesBuy(parsed, buys, holding) : null;
   const frozen = portfolio?.frozen ?? false;
-  const ready = !busy && !frozen && portfolio !== null && !limits.blocked && trigger.trim() !== "" && !triggerError && parsed !== null && !amountError;
+  const slNote = bracket && slPrice && !slError ? triggerNote("stop_loss", priceSol, slPrice) : null;
+  const slDist = bracket && slPrice && !slError ? pctFrom(priceSol, slPrice) : null;
+  const ready =
+    !busy &&
+    !frozen &&
+    portfolio !== null &&
+    !limits.blocked &&
+    trigger.trim() !== "" &&
+    !triggerError &&
+    (!bracket || (slPrice.trim() !== "" && !slError && !pairError)) &&
+    parsed !== null &&
+    !amountError;
 
   const pickKind = (k: OrderKind) => {
     if (k === kind) return;
     setKind(k);
     setTrigger("");
+    setSlPrice("");
     setAmount("");
     setError(null);
   };
@@ -148,16 +173,20 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
           venue: "pumpfun",
           mint: token.mint,
           kind,
-          triggerPriceSol: trigger.trim(),
+          ...(bracket
+            ? { tpPriceSol: trigger.trim(), slPriceSol: slPrice.trim(), slSlippageBps: slSlippage }
+            : { triggerPriceSol: trigger.trim() }),
           amount: parsed.toString(),
           slippageBps: slippage,
           ttlSecs: clampTtlHours(ttlH, params) * 3600,
           exec,
+          ...(rearm ? { rearm: true } : {}),
         },
         token.symbol,
       );
       setPlaced(r.id);
       setTrigger("");
+      setSlPrice("");
       setAmount("");
     } catch (e) {
       setError(e instanceof ApiError ? e : new ApiError("internal", String(e)));
@@ -166,12 +195,12 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
     }
   };
 
-  const presetBase = kind === "take_profit" && entry !== null ? entry : Number(priceSol);
-  const presetFromEntry = kind === "take_profit" && entry !== null;
+  const presetBase = (kind === "take_profit" || bracket) && entry !== null ? entry : Number(priceSol);
+  const presetFromEntry = (kind === "take_profit" || bracket) && entry !== null;
 
   return (
     <div className="mt-5 space-y-4">
-      <div role="radiogroup" aria-label="Order type" className="grid grid-cols-2 gap-1.5">
+      <div role="radiogroup" aria-label="Order type" className="grid grid-cols-2 gap-1.5 [&>button:last-child:nth-child(odd)]:col-span-2">
         {ORDER_KINDS.filter((k) => params.kinds.includes(k)).map((k) => (
           <button
             key={k}
@@ -194,7 +223,7 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
       <div className="space-y-2">
         <div className="flex items-baseline justify-between text-xs">
           <label htmlFor={`${ids}-trigger`} className="text-muted-foreground">
-            {kind === "take_profit" ? "Target price" : "Trigger price"}
+            {kind === "take_profit" ? "Target price" : bracket ? "Take-profit price" : "Trigger price"}
           </label>
           <button
             type="button"
@@ -246,6 +275,65 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
                 : "Checked against the pool's price tick, about once a minute.")}
         </p>
       </div>
+
+      {/* bracket: stop-loss leg */}
+      <AnimatePresence initial={false}>
+        {bracket && (
+          <motion.div
+            key="sl-leg"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.22, ease: EASE }}
+            style={{ overflow: "hidden" }}
+          >
+            <div className="space-y-2">
+              <label htmlFor={`${ids}-sl`} className="block text-xs text-muted-foreground">
+                Stop-loss price
+              </label>
+              <div
+                className={cn(
+                  "flex h-12 items-center rounded-2xl border bg-surface-1 px-4 transition-colors duration-150 focus-within:border-ring",
+                  slError || pairError ? "border-destructive/60" : "border-border",
+                )}
+              >
+                <input
+                  id={`${ids}-sl`}
+                  inputMode="decimal"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={priceAtPct(priceSol, SL_LEG_PRESETS[1]) || "0.0000001"}
+                  value={slPrice}
+                  onChange={(e) => {
+                    setError(null);
+                    setSlPrice(e.target.value.replace(",", ".").trim());
+                  }}
+                  aria-invalid={!!(slError || pairError)}
+                  aria-describedby={`${ids}-sl-hint`}
+                  className="tabular min-w-0 flex-1 bg-transparent text-lg font-medium tracking-tight outline-none placeholder:text-faint-foreground"
+                />
+                <span className="ml-3 shrink-0 text-xs text-muted-foreground">SOL / token</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {SL_LEG_PRESETS.map((pct) => (
+                  <Chip key={pct} onClick={() => setSlPrice(priceAtPct(priceSol, pct))} active={slPrice === priceAtPct(priceSol, pct)}>
+                    −{Math.abs(pct)}%
+                  </Chip>
+                ))}
+                <span className="text-[11px] text-faint-foreground">from now</span>
+              </div>
+              <p id={`${ids}-sl-hint`} className={cn("text-xs text-pretty", slError || pairError ? "text-sell" : slNote ? "text-zec/85" : "text-faint-foreground")}>
+                {slError ??
+                  pairError ??
+                  slNote ??
+                  (slDist !== null
+                    ? `${slDist >= 0 ? "+" : "−"}${Math.abs(slDist).toFixed(1)}% from the current price. One hold of your tokens covers both legs.`
+                    : "Sells if the price stays at or below this on two checks in a row. One hold covers both legs.")}
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* amount */}
       <div className="space-y-2">
@@ -366,7 +454,7 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
 
         <div className="border-t border-border/60 pt-3">
           <p className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>Max slippage</span>
+            <span>{bracket ? "Max slippage · take-profit leg" : "Max slippage"}</span>
             <span className="tabular text-foreground">{slippage / 100}%</span>
           </p>
           <div role="radiogroup" aria-label="Max slippage" className="mt-2 grid grid-cols-6 gap-1">
@@ -376,17 +464,46 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
               </Chip>
             ))}
           </div>
+          {bracket && (
+            <>
+              <p className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
+                <span>Max slippage · stop-loss leg</span>
+                <span className="tabular text-foreground">{slSlippage / 100}%</span>
+              </p>
+              <div role="radiogroup" aria-label="Max slippage of the stop-loss leg" className="mt-2 grid grid-cols-6 gap-1">
+                {SLIPPAGE_CHOICES.map((b) => (
+                  <Chip key={b} role="radio" aria-checked={slSlippage === b} active={slSlippage === b} onClick={() => setSlSlip(b)} className="w-full justify-center px-0">
+                    {b / 100}%
+                  </Chip>
+                ))}
+              </div>
+            </>
+          )}
           <p className="mt-1.5 text-[11px] text-pretty text-faint-foreground">
-            {kind === "stop_loss"
-              ? "Sells only while the price is within this of the trigger. "
+            {kind === "stop_loss" || bracket
+              ? "A stop-loss sells only while the price is within this of its trigger. "
               : ""}
-            Measured from the price check that triggers it; min received is rounded down. If the batch can’t fill inside it, the order fails and the hold returns.
+            Measured from the price check that triggers it; min received is rounded down. If the batch can’t fill inside it, the order fails and the hold returns
+            {rearm ? ", unless retry is on" : ""}.
           </p>
         </div>
+
+        <label className="flex cursor-pointer items-start gap-2.5 border-t border-border/60 pt-3 text-xs">
+          <input
+            type="checkbox"
+            checked={rearm}
+            onChange={(e) => setRearm(e.target.checked)}
+            className="mt-0.5 size-4 shrink-0 cursor-pointer rounded border-border-strong bg-transparent accent-[#F4B728]"
+          />
+          <span>
+            <span className="text-muted-foreground">Retry after slippage</span>
+            <span className="mt-0.5 block text-[11px] text-pretty text-faint-foreground">{rearmNote(maxRearms)}</span>
+          </span>
+        </label>
       </div>
 
       <AnimatePresence initial={false}>
-        {kind === "stop_loss" && (
+        {(kind === "stop_loss" || bracket) && (
           <motion.p
             key="sl"
             initial={{ opacity: 0, height: 0 }}
@@ -506,11 +623,19 @@ export function OrderRow({ order, token, compact = false }: { order: Order; toke
   const amount = isSellKind(order.kind)
     ? `${token ? formatCompact(unitsToNumber(order.amount, token.decimals)) : "—"} ${sym}`
     : `${formatZec(order.amount)} ZEC`;
+  const leg = order.kind === "bracket" && order.leg ? (order.leg === "tp" ? " · take-profit leg" : " · stop-loss leg") : "";
+  const rearms = order.rearms ?? 0;
+  const { pool } = usePool();
+  const maxRearms = pool?.orders?.maxRearms ?? 3;
   const status =
     order.status === "open" && order.armed
-      ? "Armed · confirming"
+      ? order.kind === "bracket"
+        ? "Stop-loss leg armed · confirming"
+        : "Armed · confirming"
       : order.status === "triggered"
-        ? "Triggered · next batch"
+        ? `Triggered${leg} · next batch`
+        : order.status === "filled" || order.status === "failed"
+          ? `${ORDER_STATUS_LABEL[order.status]}${leg}`
         : order.status === "open"
           ? now === null
             ? "Open"
@@ -546,13 +671,25 @@ export function OrderRow({ order, token, compact = false }: { order: Order; toke
         <p className="truncate text-sm">
           {ORDER_LABEL[order.kind]}
           {compact && <span className="text-muted-foreground"> {sym}</span>}
-          <span className="text-faint-foreground"> at </span>
-          <span className="tabular">{formatPrice(order.triggerPriceSol)}</span>
+          {order.kind === "bracket" ? (
+            <>
+              <span className="text-faint-foreground"> TP </span>
+              <span className="tabular">{formatPrice(order.triggerPriceSol)}</span>
+              <span className="text-faint-foreground"> · SL </span>
+              <span className="tabular">{order.slPriceSol ? formatPrice(order.slPriceSol) : "—"}</span>
+            </>
+          ) : (
+            <>
+              <span className="text-faint-foreground"> at </span>
+              <span className="tabular">{formatPrice(order.triggerPriceSol)}</span>
+            </>
+          )}
           <span className="text-faint-foreground"> SOL</span>
         </p>
         <p className="tabular truncate text-xs text-faint-foreground">
           {amount} · <span className={cn(order.status === "failed" && "text-sell", order.armed && "text-sell")}>{status}</span>
           {order.exec === "max" && " · max privacy"}
+          {order.rearm && ` · retry on · ${rearms}/${maxRearms}`}
         </p>
         {err && <p className="text-xs text-sell">{err}</p>}
       </div>
