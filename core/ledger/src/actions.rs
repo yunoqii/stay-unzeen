@@ -102,6 +102,10 @@ pub struct NewAction {
     /// buy: `(mint, upper-bound estimate of tokens received)`. Checked against the creator
     /// cap only when the key created that mint (API v0.5); ignored otherwise.
     pub gain: Option<(String, u64)>,
+    /// v0.13: set ONLY for ZEC SPL pair actions (USDC/USD1 pairs are booked in lamports like
+    /// SOL). The rate column then holds ZEC SPL units per ZEC (source "parity") and the job
+    /// amounts are ZEC SPL units (RELAYER v8).
+    pub quote_mint: Option<String>,
 }
 
 /// What the owner sees in `GET /api/actions/:id`.
@@ -234,16 +238,40 @@ impl Ledger {
             None => (None, None, None),
         };
 
+        // A nonce already spent by a chat / noop request (api_nonces with an answer) is a replay
+        // too (both directions; chat checks `actions`).
+        if tx
+            .query_opt(
+                "SELECT 1 FROM api_nonces WHERE anon_pubkey = $1 AND nonce = $2 AND request_hash IS NOT NULL",
+                &[&pk_s, &nonce_s],
+            )
+            .await?
+            .is_some()
+        {
+            return Err(LedgerError::Replay);
+        }
         let inserted = tx
             .execute(
                 "INSERT INTO actions (id, anon_pubkey, nonce, request_hash, kind, hold_zat, status,
                                       amount_zat, fee_zat, rate_lamports_per_zec, rate_source, rate_ts,
-                                      token_mint, token_hold)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10, to_timestamp($11), $12, $13)
+                                      token_mint, token_hold, quote_mint)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10, to_timestamp($11), $12, $13, $14)
                  ON CONFLICT (anon_pubkey, nonce) DO NOTHING",
                 &[
-                    &id_s, &pk_s, &nonce_s, &hash_s, &a.kind, &hold, &amount, &fee, &rate, &rate_src, &rate_ts, &tmint,
+                    &id_s,
+                    &pk_s,
+                    &nonce_s,
+                    &hash_s,
+                    &a.kind,
+                    &hold,
+                    &amount,
+                    &fee,
+                    &rate,
+                    &rate_src,
+                    &rate_ts,
+                    &tmint,
                     &thold,
+                    &a.quote_mint,
                 ],
             )
             .await?
@@ -542,7 +570,7 @@ impl Ledger {
         let Some(a) = tx
             .query_opt(
                 "SELECT anon_pubkey, kind, status, hold_zat, amount_zat, fee_zat, rate_lamports_per_zec,
-                        token_mint, token_hold
+                        token_mint, token_hold, quote_mint
                  FROM actions WHERE id = $1 FOR UPDATE SKIP LOCKED",
                 &[&action_id],
             )
@@ -558,11 +586,14 @@ impl Ledger {
         let rate: Option<i64> = a.get(6);
         let token_mint: Option<String> = a.get(7);
         let token_hold: i64 = a.get(8);
+        let quote_mint: Option<String> = a.get(9);
 
         let jobs = tx
             .query(
                 "SELECT id, op, mint, lamports_in, token_amount, status, out_mint, out_token_amount,
-                        out_lamports, error_code, venue, out_creator_fee
+                        COALESCE(out_lamports,
+                                 CASE WHEN out_quote_amount <= 9223372036854775807 THEN out_quote_amount::bigint END),
+                        error_code, venue, out_creator_fee
                  FROM relayer_jobs WHERE action_id = $1 AND settled_at IS NULL ORDER BY part FOR UPDATE",
                 &[&action_id],
             )
@@ -573,6 +604,20 @@ impl Ledger {
                 .iter()
                 .any(|r| !matches!(r.get::<_, &str>(5), "confirmed" | "failed"))
         {
+            return Ok(false);
+        }
+        // v8: ZEC-pair jobs report `out_lamports = NULL` and the amount in `out_quote_amount`
+        // (ZEC SPL units). A confirmed buy/sell/create with neither cannot be priced: leave it
+        // unsettled for the operator instead of refunding/crediting against zero.
+        if jobs.iter().any(|r| {
+            r.get::<_, &str>(5) == "confirmed"
+                && matches!(r.get::<_, &str>(1), "buy" | "sell" | "create")
+                && r.get::<_, Option<i64>>(8).is_none()
+        }) {
+            tracing::warn!(
+                action_id,
+                "confirmed job without out_lamports/out_quote_amount; not settled"
+            );
             return Ok(false);
         }
         if status != "queued" {
@@ -726,7 +771,16 @@ impl Ledger {
         };
         let fill_v = if any_ok {
             if kind != "withdraw_token" {
-                fill.insert("solAmount".into(), json!(sol_total.to_string()));
+                match &quote_mint {
+                    // ZEC SPL pair: job amounts are ZEC SPL units (RELAYER v8).
+                    Some(q) => {
+                        fill.insert("quoteAmount".into(), json!(sol_total.to_string()));
+                        fill.insert("quoteMint".into(), json!(q));
+                    }
+                    None => {
+                        fill.insert("solAmount".into(), json!(sol_total.to_string()));
+                    }
+                }
             }
             fill.insert("tokenAmount".into(), json!(tok_total.to_string()));
             fill.insert("executedAt".into(), json!(minute_now_ms()));
@@ -772,11 +826,11 @@ impl Ledger {
             .execute(
                 "UPDATE actions SET amount_zat = 0, fee_zat = 0, hold_zat = 0, rate_lamports_per_zec = NULL,
                         rate_source = NULL, rate_ts = NULL, token_mint = NULL, token_hold = 0, fill = NULL,
-                        gain_mint = NULL, gain_est = NULL
+                        gain_mint = NULL, gain_est = NULL, quote_mint = NULL
                  WHERE status <> 'queued' AND updated_at < now() - interval '48 hours'
                    AND (amount_zat <> 0 OR fee_zat <> 0 OR hold_zat <> 0 OR rate_lamports_per_zec IS NOT NULL
                         OR token_mint IS NOT NULL OR fill IS NOT NULL OR rate_ts IS NOT NULL
-                        OR gain_mint IS NOT NULL)",
+                        OR gain_mint IS NOT NULL OR quote_mint IS NOT NULL)",
                 &[],
             )
             .await?;

@@ -179,11 +179,17 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
                 warn!("rebalance enabled in LIVE mode: real ZEC is sent to 1Click");
             }
         }
-        Some((cfg, crate::oneclick::HttpOneClick::from_env()?))
+        // v0.13: also ZEC -> ZEC SPL (quote stock of ZEC pairs) when UNZEEN_REBALANCE_ZEC_SPL=1.
+        let mut cfgs = vec![cfg.clone()];
+        if std::env::var("UNZEEN_REBALANCE_ZEC_SPL").as_deref() == Ok("1") {
+            cfgs.push(cfg.zec_spl()?);
+            info!("rebalance ZEC -> ZEC SPL enabled");
+        }
+        Some((cfgs, crate::oneclick::HttpOneClick::from_env()?))
     } else {
         None
     };
-    let mut last_rebalance_label = "";
+    let mut last_rebalance_label: Vec<&'static str> = vec![""; 2];
     let mut client = None;
     let mut backoff = 5u64;
     loop {
@@ -240,26 +246,34 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
                 }
             }
             // Pool rebalance ZEC -> SOL (RELAYER v7). A failure here never stops scanning.
-            if let Some((rc, oc)) = &rebalance_cfg {
-                let cl = client.as_mut().expect("set above");
-                let mut w = crate::rebalance::LiveWallet {
-                    common: c,
-                    db: &mut db,
-                    client: cl,
-                };
-                let ch = crate::rebalance::Chain {
-                    tip: rep.tip,
-                    confirmations: policy.confirmations,
-                    now_unix: now_unix(),
-                };
-                match crate::rebalance::step(rc, &ledger, oc, &mut w, ch).await {
-                    Ok(label) => {
-                        if label != last_rebalance_label {
-                            info!(step = label, "rebalance");
-                            last_rebalance_label = label;
+            if let Some((cfgs, oc)) = &rebalance_cfg {
+                for (i, rc) in cfgs.iter().enumerate() {
+                    let cl = client.as_mut().expect("set above");
+                    let mut w = crate::rebalance::LiveWallet {
+                        common: c,
+                        db: &mut db,
+                        client: cl,
+                    };
+                    let ch = crate::rebalance::Chain {
+                        tip: rep.tip,
+                        confirmations: policy.confirmations,
+                        now_unix: now_unix(),
+                    };
+                    match crate::rebalance::step(rc, &ledger, oc, &mut w, ch).await {
+                        Ok(label) => {
+                            if last_rebalance_label.get(i) != Some(&label) {
+                                info!(step = label, target = rc.target, "rebalance");
+                                if let Some(l) = last_rebalance_label.get_mut(i) {
+                                    *l = label;
+                                }
+                            }
                         }
+                        Err(e) => warn!(
+                            error = %unzeen_ledger::error_chain(e.as_ref()),
+                            target = rc.target,
+                            "rebalance step failed"
+                        ),
                     }
-                    Err(e) => warn!(error = %unzeen_ledger::error_chain(e.as_ref()), "rebalance step failed"),
                 }
             }
             // Verify (API v0.10): reserve of the pool wallet at this tip, attested by the operator

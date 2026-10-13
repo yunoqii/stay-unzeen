@@ -85,6 +85,9 @@ enum Cmd {
     },
     /// Pool rebalance ZEC -> SOL via NEAR Intents 1Click (see docs/RELAYER.md v7).
     Rebalance {
+        /// `sol` (ZEC → SOL) | `zec-spl` (ZEC → ZEC SPL stock of ZEC pairs, API v0.13).
+        #[arg(long, default_value = "sol")]
+        target: String,
         #[command(subcommand)]
         cmd: RebalanceCmd,
     },
@@ -295,7 +298,7 @@ async fn run() -> anyhow::Result<()> {
             payouts,
             rebalance,
         } => service::serve(c, interval, once, payouts, rebalance).await?,
-        Cmd::Rebalance { cmd } => rebalance_cmd(c, cmd).await?,
+        Cmd::Rebalance { cmd, target } => rebalance_cmd(c, cmd, &target).await?,
         Cmd::Sync { watch, all, json } => {
             dev_only(c, "sync")?;
             let db_path = c.wallet_db_path();
@@ -552,10 +555,15 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd) -> anyhow::Result<()> {
+async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd, target: &str) -> anyhow::Result<()> {
     use rebalance::{RebalanceCfg, Trigger};
     let policy = service::policy_from_env(c)?;
     let cfg = RebalanceCfg::from_env(c, policy.chain.solana)?;
+    let cfg = match target {
+        "sol" => cfg,
+        "zec-spl" | "zec_spl" => cfg.zec_spl()?,
+        other => bail!("--target: sol | zec-spl (got {other:?})"),
+    };
     let ledger = || async {
         let url = std::env::var("DATABASE_URL").context("DATABASE_URL")?;
         let l = unzeen_ledger::Ledger::connect(&url, policy).await?;
@@ -581,8 +589,16 @@ async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd) -> anyhow::Result<()> {
                 if oc.has_jwt() { "set" } else { "not set (+0.25% fee)" }
             );
             println!("lot:            {} ZEC", zec(q.amount_in));
-            println!("amountOut:      {} SOL", sol(q.amount_out));
-            println!("minAmountOut:   {} SOL", sol(q.min_amount_out));
+            let out = |x: u64| {
+                if cfg.target == "zec_spl" {
+                    format!("{} ZEC SPL", zec(x))
+                } else {
+                    format!("{} SOL", sol(x))
+                }
+            };
+            println!("target:         {}", cfg.target);
+            println!("amountOut:      {}", out(q.amount_out));
+            println!("minAmountOut:   {}", out(q.min_amount_out));
             println!(
                 "timeEstimate:   {} s",
                 q.time_estimate_secs.map_or("-".into(), |t| t.to_string())
@@ -591,7 +607,7 @@ async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd) -> anyhow::Result<()> {
                 Some(e) => {
                     let dev = (q.min_amount_out as f64 / e as f64 - 1.0) * 10_000.0;
                     let ok = oneclick::price_ok(q.min_amount_out, e, cfg.max_deviation_bps);
-                    println!("reference:      {} SOL (1Click /v0/tokens)", sol(e));
+                    println!("reference:      {} (1Click /v0/tokens; ZEC SPL: parity)", out(e));
                     println!(
                         "min vs ref:     {dev:+.0} bps (limit -{} bps) {}",
                         cfg.max_deviation_bps,
@@ -601,11 +617,41 @@ async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd) -> anyhow::Result<()> {
                 None => println!("reference:      unavailable (a live rebalance would be refused)"),
             }
         }
+        RebalanceCmd::Check if cfg.target == "zec_spl" => {
+            let l = ledger().await?;
+            let inv = l
+                .quote_inventory(cfg.network, unzeen_ledger::rebalance::ZEC_SPL_MINT)
+                .await?;
+            let committed = l.committed_zec_spl(cfg.network).await?;
+            println!(
+                "network:        {} / zcash {} / target zec_spl",
+                cfg.network,
+                c.network.as_str()
+            );
+            match inv {
+                Some((t, age)) => println!(
+                    "stock:          {} ZEC SPL on vaults + rebalance address (age {age} s)",
+                    zec(u64::try_from(t).unwrap_or(u64::MAX))
+                ),
+                None => println!("stock:          none (relayer v8 writes pool_quote_inventory)"),
+            }
+            println!("committed:      {} ZEC SPL (queued ZEC-pair buys)", zec(committed));
+            println!("threshold:      {} ZEC SPL free", zec(cfg.min_free_lamports));
+            let live = l.live_rebalance(cfg.network, cfg.target).await?;
+            println!(
+                "live:           {}",
+                live.map_or("none".into(), |r| format!("#{} {}", r.id, r.status))
+            );
+            println!(
+                "trigger:        {:?}",
+                rebalance::current_trigger(&cfg, &l, true).await?
+            );
+        }
         RebalanceCmd::Check => {
             let l = ledger().await?;
             let inv = l.sol_inventory(cfg.network).await?;
             let committed = l.committed_sol(cfg.network).await?;
-            let hist = l.rebalance_history(cfg.network).await?;
+            let hist = l.rebalance_history(cfg.network, cfg.target).await?;
             println!("network:        {} / zcash {}", cfg.network, c.network.as_str());
             println!(
                 "mode:           {}",
@@ -635,7 +681,7 @@ async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd) -> anyhow::Result<()> {
                 cfg.max_per_day,
                 hist.since_last_secs.map_or("-".into(), |s| format!("{s} s"))
             );
-            let live = l.live_rebalance(cfg.network).await?;
+            let live = l.live_rebalance(cfg.network, cfg.target).await?;
             println!(
                 "live:           {}",
                 live.map_or("none".into(), |r| format!("#{} {}", r.id, r.status))
@@ -657,8 +703,9 @@ async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd) -> anyhow::Result<()> {
             let l = ledger().await?;
             for r in l.list_rebalances(cfg.network, limit.clamp(1, 500)).await? {
                 println!(
-                    "#{:<5} {:<12} {} lot={} ZEC quote={} got={} 1click={} err={} created={} finished={}",
+                    "#{:<5} {:<7} {:<12} {} lot={} ZEC quote={} got={} 1click={} err={} created={} finished={}",
                     r.id,
+                    r.target,
                     r.status,
                     if r.dry_run { "dry " } else { "live" },
                     zec(r.lot_zat),
@@ -685,7 +732,10 @@ async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd) -> anyhow::Result<()> {
                 cfg.delay_min_secs + (cfg.delay_max_secs - cfg.delay_min_secs) * rand::random::<f64>()
             };
             let dry = cfg.dry_reason().is_some();
-            match l.plan_rebalance(cfg.network, cfg.lot_zat, delay, dry, force).await? {
+            match l
+                .plan_rebalance(cfg.network, cfg.target, cfg.lot_zat, delay, dry, force)
+                .await?
+            {
                 Some(id) => println!(
                     "planned #{id} ({}), due in {delay:.0} s; executed by `serve --rebalance`",
                     if dry { "dry-run" } else { "LIVE" }

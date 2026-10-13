@@ -137,6 +137,11 @@ fn config(url: &str) -> Config {
             min_account_zat: 100_000,
             key: None,
         },
+        quotes: unzeen_api::config::QuotesConfig {
+            list: unzeen_api::config::known_quotes(false),
+            zec_spread_bps: 30,
+            zec_virtual_units: 271_890_000,
+        },
     }
 }
 
@@ -3349,5 +3354,181 @@ async fn chat_hidden_when_disabled() {
         .signed(&user(1), "POST", "/api/actions", &chat_body(json!({"op":"noop"})))
         .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    e.drop_schema().await;
+}
+
+const ZEC_SPL: &str = "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS";
+
+async fn bal(e: &Env, n: u8) -> (i64, i64) {
+    let r = e
+        .admin
+        .query_one(
+            &format!(
+                "SELECT available_zat, held_zat FROM {}.balances WHERE anon_pubkey = '\\x{}'",
+                e.schema,
+                hex::encode(user(n).verifying_key().to_bytes())
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    (r.get(0), r.get(1))
+}
+
+#[tokio::test]
+async fn quote_pairs_zec_spl_and_usdc() {
+    let Some(e) = setup_with(|c| {
+        // Both registries: ZEC SPL (mainnet) is looked up by mint; create on devnet uses USDC.
+        c.quotes.list = unzeen_api::config::known_quotes(true)
+            .into_iter()
+            .chain(unzeen_api::config::known_quotes(false))
+            .collect();
+        c.chat.noop = true;
+    })
+    .await
+    else {
+        return;
+    };
+    e.ledger.set_pool_meta("network", "test").await.unwrap();
+    e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+    let s = e.schema.clone();
+    // PoolInfo.quotes: only enabled venues (pumpfun here).
+    let pool = e.get("/api/pool").await.body;
+    let quotes = pool["quotes"].as_array().unwrap().clone();
+    let zq = quotes.iter().find(|q| q["quote"] == "ZEC").unwrap();
+    assert_eq!(
+        (
+            zq["mint"].as_str().unwrap(),
+            zq["bridged"].clone(),
+            zq["spreadBps"].clone()
+        ),
+        (ZEC_SPL, json!(true), json!(30))
+    );
+    assert_eq!(zq["venues"], json!(["pumpfun"]));
+    assert!(
+        quotes
+            .iter()
+            .all(|q| q["venues"].as_array().unwrap().iter().all(|v| v == "pumpfun"))
+    );
+
+    e.fund(2, 0, 2_000_000).await;
+    e.sql(&format!(
+        "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol, quote_mint, price_quote)
+           VALUES ('{MINT}', 'pumpfun', 'ZPEPE', 'Z Pepe', 6, 0, 0, '{ZEC_SPL}', 0.00001);
+         INSERT INTO {s}.trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, ts, quote_mint, quote_amount)
+           VALUES ('buy', 'pumpfun', '{MINT}', 'ZPEPE', 1000, 0, 6, 'QS1', now(), '{ZEC_SPL}', 300000);"
+    ))
+    .await;
+    // Token and feed carry the pair.
+    let t = e.get(&format!("/api/tokens/{MINT}")).await.body;
+    assert_eq!(
+        (t["quote"].clone(), t["quoteMint"].clone(), t["priceQuote"].clone()),
+        (json!("ZEC"), json!(ZEC_SPL), json!("0.00001"))
+    );
+    assert_eq!(t["trades"][0]["quoteAmount"], "300000");
+    assert_eq!(t["trades"][0]["quoteMint"], ZEC_SPL);
+    let list = e.get("/api/tokens").await.body;
+    assert_eq!(list[0]["quote"], "ZEC");
+
+    // Buy in the ZEC SPL pair: 1:1 minus 30 bps, ZEC SPL units in the job, no SOL rate.
+    let r = e.signed(&user(2), "POST", "/api/actions", &buy_body(400_000)).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(r.body["rate"]["quote"], "ZEC");
+    assert_eq!(r.body["rate"]["quotePerZec"], "99700000");
+    assert_eq!(r.body["rate"]["source"], "parity");
+    assert!(r.body["rate"].get("lamportsPerZec").is_none());
+    let id = r.body["id"].as_str().unwrap().to_string();
+    let units = e
+        .one_i64(&format!("SELECT lamports_in FROM {s}.relayer_jobs WHERE op = 'buy'"))
+        .await;
+    assert_eq!(units, 390_000, "398 800 units shaved 0–1 % and floored to 0.0001 ZEC");
+    let charged = (390_000u128 * 100_000_000).div_ceil(99_700_000) as i64; // 391 174
+    assert_eq!(bal(&e, 2).await, (2_000_000 - charged, charged));
+    // Relayer: partial fill 300 000 units for 1000 tokens → pro-rata refund.
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'ZB1', out_token_amount = 1000, out_lamports = NULL,
+                out_quote_mint = '{ZEC_SPL}', out_quote_amount = 300000 WHERE op = 'buy'"
+    ))
+    .await;
+    let st = wait_executed(&e, 2, &id).await;
+    assert_eq!(
+        (st["fill"]["quoteAmount"].clone(), st["fill"]["quoteMint"].clone()),
+        (json!("300000"), json!(ZEC_SPL))
+    );
+    assert!(st["fill"].get("solAmount").is_none());
+    let refund = (charged as i128 * 90_000 / 390_000) as i64;
+    assert_eq!(bal(&e, 2).await, (2_000_000 - charged + refund, 0));
+
+    // Sell in the ZEC pair: minZecOut → ZEC SPL units at 1 + 30 bps; proceeds credited 1:1 − spread.
+    let sell = json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":"1000","minZecOut":"100000"}).to_string();
+    let r = e.signed(&user(2), "POST", "/api/actions", &sell).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let sid = r.body["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        e.one_i64(&format!("SELECT min_out FROM {s}.relayer_jobs WHERE op = 'sell'"))
+            .await,
+        100_000, // 100 300 units quantized down to 3 significant digits (E4)
+    );
+    let before = bal(&e, 2).await.0;
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'ZS1', out_token_amount = 1000, out_lamports = NULL,
+                out_quote_mint = '{ZEC_SPL}', out_quote_amount = 200600 WHERE op = 'sell'"
+    ))
+    .await;
+    wait_executed(&e, 2, &sid).await;
+    assert_eq!(bal(&e, 2).await.0 - before, 200_000);
+
+    // Orders: SOL pairs only.
+    let ord = json!({"op":"order_create","venue":"pumpfun","mint":MINT,"kind":"limit_buy","triggerPriceSol":"0.00000001","amount":"200000"}).to_string();
+    assert_eq!(
+        code(&e.signed(&user(2), "POST", "/api/actions", &ord).await),
+        "order_unsupported_mint"
+    );
+
+    // Create in a USDC pair (devnet pump.fun USDC): lamport-booked, meta.quote for the relayer.
+    let c = json!({"op":"create","venue":"pumpfun","meta":{"name":"Usd","symbol":"USDX"},"quote":"USDC"}).to_string();
+    let r = e.signed(&user(2), "POST", "/api/actions", &c).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'create' AND meta->>'quote' = 'USDC'"
+        ))
+        .await,
+        1
+    );
+    // ZEC pair on devnet does not exist; unknown quote → 400; platform outside LaunchLab → 400.
+    for (body, want) in [
+        (
+            json!({"op":"create","venue":"pumpfun","meta":{"name":"A","symbol":"A"},"quote":"ZEC"}),
+            "bad_request",
+        ),
+        (
+            json!({"op":"create","venue":"pumpfun","meta":{"name":"A","symbol":"A"},"quote":"DOGE"}),
+            "bad_request",
+        ),
+        (
+            json!({"op":"create","venue":"pumpfun","meta":{"name":"A","symbol":"A"},"platform":"bonk"}),
+            "bad_request",
+        ),
+    ] {
+        assert_eq!(
+            code(&e.signed(&user(2), "POST", "/api/actions", &body.to_string()).await),
+            want,
+            "{body}"
+        );
+    }
+
+    // Nonce replay both ways: a nonce spent by noop cannot be reused by an action.
+    let noop = chat_body(json!({"op":"noop"}));
+    let h = e.sign(&user(2), "POST", "/api/actions", &noop);
+    assert_eq!(
+        e.raw("POST", "/api/actions", &noop, Some(&h)).await.status,
+        StatusCode::OK
+    );
+    let nonce: [u8; 16] = hex::decode(&h.nonce).unwrap().try_into().unwrap();
+    let b2 = buy_body(300_000);
+    let h2 = api_auth::sign_request(CHAIN, &user(2), "POST", "/api/actions", b2.as_bytes(), nonce, now_ms());
+    let r = e.raw("POST", "/api/actions", &b2, Some(&h2)).await;
+    assert_eq!((r.status, code(&r)), (StatusCode::CONFLICT, "replay"));
     e.drop_schema().await;
 }

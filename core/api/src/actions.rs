@@ -41,6 +41,10 @@ pub enum SignedAction {
         meta: Meta,
         #[serde(rename = "initialBuyZec")]
         initial_buy_zec: Option<String>,
+        /// v0.13: "SOL" (default) | "USDC" | "USD1" | "ZEC".
+        quote: Option<String>,
+        /// v0.13: raydium-launchlab only: "unzeen" (default) | "bonk" | "stonk".
+        platform: Option<String>,
         /// `now` | `delayed` (default, 30–60 s epoch) | `max` (5–15 min epoch).
         #[serde(default)]
         exec: ExecMode,
@@ -117,7 +121,11 @@ pub struct Smart {
     pub max_delay_min: u32,
 }
 
-const VENUES: [&str; 3] = ["pumpfun", "meteora-dbc", "jupiter"];
+const VENUES: [&str; 5] = ["pumpfun", "meteora-dbc", "jupiter", "raydium-launchlab", "bags"];
+const PLATFORMS: [&str; 3] = ["unzeen", "bonk", "stonk"];
+/// ZEC SPL amounts are rounded to 0.0001 ZEC (D10 for ZEC pairs).
+pub const ZEC_UNITS_STEP: u64 = 10_000;
+const ZEC_SPL_UNITS: u64 = 100_000_000;
 const MAX_IMAGE_BYTES: usize = 512 * 1024;
 
 /// Canonical unsigned integer string: digits only, no leading zeros, fits in i64.
@@ -233,7 +241,9 @@ fn delay(min: f64, max: f64) -> f64 {
 
 fn venue(st: &AppState, v: &str) -> ApiResult<String> {
     if !VENUES.contains(&v) {
-        return Err(ApiError::bad_request("venue: expected pumpfun | meteora-dbc | jupiter"));
+        return Err(ApiError::bad_request(
+            "venue: expected pumpfun | meteora-dbc | jupiter | raydium-launchlab | bags",
+        ));
     }
     if !st.cfg.venues.iter().any(|e| e == v) {
         return Err(ApiError::venue_unavailable(format!("venue {v} is not enabled")));
@@ -245,33 +255,92 @@ fn venue(st: &AppState, v: &str) -> ApiResult<String> {
     Ok(v.to_string())
 }
 
-/// Known token facts from the public `tokens` table: (venue, status, price_sol, decimals).
-async fn token_info(st: &AppState, mint: &str) -> ApiResult<Option<(String, String, String, i16)>> {
+/// Known token facts from the public `tokens` table.
+pub struct TokenFacts {
+    pub venue: String,
+    pub status: String,
+    pub price_sol: String,
+    pub decimals: i16,
+    /// v0.13: NULL = SOL pair.
+    pub quote_mint: Option<String>,
+    /// v0.13: quote per whole token (decimal), when the relayer wrote it.
+    pub price_quote: Option<String>,
+}
+
+async fn token_info(st: &AppState, mint: &str) -> ApiResult<Option<TokenFacts>> {
     let c = st.ledger.pg().get().await.map_err(unzeen_ledger::LedgerError::from)?;
     let r = c
         .query_opt(
-            "SELECT venue, status, price_sol::text, decimals FROM tokens WHERE mint = $1",
+            "SELECT venue, status, price_sol::text, decimals, quote_mint, price_quote::text FROM tokens WHERE mint = $1",
             &[&mint],
         )
         .await
         .map_err(unzeen_ledger::LedgerError::from)?;
-    Ok(r.map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))))
+    Ok(r.map(|r| TokenFacts {
+        venue: r.get(0),
+        status: r.get(1),
+        price_sol: r.get(2),
+        decimals: r.get(3),
+        quote_mint: r.get(4),
+        price_quote: r.get(5),
+    }))
 }
 
 /// `graduated` for curve venues; a token known under another venue is a bad request.
-async fn check_venue_status(st: &AppState, mint: &str, v: &str) -> ApiResult<Option<(String, i16)>> {
+async fn check_venue_status(st: &AppState, mint: &str, v: &str) -> ApiResult<Option<TokenFacts>> {
     match token_info(st, mint).await? {
         None => Ok(None),
-        Some((tv, status, price, dec)) => {
-            if v != "jupiter" && tv != v {
-                return Err(ApiError::bad_request(format!("token trades on {tv}, not {v}")));
+        Some(t) => {
+            if v != "jupiter" && t.venue != v {
+                return Err(ApiError::bad_request(format!("token trades on {}, not {v}", t.venue)));
             }
-            if status == "graduated" && v != "jupiter" {
+            if t.status == "graduated" && v != "jupiter" {
                 return Err(ApiError::graduated());
             }
-            Ok(Some((price, dec)))
+            Ok(Some(t))
         }
     }
+}
+
+/// v0.13: is this a ZEC SPL pair (booked 1:1 in ZEC SPL units)? A pair whose quote is not
+/// enabled is refused (`venue_unavailable`); USDC/USD1 pairs stay lamport-booked (None).
+fn zec_pair<'a>(st: &'a AppState, t: Option<&TokenFacts>, v: &str) -> ApiResult<Option<&'a crate::config::QuoteCfg>> {
+    let Some(q) = t.and_then(|t| t.quote_mint.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(cfg) = st.cfg.quotes.by_mint(q) else {
+        return Err(ApiError::venue_unavailable("this token's quote pair is not enabled"));
+    };
+    if !cfg.is_zec() {
+        return Ok(None);
+    }
+    if v == "jupiter" {
+        return Err(ApiError::bad_request(
+            "ZEC-pair tokens trade on their launchpad, not via jupiter",
+        ));
+    }
+    Ok(Some(cfg))
+}
+
+/// ZEC SPL units per 1 ZEC with the parity spread (buy: fewer units per ZEC; sell: more).
+pub fn zec_units_per_zec(spread_bps: u64, buy: bool) -> u64 {
+    crate::rate::apply_spread(ZEC_SPL_UNITS, spread_bps, buy)
+}
+
+fn parity_used(applied: u64) -> RateUsed {
+    RateUsed {
+        lamports_per_zec: applied,
+        source: "parity".into(),
+        ts_ms: crate::rate::now_ms(),
+    }
+}
+
+/// Estimated zat of `amount` base units at `price_quote` (decimal ZEC per whole token).
+fn estimate_zat_zec(price_quote: &str, decimals: i16, amount: u64, units_per_zec: u64) -> Option<u64> {
+    // sol_to_lamports gives price × 1e9; ZEC SPL has 8 decimals.
+    let units_per_whole = crate::config::sol_to_lamports(&truncate_decimals(price_quote, 9))? / 10;
+    let units = (amount as u128) * (units_per_whole as u128) / 10u128.checked_pow(decimals.max(0) as u32)?;
+    Some((units * 100_000_000 / (units_per_zec.max(1) as u128)).min(u64::MAX as u128) as u64)
 }
 
 async fn rate(st: &AppState) -> ApiResult<rate::Rate> {
@@ -359,11 +428,22 @@ pub fn split_amount(amount: u64, parts: u32) -> Vec<u64> {
 /// user is charged only the ZEC equivalent of the lamports actually sent (the rest stays
 /// available), and `minOut` shrinks in proportion (same minimum price).
 pub fn fuzzed_buy(zec_in: u64, min_out: u64, applied: u64, min_action: u64) -> ApiResult<(u64, u64, u64)> {
+    fuzzed_buy_step(zec_in, min_out, applied, min_action, rate::LAMPORTS_STEP)
+}
+
+/// [`fuzzed_buy`] with another rounding step (ZEC SPL pairs: 0.0001 ZEC).
+pub fn fuzzed_buy_step(
+    zec_in: u64,
+    min_out: u64,
+    applied: u64,
+    min_action: u64,
+    step: u64,
+) -> ApiResult<(u64, u64, u64)> {
     let full = zat_to_lamports(zec_in, applied);
-    let mut lamports = rate::fuzz_lamports(full, rand_unit());
+    let mut lamports = rate::fuzz_units(full, rand_unit(), step);
     // Never charge less than the minimum action because of rounding: step back up if possible.
     while lamports > 0 && lamports_to_zat_ceil(lamports, applied) < min_action {
-        let up = lamports + rate::LAMPORTS_STEP;
+        let up = lamports + step;
         if up > full {
             break;
         }
@@ -372,7 +452,7 @@ pub fn fuzzed_buy(zec_in: u64, min_out: u64, applied: u64, min_action: u64) -> A
     let zat = lamports_to_zat_ceil(lamports, applied).min(zec_in);
     if lamports == 0 || zat < min_action {
         return Err(ApiError::below_minimum(
-            "zecIn too small (buys are rounded down to 0.001 SOL)",
+            "zecIn too small (buys are rounded down to 0.001 SOL / 0.0001 ZEC)",
         ));
     }
     let min_out = ((min_out as u128) * (lamports as u128) / (full.max(1) as u128)) as u64;
@@ -426,6 +506,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
         jobs: vec![],
         payout: None,
         gain: None,
+        quote_mint: None,
     };
     Ok(match a {
         SignedAction::Buy {
@@ -450,6 +531,33 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                     "minOut required for a token without a pool price",
                 ));
             }
+            if let Some(q) = zec_pair(st, known.as_ref(), &v)? {
+                // v0.13 ZEC SPL pair: 1:1 to ZEC, no SOL rate; job amounts in ZEC SPL units.
+                let applied = zec_units_per_zec(st.cfg.quotes.zec_spread_bps, true);
+                let (amount_zat, units, min_out) =
+                    fuzzed_buy_step(zec_in, min_out, applied, min_action, ZEC_UNITS_STEP)?;
+                let spot = known.as_ref().and_then(|t| {
+                    let p = t.price_quote.as_deref()?;
+                    let upw = crate::config::sol_to_lamports(&truncate_decimals(p, 9))? / 10;
+                    crate::launch::tokens_at_spot(units, upw, t.decimals)
+                });
+                return Ok(NewAction {
+                    gain: Some((mint.clone(), spot.unwrap_or(min_out).max(min_out))),
+                    amount_zat,
+                    fee_zat: now_fee(mode),
+                    rate: Some(parity_used(applied)),
+                    quote_mint: Some(q.mint.to_string()),
+                    jobs: vec![NewJob {
+                        venue: Some(v),
+                        mint: Some(mint),
+                        lamports_in: Some(units),
+                        min_out: Some(min_out),
+                        ..job(JobOp::Buy, mode, epoch(mode))
+                    }],
+                    ..base("buy")
+                });
+            }
+            let known = known.map(|t| (t.price_sol, t.decimals));
             let r = rate(st).await?;
             let applied = apply_spread(r.lamports_per_zec, spread(&r), true);
             let (amount_zat, lamports, min_out) = fuzzed_buy(zec_in, min_out, applied, min_action)?;
@@ -492,6 +600,34 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                     "minZecOut required for a token without a pool price",
                 ));
             }
+            if let Some(q) = zec_pair(st, known.as_ref(), &v)? {
+                // v0.13 ZEC SPL pair: proceeds in ZEC SPL units, credited 1:1 minus the spread.
+                let applied = zec_units_per_zec(st.cfg.quotes.zec_spread_bps, false);
+                let est = known
+                    .as_ref()
+                    .and_then(|t| estimate_zat_zec(t.price_quote.as_deref()?, t.decimals, amount, applied))
+                    .unwrap_or(0);
+                if min_zec_out < min_action && est < min_action {
+                    return Err(ApiError::below_minimum(
+                        "sell value below PoolInfo.minActionZat (raise amount or minZecOut)",
+                    ));
+                }
+                return Ok(NewAction {
+                    fee_zat: now_fee(mode),
+                    token_hold: Some((mint.clone(), amount)),
+                    rate: Some(parity_used(applied)),
+                    quote_mint: Some(q.mint.to_string()),
+                    jobs: vec![NewJob {
+                        venue: Some(v),
+                        mint: Some(mint),
+                        token_amount: Some(amount),
+                        min_out: Some(zat_to_lamports_ceil(min_zec_out, applied)),
+                        ..job(JobOp::Sell, mode, epoch(mode))
+                    }],
+                    ..base("sell")
+                });
+            }
+            let known = known.map(|t| (t.price_sol, t.decimals));
             let r = rate(st).await?;
             let applied = apply_spread(r.lamports_per_zec, spread(&r), false);
             // N7: sells are checked against the minimum too (by the signed floor, or by the
@@ -523,12 +659,46 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             meta,
             initial_buy_zec,
             exec: mode,
+            quote,
+            platform,
         } => {
             let v = venue(st, &v)?;
             if v == "jupiter" {
                 return Err(ApiError::bad_request("create: jupiter is not a launchpad"));
             }
             check_meta(&meta)?;
+            // v0.13: pair and LaunchLab platform.
+            let quote = quote.unwrap_or_else(|| "SOL".into());
+            if !["SOL", "USDC", "USD1", "ZEC"].contains(&quote.as_str()) {
+                return Err(ApiError::bad_request("quote: SOL | USDC | USD1 | ZEC"));
+            }
+            let qcfg = if quote == "SOL" {
+                None
+            } else {
+                let supported = crate::config::known_quotes(st.cfg.cluster == "mainnet-beta")
+                    .into_iter()
+                    .any(|q| q.quote == quote && q.venues.contains(&v.as_str()));
+                if !supported {
+                    return Err(ApiError::bad_request(format!(
+                        "{v} has no {quote} pair on this network"
+                    )));
+                }
+                Some(
+                    st.cfg
+                        .quotes
+                        .for_venue(&quote, &v)
+                        .ok_or_else(|| ApiError::venue_unavailable(format!("{quote} pairs are not enabled")))?,
+                )
+            };
+            let platform = match (v.as_str(), platform) {
+                ("raydium-launchlab", None) => Some("unzeen".to_string()),
+                ("raydium-launchlab", Some(p)) if PLATFORMS.contains(&p.as_str()) => Some(p),
+                ("raydium-launchlab", Some(_)) => {
+                    return Err(ApiError::bad_request("platform: unzeen | bonk | stonk"));
+                }
+                (_, Some(_)) => return Err(ApiError::bad_request("platform: raydium-launchlab only")),
+                (_, None) => None,
+            };
             // D6: no relayer executes `create` yet; never take a hold that nobody settles.
             if !st.cfg.create_enabled {
                 return Err(ApiError::venue_unavailable("create is not available yet"));
@@ -540,18 +710,51 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             if initial > 0 && initial < min_action {
                 return Err(ApiError::below_minimum("initialBuyZec below PoolInfo.minActionZat"));
             }
-            let r = rate(st).await?;
-            let applied = apply_spread(r.lamports_per_zec, spread(&r), true);
+            let zec = qcfg.filter(|q| q.is_zec());
+            let (applied, rate_used) = match zec {
+                Some(_) => {
+                    let a = zec_units_per_zec(st.cfg.quotes.zec_spread_bps, true);
+                    (a, parity_used(a))
+                }
+                None => {
+                    let r = rate(st).await?;
+                    let a = apply_spread(r.lamports_per_zec, spread(&r), true);
+                    (a, used(&r, a))
+                }
+            };
             // Creator cap (v0.5), checked on the requested amount before the random shave so
             // the answer is deterministic: initial buy within PoolInfo.launchRules.
             if initial > 0 && st.cfg.launch.cap_bps > 0 {
                 let full = zat_to_lamports(initial, applied);
-                if full - full % rate::LAMPORTS_STEP > crate::max_initial_buy_for(st, &v).await? {
+                let max = match zec {
+                    // ZEC curve of pump.fun / LaunchLab: same token reserves, ZEC virtual reserves.
+                    Some(_) => {
+                        let l = &st.cfg.launch;
+                        let curve = crate::launch::Curve {
+                            virtual_sol: st.cfg.quotes.zec_virtual_units,
+                            virtual_tokens: l.virtual_token_reserves,
+                        };
+                        let cap = ((l.total_supply as u128) * (l.cap_bps as u128) / 10_000) as u64;
+                        curve.max_lamports_within(cap)
+                    }
+                    None => crate::max_initial_buy_for(st, &v).await?,
+                };
+                let step = if zec.is_some() {
+                    ZEC_UNITS_STEP
+                } else {
+                    rate::LAMPORTS_STEP
+                };
+                if full - full % step > max {
                     return Err(ApiError::creator_cap());
                 }
             }
+            let step = if zec.is_some() {
+                ZEC_UNITS_STEP
+            } else {
+                rate::LAMPORTS_STEP
+            };
             let (amount_zat, lamports, _) = if initial > 0 {
-                fuzzed_buy(initial, 0, applied, min_action)?
+                fuzzed_buy_step(initial, 0, applied, min_action, step)?
             } else {
                 (0, 0, 0)
             };
@@ -559,10 +762,17 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             if let Some(img) = meta.image {
                 m["image"] = json!(img);
             }
+            if let Some(q) = qcfg {
+                m["quote"] = json!(q.quote);
+            }
+            if let Some(p) = platform {
+                m["platform"] = json!(p);
+            }
             NewAction {
                 amount_zat,
                 fee_zat: st.cfg.fees.create_fee_zat + now_fee(mode),
-                rate: Some(used(&r, applied)),
+                rate: Some(rate_used),
+                quote_mint: zec.map(|q| q.mint.to_string()),
                 jobs: vec![NewJob {
                     venue: Some(v),
                     lamports_in: Some(lamports),

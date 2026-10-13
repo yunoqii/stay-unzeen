@@ -288,6 +288,32 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
             "maxInitialBuyLamportsByVenue": by_venue,
         },
     }));
+    // v0.13: enabled non-SOL pairs (venues limited to the enabled ones).
+    r.0["quotes"] = Value::Array(
+        st.cfg
+            .quotes
+            .list
+            .iter()
+            .filter_map(|q| {
+                let venues: Vec<&str> = q
+                    .venues
+                    .iter()
+                    .copied()
+                    .filter(|v| st.cfg.venues.iter().any(|e| e == v))
+                    .collect();
+                if venues.is_empty() {
+                    return None;
+                }
+                let mut v = json!({
+                    "quote": q.quote, "mint": q.mint, "decimals": q.decimals, "bridged": q.bridged, "venues": venues,
+                });
+                if q.is_zec() {
+                    v["spreadBps"] = json!(st.cfg.quotes.zec_spread_bps);
+                }
+                Some(v)
+            })
+            .collect(),
+    );
     if st.cfg.intel.discovery {
         r.0["features"]["discovery"] = json!(true);
     }
@@ -466,6 +492,13 @@ fn action_json(v: &unzeen_ledger::ActionView) -> Value {
 
 fn rate_json(r: &Option<unzeen_ledger::RateUsed>) -> Value {
     match r {
+        // v0.13: ZEC SPL pair (1:1 parity): units of ZEC SPL per ZEC, no lamports.
+        Some(r) if r.source == "parity" => json!({
+            "quote": "ZEC",
+            "quotePerZec": r.lamports_per_zec.to_string(),
+            "source": r.source,
+            "ts": r.ts_ms,
+        }),
         Some(r) => json!({
             "lamportsPerZec": r.lamports_per_zec.to_string(),
             "source": r.source,
@@ -554,6 +587,55 @@ async fn action_status(
     Ok(padded(out, 1024))
 }
 
+// ------------------------------------------------------------------ quote stock (v0.13)
+
+/// RELAYER v8 `fund_quote` schedule for lamport-booked quotes (USDC/USD1): a round every
+/// 45–90 min (random), vaults in random order, 20–120 s between jobs. Pool level only: the
+/// schedule never depends on trades. ZEC SPL stock is refilled after ZEC → ZEC SPL rebalances
+/// (scanner), not here.
+pub async fn quote_stock_loop(st: AppState) {
+    fn uni(lo: f64, hi: f64) -> f64 {
+        lo + (hi - lo) * ((rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64)
+    }
+    loop {
+        tokio::time::sleep(Duration::from_secs_f64(uni(45.0 * 60.0, 90.0 * 60.0))).await;
+        let quotes: Vec<&'static str> = st
+            .cfg
+            .quotes
+            .list
+            .iter()
+            .filter(|q| !q.is_zec() && q.venues.iter().any(|v| st.cfg.venues.iter().any(|e| e == v)))
+            .map(|q| q.mint)
+            .collect();
+        if quotes.is_empty() {
+            continue;
+        }
+        let mut vaults = match st.ledger.pool_vaults(st.cfg.cluster).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "quote stock round: vault list failed");
+                continue;
+            }
+        };
+        for i in (1..vaults.len()).rev() {
+            let j = (rand::random::<u64>() % (i as u64 + 1)) as usize;
+            vaults.swap(i, j);
+        }
+        let (mut at, mut queued) = (0.0, 0usize);
+        for v in &vaults {
+            for q in &quotes {
+                at += uni(20.0, 120.0);
+                match st.ledger.queue_fund_quote(st.cfg.cluster, v, q, at).await {
+                    Ok(Some(_)) => queued += 1,
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(error = %e, "fund_quote enqueue failed"),
+                }
+            }
+        }
+        tracing::info!(jobs = queued, "quote stock round queued");
+    }
+}
+
 // ------------------------------------------------------------------ background tasks
 
 /// Settler (1 s), market poller (1 s), janitor (60 s) and rate refresh (30–60 s). Errors are logged by kind only.
@@ -565,6 +647,10 @@ pub fn spawn_background(st: &AppState) {
             tick.tick().await;
             if let Err(e) = s.ledger.settle_ready(50).await {
                 tracing::warn!(error = %e, "settlement pass failed");
+            }
+            // v0.13: quote stock jobs are pool-internal: just close them.
+            if let Err(e) = s.ledger.settle_fund_quotes().await {
+                tracing::warn!(error = %e, "fund_quote settlement failed");
             }
             // Fair-launch v2: internal `consolidate` jobs (RELAYER v7).
             match s.ledger.settle_consolidations().await {
@@ -618,6 +704,7 @@ pub fn spawn_background(st: &AppState) {
     tokio::spawn(creator_fees::credit_loop(st.clone()));
     tokio::spawn(stats::scheduler_loop(st.clone()));
     tokio::spawn(orders::evaluator_loop(st.clone()));
+    tokio::spawn(quote_stock_loop(st.clone()));
     if st.cfg.chat.enabled {
         tokio::spawn(chat::publisher_loop(st.clone()));
         tokio::spawn(chat::janitor_loop(st.clone()));

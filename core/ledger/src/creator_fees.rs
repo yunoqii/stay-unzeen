@@ -59,6 +59,7 @@ impl Ledger {
                 "SELECT s.id, s.mint, s.lamports, ct.anon_pubkey
                  FROM creator_fee_sweeps s LEFT JOIN creator_tokens ct ON ct.mint = s.mint
                  WHERE s.network = $1 AND s.status = 'confirmed' AND s.kind = 'creator' AND s.credited_at IS NULL
+                   AND s.quote_mint IS NULL   -- v0.13: quote-token fees wait for v0.14 (kept, not lost)
                  FOR UPDATE OF s SKIP LOCKED",
                 &[&network],
             )

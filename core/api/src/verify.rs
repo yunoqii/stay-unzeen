@@ -64,6 +64,11 @@ pub fn snapshot_json(s: &SnapshotRow) -> Value {
         .collect::<Vec<_>>()
         .into();
     v["committedLamports"] = json!(s.committed_lamports.to_string());
+    if let Some(q) = &s.quote_assets
+        && q.as_array().is_some_and(|a| !a.is_empty())
+    {
+        v["quoteAssets"] = q.clone();
+    }
     if let Some(r) = s.rate_sell {
         v["rateLamportsPerZecSell"] = json!(r.to_string());
     }

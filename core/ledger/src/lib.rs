@@ -18,6 +18,7 @@ pub mod fair;
 mod migrate;
 pub mod orders;
 pub mod payouts;
+pub mod quotes;
 pub mod rebalance;
 pub mod stats;
 pub mod verify;
@@ -34,6 +35,7 @@ pub use chat::{ChatMsgMeta, ChatPost, ChatQuery, ChatRequest, NonceCtx};
 pub use deadpool_postgres;
 pub use decide::{MemoInput, NoteObs, Outcome, Policy, Stage, evaluate};
 pub use payouts::{InflightPayout, PayoutRow};
+pub use quotes::PoolQuote;
 pub use rebalance::{FundOutcome, History as RebalanceHistory, Inventory, LiveRebalance, RebalanceView};
 pub use tokio_postgres;
 pub use tokio_postgres::Config as PgConfig;
@@ -469,6 +471,7 @@ impl Ledger {
             jobs: vec![],
             payout: None,
             gain: None,
+            quote_mint: None,
         };
         self.submit(pk, nonce, request_hash, &a).await
     }

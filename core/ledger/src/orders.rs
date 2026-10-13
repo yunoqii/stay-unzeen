@@ -658,13 +658,14 @@ impl Ledger {
     }
 
     /// Facts for validating an order mint: (venue, status, decimals) from `tokens`, and the
-    /// last tick price (decimal string) if any.
+    /// last tick price (decimal string) if any. v0.13: SOL pairs only (a non-SOL pair answers
+    /// like an unknown mint → order_unsupported_mint).
     pub async fn order_mint_info(&self, mint: &str) -> Result<Option<(String, String, i16, Option<String>)>> {
         let c = self.pool.get().await?;
         let r = c
             .query_opt(
                 "SELECT t.venue, t.status, t.decimals, p.price_sol::text FROM tokens t
-                 LEFT JOIN intel_prices p ON p.mint = t.mint WHERE t.mint = $1",
+                 LEFT JOIN intel_prices p ON p.mint = t.mint WHERE t.mint = $1 AND t.quote_mint IS NULL",
                 &[&mint],
             )
             .await?;

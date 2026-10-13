@@ -17,6 +17,9 @@ use serde_json::{Value, json};
 
 use crate::{Ledger, LedgerError, Result, to_i64, to_u64};
 
+/// ZEC SPL (Zcash on Solana, bridged) — target of `zec_spl` rebalances (0019).
+pub const ZEC_SPL_MINT: &str = "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS";
+
 /// Statuses of a live (non-terminal) rebalance.
 pub const LIVE: [&str; 6] = ["planned", "quoted", "sending", "deposited", "distributing", "attention"];
 
@@ -77,6 +80,8 @@ pub struct RebalanceView {
     pub error_code: Option<String>,
     pub created_unix: i64,
     pub finished_unix: Option<i64>,
+    /// `sol` | `zec_spl` (0019).
+    pub target: String,
 }
 
 /// Outcome of [`Ledger::rebalance_fund_step`].
@@ -152,6 +157,23 @@ impl Ledger {
         Ok(to_u64(v))
     }
 
+    /// ZEC SPL units promised to queued ZEC-pair buys / launch buys (RELAYER v8: their
+    /// `lamports_in` is in ZEC SPL units).
+    pub async fn committed_zec_spl(&self, network: &str) -> Result<u64> {
+        let c = self.pool.get().await?;
+        let v: i64 = c
+            .query_one(
+                "SELECT COALESCE(sum(j.lamports_in), 0)::bigint FROM relayer_jobs j
+                 LEFT JOIN tokens t ON t.mint = j.mint
+                 WHERE j.network = $1 AND j.status IN ('queued', 'claimed')
+                   AND ((j.op = 'buy' AND t.quote_mint = $2) OR (j.op = 'create' AND j.meta->>'quote' = 'ZEC'))",
+                &[&network, &ZEC_SPL_MINT],
+            )
+            .await?
+            .get(0);
+        Ok(to_u64(v))
+    }
+
     /// Σ ZEC the pool owes its users (available + held of every balance; pending payouts are
     /// held until confirmed). The rebalance only spends ZEC above this.
     pub async fn zec_liabilities(&self) -> Result<u64> {
@@ -166,7 +188,8 @@ impl Ledger {
         Ok(to_u64(v))
     }
 
-    pub async fn live_rebalance(&self, network: &str) -> Result<Option<LiveRebalance>> {
+    /// Live rebalance of `network` towards `target` (`sol` | `zec_spl`, 0019).
+    pub async fn live_rebalance(&self, network: &str, target: &str) -> Result<Option<LiveRebalance>> {
         let c = self.pool.get().await?;
         let row = c
             .query_opt(
@@ -178,8 +201,8 @@ impl Ledger {
                         EXTRACT(EPOCH FROM now() - polled_at)::float8,
                         CASE WHEN status = 'deposited' THEN EXTRACT(EPOCH FROM now() - updated_at)::float8 END,
                         fund_job_id, forced
-                 FROM pool_rebalances WHERE network = $1 AND status = ANY($2)",
-                &[&network, &&LIVE[..]],
+                 FROM pool_rebalances WHERE network = $1 AND status = ANY($2) AND target = $3",
+                &[&network, &&LIVE[..], &target],
             )
             .await?;
         Ok(row.map(|r| LiveRebalance {
@@ -207,7 +230,7 @@ impl Ledger {
         }))
     }
 
-    pub async fn rebalance_history(&self, network: &str) -> Result<History> {
+    pub async fn rebalance_history(&self, network: &str, target: &str) -> Result<History> {
         let c = self.pool.get().await?;
         let r = c
             .query_one(
@@ -215,8 +238,8 @@ impl Ledger {
                                            AND status NOT IN ('cancelled', 'expired')),
                         EXTRACT(EPOCH FROM now() - max(finished_at)
                                 FILTER (WHERE status NOT IN ('cancelled', 'expired')))::float8
-                 FROM pool_rebalances WHERE network = $1",
-                &[&network],
+                 FROM pool_rebalances WHERE network = $1 AND target = $2",
+                &[&network, &target],
             )
             .await?;
         Ok(History {
@@ -229,6 +252,7 @@ impl Ledger {
     pub async fn plan_rebalance(
         &self,
         network: &str,
+        target: &str,
         lot_zat: u64,
         delay_secs: f64,
         dry_run: bool,
@@ -238,10 +262,10 @@ impl Ledger {
         let lot = to_i64(lot_zat)?;
         let row = c
             .query_opt(
-                "INSERT INTO pool_rebalances (network, dry_run, lot_zat, not_before, forced)
-                 VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5)
+                "INSERT INTO pool_rebalances (network, dry_run, lot_zat, not_before, forced, target)
+                 VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5, $6)
                  ON CONFLICT DO NOTHING RETURNING id",
-                &[&network, &dry_run, &lot, &delay_secs.max(0.0), &forced],
+                &[&network, &dry_run, &lot, &delay_secs.max(0.0), &forced, &target],
             )
             .await?;
         Ok(row.map(|r| r.get(0)))
@@ -379,15 +403,52 @@ impl Ledger {
     ) -> Result<bool> {
         let mut c = self.pool.get().await?;
         let tx = c.transaction().await?;
-        let ok = tx
+        let Some(target) = tx
             .query_opt(
-                "SELECT 1 FROM pool_rebalances WHERE id = $1 AND network = $2 AND status = 'deposited' FOR UPDATE",
+                "SELECT target FROM pool_rebalances WHERE id = $1 AND network = $2 AND status = 'deposited' FOR UPDATE",
                 &[&id, &network],
             )
             .await?
-            .is_some();
-        if !ok {
+            .map(|r| r.get::<_, String>(0))
+        else {
             return Ok(false);
+        };
+        if target == "zec_spl" {
+            // RELAYER v8: ZEC SPL landed on the rebalance address; one fund_quote per vault spreads
+            // it (the relayer tops each vault up to its stock policy, staggered 20–120 s).
+            let vaults: Vec<String> = tx
+                .query(
+                    "SELECT vault FROM relayer_vault_usage WHERE network = $1
+                     UNION SELECT vault FROM mint_vaults WHERE network = $1",
+                    &[&network],
+                )
+                .await?
+                .into_iter()
+                .map(|r| r.get(0))
+                .collect();
+            let (mut at, mut jobs) = (delay_secs.max(0.0), Vec::new());
+            for v in vaults {
+                at += 20.0 + 100.0 * ((rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64);
+                jobs.push(
+                    tx.query_one(
+                        "INSERT INTO relayer_jobs (op, meta, network, exec_mode, not_before)
+                         VALUES ('fund_quote', $1, $2, 'delayed', now() + make_interval(secs => $3)) RETURNING id",
+                        &[&json!({ "quote": ZEC_SPL_MINT, "vault": v }), &network, &at],
+                    )
+                    .await?
+                    .get::<_, i64>(0),
+                );
+            }
+            tx.execute(
+                "UPDATE pool_rebalances SET status = CASE WHEN cardinality($4::bigint[]) = 0 THEN 'done' ELSE 'distributing' END,
+                        oc_status = 'SUCCESS', amount_out = $2, dest_tx = $3, fund_quote_jobs = $4, updated_at = now(),
+                        finished_at = CASE WHEN cardinality($4::bigint[]) = 0 THEN now() END
+                 WHERE id = $1",
+                &[&id, &to_i64(amount_out)?, &dest_tx, &jobs],
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(true);
         }
         let job = if fund_lamports > 0 {
             Some(insert_fund_job(&tx, network, to_i64(fund_lamports)?, delay_secs).await?)
@@ -415,7 +476,7 @@ impl Ledger {
         let tx = c.transaction().await?;
         let Some(r) = tx
             .query_opt(
-                "SELECT network, fund_job_id, fund_attempts, amount_out FROM pool_rebalances
+                "SELECT network, fund_job_id, fund_attempts, amount_out, target, fund_quote_jobs FROM pool_rebalances
                  WHERE id = $1 AND status = 'distributing' FOR UPDATE",
                 &[&id],
             )
@@ -423,6 +484,28 @@ impl Ledger {
         else {
             return Ok(FundOutcome::Waiting);
         };
+        if r.get::<_, String>(4) == "zec_spl" {
+            // Done once every fund_quote is final (the API settles them). A failed one leaves the
+            // rest on the rebalance address for the next distribution: no retry loop here.
+            let jobs: Vec<i64> = r.get::<_, Option<Vec<i64>>>(5).unwrap_or_default();
+            let open: i64 = tx
+                .query_one(
+                    "SELECT count(*) FROM relayer_jobs WHERE id = ANY($1) AND status NOT IN ('confirmed', 'failed')",
+                    &[&jobs],
+                )
+                .await?
+                .get(0);
+            if open > 0 {
+                return Ok(FundOutcome::Waiting);
+            }
+            tx.execute(
+                "UPDATE pool_rebalances SET status = 'done', updated_at = now(), finished_at = now() WHERE id = $1",
+                &[&id],
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(FundOutcome::Done);
+        }
         let network: String = r.get(0);
         let job: Option<i64> = r.get(1);
         let attempts: i32 = r.get(2);
@@ -508,7 +591,7 @@ impl Ledger {
         let rows = c
             .query(
                 "SELECT id, status, dry_run, lot_zat, amount_out_quote, amount_out, oc_status, error_code,
-                        EXTRACT(EPOCH FROM created_at)::bigint, EXTRACT(EPOCH FROM finished_at)::bigint
+                        EXTRACT(EPOCH FROM created_at)::bigint, EXTRACT(EPOCH FROM finished_at)::bigint, target
                  FROM pool_rebalances WHERE network = $1 ORDER BY id DESC LIMIT $2",
                 &[&network, &limit],
             )
@@ -526,6 +609,7 @@ impl Ledger {
                 error_code: r.get(7),
                 created_unix: r.get(8),
                 finished_unix: r.get(9),
+                target: r.get(10),
             })
             .collect())
     }

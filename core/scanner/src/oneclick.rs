@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 
 pub const ZEC_ASSET: &str = "nep141:zec.omft.near";
 pub const SOL_ASSET: &str = "nep141:sol.omft.near";
+/// ZEC SPL on Solana (`A7bd…QXaS`, 8 decimals), 1Click asset id (live /v0/tokens 13.10).
+pub const ZEC_SPL_ASSET: &str = "1cs_v1:sol:spl:A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS";
 /// wSOL mint: a valid Solana address no one in the pool owns (dry quotes only).
 pub const DUMMY_SOL_RECIPIENT: &str = "So11111111111111111111111111111111111111112";
 /// Placeholder mainnet t-address for dry quotes (no deposit is ever made).
@@ -142,6 +144,8 @@ pub struct QuoteParams<'a> {
     pub recipient: &'a str,
     pub slippage_bps: u32,
     pub deadline_unix: u64,
+    /// Destination asset: [`SOL_ASSET`] or [`ZEC_SPL_ASSET`].
+    pub destination: &'a str,
 }
 
 /// `POST /v0/quote` body: EXACT_INPUT ZEC (origin chain, transparent deposit) → SOL to
@@ -154,7 +158,7 @@ pub fn quote_request(p: &QuoteParams<'_>) -> Value {
         "slippageTolerance": p.slippage_bps,
         "originAsset": ZEC_ASSET,
         "depositType": "ORIGIN_CHAIN",
-        "destinationAsset": SOL_ASSET,
+        "destinationAsset": p.destination,
         "amount": p.amount_zat.to_string(),
         "refundTo": p.refund_to,
         "refundType": "ORIGIN_CHAIN",
@@ -246,7 +250,7 @@ pub fn check_quote(
     if let Some(echo) = v.get("quoteRequest") {
         let s = |k: &str| echo.get(k).and_then(Value::as_str);
         if s("originAsset") != Some(ZEC_ASSET)
-            || s("destinationAsset") != Some(SOL_ASSET)
+            || s("destinationAsset") != Some(p.destination)
             || s("recipient") != Some(p.recipient)
             || s("refundTo") != Some(p.refund_to)
             || s("swapType") != Some("EXACT_INPUT")
@@ -380,6 +384,7 @@ mod tests {
             recipient: DUMMY_SOL_RECIPIENT,
             slippage_bps: 100,
             deadline_unix: 1_791_770_400,
+            destination: SOL_ASSET,
         }
     }
 

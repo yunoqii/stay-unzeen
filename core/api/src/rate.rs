@@ -214,8 +214,14 @@ pub const LAMPORTS_STEP: u64 = 1_000_000;
 /// reversible). Shave a random 0–1 % and round DOWN to 0.001 SOL; the user is only charged
 /// the ZEC equivalent of what is actually spent. `u` is uniform in [0, 1).
 pub fn fuzz_lamports(lamports: u64, u: f64) -> u64 {
-    let shaved = (lamports as f64 * (1.0 - 0.01 * u.clamp(0.0, 1.0))) as u64;
-    shaved / LAMPORTS_STEP * LAMPORTS_STEP
+    fuzz_units(lamports, u, LAMPORTS_STEP)
+}
+
+/// [`fuzz_lamports`] with another step (ZEC SPL units: 0.0001 ZEC).
+pub fn fuzz_units(units: u64, u: f64, step: u64) -> u64 {
+    let step = step.max(1);
+    let shaved = (units as f64 * (1.0 - 0.01 * u.clamp(0.0, 1.0))) as u64;
+    shaved / step * step
 }
 
 /// Minimal RFC 3339 UTC formatter (no chrono dependency).

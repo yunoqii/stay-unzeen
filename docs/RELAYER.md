@@ -1,8 +1,23 @@
 # Unzeen — контракт core ↔ relayer
 
-Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql`, `0009_verify.sql`, `0010_creator_fees.sql`, `0011_orders.sql`, `0012_fair_review.sql`, `0013_creator_stats.sql`, `0014_verify_review.sql`, `0015_rebalance.sql`, `0017_fair_bundle.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
+Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql`, `0009_verify.sql`, `0010_creator_fees.sql`, `0011_orders.sql`, `0012_fair_review.sql`, `0013_creator_stats.sql`, `0014_verify_review.sql`, `0015_rebalance.sql`, `0017_fair_bundle.sql`, `0018_discovery.sql`, `0019_quotes.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
 
-Статус: **v7** (13.10; миграции `0015_rebalance.sql`, `0017_fair_bundle.sql` (0016 зарезервирован за чатом); API.md v0.11). Изменения против v6:
+Статус: **v8** (13.10; миграция `0019_quotes.sql`; API.md v0.13). Согласовано с adapters `a756224` (пары к USDC для DBC и pump.fun, `fund_quote`, пул A). Изменения против v7:
+
+**A. Пары не к SOL.**
+1. **`create` в паре:** `meta.quote` = `"USDC"` | `"USD1"` | `"ZEC"` (нет поля или `"SOL"` = SOL). `raydium-launchlab`: ещё `meta.platform` = `"unzeen"` | `"bonk"` | `"stonk"` (platform id захардкожены в адаптере, сверка `claimWallet` при старте). `buy`/`sell` пары не несут: пара — свойство кривой mint. `fair_create` — только SOL.
+2. **Реестр в лампортах (USDC/USD1).** `lamports_in`, `min_out` (sell), `out_lamports` — лампорты, как у SOL-пар. Релейер пересчитывает их в quote по **пулу A** (закреплённый DAMM v2 SOL/quote, котировка локально из состояния пула), тратит **запас quote на vault**; если запаса не хватает — своп-нога SOL→quote ExactOut **в той же tx** (fallback, отдельной tx перед сделкой — никогда). `out_lamports` = лампорты-эквивалент потраченного/полученного quote по той же котировке пула A (+ SOL своп-ноги, если была).
+3. **ZEC SPL (`A7bd…QXaS`, stock-only, без пула A, решение лида).** Для заданий в паре к ZEC **суммы — в базовых единицах ZEC SPL** в тех же колонках: `buy`/`create`: `lamports_in` = ZEC SPL к трате, `min_out` = мин. токенов; `sell`: `min_out` = мин. ZEC SPL; `confirmed`: **`out_lamports = NULL`**, `out_quote_mint` = ZEC SPL mint, `out_quote_amount` = ZEC SPL потрачено/получено (лампорты считает core). Confirmed `buy`/`sell`/`create` без `out_lamports` и без `out_quote_amount` core не закрывает (алерт оператору). Core знает пару по `tokens.quote_mint` (для `create` — по `meta.quote`) и считает 1:1 к ZEC (реестр/Verify оценивают в лампортах по своему курсу ZEC/SOL). Своп-ноги нет: запаса не хватает → `failed`/`pool_liquidity`.
+4. **Новая op `fund_quote`** (ставит core; `meta = {"quote": "<mint>", "vault": "<vault>"}`, `exec_mode = 'delayed'`, `action_id = NULL`, в ленту не пишется): держать запас quote на `vault` в политике релейера (`QUOTE_STOCK_<SYM>_TARGET/LOW/HIGH`): USDC/USD1 — одним свопом через пул A с самого vault; ZEC SPL — переводом с **rebalance-адреса** (туда его приносит ребаланс ZEC → ZEC SPL через 1Click). `confirmed`: `out_token_amount` = |quote units|, `out_lamports` = |лампорты|, `vault`; запас уже в границах → `confirmed` **без tx и без `signature`** (CHECK `0019` это разрешает для `consolidate` и `fund_quote`). Core закрывает задание сам. Расписание (core): USDC/USD1 — раунд раз в 45–90 мин (случайно), по vault в случайном порядке с паузами 20–120 с между заданиями; ZEC SPL — после каждого успешного ребаланса в ZEC SPL. Локальный раннер релейера (`RELAYER_QUOTE_STOCK=1`) после этого выключить.
+4a. **Колонки факта пары (`0019`).** `relayer_jobs.out_quote_mint TEXT`, `out_quote_amount NUMERIC(78,0)` — базовые единицы quote, реально прошедшие через tx (`buy`/`sell`/`create` в паре не к SOL). USDC/USD1: заполнены вместе с `out_lamports`; ZEC: только они. Права роли: SELECT + UPDATE обеих колонок. `fund_quote` для ZEC исполняет **rebalance-адрес** (перевод ZEC SPL на `meta.vault`), для USDC/USD1 — сам vault.
+5. **Лента и токены.** `trades.quote_mint`, `trades.quote_amount NUMERIC(78,0)` (базовые единицы quote, ровно из tx) — для сделок в паре не к SOL; `trades.sol_amount` — SOL-эквивалент (USDC/USD1 — по пулу A; ZEC — `0`). `tokens.quote_mint` (NULL = SOL), `tokens.price_quote` (десятичная, quote за 1 целый токен), `tokens.platform` (LaunchLab). `price_sol`/`market_cap_sol` — SOL-эквивалент или `0`.
+6. **Снимок Verify** читает, кроме ATA из `mint_vaults`, **ATA всех quote-mint пула** из новой таблицы `pool_quotes (network, mint, quote, decimals, bridged)` (пишет core при старте; права релейера — SELECT) на каждом vault **и на rebalance-адресе**; в `verify_vaults.tokens` — как обычные `{mint, amount}`.
+7. **Запас для ребаланса ZEC SPL:** в `pool_quote_inventory (network, quote_mint, vault_amount, reserve_amount, vault_count, slot, updated_at)` релейер раз в ~5 мин (вместе с `pool_sol_inventory`) пишет Σ quote на vault и на rebalance-адресе (`NUMERIC(78,0)`). Без строки ZEC SPL core ребаланс в ZEC SPL не планирует.
+8. **Creator fees в парах не к SOL:** sweeper пишет в `creator_fee_sweeps` ещё `quote_mint` и `quote_amount` (`lamports` = 0, если сбор был в quote). Core такие строки **пока не зачисляет** создателю (`credited_at` остаётся NULL до v0.14, деньги не теряются) — это поведение core, релейеру ничего не делать.
+9. **Площадки:** CHECK `venue` во всех таблицах += `raydium-launchlab`, `bags` (`bags` core пока не ставит). `launch_curves` для `raydium-launchlab` — по желанию (иначе кап первой покупки из env).
+10. **Права** (`infra/relayer-role.sql`, перезапустить): SELECT `pool_quotes`; SELECT/INSERT/UPDATE `pool_quote_inventory`; INSERT/UPDATE новых колонок `trades`, `tokens`, `creator_fee_sweeps`.
+
+Изменения v7 против v6:
 
 **A. Авторебаланс пула ZEC → SOL (NEAR Intents 1Click, `0015`).** Core (сканер `serve --rebalance`) сам меняет фиксированный лот ZEC на SOL, когда свободного SOL у пула мало. Релейер делает две вещи:
 1. **Снимок SOL пула → `pool_sol_inventory`** раз в ~5 мин (и при старте): `INSERT ... ON CONFLICT (network) DO UPDATE SET vault_lamports, vault_count, rebalance_lamports, slot, updated_at = now()`. `vault_lamports` = Σ лампортов **всех торговых vault** сети, `vault_count` = их число, `rebalance_lamports` = баланс rebalance-адреса, `slot` — слот чтения (`confirmed`, провайдер чтения, `getMultipleAccounts`). Без строки или старше 15 мин core ребаланс не планирует. Права: SELECT/INSERT/UPDATE `pool_sol_inventory`.
@@ -102,7 +117,7 @@
 | `id` | core | bigserial, id задания для логов релейера |
 | `action_id` | core | bytea(16) или NULL. Релейеру не нужен, не логировать |
 | `part` | core | номер части (`transfer` при умном выводе: 0..N-1), иначе 0 |
-| `op` | core | `buy` \| `sell` \| `create` \| `transfer` \| `fair_create` (v3) \| `attest` (v3) \| `fund_vaults` (v7) \| `consolidate` (v7) |
+| `op` | core | `buy` \| `sell` \| `create` \| `transfer` \| `fair_create` (v3) \| `attest` (v3) \| `fund_vaults` (v7) \| `consolidate` (v7) \| `fund_quote` (v8) |
 | `venue` | core | `pumpfun` \| `meteora-dbc` \| `jupiter` (NULL для `transfer`) |
 | `mint` | core | base58 mint (NULL для `create`) |
 | `lamports_in` | core | `buy`: лампорты на покупку; `create`: первая покупка (0 = без покупки) |
@@ -134,12 +149,14 @@
 | `buy` | `venue, mint, lamports_in, min_out` | токенов получено | лампортов фактически потрачено (≤ `lamports_in`, комиссии площадки включены, network fee и рента — нет) | |
 | `sell` | `venue, mint, token_amount, min_out` | токенов продано (≤ `token_amount`) | лампортов получено | |
 | `create` | `venue, meta, lamports_in, min_out` | токенов от первой покупки (0 если без) | лампортов на первую покупку | `out_mint` обязателен. creator — свежий адрес пула (не vault) |
+| `buy`/`sell`/`create` в паре к ZEC (v8) | суммы в единицах ZEC SPL | как выше | **`NULL`** | `out_quote_mint`, `out_quote_amount` обязательны; core читает `COALESCE(out_lamports, out_quote_amount)` в единицах quote |
 | `transfer` | `mint, token_amount, dest, gas_lamports` | токенов отправлено (= `token_amount`) | 0 | с vault этого mint (`mint_vaults`) вместе с каплей SOL `gas_lamports`; отдельная tx на каждую часть |
 | `fair_create` (v3) | `venue, meta, lamports_in, min_out, mint_secret` | токенов куплено | лампортов на покупку | `out_mint` = pubkey `mint_secret`; creator — свежий адрес пула; одна v0-tx + ALT |
 | `attest` (v3) | `meta.memo` | — | — | `vault` = ключ аттестаций, `out_memo` из подтверждённой tx, `slot` |
 | `fair_create` бандл (v7) | как v3 | Σ по ногам | Σ по ногам | `signature`/`slot`/`vault` ноги 0, `bundle_legs`; частичное исполнение допустимо |
 | `fund_vaults` (v7) | `lamports_in` | — | реально разнесено | с rebalance-адреса на vault, `vault` = rebalance-адрес |
 | `consolidate` (v7) | `mint, dest, meta.from` | токенов переведено | — | весь баланс `mint` с `meta.from` на `dest` (vault A), `vault` = `meta.from` |
+| `fund_quote` (v8) | `meta.quote`, `meta.vault` | |quote units| | |лампорты| | запас quote на `meta.vault`; в границах → `confirmed` без tx |
 
 Если `out_lamports` при `buy` меньше `lamports_in`, core вернёт пользователю разницу в ZEC по курсу задания. При `sell` недопроданный остаток токенов возвращается на баланс пользователя.
 

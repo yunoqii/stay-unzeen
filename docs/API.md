@@ -2,7 +2,20 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.12** (13.10; миграции `0018_discovery.sql`, `0016_chat.sql`). Изменения против v0.11:
+Статус: **v0.13** (13.10; миграция `0019_quotes.sql`; RELAYER.md v8). Изменения против v0.12:
+- **Пары не к SOL (решения владельца и лида 13.10, `docs/analysis/launchpads-a.md`, `-b.md`).** Quote-активы: **ZEC SPL** `A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS` (мостовой, `bridged`), **USDC**, **USD1** (выкл., пока нет пула A). Список включённых на сети и площадке — `PoolInfo.quotes` (нет записи → пара недоступна).
+  - `create` += `quote?: "SOL" | "USDC" | "USD1" | "ZEC"` (по умолчанию `"SOL"`). Площадка должна поддерживать пару (`PoolInfo.quotes[].venues`), иначе `400 bad_request`; выключенная пара → `503 venue_unavailable`.
+  - `buy`/`sell` пары определяются по токену (`Token.quote`), отдельного поля нет. Пользователь всегда платит и получает **ZEC** с баланса.
+  - **ZEC SPL:** 1:1 к ZEC без курса SOL: `buy` тратит `zecIn × (1 − s)` ZEC SPL, `sell` зачисляет `ZEC SPL × 1/(1 + s)` зат, `s` = `PoolInfo.quotes[ZEC].spreadBps` (env `UNZEEN_ZEC_SPL_SPREAD_BPS`, по умолчанию 30 б.п. — стоимость пополнения через 1Click). `RateUsed` таких действий: `{ quote: "ZEC", quotePerZec, source: "parity", ts }` (нет `lamportsPerZec`). `fill.quoteAmount` вместо `fill.solAmount`.
+  - **USDC/USD1:** реестр в лампортах как у SOL-пар (курс ZEC/SOL), релейер пересчитывает лампорты в quote по закреплённому пулу A (DAMM v2 SOL/USDC) и тратит запас quote на vault; `RateUsed`/`fill` как у SOL.
+  - Ордера и fair-launch — только SOL-пары (`order_create` на не-SOL токен → `422 order_unsupported_mint`). `venue: "jupiter"` на ZEC-паре → `400 bad_request`.
+- **`Token`** += `quote` (`"SOL" | "USDC" | "USD1" | "ZEC"`), `quoteMint?` (нет у SOL), `priceQuote?` (десятичная строка: quote за 1 целый токен, UI-единицы), `platform?` (у `raydium-launchlab`). `priceSol`/`marketCapSol` остаются SOL-эквивалентом (для пар не к SOL — оценка релейера, может быть `"0"`).
+- **`FeedEvent`** += `quoteMint?`, `quoteAmount?` (базовые единицы quote, целая строка; только у пар не к SOL). `solAmount` у таких событий — SOL-эквивалент или `"0"`.
+- **`Venue`** += `"raydium-launchlab"` (LaunchLab: платформа `"unzeen"` (своя platform config «Unzeen»), `"bonk"` (bonk.fun), `"stonk"` (stonk) — `create.platform`, по умолчанию `"unzeen"`) и `"bags"` (зарезервировано, `503 venue_unavailable`, пока не включено). Список включённых — как раньше, `UNZEEN_VENUES`.
+- **Verify** += `quoteAssets` снимка (quote-активы пула на vault): ZEC SPL засчитывается в покрытие ZEC **1:1 с пометкой `bridged`** (риск эмитента моста — в README), пыль ниже `dustBelow` на каждом vault не учитывается; USDC/USD1 показываются, но в покрытие **не засчитываются** (консервативно). См. раздел Verify.
+- Новые суммы — `NUMERIC(78,0)` в БД и **строки** в API.
+
+Изменения v0.12 против v0.11 (13.10; миграции `0018_discovery.sql`, `0016_chat.sql`):
 - **`GET /api/tokens` — поля для фильтров `/tokens`** (сортировка и фильтры — в браузере, запрос одинаковый у всех): `unzeenLaunch` (токен запущен через Unzeen: в публичной ленте есть событие `create` пула — `create`/`fl_create`), `volume24hSol` (объём сделок **пула** по mint за 24 ч, buy+sell, десятичная строка SOL), `unzeenTrades24h` (число этих сделок), `curveProgressPct?` (только на кривой и при наличии снимка индексатора, как `TokenSafety.market`). Список по-прежнему только из токенов пула.
 - **Discovery** (`UNZEEN_DISCOVERY=1`, по умолчанию выкл.): `PoolInfo.features.discovery: true` и `GET /api/tokens?source=discovery` → `DiscoveryToken[]` — свежие токены площадок из тика индексатора, **один список для всех** (без параметров, кроме `source`), публичный, `Cache-Control: public, max-age=60`, ≤ 200, новые первыми. Флаг выключен: ключа `features.discovery` нет, `?source=discovery` → `404 not_found` (как неизвестный путь). Другое значение `source` → `400`. Discovery-mint в обычный `GET /api/tokens` не попадают.
 - **Анонимный чат токена** — раздел «Чат (v0.12)» ниже.
@@ -135,7 +148,8 @@
 ## Типы
 
 ```ts
-type Venue = "pumpfun" | "meteora-dbc" | "jupiter";
+type Venue = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "bags";   // v0.13: + raydium-launchlab, bags (зарезервировано)
+type Quote = "SOL" | "USDC" | "USD1" | "ZEC";   // v0.13: ZEC = ZEC SPL A7bd…QXaS (мостовой)
 
 interface FeedEvent {
   id: string;
@@ -148,6 +162,8 @@ interface FeedEvent {
   decimals: number;      // decimals токена (pump.fun = 6), чтобы не ходить за Token
   solanaTx: string;      // публичная подпись — видна в эксплорере
   ts: number;            // unix ms
+  quoteMint?: string;    // v0.13: только у пар не к SOL
+  quoteAmount?: string;  // v0.13: базовые единицы quote (целое); solAmount тогда — SOL-эквивалент или "0"
   // никаких данных о пользователе — только "unzeen"
 }
 
@@ -158,6 +174,20 @@ interface Token {
   priceSol: string;      // десятичная строка: SOL за 1 целый токен (UI-единицы)
   marketCapSol: string;  // десятичная строка, SOL (UI-единицы)
   createdAt: number;     // unix ms
+  quote: Quote;          // v0.13: пара кривой ("SOL" у всех старых токенов)
+  quoteMint?: string;    // v0.13: нет у SOL
+  priceQuote?: string;   // v0.13: quote за 1 целый токен (UI-единицы), если релейер его записал
+  platform?: "unzeen" | "bonk" | "stonk";   // v0.13: только venue = "raydium-launchlab"
+}
+
+// v0.13: PoolInfo.quotes[] — включённые quote-активы сети
+interface QuoteAsset {
+  quote: Exclude<Quote, "SOL">;
+  mint: string;              // base58; на devnet у pump.fun и Raydium разные USDC — отдельные записи
+  decimals: number;
+  bridged: boolean;          // ZEC SPL: true (мостовой актив, риск эмитента)
+  venues: Venue[];           // где доступна пара
+  spreadBps?: number;        // только ZEC: спред паритета 1:1
 }
 
 // v0.12: элемент GET /api/tokens
@@ -211,6 +241,7 @@ interface PoolInfo {
   };
   fairLaunch?: FairLaunchParams;  // v0.6: только при features.fairLaunch = true
   chat?: ChatParams;        // v0.12: только при features.chat = true
+  quotes: QuoteAsset[];     // v0.13: включённые пары не к SOL (пусто — только SOL)
   orders: {                 // v0.8: приватные ордера
     kinds: ("limit_buy" | "limit_sell" | "take_profit" | "stop_loss")[];
     venues: "pumpfun"[];
@@ -280,6 +311,8 @@ interface ActionStatus {
   fill?: {                  // после исполнения, хранится 24–48 ч
     tokenAmount: string;    // получено (buy/create) / продано (sell) / отправлено (withdraw_token), базовые единицы
     solAmount?: string;     // лампорты сделки (нет у withdraw_token)
+    quoteAmount?: string;   // v0.13: ZEC-пары — базовые единицы ZEC SPL сделки (вместо solAmount)
+    quoteMint?: string;     // v0.13: вместе с quoteAmount
     zecSpent?: string;      // затоши списано (с учётом возврата неистраченного)
     zecCredited?: string;   // sell: затоши зачислено
     mint?: string;          // create: новый mint
@@ -287,8 +320,10 @@ interface ActionStatus {
 }
 
 interface RateUsed {
-  lamportsPerZec: string;   // лампорты за 1 ZEC, уже со спредом пула (buy: меньше SOL; sell: больше SOL за 1 ZEC)
-  source: "near-1click" | "fixed";   // fixed — только devnet (DEVNET_ZEC_SOL_RATE)
+  lamportsPerZec?: string;  // лампорты за 1 ZEC, уже со спредом пула (buy: меньше SOL; sell: больше SOL за 1 ZEC); нет у ZEC-пар (v0.13)
+  quote?: "ZEC";            // v0.13: действие в паре к ZEC SPL
+  quotePerZec?: string;     // v0.13: базовые единицы ZEC SPL за 1 ZEC со спредом (buy 1e8·(1−s), sell 1e8·(1+s))
+  source: "near-1click" | "fixed" | "parity";   // fixed — только devnet (DEVNET_ZEC_SOL_RATE); parity — ZEC SPL 1:1
   ts: number;               // время котировки, unix мс
 }
 ```
@@ -300,7 +335,9 @@ interface RateUsed {
 type SignedAction = (
   | { op: "buy";  venue: Venue; mint: string; zecIn: string; minOut: string; exec?: "now" | "delayed" | "max" }
   | { op: "sell"; venue: Venue; mint: string; amount: string; minZecOut: string; exec?: "now" | "delayed" | "max" }
-  | { op: "create"; venue: Venue; meta: { name: string; symbol: string; image?: string }; initialBuyZec?: string; exec?: "now" | "delayed" | "max" }  // 503 пока выключен
+  | { op: "create"; venue: Venue; meta: { name: string; symbol: string; image?: string }; initialBuyZec?: string; exec?: "now" | "delayed" | "max";
+      quote?: Quote;                                   // v0.13: пара (по умолчанию "SOL"), см. PoolInfo.quotes
+      platform?: "unzeen" | "bonk" | "stonk" }   // v0.13: только raydium-launchlab, по умолчанию "unzeen"
   | { op: "claim"; mint?: string }                          // creator fees → баланс; чисто реестровая операция,
                                                             // on-chain сбор fees — по глобальному расписанию пула
   | { op: "withdraw_zec"; to: string; amount: string; exec?: "delayed" | "max" }  // UA с Orchard/Ironwood receiver; t-адрес и Sapling-only → 400
@@ -718,6 +755,12 @@ interface VerifySnapshot extends VerifySnapshotSummary {
   committedLamports: string;              // v0.10: только газ стоящих в очереди выводов токенов: вычитается из покрытия
   rateLamportsPerZecSell?: string;        // курс, по которому SOL засчитывается в покрытие ZEC (нет — курса не было)
   rateLamportsPerZecBuy?: string;         // v0.10: курс пересчёта claimable создателей в ZEC-обязательства (ceil)
+  quoteAssets?: {                         // v0.13: quote-активы пула (релейер читает их ATA на каждом vault)
+    mint: string; quote: "ZEC" | "USDC" | "USD1"; decimals: number;
+    bridged: boolean;                     // ZEC SPL: мостовой
+    counted: boolean;                     // true только у ZEC SPL: засчитывается в покрытие ZEC 1:1
+    dustBelow: string;                    // баланс vault ниже — не засчитывается (базовые единицы)
+  }[];
   zecReserve: { amountZat: string; height: number; attested: true };   // округлено ВНИЗ до 0.01 ZEC; заявлено оператором, не доказано.
                                           // v0.10: ноты с ≥ K подтверждений + своя сдача + выплаты в полёте + депозиты, зачисленные после замера
 }
@@ -741,7 +784,7 @@ interface VerifyProof {                   // GET /api/verify/proof (подпис
 ### Проверка в браузере
 1. `GET /api/verify` (или `/:id`) → пересчитать `rootsDigest` из полей снимка, проверить `operator.sig` (ed25519, `@noble/curves`) и `vault.sig` каждого vault.
 2. `GET /api/verify/proof` (по кнопке, без автоопроса) → для каждого куска: лист из `(chainId, snapshotId, asset, свой pubkey, piece, value, blind)`, подъём по `path` → совпадает с `trees[asset].root` и `.sum`. Показать «committed ≥ ваш баланс на takenAt» (сумма кусков).
-3. Солвентность: по mint `sum ≤ Σ vault.tokens[mint]` (проверяемо, гранула 1); по ZEC `sum ≤ zecReserve.amountZat + floor((Σ vault.lamports − committedLamports) · 1e8 / rateLamportsPerZecSell)` (часть ZEC — «attested»). Строки SOL нет. Пример с числами — `verify-vectors.json` → `creatorSnapshot.solvency`.
+3. Солвентность: по mint `sum ≤ Σ vault.tokens[mint]` (проверяемо, гранула 1); по ZEC `sum ≤ zecReserve.amountZat + floor((Σ vault.lamports − committedLamports) · 1e8 / rateLamportsPerZecSell) + Σ_vault (ZEC SPL ≥ dustBelow ? ZEC SPL : 0)` (часть ZEC — «attested», часть — «bridged»; v0.13: ZEC SPL только из `quoteAssets` с `counted: true`, USDC/USD1 не засчитываются). Строки SOL нет. Mint quote-активов в деревья обязательств не входят (у пользователей их нет). Пример с числами — `verify-vectors.json` → `creatorSnapshot.solvency`.
 4. Якорь: ссылка на `anchor.solanaTx` в эксплорере (по клику). Доказательство — только «Download JSON», **не в localStorage**.
 
 ### Ошибки и лимиты

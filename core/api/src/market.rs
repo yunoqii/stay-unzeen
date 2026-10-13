@@ -31,10 +31,16 @@ pub struct FeedMsg {
 }
 
 const TRADE_COLS: &str = "id, kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature,
-     (extract(epoch FROM ts) * 1000)::bigint";
+     (extract(epoch FROM ts) * 1000)::bigint, quote_mint, quote_amount::text";
+
+/// Column `i` exists under `name` (rows of `trades`/`tokens` carry the v0.13 quote columns,
+/// `market_trades`/`intel_tokens` rows do not).
+fn has_col(r: &Row, i: usize, name: &str) -> bool {
+    r.columns().get(i).is_some_and(|c| c.name() == name)
+}
 
 fn trade_json(r: &Row) -> Value {
-    json!({
+    let mut v = json!({
         "id": r.get::<_, i64>(0).to_string(),
         "kind": r.get::<_, String>(1),
         "venue": r.get::<_, String>(2),
@@ -45,11 +51,52 @@ fn trade_json(r: &Row) -> Value {
         "decimals": r.get::<_, i16>(7),
         "solanaTx": r.get::<_, String>(8),
         "ts": r.get::<_, i64>(9),
-    })
+    });
+    // v0.13: pairs not quoted in SOL.
+    if has_col(r, 10, "quote_mint")
+        && let Some(q) = r.get::<_, Option<String>>(10)
+    {
+        v["quoteMint"] = json!(q);
+        if let Some(a) = r.get::<_, Option<String>>(11) {
+            v["quoteAmount"] = json!(a);
+        }
+    }
+    v
 }
 
 const TOKEN_COLS: &str = "mint, symbol, name, image, venue, status, decimals,
      trim_scale(price_sol)::text, trim_scale(market_cap_sol)::text, (extract(epoch FROM created_at) * 1000)::bigint";
+/// `tokens` only (v0.13): + quote pair, quote price, LaunchLab platform.
+const TOKEN_COLS_Q: &str = "mint, symbol, name, image, venue, status, decimals,
+     trim_scale(price_sol)::text, trim_scale(market_cap_sol)::text, (extract(epoch FROM created_at) * 1000)::bigint,
+     quote_mint, trim_scale(price_quote)::text, platform";
+
+/// v0.13 `Token.quote` / `quoteMint` / `priceQuote` / `platform` from columns at `i..i+3`.
+fn quote_fields(v: &mut Value, r: &Row, i: usize) {
+    if !has_col(r, i, "quote_mint") {
+        v["quote"] = json!("SOL");
+        return;
+    }
+    match r.get::<_, Option<String>>(i) {
+        None => v["quote"] = json!("SOL"),
+        Some(m) => {
+            let known = crate::config::known_quotes(true)
+                .into_iter()
+                .chain(crate::config::known_quotes(false))
+                .find(|q| q.mint == m);
+            if let Some(q) = known {
+                v["quote"] = json!(q.quote);
+            }
+            v["quoteMint"] = json!(m);
+        }
+    }
+    if let Some(p) = r.get::<_, Option<String>>(i + 1) {
+        v["priceQuote"] = json!(p);
+    }
+    if let Some(p) = r.get::<_, Option<String>>(i + 2) {
+        v["platform"] = json!(p);
+    }
+}
 
 fn token_json(r: &Row) -> Value {
     let mut v = json!({
@@ -66,6 +113,7 @@ fn token_json(r: &Row) -> Value {
     if let Some(img) = r.get::<_, Option<String>>(3) {
         v["image"] = json!(img);
     }
+    quote_fields(&mut v, r, 10);
     v
 }
 
@@ -153,7 +201,8 @@ pub async fn tokens(State(st): State<AppState>, Query(q): Query<HashMap<String, 
                     (extract(epoch FROM t.created_at) * 1000)::bigint,
                     EXISTS (SELECT 1 FROM trades c WHERE c.mint = t.mint AND c.kind = 'create'),
                     COALESCE(a.vol, 0)::bigint, COALESCE(a.n, 0)::bigint,
-                    CASE WHEN t.status = 'curve' THEN s.data->'market'->>'curveProgressPct' END
+                    CASE WHEN t.status = 'curve' THEN s.data->'market'->>'curveProgressPct' END,
+                    t.quote_mint, trim_scale(t.price_quote)::text, t.platform
              FROM tokens t
              LEFT JOIN LATERAL (SELECT sum(x.sol_amount) AS vol, count(*) AS n FROM trades x
                                 WHERE x.mint = t.mint AND x.kind IN ('buy', 'sell')
@@ -168,6 +217,7 @@ pub async fn tokens(State(st): State<AppState>, Query(q): Query<HashMap<String, 
         .iter()
         .map(|r| {
             let mut v = token_json(r);
+            quote_fields(&mut v, r, 14);
             list_fields(&mut v, r.get(10), r.get(11), r.get(12), r.get(13));
             v
         })
@@ -226,7 +276,7 @@ pub async fn token(State(st): State<AppState>, Path(mint): Path<String>) -> ApiR
     let mint = mint_param(&mint)?;
     let c = client(&st).await?;
     let Some(t) = c
-        .query_opt(&format!("SELECT {TOKEN_COLS} FROM tokens WHERE mint = $1"), &[&mint])
+        .query_opt(&format!("SELECT {TOKEN_COLS_Q} FROM tokens WHERE mint = $1"), &[&mint])
         .await
         .map_err(db)?
     else {

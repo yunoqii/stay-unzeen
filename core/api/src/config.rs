@@ -44,6 +44,104 @@ pub struct Config {
     pub stats: StatsConfig,
     /// Token chat and cover traffic (API v0.12).
     pub chat: ChatConfig,
+    /// Quote assets of non-SOL pairs (API v0.13).
+    pub quotes: QuotesConfig,
+}
+
+/// ZEC SPL (Zcash on Solana, bridged; launchpads-a.md): 8 decimals like ZEC.
+pub const ZEC_SPL_MINT: &str = "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS";
+
+/// One quote asset of a network (API v0.13 `PoolInfo.quotes[]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuoteCfg {
+    /// "USDC" | "USD1" | "ZEC".
+    pub quote: &'static str,
+    pub mint: &'static str,
+    pub decimals: u8,
+    pub bridged: bool,
+    /// Venues with this pair (devnet: pump.fun and Raydium use different USDC mints).
+    pub venues: &'static [&'static str],
+}
+
+impl QuoteCfg {
+    pub fn is_zec(&self) -> bool {
+        self.quote == "ZEC"
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct QuotesConfig {
+    /// Enabled quotes (UNZEEN_QUOTES, symbols; default mainnet "USDC,ZEC", devnet "USDC").
+    pub list: Vec<QuoteCfg>,
+    /// ZEC SPL parity spread, bps (UNZEEN_ZEC_SPL_SPREAD_BPS, default 30): cost of refilling
+    /// the stock through 1Click.
+    pub zec_spread_bps: u64,
+    /// Initial virtual quote reserves of a pump.fun ZEC curve, ZEC SPL units (creator cap of
+    /// ZEC-pair launches; UNZEEN_LAUNCH_VIRTUAL_ZEC_UNITS, default 2.7189 ZEC, on-chain 13.10).
+    pub zec_virtual_units: u64,
+}
+
+/// The registry (on-chain facts 13.10, launchpads-a.md / adapters `pool-a.ts`).
+pub fn known_quotes(mainnet: bool) -> Vec<QuoteCfg> {
+    if mainnet {
+        vec![
+            QuoteCfg {
+                quote: "ZEC",
+                mint: ZEC_SPL_MINT,
+                decimals: 8,
+                bridged: true,
+                venues: &["pumpfun", "raydium-launchlab"],
+            },
+            QuoteCfg {
+                quote: "USDC",
+                mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                decimals: 6,
+                bridged: false,
+                venues: &["pumpfun", "meteora-dbc", "raydium-launchlab"],
+            },
+            QuoteCfg {
+                quote: "USD1",
+                mint: "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB",
+                decimals: 6,
+                bridged: false,
+                venues: &["meteora-dbc", "raydium-launchlab"],
+            },
+        ]
+    } else {
+        vec![
+            QuoteCfg {
+                quote: "USDC",
+                mint: "USDCoctVLVnvTXBEuP9s8hntucdJokbo17RwHuNXemT",
+                decimals: 6,
+                bridged: false,
+                venues: &["meteora-dbc", "raydium-launchlab"],
+            },
+            QuoteCfg {
+                quote: "USDC",
+                mint: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+                decimals: 6,
+                bridged: false,
+                venues: &["pumpfun"],
+            },
+        ]
+    }
+}
+
+impl QuotesConfig {
+    /// The quote asset of `quote` on `venue` (None: not enabled there).
+    pub fn for_venue(&self, quote: &str, venue: &str) -> Option<&QuoteCfg> {
+        self.list.iter().find(|q| q.quote == quote && q.venues.contains(&venue))
+    }
+
+    pub fn by_mint(&self, mint: &str) -> Option<&QuoteCfg> {
+        self.list.iter().find(|q| q.mint == mint)
+    }
+
+    /// Every quote mint the pool may hold on this network (also disabled ones: Verify must
+    /// still see a stock left from before).
+    pub fn all_mints(mainnet: bool) -> Vec<QuoteCfg> {
+        known_quotes(mainnet)
+    }
 }
 
 /// K_chat: 32 bytes per network, outside the database (UNZEEN_CHAT_KEY_FILE). Never printed.
@@ -541,6 +639,28 @@ impl Config {
                     zec_round_zat: num::<u64>("UNZEEN_STATS_ZEC_ROUND_ZAT", 100_000_000)?.max(1_000_000),
                     ..unzeen_ledger::stats::StatsParams::default()
                 },
+            },
+            quotes: {
+                let wanted =
+                    var("UNZEEN_QUOTES").unwrap_or_else(|| if mainnet { "USDC,ZEC".into() } else { "USDC".into() });
+                let wanted: Vec<String> = wanted
+                    .split(',')
+                    .map(|v| v.trim().to_uppercase())
+                    .filter(|v| !v.is_empty())
+                    .collect();
+                for w in &wanted {
+                    if !["USDC", "USD1", "ZEC"].contains(&w.as_str()) {
+                        bail!("UNZEEN_QUOTES: unknown quote {w:?} (USDC | USD1 | ZEC)");
+                    }
+                }
+                QuotesConfig {
+                    list: known_quotes(mainnet)
+                        .into_iter()
+                        .filter(|q| wanted.iter().any(|w| w == q.quote))
+                        .collect(),
+                    zec_spread_bps: num::<u64>("UNZEEN_ZEC_SPL_SPREAD_BPS", 30)?.min(1000),
+                    zec_virtual_units: num::<u64>("UNZEEN_LAUNCH_VIRTUAL_ZEC_UNITS", 271_890_000)?.max(1),
+                }
             },
             chat: {
                 let enabled = var("UNZEEN_CHAT").as_deref() == Some("1");

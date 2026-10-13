@@ -55,6 +55,8 @@ pub const HARD_MAX_LOT_ZAT: u64 = 200_000_000;
 pub struct RebalanceCfg {
     /// Solana cluster of this instance (`devnet` | `mainnet-beta`) = `relayer_jobs.network`.
     pub network: &'static str,
+    /// `sol` (ZEC → SOL, vault SOL) | `zec_spl` (ZEC → ZEC SPL, quote stock of ZEC pairs; 0019).
+    pub target: &'static str,
     pub zcash: NetName,
     pub allow_mainnet: bool,
     pub lot_zat: u64,
@@ -120,6 +122,7 @@ impl RebalanceCfg {
     pub fn from_env(c: &Common, cluster: SolanaCluster) -> anyhow::Result<Self> {
         let cfg = Self {
             network: cluster_str(cluster),
+            target: "sol",
             zcash: c.network,
             allow_mainnet: std::env::var("UNZEEN_ALLOW_MAINNET_REBALANCE").as_deref() == Ok("1"),
             lot_zat: env_u64("UNZEEN_REBALANCE_LOT_ZAT", 50_000_000)?,
@@ -194,8 +197,33 @@ impl RebalanceCfg {
         None
     }
 
+    /// The ZEC → ZEC SPL flavour (API v0.13 / RELAYER v8): same gates, own lot and threshold
+    /// (UNZEEN_REBALANCE_ZEC_SPL_LOT_ZAT, _MIN_FREE_ZAT), free = ZEC SPL on vaults + rebalance
+    /// address − queued ZEC-pair buys.
+    pub fn zec_spl(&self) -> anyhow::Result<Self> {
+        let c = Self {
+            target: "zec_spl",
+            lot_zat: env_u64("UNZEEN_REBALANCE_ZEC_SPL_LOT_ZAT", 50_000_000)?,
+            min_free_lamports: env_u64("UNZEEN_REBALANCE_ZEC_SPL_MIN_FREE_ZAT", 20_000_000)?,
+            vault_reserve_lamports: 0,
+            keep_lamports: 0,
+            ..self.clone()
+        };
+        c.validate()?;
+        Ok(c)
+    }
+
+    pub fn destination(&self) -> &'static str {
+        if self.target == "zec_spl" {
+            oneclick::ZEC_SPL_ASSET
+        } else {
+            oneclick::SOL_ASSET
+        }
+    }
+
     fn params(&self, dry: bool, now_unix: u64) -> QuoteParams<'_> {
         QuoteParams {
+            destination: self.destination(),
             dry,
             amount_zat: self.lot_zat,
             refund_to: self.refund_taddr.as_deref().unwrap_or(oneclick::DUMMY_ZEC_REFUND),
@@ -234,13 +262,17 @@ pub fn evaluate(
     committed: u64,
     hist: Option<&RebalanceHistory>,
 ) -> Trigger {
-    let Some(inv) = inv else {
+    evaluate_free(cfg, inv.map(|i| (free_lamports(cfg, i, committed), i.age_secs)), hist)
+}
+
+/// [`evaluate`] on an already computed `(free, inventory age)` (any target).
+pub fn evaluate_free(cfg: &RebalanceCfg, free_age: Option<(u64, u64)>, hist: Option<&RebalanceHistory>) -> Trigger {
+    let Some((free, age)) = free_age else {
         return Trigger::NoInventory;
     };
-    if inv.age_secs > cfg.inventory_max_age_secs {
+    if age > cfg.inventory_max_age_secs {
         return Trigger::StaleInventory;
     }
-    let free = free_lamports(cfg, inv, committed);
     if free >= cfg.min_free_lamports {
         return Trigger::Enough { free };
     }
@@ -256,13 +288,24 @@ pub fn evaluate(
 }
 
 pub async fn current_trigger(cfg: &RebalanceCfg, ledger: &Ledger, with_history: bool) -> anyhow::Result<Trigger> {
-    let inv = ledger.sol_inventory(cfg.network).await?;
-    let committed = ledger.committed_sol(cfg.network).await?;
     let hist = if with_history {
-        Some(ledger.rebalance_history(cfg.network).await?)
+        Some(ledger.rebalance_history(cfg.network, cfg.target).await?)
     } else {
         None
     };
+    if cfg.target == "zec_spl" {
+        let inv = ledger
+            .quote_inventory(cfg.network, unzeen_ledger::rebalance::ZEC_SPL_MINT)
+            .await?;
+        let committed = ledger.committed_zec_spl(cfg.network).await?;
+        let free_age = inv.map(|(total, age)| {
+            let total = u64::try_from(total).unwrap_or(u64::MAX);
+            (total.saturating_sub(committed), age)
+        });
+        return Ok(evaluate_free(cfg, free_age, hist.as_ref()));
+    }
+    let inv = ledger.sol_inventory(cfg.network).await?;
+    let committed = ledger.committed_sol(cfg.network).await?;
     Ok(evaluate(cfg, inv.as_ref(), committed, hist.as_ref()))
 }
 
@@ -390,7 +433,7 @@ pub async fn step<O: OneClick, W: PoolWallet>(
     w: &mut W,
     ch: Chain,
 ) -> anyhow::Result<&'static str> {
-    let Some(live) = ledger.live_rebalance(cfg.network).await? else {
+    let Some(live) = ledger.live_rebalance(cfg.network, cfg.target).await? else {
         return maybe_plan(cfg, ledger).await;
     };
     match live.status.as_str() {
@@ -443,11 +486,16 @@ async fn maybe_plan(cfg: &RebalanceCfg, ledger: &Ledger) -> anyhow::Result<&'sta
             let dry = cfg.dry_reason().is_some();
             let delay = jitter(cfg.delay_min_secs, cfg.delay_max_secs);
             match ledger
-                .plan_rebalance(cfg.network, cfg.lot_zat, delay, dry, false)
+                .plan_rebalance(cfg.network, cfg.target, cfg.lot_zat, delay, dry, false)
                 .await?
             {
                 Some(id) => {
-                    info!(id, dry_run = dry, "rebalance planned (pool SOL below threshold)");
+                    info!(
+                        id,
+                        dry_run = dry,
+                        target = cfg.target,
+                        "rebalance planned (pool stock below threshold)"
+                    );
                     Ok("planned")
                 }
                 None => Ok("idle"),
@@ -489,11 +537,17 @@ async fn quote<O: OneClick>(
             return Ok(Err(QuoteReject::BadDepositAddress.code()));
         }
     }
-    let Ok(tokens) = oc.tokens().await else {
-        return Ok(Err(QuoteReject::NoPrice.code()));
-    };
-    let Some(expected) = oneclick::expected_lamports(&tokens, p.amount_zat) else {
-        return Ok(Err(QuoteReject::NoPrice.code()));
+    let expected = if cfg.target == "zec_spl" {
+        // ZEC → ZEC SPL: parity, both 8 decimals.
+        p.amount_zat
+    } else {
+        let Ok(tokens) = oc.tokens().await else {
+            return Ok(Err(QuoteReject::NoPrice.code()));
+        };
+        let Some(e) = oneclick::expected_lamports(&tokens, p.amount_zat) else {
+            return Ok(Err(QuoteReject::NoPrice.code()));
+        };
+        e
     };
     if !oneclick::price_ok(q.min_amount_out, expected, cfg.max_deviation_bps) {
         return Ok(Err(QuoteReject::PriceDeviation.code()));
@@ -578,7 +632,7 @@ async fn planned<O: OneClick, W: PoolWallet>(
         return Ok("waiting");
     }
     info!(id = live.id, "rebalance quoted");
-    let Some(live) = ledger.live_rebalance(cfg.network).await? else {
+    let Some(live) = ledger.live_rebalance(cfg.network, cfg.target).await? else {
         return Ok("quoted");
     };
     send_quoted(cfg, ledger, oc, w, ch, &live).await
@@ -763,9 +817,13 @@ pub async fn dry_quote<O: OneClick>(
         .await
         .map_err(|e| anyhow!("{e}"))?;
     let q = oneclick::check_quote(&v, &p, now_unix, 0).map_err(|r| anyhow!("quote refused: {}", r.code()))?;
-    let expected = match oc.tokens().await {
-        Ok(t) => oneclick::expected_lamports(&t, p.amount_zat),
-        Err(_) => None,
+    let expected = if cfg.target == "zec_spl" {
+        Some(p.amount_zat)
+    } else {
+        match oc.tokens().await {
+            Ok(t) => oneclick::expected_lamports(&t, p.amount_zat),
+            Err(_) => None,
+        }
     };
     Ok((q, expected))
 }
@@ -790,6 +848,7 @@ mod tests {
     fn cfg(live: bool) -> RebalanceCfg {
         RebalanceCfg {
             network: if live { "mainnet-beta" } else { "devnet" },
+            target: "sol",
             zcash: if live { NetName::Main } else { NetName::Test },
             allow_mainnet: live,
             lot_zat: 50_000_000,
@@ -953,10 +1012,17 @@ mod tests {
         async fn quote(&self, req: &Value) -> Result<Value, OcError> {
             let mut s = self.0.lock().unwrap();
             s.quotes += 1;
+            // ZEC → ZEC SPL is near parity; ZEC → SOL ~11.2 SOL/ZEC.
+            let (out, min) = if req["destinationAsset"] == json!(crate::oneclick::ZEC_SPL_ASSET) {
+                let a: u64 = req["amount"].as_str().unwrap().parse().unwrap();
+                ((a - 24_000).to_string(), ((a - 24_000) * 99 / 100).to_string())
+            } else {
+                ("5600000000".to_string(), "5544000000".to_string())
+            };
             let mut q = json!({
                 "amountIn": req["amount"], "amountInFormatted": "0.5", "amountInUsd": "608",
-                "minAmountIn": req["amount"], "amountOut": "5600000000", "amountOutFormatted": "5.6",
-                "amountOutUsd": "606", "minAmountOut": "5544000000", "timeEstimate": 452,
+                "minAmountIn": req["amount"], "amountOut": out, "amountOutFormatted": "x",
+                "amountOutUsd": "606", "minAmountOut": min, "timeEstimate": 452,
             });
             if req["dry"] == json!(false) {
                 s.next_addr += 1;
@@ -985,6 +1051,7 @@ mod tests {
     struct MockWallet {
         ledger: Ledger,
         network: &'static str,
+        target: &'static str,
         spendable: u64,
         proposal_error: bool,
         builds: u32,
@@ -1013,7 +1080,11 @@ mod tests {
         }
         async fn broadcast(&mut self, _raw: Vec<u8>) -> anyhow::Result<()> {
             // The txid must already be in Postgres when the tx leaves.
-            let live = self.ledger.live_rebalance(self.network).await?.expect("live");
+            let live = self
+                .ledger
+                .live_rebalance(self.network, self.target)
+                .await?
+                .expect("live");
             assert_eq!(live.status, "sending");
             assert!(live.txid.is_some());
             self.broadcasts += 1;
@@ -1096,6 +1167,7 @@ mod tests {
         MockWallet {
             ledger: db.ledger.clone(),
             network,
+            target: "sol",
             spendable: 100_000_000,
             proposal_error: false,
             builds: 0,
@@ -1263,6 +1335,66 @@ mod tests {
         ))
         .await;
         assert_eq!(step(&c, l, &oc, &mut w, ch()).await.unwrap(), "failed");
+        db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn zec_spl_rebalance_spreads_stock_with_fund_quote() {
+        let Some(db) = setup().await else { return };
+        let c = cfg(true).zec_spl().unwrap();
+        assert_eq!((c.target, c.destination()), ("zec_spl", crate::oneclick::ZEC_SPL_ASSET));
+        let oc = MockOc::default();
+        let mut w = MockWallet {
+            target: "zec_spl",
+            ..wallet(&db, "mainnet-beta")
+        };
+        let l = &db.ledger;
+        let zec = unzeen_ledger::rebalance::ZEC_SPL_MINT;
+        assert_eq!(step(&c, l, &oc, &mut w, ch()).await.unwrap(), "no_inventory");
+        // SOL inventory is plenty: the SOL target stays idle, the ZEC SPL one plans.
+        db.sql(&format!(
+            "INSERT INTO pool_sol_inventory (network, vault_lamports, vault_count, slot) VALUES ('mainnet-beta', 90000000000, 2, 1);
+             INSERT INTO pool_quote_inventory (network, quote_mint, vault_amount, reserve_amount, vault_count, slot)
+               VALUES ('mainnet-beta', '{zec}', 1000000, 0, 2, 1);
+             INSERT INTO relayer_vault_usage (network, vault, last_used_at) VALUES
+               ('mainnet-beta', 'VaultOne1111111111111111111111111111111111', now()),
+               ('mainnet-beta', 'VaultTwo1111111111111111111111111111111111', now());"
+        ))
+        .await;
+        assert_eq!(step(&cfg(true), l, &oc, &mut w, ch()).await.unwrap(), "idle");
+        assert_eq!(step(&c, l, &oc, &mut w, ch()).await.unwrap(), "planned");
+        assert_eq!(step(&c, l, &oc, &mut w, ch()).await.unwrap(), "sent");
+        w.state = TxState::Mined(90);
+        assert_eq!(step(&c, l, &oc, &mut w, ch()).await.unwrap(), "mined");
+        {
+            let mut s = oc.0.lock().unwrap();
+            s.status = "SUCCESS".into();
+            s.amount_out = Some("49976005".into());
+        }
+        assert_eq!(step(&c, l, &oc, &mut w, ch()).await.unwrap(), "success");
+        let r = db
+            .one(&format!(
+                "SELECT count(*), count(*) FILTER (WHERE meta->>'quote' = '{zec}' AND action_id IS NULL AND exec_mode = 'delayed')
+                 FROM relayer_jobs WHERE op = 'fund_quote'"
+            ))
+            .await;
+        assert_eq!(
+            (r.get::<_, i64>(0), r.get::<_, i64>(1)),
+            (2, 2),
+            "one fund_quote per vault"
+        );
+        assert_eq!(step(&c, l, &oc, &mut w, ch()).await.unwrap(), "distributing");
+        // Stock already within bounds → confirmed without a tx (CHECK allows it for fund_quote).
+        db.sql("UPDATE relayer_jobs SET status = 'confirmed', out_token_amount = 0, out_lamports = 0 WHERE op = 'fund_quote'")
+            .await;
+        assert_eq!(step(&c, l, &oc, &mut w, ch()).await.unwrap(), "done");
+        let t = db
+            .one("SELECT target, status, amount_out FROM pool_rebalances WHERE target = 'zec_spl'")
+            .await;
+        assert_eq!(
+            (t.get::<_, String>(0), t.get::<_, String>(1), t.get::<_, i64>(2)),
+            ("zec_spl".into(), "done".into(), 49_976_005)
+        );
         db.drop().await;
     }
 }
