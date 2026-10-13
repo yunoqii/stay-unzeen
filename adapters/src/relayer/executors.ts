@@ -32,6 +32,8 @@ export interface JobExecutor<S extends JobSpec = JobSpec> {
    * the attestation key of the job's purpose). The engine then takes no vault lease.
    */
   ownSigner?(spec: S): Signer;
+  /** RELAYER v6 §4: `out_sig` known before sending (Verify attest); recorded with the attempt. */
+  earlyOutSig?(spec: S): string | null;
 }
 
 /** Chain access used to resolve recorded attempts. */
@@ -269,6 +271,12 @@ export class AttestExecutor implements JobExecutor<Extract<JobSpec, { kind: "att
 
   prepare(spec: Extract<JobSpec, { kind: "attest" }>): Promise<SignedTx> {
     return this.of(spec).prepare(spec.memo);
+  }
+
+  /** v6 §4: Verify operator signature right away (fair-launch keeps it until confirmed). */
+  earlyOutSig(spec: Extract<JobSpec, { kind: "attest" }>): string | null {
+    if (spec.purpose !== "verify") return null;
+    return signDetached(this.of(spec).key, attestSigMessage(spec.memo));
   }
 
   async submit(tx: SignedTx): Promise<void> {

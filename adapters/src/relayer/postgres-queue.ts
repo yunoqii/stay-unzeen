@@ -300,12 +300,16 @@ export class PostgresJobQueue implements JobQueue {
   async reportSent(job: { id: string; leaseId: string }, a: SentAttempt): Promise<void> {
     // Written BEFORE broadcast. A previous signature is only ever replaced after
     // the engine proved it expired (RELAYER.md §4).
+    // v6 §4: Verify attest also records out_sig here (before the memo tx goes out).
+    const sig = a.outSig !== undefined && (await this.hasV4()) ? a.outSig : null;
+    const params: unknown[] = [job.id, a.signature, a.lastValidBlockHeight, a.vault, job.leaseId, this.leaseMs];
+    if (sig !== null) params.push(sig);
     const res = await this.pool.query(
       `UPDATE relayer_jobs
           SET status = 'sent', signature = $2, last_valid_block_height = $3, vault = $4,
-              lease_until = now() + $6 * interval '1 millisecond', updated_at = now()
+              lease_until = now() + $6 * interval '1 millisecond', updated_at = now()${sig !== null ? ", out_sig = $7" : ""}
         WHERE id = $1 AND status IN ('claimed', 'sent') AND claimed_by = $5 AND settled_at IS NULL`,
-      [job.id, a.signature, a.lastValidBlockHeight, a.vault, job.leaseId, this.leaseMs],
+      params,
     );
     if (res.rowCount !== 1) throw new LeaseLostError(job.id);
   }

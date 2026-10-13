@@ -100,6 +100,12 @@ export interface SentAttempt {
   sentAt: number;
   /** base64 wire bytes, to rebroadcast after a restart (public data once sent). */
   rawTx?: string;
+  /**
+   * RELAYER v6 §4 (review E10): Verify attest only — `out_sig` written together
+   * with the signature and `vault`, BEFORE broadcast, so the operator signature
+   * is published without waiting for the anchor.
+   */
+  outSig?: string;
 }
 
 export interface Job {

@@ -7,6 +7,11 @@ import { attestSigMessage, signDetached, verifyDetached, verifyVaultMessage } fr
 import { loadRepoEnv } from "../src/env";
 import type { Attester } from "../src/attest";
 import { AttestExecutor } from "../src/relayer/executors";
+import { Relayer } from "../src/relayer/engine";
+import { InMemoryJobQueue } from "../src/relayer/memory-queue";
+import { VaultPool } from "../src/relayer/vaults";
+import { seededRng } from "../src/relayer/random";
+import { FakeChain, FakeClock, FakeExecutor, FakeInventory, vaults } from "./relayer/fakes";
 import { PostgresJobQueue, rowToSpec } from "../src/relayer/postgres-queue";
 import { ATTEST_PATH, FAIR_ATTEST_PATH, deriveAttestKeypair } from "../src/attest";
 import {
@@ -431,6 +436,50 @@ describe.skipIf(!DB)("Verify v4 (live Postgres, temp schema)", () => {
     await q2.reportResult(b, { status: "executed", execution: { kind: "attest", signature: "sigB", slot: 8, vault: "K", memo: ROOT, networkFee: 5000n, blockTime: 1_760_000_000, outSig: "S" } });
     const r = (await pool.query(`SELECT status, out_block_time, out_sig FROM relayer_jobs WHERE id = $1`, [id])).rows[0];
     expect(r).toEqual({ status: "confirmed", out_block_time: "1760000000", out_sig: "S" });
+  });
+
+  it("v6 §4: Verify attest records out_sig + vault at send time, before any confirmation", async (ctx) => {
+    if (!has0009) ctx.skip();
+    await pool.query(`DELETE FROM relayer_jobs`);
+    const key = Keypair.generate();
+    const fake = (k: Keypair) =>
+      ({ key: k, prepare: async () => ({ signature: "sigE", raw: new Uint8Array([1]), blockhash: "bh", lastValidBlockHeight: 9 }) }) as unknown as Attester;
+    const ex = new AttestExecutor({ verify: fake(key), fair: fake(Keypair.generate()) });
+    expect(ex.earlyOutSig({ kind: "attest", memo: ROOT, purpose: "fair" })).toBeNull(); // fair: only at confirmed
+    const early = ex.earlyOutSig({ kind: "attest", memo: ROOT, purpose: "verify" })!;
+    expect(verifyDetached(key.publicKey.toBase58(), Buffer.alloc(32, 0xab), early)).toBe(true);
+
+    const q2 = new PostgresJobQueue({ pool, network: "devnet" });
+    const id = (await pool.query<{ id: string }>(`INSERT INTO relayer_jobs (op, meta, network, exec_mode) VALUES ('attest', $1, 'devnet', 'delayed') RETURNING id`, [{ memo: ROOT, purpose: "verify" }])).rows[0]!.id;
+    const b = (await q2.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000, lane: "attest" }))!;
+    await q2.reportSent(b, { signature: "sigE", lastValidBlockHeight: 9, vault: key.publicKey.toBase58(), sentAt: Date.now(), outSig: early });
+    const r = (await pool.query(`SELECT status, vault, out_sig, slot FROM relayer_jobs WHERE id = $1`, [id])).rows[0];
+    expect(r).toEqual({ status: "sent", vault: key.publicKey.toBase58(), out_sig: early, slot: null });
+  });
+
+  it("v6 §4: the engine attaches out_sig to the attempt before submit (Verify only)", async () => {
+    const chain = new FakeChain();
+    const clock = new FakeClock(1_700_000_000_000, chain);
+    const inv = new FakeInventory();
+    const q = new InMemoryJobQueue(seededRng(1));
+    const key = Keypair.generate();
+    const ex = new FakeExecutor(chain);
+    const seen: (string | undefined)[] = [];
+    const attestEx = Object.assign(Object.create(ex) as InstanceType<typeof FakeExecutor>, {
+      ownSigner: () => key,
+      earlyOutSig: (spec: { kind: string; purpose?: string }) => (spec.purpose === "verify" ? "EARLY" : null),
+      submit: async (tx: { signature: string }) => {
+        seen.push(q.all().flatMap((j) => j.attempts).find((a) => a.signature === tx.signature)?.outSig);
+        chain.land(tx.signature);
+      },
+    });
+    const relayer = new Relayer({ queue: q, pool: new VaultPool(vaults(1, inv), inv, seededRng(1)), executors: { trade: {}, withdraw: ex, attest: attestEx }, probe: chain, clock, rng: seededRng(1) });
+    q.enqueue({ kind: "attest", memo: ROOT, purpose: "verify" }, { notBefore: clock.now() });
+    q.enqueue({ kind: "attest", memo: ROOT, purpose: "fair" }, { notBefore: clock.now() + 1 });
+    clock.t += 2;
+    await relayer.tick("attest");
+    await relayer.tick("attest");
+    expect(seen.sort()).toEqual(["EARLY", undefined]);
   });
 
   it("verify_vaults + slot in one transaction, only while collecting and inside the freeze; second writer loses", async (ctx) => {

@@ -265,6 +265,8 @@ export class Relayer {
           sentAt: this.o.clock.now(),
           rawTx: Buffer.from(tx.raw).toString("base64"),
         };
+        const early = ex.earlyOutSig?.(job.spec) ?? null;
+        if (early) attempt.outSig = early;
         // Durable record first: if this throws, nothing has been sent.
         await this.o.queue.reportSent(job, attempt);
         if (!own) await this.o.pool.markUsed(attempt.vault, attempt.sentAt).catch(() => undefined);
