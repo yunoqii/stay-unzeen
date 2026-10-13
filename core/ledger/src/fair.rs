@@ -1074,7 +1074,9 @@ impl Ledger {
         // is created by this very tx, so only a venue config change can trip it.
         let net = (lamports_in as u128) * (10_000 - p.fee_bound_bps.min(9_999) as u128) / 10_000;
         let quote = alloc::curve_tokens_out(p.curve.virtual_sol, p.curve.virtual_tokens, net as u64);
-        let min_out = ((quote as u128) * (10_000 - p.slippage_bps.min(10_000) as u128) / 10_000) as u64;
+        let min_out = crate::actions::quantize_min_out(
+            ((quote as u128) * (10_000 - p.slippage_bps.min(10_000) as u128) / 10_000) as u64,
+        );
         let mint_secret: &[u8] = &p.mint_secret;
         let job: i64 = tx
             .query_one(

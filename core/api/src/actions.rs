@@ -238,6 +238,10 @@ fn venue(st: &AppState, v: &str) -> ApiResult<String> {
     if !st.cfg.venues.iter().any(|e| e == v) {
         return Err(ApiError::venue_unavailable(format!("venue {v} is not enabled")));
     }
+    // Jupiter routes only on mainnet liquidity (relayer 4b9a2a7): refused before any hold.
+    if v == "jupiter" && st.cfg.cluster != "mainnet-beta" {
+        return Err(ApiError::venue_unavailable("jupiter is mainnet-only"));
+    }
     Ok(v.to_string())
 }
 
@@ -439,6 +443,13 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                 return Err(ApiError::below_minimum("zecIn below PoolInfo.minActionZat"));
             }
             let known = check_venue_status(st, &mint, &v).await?;
+            // No public price for a mint outside `tokens`: the user's own minOut is the only
+            // protection, so it must be explicit (API v0.10).
+            if known.is_none() && min_out == 0 {
+                return Err(ApiError::bad_request(
+                    "minOut required for a token without a pool price",
+                ));
+            }
             let r = rate(st).await?;
             let applied = apply_spread(r.lamports_per_zec, spread(&r), true);
             let (amount_zat, lamports, min_out) = fuzzed_buy(zec_in, min_out, applied, min_action)?;
@@ -476,6 +487,11 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             let amount = positive(&amount, "amount")?;
             let min_zec_out = parse_amount(&min_zec_out, "minZecOut")?;
             let known = check_venue_status(st, &mint, &v).await?;
+            if known.is_none() && min_zec_out == 0 {
+                return Err(ApiError::bad_request(
+                    "minZecOut required for a token without a pool price",
+                ));
+            }
             let r = rate(st).await?;
             let applied = apply_spread(r.lamports_per_zec, spread(&r), false);
             // N7: sells are checked against the minimum too (by the signed floor, or by the

@@ -3,10 +3,17 @@
 //! anchor via an `attest` job, owner proofs, 48 h retention of paths and key bindings.
 //!
 //! State machine of a snapshot (driven by the API every second):
-//! `freezing` (relayer claims nothing; wait until no job/payout is in flight and every final
-//! job is settled, ≤ quiesce_secs) → `collecting` (relayer writes `verify_vaults` + slot) →
-//! `built` (one REPEATABLE READ transaction: trees, digest, attest job; freeze lifted).
-//! Any timeout → `skipped` (freeze lifted; the scheduler retries).
+//! `freezing` (relayer claims nothing; wait until no Solana job is in flight and every final
+//! job is settled, ≤ quiesce_secs; ZEC payouts in flight do NOT block, E8) → `collecting`
+//! (`min_slot` recorded, E2; relayer writes `verify_vaults` + slot at finalized ≥ min_slot;
+//! the scanner samples the ZEC reserve after the freeze started, E7/E8) → `built` (one
+//! REPEATABLE READ transaction: trees, digest, attest job; freeze lifted). Any timeout or a
+//! build error → `skipped` (freeze lifted; the scheduler retries; E14).
+//!
+//! Review-day8 (API v0.10): mint granule 1 base unit (E1); no SOL tree — a creator's claimable
+//! lamports are part of their ZEC leaf at the buy rate, rounded up (E5/E6); only withdrawal gas
+//! is committed SOL (E9); the operator signature is published as soon as the relayer signed,
+//! the anchor follows (E10).
 //!
 //! Privacy: nothing here logs. Leaves carry snapshotId + fresh blinds; balances are split
 //! into 2–4 random pieces and shuffled among dummies; trees padded to ≥ 1024 leaves.
@@ -39,6 +46,14 @@ impl Default for VerifyTiming {
     }
 }
 
+/// Rates (lamports per ZEC, after spread) for a snapshot: `sell` values pool SOL as ZEC cover,
+/// `buy` converts creators' claimable lamports into ZEC liabilities.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VerifyRates {
+    pub sell: Option<u64>,
+    pub buy: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
     Idle,
@@ -62,6 +77,7 @@ pub struct SnapshotRow {
     pub zec_reserve_zat: u64,
     pub committed_lamports: u64,
     pub rate_sell: Option<u64>,
+    pub rate_buy: Option<u64>,
     /// (asset, decimals, granule, root, sum)
     pub trees: Vec<(String, i16, u64, Vec<u8>, String)>,
     /// (address, sig, lamports, tokens)
@@ -116,9 +132,6 @@ fn asset_bytes(asset: &str) -> Option<[u8; 32]> {
     if asset == "ZEC" {
         return Some(pv::ZEC_ASSET);
     }
-    if asset == "SOL" {
-        return Some(pv::SOL_ASSET);
-    }
     bs58::decode(asset).into_vec().ok()?.try_into().ok()
 }
 
@@ -139,16 +152,30 @@ async fn meta_u64<C: GenericClient>(c: &C, key: &str) -> Result<u64> {
         .unwrap_or(0))
 }
 
+/// No Solana job in flight and every final job settled. ZEC payouts in flight do not block
+/// (E8): their amounts are still held (liability) and are added to the reserve at build.
 async fn quiescent<C: GenericClient>(c: &C, network: &str) -> Result<bool> {
     Ok(c.query_one(
         "SELECT NOT EXISTS (SELECT 1 FROM relayer_jobs WHERE network = $1 AND op <> 'attest'
                               AND (status IN ('claimed', 'sent')
-                                   OR (status IN ('confirmed', 'failed') AND settled_at IS NULL)))
-            AND NOT EXISTS (SELECT 1 FROM zec_payouts WHERE status = 'sent')",
+                                   OR (status IN ('confirmed', 'failed') AND settled_at IS NULL)))",
         &[&network],
     )
     .await?
     .get(0))
+}
+
+/// Σ credited (non-reorged) deposits. The scanner samples it with the reserve; deposits
+/// credited after that sample are real notes with ≥ K confirmations and join the reserve.
+pub async fn credited_total<C: GenericClient>(c: &C) -> Result<u64> {
+    Ok(to_u64(
+        c.query_one(
+            "SELECT COALESCE(sum(credited_zat), 0)::bigint FROM deposits WHERE status = 'credited' AND NOT reorged",
+            &[],
+        )
+        .await?
+        .get(0),
+    ))
 }
 
 impl Ledger {
@@ -204,13 +231,48 @@ impl Ledger {
         .get(0))
     }
 
-    /// Advance the snapshot in progress. `rate_sell` = lamports per ZEC (sell side) now.
-    pub async fn verify_step(&self, network: &str, t: VerifyTiming, rate_sell: Option<u64>) -> Result<Step> {
+    /// Any snapshot in `freezing`/`collecting`: the scanner sends no new ZEC payouts then.
+    pub async fn verify_frozen(&self) -> Result<bool> {
+        let c = self.pool.get().await?;
+        Ok(c.query_opt(
+            "SELECT 1 FROM verify_snapshots WHERE status IN ('freezing', 'collecting') LIMIT 1",
+            &[],
+        )
+        .await?
+        .is_some())
+    }
+
+    /// Scanner: attested reserve of the pool wallet, sampled at `at_ms` (before its payout step),
+    /// with Σ credited deposits at that moment. One transaction (the build reads all four).
+    pub async fn set_reserve(&self, zat: u64, height: u32, at_ms: u64) -> Result<()> {
+        let mut c = self.pool.get().await?;
+        let tx = c.transaction().await?;
+        let credited = credited_total(&tx).await?;
+        for (k, v) in [
+            ("reserve_zat", zat.to_string()),
+            ("reserve_height", height.to_string()),
+            ("reserve_credited_zat", credited.to_string()),
+            ("reserve_at", at_ms.to_string()),
+        ] {
+            tx.execute(
+                "INSERT INTO pool_meta (key, value) VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+                &[&k, &v],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Advance the snapshot in progress.
+    pub async fn verify_step(&self, network: &str, t: VerifyTiming, rates: VerifyRates) -> Result<Step> {
         let row = {
             let c = self.pool.get().await?;
             c.query_opt(
                 "SELECT id, status, assets_done_at IS NOT NULL,
-                        requested_at < now() - make_interval(secs => $2), freeze_until < now()
+                        requested_at < now() - make_interval(secs => $2), freeze_until < now(),
+                        (extract(epoch FROM requested_at) * 1000)::bigint
                  FROM verify_snapshots WHERE network = $1 AND status IN ('freezing', 'collecting')
                  ORDER BY id LIMIT 1",
                 &[&network, &t.quiesce_secs],
@@ -220,6 +282,7 @@ impl Ledger {
         let Some(r) = row else { return Ok(Step::Idle) };
         let (id, status, assets, quiesce_over, freeze_over): (i32, String, bool, bool, bool) =
             (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4));
+        let requested_ms = to_u64(r.get(5));
         let c = self.pool.get().await?;
         let skip = |reason: &'static str| async move {
             c.execute(
@@ -233,10 +296,14 @@ impl Ledger {
         if status == "freezing" {
             let cc = self.pool.get().await?;
             if quiescent(&cc, network).await? {
+                // E2: the highest slot of a trade the ledger already counted.
                 cc.execute(
-                    "UPDATE verify_snapshots SET status = 'collecting', taken_at = date_trunc('minute', now())
+                    "UPDATE verify_snapshots SET status = 'collecting', taken_at = date_trunc('minute', now()),
+                            min_slot = (SELECT max(slot) FROM relayer_jobs
+                                        WHERE network = $2 AND op <> 'attest' AND status = 'confirmed'
+                                          AND settled_at IS NOT NULL)
                      WHERE id = $1 AND status = 'freezing'",
-                    &[&id],
+                    &[&id, &network],
                 )
                 .await?;
                 return Ok(Step::Collecting(id));
@@ -246,19 +313,34 @@ impl Ledger {
             }
             return Ok(Step::Waiting);
         }
-        // collecting
-        if assets {
-            self.verify_build(id, network, rate_sell).await?;
-            return Ok(Step::Built(id));
+        // collecting: vault balances written, and a reserve sampled after the freeze started
+        // (no payout can be sent after that sample until the freeze is lifted).
+        let reserve_at = meta_u64(&self.pool.get().await?, "reserve_at").await?;
+        if assets && reserve_at >= requested_ms {
+            return Ok(match self.verify_build(id, network, rates).await {
+                Ok(Ok(())) => Step::Built(id),
+                Ok(Err(reason)) => skip(reason).await?,
+                // E14: a build that cannot succeed must not retry forever under the freeze.
+                Err(e) => {
+                    tracing::warn!(error = e.kind(), "verify build failed");
+                    skip("build_error").await?
+                }
+            });
         }
         if freeze_over {
-            return Ok(skip("assets_timeout").await?);
+            return Ok(skip(if assets { "reserve_stale" } else { "assets_timeout" }).await?);
         }
         Ok(Step::Waiting)
     }
 
     /// Build trees + digest + attest job in one REPEATABLE READ transaction; lift the freeze.
-    async fn verify_build(&self, id: i32, network: &str, rate_sell: Option<u64>) -> Result<()> {
+    /// `Ok(Err(reason))`: cannot build now (skip, retried later).
+    async fn verify_build(
+        &self,
+        id: i32,
+        network: &str,
+        rates: VerifyRates,
+    ) -> Result<std::result::Result<(), &'static str>> {
         let mut c = self.pool.get().await?;
         let tx = c
             .build_transaction()
@@ -281,36 +363,35 @@ impl Ledger {
         let taken_at_sec = to_u64(s.get(1));
         let solana_slot = to_u64(s.get::<_, Option<i64>>(2).unwrap_or(0));
 
-        // Liabilities: (asset, decimals, granule) -> [(pk, value)]
-        let mut assets: Vec<Liab> = vec![("ZEC".into(), 8, pv::ZEC_GRANULE, vec![])];
-        for r in tx
+        // Liabilities: (asset, decimals, granule) -> [(pk, value)]. ZEC: one value per key =
+        // balance + held + creator fees owed (claimable lamports of all its mints, summed per
+        // key, at the buy rate, rounded up). One entry per key → piece numbers unique (E6).
+        let zec_rows = tx
             .query(
-                "SELECT anon_pubkey, available_zat + held_zat FROM balances WHERE available_zat + held_zat > 0",
+                "SELECT anon_pubkey, sum(z)::bigint, sum(l)::bigint FROM (
+                     SELECT anon_pubkey, available_zat + held_zat AS z, 0::bigint AS l FROM balances
+                     UNION ALL
+                     SELECT anon_pubkey, 0, lamports FROM creator_claimable WHERE lamports > 0
+                 ) x GROUP BY anon_pubkey HAVING sum(z) > 0 OR sum(l) > 0 ORDER BY anon_pubkey",
                 &[],
             )
-            .await?
-        {
+            .await?;
+        let mut zec: Vec<([u8; 32], u64)> = Vec::with_capacity(zec_rows.len());
+        for r in zec_rows {
             let pk: Vec<u8> = r.get(0);
-            if let Ok(pk) = pk.try_into() {
-                assets[0].3.push((pk, to_u64(r.get(1))));
-            }
+            let Ok(pk) = pk.try_into() else { continue };
+            let (z, l) = (to_u64(r.get(1)), to_u64(r.get(2)));
+            let fees = if l == 0 {
+                0
+            } else {
+                match rates.buy.and_then(|rb| pv::claimable_zat(l, rb)) {
+                    Some(f) => f,
+                    None => return Ok(Err("no_rate")),
+                }
+            };
+            zec.push((pk, z.saturating_add(fees)));
         }
-        // Creator fees owed in SOL (claimable lamports), granule 0.001 SOL.
-        let sol: Vec<([u8; 32], u64)> = tx
-            .query(
-                "SELECT anon_pubkey, lamports FROM creator_claimable WHERE lamports > 0",
-                &[],
-            )
-            .await?
-            .into_iter()
-            .filter_map(|r| {
-                let pk: Vec<u8> = r.get(0);
-                Some((pk.try_into().ok()?, to_u64(r.get(1))))
-            })
-            .collect();
-        if !sol.is_empty() {
-            assets.push(("SOL".into(), 9, 1_000_000, sol));
-        }
+        let mut assets: Vec<Liab> = vec![("ZEC".into(), 8, pv::ZEC_GRANULE, zec)];
         let rows = tx
             .query(
                 "SELECT b.mint, COALESCE(t.decimals, it.decimals, 6::smallint), b.anon_pubkey, b.available + b.held
@@ -329,8 +410,7 @@ impl Ledger {
             let pk: Vec<u8> = r.get(2);
             let Ok(pk) = pk.try_into() else { continue };
             if assets.last().is_none_or(|a| a.0 != mint) {
-                let g = 10u64.checked_pow(dec.clamp(0, 18) as u32).unwrap_or(1);
-                assets.push((mint, dec, g, vec![]));
+                assets.push((mint, dec, pv::MINT_GRANULE, vec![]));
             }
             assets.last_mut().expect("pushed").3.push((pk, to_u64(r.get(3))));
         }
@@ -354,13 +434,31 @@ impl Ledger {
         }
         let n = pv::tree_size(pieces.iter().map(Vec::len).max().unwrap_or(0));
 
-        let zec_reserve = pv::reserve_floor(meta_u64(&tx, "reserve_zat").await?);
+        // Reserve (attested by the scanner, K confirmations like crediting, E7) + deposits
+        // credited after its sample (≥ K confirmations, in the wallet) + ZEC payouts in flight
+        // (still held as liabilities, already gone from the wallet, E8). Floored to 0.01 ZEC.
+        let sampled = meta_u64(&tx, "reserve_zat").await?;
+        let sampled_credited = meta_u64(&tx, "reserve_credited_zat").await?;
+        let credited_now = credited_total(&tx).await?;
+        let inflight: i64 = tx
+            .query_one(
+                "SELECT COALESCE(sum(amount_zat), 0)::bigint FROM zec_payouts WHERE status = 'sent'",
+                &[],
+            )
+            .await?
+            .get(0);
+        let zec_reserve = pv::reserve_floor(
+            sampled
+                .saturating_add(credited_now.saturating_sub(sampled_credited))
+                .saturating_add(to_u64(inflight)),
+        );
         let zcash_height = meta_u64(&tx, "reserve_height").await?.min(u32::MAX as u64) as u32;
+        // E9: SOL of queued buys/creates stays an asset (its ZEC hold is the liability); only
+        // the gas of queued withdrawals leaves the pool on top of liabilities.
         let committed: i64 = tx
             .query_one(
-                "SELECT COALESCE(sum(CASE WHEN op IN ('buy', 'create', 'fair_create') THEN COALESCE(lamports_in, 0)
-                                          WHEN op = 'transfer' THEN COALESCE(gas_lamports, 0) ELSE 0 END), 0)::bigint
-                 FROM relayer_jobs WHERE network = $1 AND status IN ('queued', 'claimed', 'sent')",
+                "SELECT COALESCE(sum(COALESCE(gas_lamports, 0)), 0)::bigint
+                 FROM relayer_jobs WHERE network = $1 AND op = 'transfer' AND status IN ('queued', 'claimed', 'sent')",
                 &[&network],
             )
             .await?
@@ -454,11 +552,12 @@ impl Ledger {
             )
             .await?
             .get(0);
-        let rate = rate_sell.map(to_i64).transpose()?;
+        let rate = rates.sell.map(to_i64).transpose()?;
+        let rate_buy = rates.buy.map(to_i64).transpose()?;
         tx.execute(
             "UPDATE verify_snapshots SET status = 'built', freeze_until = now(), zcash_height = $2,
                     zec_reserve_zat = $3, leaves = $4, roots_digest = $5, committed_lamports = $6,
-                    rate_lamports_per_zec_sell = $7, attest_job_id = $8
+                    rate_lamports_per_zec_sell = $7, attest_job_id = $8, rate_lamports_per_zec_buy = $9
              WHERE id = $1",
             &[
                 &id,
@@ -469,11 +568,43 @@ impl Ledger {
                 &committed,
                 &rate,
                 &job,
+                &rate_buy,
             ],
         )
         .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(Ok(()))
+    }
+
+    /// E10: publish the operator signature as soon as the relayer signed the digest (it
+    /// writes `out_sig` + the signer in `vault` when it claims the attest job), without waiting
+    /// for the memo tx. Checked (strict ed25519) against the snapshot's own digest.
+    pub async fn publish_operator_sigs(&self) -> Result<usize> {
+        let c = self.pool.get().await?;
+        let rows = c
+            .query(
+                "SELECT s.id, j.vault, j.out_sig, encode(s.roots_digest, 'hex')
+                 FROM verify_snapshots s JOIN relayer_jobs j
+                   ON j.op = 'attest' AND j.meta->>'purpose' = 'verify'
+                  AND j.meta->>'memo' = encode(s.roots_digest, 'hex')
+                 WHERE s.status = 'built' AND s.operator IS NULL AND j.out_sig IS NOT NULL AND j.vault IS NOT NULL",
+                &[],
+            )
+            .await?;
+        let mut n = 0;
+        for r in rows {
+            let (id, pk, sig, memo): (i32, String, String, String) = (r.get(0), r.get(1), r.get(2), r.get(3));
+            if !detached_ok(&pk, &sig, &memo) {
+                continue;
+            }
+            n += c
+                .execute(
+                    "UPDATE verify_snapshots SET operator = $2 WHERE id = $1 AND operator IS NULL",
+                    &[&id, &json!({ "pubkey": pk, "sig": sig })],
+                )
+                .await? as usize;
+        }
+        Ok(n)
     }
 
     /// Settle final `attest` jobs (fair-launch roots and Verify roots): anchor facts, and the
@@ -521,10 +652,11 @@ impl Ledger {
                     _ => None,
                 };
                 tx.execute(
-                    "UPDATE verify_snapshots SET anchor = $2, operator = $3 WHERE attest_job_id = $1",
+                    "UPDATE verify_snapshots SET anchor = $2, operator = COALESCE(operator, $3)
+                     WHERE attest_job_id = $1",
                     &[
                         &jid,
-                        &json!({ "solanaTx": sig, "slot": slot, "matches": matches }),
+                        &json!({ "solanaTx": sig, "slot": slot, "matches": matches, "blockTime": block_time }),
                         &operator,
                     ],
                 )
@@ -544,8 +676,9 @@ impl Ledger {
         let rows = tx
             .query(
                 "SELECT s.id, s.roots_digest FROM verify_snapshots s JOIN relayer_jobs j ON j.id = s.attest_job_id
-                 WHERE s.network = $1 AND s.status = 'built' AND s.anchor IS NULL
-                   AND j.status = 'failed' AND j.settled_at IS NOT NULL
+                 WHERE s.network = $1 AND s.status = 'built' AND j.settled_at IS NOT NULL
+                   AND ((s.anchor IS NULL AND j.status = 'failed')
+                        OR (j.status = 'confirmed' AND (s.anchor->>'matches')::boolean IS FALSE))
                    AND s.anchor_attempts < $2 AND (s.anchor_retry_at IS NULL OR s.anchor_retry_at <= now())
                  FOR UPDATE OF s SKIP LOCKED",
                 &[&network, &max_attempts],
@@ -605,7 +738,7 @@ impl Ledger {
             .query_opt(
                 "SELECT id, chain_id, (extract(epoch FROM taken_at) * 1000)::bigint, roots_digest, anchor, operator,
                         leaves, solana_slot, zcash_height, zec_reserve_zat, committed_lamports,
-                        rate_lamports_per_zec_sell
+                        rate_lamports_per_zec_sell, rate_lamports_per_zec_buy
                  FROM verify_snapshots WHERE network = $1 AND status = 'built' AND ($2::int IS NULL OR id = $2)
                  ORDER BY id DESC LIMIT 1",
                 &[&network, &id],
@@ -646,6 +779,7 @@ impl Ledger {
             zec_reserve_zat: to_u64(r.get::<_, Option<i64>>(9).unwrap_or(0)),
             committed_lamports: to_u64(r.get::<_, Option<i64>>(10).unwrap_or(0)),
             rate_sell: r.get::<_, Option<i64>>(11).map(to_u64),
+            rate_buy: r.get::<_, Option<i64>>(12).map(to_u64),
             trees,
             vaults,
         }))

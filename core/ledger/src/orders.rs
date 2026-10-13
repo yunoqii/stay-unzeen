@@ -81,6 +81,23 @@ pub struct EvalReport {
     pub failed: u64,
     pub expired: u64,
     pub closed: u64,
+    /// Orders whose evaluation failed (rolled back alone, retried next pass).
+    pub errors: u64,
+}
+
+/// E16: a tick older than this (indexer down) is never acted on.
+pub const TICK_MAX_AGE_MS: i64 = 180_000;
+
+/// E4: off-chain trigger guard at the tick price `p`. A stop-loss sells only while
+/// `p ≥ trigger × (1 − slippage)`; a limit buy only while `p ≤ trigger × (1 + slippage)`
+/// (always true once it fired, kept for symmetry). Sells above the trigger are fine.
+pub fn trigger_guard_ok(kind: &str, price_e18: u128, trigger_e18: u128, slippage_bps: u32) -> bool {
+    let s = slippage_bps.min(10_000) as u128;
+    match kind {
+        "stop_loss" => price_e18.saturating_mul(10_000) >= trigger_e18.saturating_mul(10_000 - s),
+        "limit_buy" => price_e18.saturating_mul(10_000) <= trigger_e18.saturating_mul(10_000 + s),
+        _ => true,
+    }
 }
 
 /// Decimal string → value × 1e18 (exact for ≤ 18 fractional digits).
@@ -225,9 +242,11 @@ impl Ledger {
         let id: &[u8] = &r.id;
         tx.execute(
             "INSERT INTO orders (id, anon_pubkey, venue, mint, kind, trigger_price_sol, amount, slippage_bps, exec_mode,
-                                 expires_at)
+                                 expires_at, last_tick)
              VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7, $8, $9,
-                     date_trunc('hour', now() + make_interval(secs => $10) + interval '1 hour' - interval '1 microsecond'))",
+                     date_trunc('hour', now() + make_interval(secs => $10) + interval '1 hour' - interval '1 microsecond'),
+                     -- E16: only ticks AFTER the order are evaluated.
+                     (SELECT tick_at FROM intel_prices WHERE mint = $4))",
             &[
                 &id,
                 &pk_s,
@@ -328,234 +347,296 @@ impl Ledger {
     }
 
     /// One pass: expire, close triggered orders whose action settled, evaluate new ticks.
+    /// E16: every order is evaluated in its own transaction (one failing order never rolls
+    /// back the others), and only on a tick newer than the order and fresher than
+    /// [`TICK_MAX_AGE_MS`].
     pub async fn orders_tick(&self, network: &str, p: &EvalParams) -> Result<EvalReport> {
         let mut rep = EvalReport::default();
-        let mut c = self.pool.get().await?;
-        let tx = c.transaction().await?;
-        // Expired.
-        for r in tx
-            .query(
-                "SELECT id FROM orders WHERE status = 'open' AND expires_at <= now() FOR UPDATE SKIP LOCKED",
+        {
+            let mut c = self.pool.get().await?;
+            let tx = c.transaction().await?;
+            // Expired.
+            for r in tx
+                .query(
+                    "SELECT id FROM orders WHERE status = 'open' AND expires_at <= now() FOR UPDATE SKIP LOCKED",
+                    &[],
+                )
+                .await?
+            {
+                let id: Vec<u8> = r.get(0);
+                close_order(&tx, &id, "expired", None).await?;
+                rep.expired += 1;
+            }
+            // Triggered orders whose action is closed.
+            for r in tx
+                .query(
+                    "SELECT o.id, a.status, a.error FROM orders o JOIN actions a ON a.id = o.action_id
+                     WHERE o.status = 'triggered' AND a.status <> 'queued' FOR UPDATE OF o SKIP LOCKED",
+                    &[],
+                )
+                .await?
+            {
+                let (id, st, err): (Vec<u8>, String, Option<String>) = (r.get(0), r.get(1), r.get(2));
+                let (ns, e) = if st == "executed" {
+                    ("filled", None)
+                } else {
+                    ("failed", err)
+                };
+                tx.execute(
+                    "UPDATE orders SET status = $2, error = $3, closed_at = now() WHERE id = $1",
+                    &[&id, &ns, &e],
+                )
+                .await?;
+                rep.closed += 1;
+            }
+            tx.commit().await?;
+        }
+        // Orders with a new tick, in random order (no arrival order).
+        let mut ids: Vec<Vec<u8>> = {
+            let c = self.pool.get().await?;
+            c.query(
+                "SELECT o.id FROM orders o JOIN intel_prices p ON p.mint = o.mint
+                 WHERE o.status = 'open' AND p.tick_at > COALESCE(o.last_tick, 0)",
                 &[],
             )
             .await?
-        {
-            let id: Vec<u8> = r.get(0);
-            close_order(&tx, &id, "expired", None).await?;
-            rep.expired += 1;
+            .into_iter()
+            .map(|r| r.get(0))
+            .collect()
+        };
+        for i in (1..ids.len()).rev() {
+            ids.swap(i, (rand::random::<u64>() % (i as u64 + 1)) as usize);
         }
-        // Triggered orders whose action is closed.
-        for r in tx
-            .query(
-                "SELECT o.id, a.status, a.error FROM orders o JOIN actions a ON a.id = o.action_id
-                 WHERE o.status = 'triggered' AND a.status <> 'queued' FOR UPDATE OF o SKIP LOCKED",
-                &[],
-            )
-            .await?
-        {
-            let (id, st, err): (Vec<u8>, String, Option<String>) = (r.get(0), r.get(1), r.get(2));
-            let (ns, e) = if st == "executed" {
-                ("filled", None)
-            } else {
-                ("failed", err)
-            };
-            tx.execute(
-                "UPDATE orders SET status = $2, error = $3, closed_at = now() WHERE id = $1",
-                &[&id, &ns, &e],
-            )
-            .await?;
-            rep.closed += 1;
+        for id in ids {
+            let res = async {
+                let mut c = self.pool.get().await?;
+                let tx = c.transaction().await?;
+                self.eval_order(&tx, network, p, &id, &mut rep).await?;
+                tx.commit().await?;
+                Ok::<(), LedgerError>(())
+            }
+            .await;
+            if let Err(e) = res {
+                // Rolled back alone; retried on the next pass. Kind only, no order data.
+                tracing::warn!(error = e.kind(), "order evaluation failed");
+                rep.errors += 1;
+            }
         }
-        // New ticks.
-        let mut rows = tx
-            .query(
+        Ok(rep)
+    }
+
+    /// Evaluate one open order against its newest tick (inside `tx`).
+    async fn eval_order<C: GenericClient>(
+        &self,
+        tx: &C,
+        network: &str,
+        p: &EvalParams,
+        id: &[u8],
+        rep: &mut EvalReport,
+    ) -> Result<()> {
+        let Some(r) = tx
+            .query_opt(
                 "SELECT o.id, o.anon_pubkey, o.kind, o.mint, o.amount, o.slippage_bps, o.exec_mode, o.sl_armed_tick,
                         p.tick_at, p.prev_tick_at, p.status,
                         p.price_sol <= o.trigger_price_sol, p.price_sol >= o.trigger_price_sol,
-                        o.trigger_price_sol::text, COALESCE(t.decimals, 6::smallint), COALESCE(b.frozen, FALSE)
+                        o.trigger_price_sol::text, COALESCE(t.decimals, 6::smallint), COALESCE(b.frozen, FALSE),
+                        p.price_sol::text, (extract(epoch FROM now()) * 1000)::bigint - p.tick_at
                  FROM orders o JOIN intel_prices p ON p.mint = o.mint
                  LEFT JOIN tokens t ON t.mint = o.mint LEFT JOIN balances b ON b.anon_pubkey = o.anon_pubkey
-                 WHERE o.status = 'open' AND p.tick_at > COALESCE(o.last_tick, 0)
+                 WHERE o.id = $1 AND o.status = 'open' AND p.tick_at > COALESCE(o.last_tick, 0)
                  FOR UPDATE OF o SKIP LOCKED",
-                &[],
+                &[&id],
             )
-            .await?;
-        // Random order inside the pass (no arrival order).
-        for i in (1..rows.len()).rev() {
-            rows.swap(i, (rand::random::<u64>() % (i as u64 + 1)) as usize);
-        }
-        for r in rows {
-            let id: Vec<u8> = r.get(0);
-            let pk: Vec<u8> = r.get(1);
-            let kind: String = r.get(2);
-            let mint: String = r.get(3);
-            let amount = to_u64(r.get(4));
-            let slip = r.get::<_, Option<i32>>(5).unwrap_or(500).max(0) as u32;
-            let exec: String = r.get(6);
-            let armed: Option<i64> = r.get(7);
-            let (tick, prev_tick): (i64, Option<i64>) = (r.get(8), r.get(9));
-            let graduated = r.get::<_, String>(10) == "graduated";
-            let (le, ge): (bool, bool) = (r.get(11), r.get(12));
-            let trigger: String = r.get(13);
-            let dec = r.get::<_, i16>(14).clamp(0, 18) as u32;
-            let frozen: bool = r.get(15);
-            if graduated {
-                close_order(&tx, &id, "failed", Some("graduated")).await?;
-                rep.failed += 1;
-                continue;
-            }
-            let cond = if matches!(kind.as_str(), "limit_buy" | "stop_loss") {
-                le
-            } else {
-                ge
-            };
-            let fire = match (kind.as_str(), cond) {
-                (_, false) => false,
-                ("stop_loss", true) => armed.is_some() && armed == prev_tick,
-                _ => true,
-            };
-            let set_tick = |armed_next: Option<i64>| {
-                let id = id.clone();
-                let tx = &tx;
-                async move {
-                    tx.execute(
-                        "UPDATE orders SET last_tick = $2, sl_armed_tick = $3 WHERE id = $1",
-                        &[&id, &tick, &armed_next],
-                    )
-                    .await
-                }
-            };
-            if !fire {
-                let next = (kind == "stop_loss" && cond).then_some(tick);
-                set_tick(next).await?;
-                if next.is_some() {
-                    rep.armed += 1;
-                }
-                continue;
-            }
-            let buy = kind == "limit_buy";
-            let rate = if buy { p.rate_buy.as_ref() } else { p.rate_sell.as_ref() };
-            let (Some(rate), false) = (rate, frozen) else {
-                // No rate / frozen balance: wait for the next tick (SL stays armed).
-                set_tick(armed.filter(|_| kind == "stop_loss").map(|_| tick)).await?;
-                continue;
-            };
-            let Some(trigger_e18) = parse_e18(&trigger) else {
-                close_order(&tx, &id, "failed", Some("bad_request")).await?;
-                rep.failed += 1;
-                continue;
-            };
-            let a = tx
-                .query_one(
-                    "SELECT hold_zat, gain_mint, gain_est FROM actions WHERE id = $1 FOR UPDATE",
-                    &[&id],
-                )
-                .await?;
-            let (hold, gain_mint, gain_est): (i64, Option<String>, Option<i64>) = (a.get(0), a.get(1), a.get(2));
-            let (lamports, zat, min_out) = if buy {
-                let full = ((hold.max(0) as u128) * (rate.lamports_per_zec as u128) / ZAT_PER_ZEC) as u64;
-                let shave = (rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64;
-                let lamports = unzeen_fair::alloc::fuzz_lamports(full, shave);
-                let zat = ((lamports as u128) * ZAT_PER_ZEC)
-                    .div_ceil(rate.lamports_per_zec.max(1) as u128)
-                    .min(hold.max(0) as u128) as u64;
-                match buy_min_out(lamports, trigger_e18, dec, slip) {
-                    Some(m) if lamports > 0 && zat >= self.policy.min_action_zat => (lamports, zat, m),
-                    _ => {
-                        close_order(&tx, &id, "failed", Some("below_minimum")).await?;
-                        rep.failed += 1;
-                        continue;
-                    }
-                }
-            } else {
-                match sell_min_out(amount, trigger_e18, dec, slip) {
-                    Some(m) => (0, 0, m),
-                    None => {
-                        close_order(&tx, &id, "failed", Some("bad_request")).await?;
-                        rep.failed += 1;
-                        continue;
-                    }
-                }
-            };
-            // The trade: an ordinary buy/sell action + relayer job on the next epoch.
-            let aid: [u8; 16] = rand::random();
-            let nonce: [u8; 16] = rand::random();
-            let (aid_s, nonce_s): (&[u8], &[u8]) = (&aid, &nonce);
-            let zero = [0u8; 32];
-            let zero_s: &[u8] = &zero;
-            let zat_i = to_i64(zat)?;
-            let (tmint, thold): (Option<&str>, i64) = if buy {
-                (None, 0)
-            } else {
-                (Some(mint.as_str()), to_i64(amount)?)
-            };
-            tx.execute(
-                "INSERT INTO actions (id, anon_pubkey, nonce, request_hash, kind, hold_zat, status, amount_zat, fee_zat,
-                                      rate_lamports_per_zec, rate_source, rate_ts, token_mint, token_hold,
-                                      gain_mint, gain_est)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $6, 0, $7, $8, to_timestamp($9), $10, $11, $12, $13)",
-                &[
-                    &aid_s,
-                    &pk,
-                    &nonce_s,
-                    &zero_s,
-                    &(if buy { "buy" } else { "sell" }),
-                    &zat_i,
-                    &to_i64(rate.lamports_per_zec)?,
-                    &rate.source,
-                    &(to_i64(rate.ts_ms)? as f64 / 1000.0),
-                    &tmint,
-                    &thold,
-                    &gain_mint,
-                    &gain_est,
-                ],
-            )
-            .await?;
-            let delay = if exec == "max" { p.delay_max } else { p.delay_delayed };
-            tx.execute(
-                "INSERT INTO relayer_jobs (action_id, part, op, venue, mint, lamports_in, token_amount, min_out,
-                                           network, not_before, exec_mode)
-                 VALUES ($1, 0, $2, 'pumpfun', $3, $4, $5, $6, $7, now() + make_interval(secs => $8), $9)",
-                &[
-                    &aid_s,
-                    &(if buy { "buy" } else { "sell" }),
-                    &mint,
-                    &(if buy { Some(to_i64(lamports)?) } else { None }),
-                    &(if buy { None } else { Some(to_i64(amount)?) }),
-                    &to_i64(min_out)?,
-                    &network,
-                    &delay.max(0.0),
-                    &exec,
-                ],
-            )
-            .await?;
-            // Move the hold: the order action keeps nothing; a buy's D10 remainder is released.
-            let back = hold - zat_i;
-            if buy && back > 0 {
+            .await?
+        else {
+            return Ok(());
+        };
+        let id: Vec<u8> = r.get(0);
+        let pk: Vec<u8> = r.get(1);
+        let kind: String = r.get(2);
+        let mint: String = r.get(3);
+        let amount = to_u64(r.get(4));
+        let slip = r.get::<_, Option<i32>>(5).unwrap_or(500).max(0) as u32;
+        let exec: String = r.get(6);
+        let armed: Option<i64> = r.get(7);
+        let (tick, prev_tick): (i64, Option<i64>) = (r.get(8), r.get(9));
+        let graduated = r.get::<_, String>(10) == "graduated";
+        let (le, ge): (bool, bool) = (r.get(11), r.get(12));
+        let trigger: String = r.get(13);
+        let dec = r.get::<_, i16>(14).clamp(0, 18) as u32;
+        let frozen: bool = r.get(15);
+        let price: String = r.get(16);
+        let age_ms: i64 = r.get(17);
+        let set_tick = |armed_next: Option<i64>| {
+            let id = id.clone();
+            async move {
                 tx.execute(
-                    "UPDATE balances SET held_zat = held_zat - $2, available_zat = available_zat + $2,
-                            updated_at = now() WHERE anon_pubkey = $1",
-                    &[&pk, &back],
+                    "UPDATE orders SET last_tick = $2, sl_armed_tick = $3 WHERE id = $1",
+                    &[&id, &tick, &armed_next],
                 )
-                .await?;
-                journal(&tx, &pk, "release", back, -back, None, Some(&id)).await?;
+                .await
             }
-            tx.execute(
-                "UPDATE actions SET status = 'executed', hold_zat = 0, token_hold = 0, gain_mint = NULL, gain_est = NULL,
-                        updated_at = now() WHERE id = $1",
+        };
+        if age_ms > TICK_MAX_AGE_MS {
+            // Stale tick (indexer was down): consumed without a decision; it cannot be one of
+            // the two consecutive stop-loss ticks.
+            set_tick(None).await?;
+            return Ok(());
+        }
+        if graduated {
+            close_order(tx, &id, "failed", Some("graduated")).await?;
+            rep.failed += 1;
+            return Ok(());
+        }
+        let cond = if matches!(kind.as_str(), "limit_buy" | "stop_loss") {
+            le
+        } else {
+            ge
+        };
+        let fire = match (kind.as_str(), cond) {
+            (_, false) => false,
+            ("stop_loss", true) => armed.is_some() && armed == prev_tick,
+            _ => true,
+        };
+        if !fire {
+            let next = (kind == "stop_loss" && cond).then_some(tick);
+            set_tick(next).await?;
+            if next.is_some() {
+                rep.armed += 1;
+            }
+            return Ok(());
+        }
+        let buy = kind == "limit_buy";
+        let rate = if buy { p.rate_buy.as_ref() } else { p.rate_sell.as_ref() };
+        let (Some(rate), false) = (rate, frozen) else {
+            // No rate / frozen balance: wait for the next tick (SL stays armed).
+            set_tick(armed.filter(|_| kind == "stop_loss").map(|_| tick)).await?;
+            return Ok(());
+        };
+        let (Some(trigger_e18), Some(price_e18)) = (parse_e18(&trigger), parse_e18(&price)) else {
+            close_order(tx, &id, "failed", Some("bad_request")).await?;
+            rep.failed += 1;
+            return Ok(());
+        };
+        // E4: the trigger guard stays off chain. A stop-loss whose tick gapped below
+        // trigger × (1 − slippage) does not sell (as before, when min_out came from the trigger).
+        if !trigger_guard_ok(&kind, price_e18, trigger_e18, slip) {
+            close_order(tx, &id, "failed", Some("slippage")).await?;
+            rep.failed += 1;
+            return Ok(());
+        }
+        let a = tx
+            .query_one(
+                "SELECT hold_zat, gain_mint, gain_est FROM actions WHERE id = $1 FOR UPDATE",
                 &[&id],
             )
             .await?;
+        let (hold, gain_mint, gain_est): (i64, Option<String>, Option<i64>) = (a.get(0), a.get(1), a.get(2));
+        // E4: min_out from the PUBLIC tick price (like a manual trade from a public price),
+        // never from the trigger; quantized at job insertion.
+        let (lamports, zat, min_out) = if buy {
+            let full = ((hold.max(0) as u128) * (rate.lamports_per_zec as u128) / ZAT_PER_ZEC) as u64;
+            let shave = (rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64;
+            let lamports = unzeen_fair::alloc::fuzz_lamports(full, shave);
+            let zat = ((lamports as u128) * ZAT_PER_ZEC)
+                .div_ceil(rate.lamports_per_zec.max(1) as u128)
+                .min(hold.max(0) as u128) as u64;
+            match buy_min_out(lamports, price_e18, dec, slip) {
+                Some(m) if lamports > 0 && zat >= self.policy.min_action_zat => (lamports, zat, m),
+                _ => {
+                    close_order(tx, &id, "failed", Some("below_minimum")).await?;
+                    rep.failed += 1;
+                    return Ok(());
+                }
+            }
+        } else {
+            match sell_min_out(amount, price_e18, dec, slip) {
+                Some(m) => (0, 0, m),
+                None => {
+                    close_order(tx, &id, "failed", Some("bad_request")).await?;
+                    rep.failed += 1;
+                    return Ok(());
+                }
+            }
+        };
+        let min_out = crate::actions::quantize_min_out(min_out);
+        // The trade: an ordinary buy/sell action + relayer job on the next epoch. E20: a random
+        // request hash, like a signed request (no "came from an order" marker in the DB).
+        let aid: [u8; 16] = rand::random();
+        let nonce: [u8; 16] = rand::random();
+        let rh: [u8; 32] = rand::random();
+        let (aid_s, nonce_s, rh_s): (&[u8], &[u8], &[u8]) = (&aid, &nonce, &rh);
+        let zat_i = to_i64(zat)?;
+        let (tmint, thold): (Option<&str>, i64) = if buy {
+            (None, 0)
+        } else {
+            (Some(mint.as_str()), to_i64(amount)?)
+        };
+        tx.execute(
+            "INSERT INTO actions (id, anon_pubkey, nonce, request_hash, kind, hold_zat, status, amount_zat, fee_zat,
+                                  rate_lamports_per_zec, rate_source, rate_ts, token_mint, token_hold,
+                                  gain_mint, gain_est)
+             VALUES ($1, $2, $3, $4, $5, $6, 'queued', $6, 0, $7, $8, to_timestamp($9), $10, $11, $12, $13)",
+            &[
+                &aid_s,
+                &pk,
+                &nonce_s,
+                &rh_s,
+                &(if buy { "buy" } else { "sell" }),
+                &zat_i,
+                &to_i64(rate.lamports_per_zec)?,
+                &rate.source,
+                &(to_i64(rate.ts_ms)? as f64 / 1000.0),
+                &tmint,
+                &thold,
+                &gain_mint,
+                &gain_est,
+            ],
+        )
+        .await?;
+        let delay = if exec == "max" { p.delay_max } else { p.delay_delayed };
+        tx.execute(
+            "INSERT INTO relayer_jobs (action_id, part, op, venue, mint, lamports_in, token_amount, min_out,
+                                       network, not_before, exec_mode)
+             VALUES ($1, 0, $2, 'pumpfun', $3, $4, $5, $6, $7, now() + make_interval(secs => $8), $9)",
+            &[
+                &aid_s,
+                &(if buy { "buy" } else { "sell" }),
+                &mint,
+                &(if buy { Some(to_i64(lamports)?) } else { None }),
+                &(if buy { None } else { Some(to_i64(amount)?) }),
+                &to_i64(min_out)?,
+                &network,
+                &delay.max(0.0),
+                &exec,
+            ],
+        )
+        .await?;
+        // Move the hold: the order action keeps nothing; a buy's D10 remainder is released.
+        let back = hold - zat_i;
+        if buy && back > 0 {
             tx.execute(
-                "UPDATE orders SET status = 'triggered', action_id = $2, last_tick = $3, sl_armed_tick = NULL
-                 WHERE id = $1",
-                &[&id, &aid_s, &tick],
+                "UPDATE balances SET held_zat = held_zat - $2, available_zat = available_zat + $2,
+                        updated_at = now() WHERE anon_pubkey = $1",
+                &[&pk, &back],
             )
             .await?;
-            rep.triggered += 1;
+            journal(tx, &pk, "release", back, -back, None, Some(&id)).await?;
         }
-        tx.commit().await?;
-        Ok(rep)
+        tx.execute(
+            "UPDATE actions SET status = 'executed', hold_zat = 0, token_hold = 0, gain_mint = NULL, gain_est = NULL,
+                    updated_at = now() WHERE id = $1",
+            &[&id],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE orders SET status = 'triggered', action_id = $2, last_tick = $3, sl_armed_tick = NULL
+             WHERE id = $1",
+            &[&id, &aid_s, &tick],
+        )
+        .await?;
+        rep.triggered += 1;
+        Ok(())
     }
 
     /// D1 for orders: closed + 24 h → amounts, price, mint, slippage, action link erased;
@@ -615,5 +696,55 @@ mod tests {
         // sell 1e12 base units at 1e-6 → 1 SOL; 15 % slippage → 0.85 SOL.
         assert_eq!(sell_min_out(1_000_000_000_000, t, 6, 0), Some(1_000_000_000));
         assert_eq!(sell_min_out(1_000_000_000_000, t, 6, 1_500), Some(850_000_000));
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    #[test]
+    fn stop_loss_guard_at_tick_price() {
+        let t = parse_e18("0.000001").unwrap();
+        // 15 % slippage: sells down to 0.85e-6, not below.
+        assert!(trigger_guard_ok(
+            "stop_loss",
+            parse_e18("0.00000095").unwrap(),
+            t,
+            1_500
+        ));
+        assert!(trigger_guard_ok(
+            "stop_loss",
+            parse_e18("0.00000085").unwrap(),
+            t,
+            1_500
+        ));
+        assert!(!trigger_guard_ok(
+            "stop_loss",
+            parse_e18("0.00000084").unwrap(),
+            t,
+            1_500
+        ));
+        assert!(trigger_guard_ok("limit_buy", parse_e18("0.0000009").unwrap(), t, 500));
+        assert!(!trigger_guard_ok("limit_buy", parse_e18("0.00000106").unwrap(), t, 500));
+        assert!(trigger_guard_ok("take_profit", parse_e18("1").unwrap(), t, 500));
+    }
+
+    #[test]
+    fn min_out_from_tick_does_not_reveal_trigger() {
+        // Same tick price, two different triggers: identical on-chain min_out.
+        let p = parse_e18("0.00000095").unwrap();
+        let a = crate::actions::quantize_min_out(sell_min_out(500_000_000_000, p, 6, 1_500).unwrap());
+        assert!(trigger_guard_ok("stop_loss", p, parse_e18("0.000001").unwrap(), 1_500));
+        assert!(trigger_guard_ok(
+            "stop_loss",
+            p,
+            parse_e18("0.00000097").unwrap(),
+            1_500
+        ));
+        assert_eq!(
+            a, 403_000_000,
+            "500 000 tokens × 0.95e-6 × 0.85 = 0.40375 SOL → 3 digits"
+        );
     }
 }

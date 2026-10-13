@@ -19,12 +19,13 @@ pub const NODE_TAG: &[u8] = b"unzeen/verify/v1/node";
 pub const SNAPSHOT_TAG: &[u8] = b"unzeen/verify/v1/snapshot";
 /// `asset` of ZEC.
 pub const ZEC_ASSET: [u8; 32] = [0; 32];
-/// `asset` of SOL (creator fees owed, claimable lamports).
-pub const SOL_ASSET: [u8; 32] = [0xFF; 32];
 /// Minimum tree size.
 pub const MIN_LEAVES: usize = 1024;
 /// ZEC granule: 0.001 ZEC.
 pub const ZEC_GRANULE: u64 = 100_000;
+/// Mint granule (review-day8 E1): 1 base unit. The vault holds exactly Σ balances, so any
+/// rounding up would show every mint as "not covered".
+pub const MINT_GRANULE: u64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Node {
@@ -155,6 +156,17 @@ pub fn round_up(v: u64, g: u64) -> u64 {
     v.div_ceil(g).saturating_mul(g)
 }
 
+/// Creator fees owed (claimable lamports) as part of the creator's ZEC liability (API v0.10,
+/// review-day8 E5): `ceil(lamports × 1e8 / rate_buy)`, rate = lamports per ZEC on the buy side
+/// (fewer lamports per ZEC → more ZEC owed: conservative). `None` without a rate.
+pub fn claimable_zat(lamports: u64, rate_buy_lamports_per_zec: u64) -> Option<u64> {
+    if rate_buy_lamports_per_zec == 0 {
+        return None;
+    }
+    let z = (lamports as u128 * 100_000_000).div_ceil(rate_buy_lamports_per_zec as u128);
+    u64::try_from(z).ok()
+}
+
 /// ZEC reserve as attested: rounded DOWN to 0.01 ZEC.
 pub fn reserve_floor(zat: u64) -> u64 {
     zat - zat % 1_000_000
@@ -209,6 +221,11 @@ mod tests {
         assert_eq!(round_up(200_000, 100_000), 200_000);
         assert_eq!(round_up(0, 100_000), 0);
         assert_eq!(reserve_floor(12_345_678), 12_000_000);
+        // 0.05 SOL at 9.95 SOL/ZEC (buy side) → 0.00502513 ZEC, rounded up.
+        assert_eq!(claimable_zat(50_000_000, 9_950_000_000), Some(502_513));
+        assert_eq!(claimable_zat(1, 10_000_000_000), Some(1));
+        assert_eq!(claimable_zat(0, 10_000_000_000), Some(0));
+        assert_eq!(claimable_zat(1, 0), None);
         let h = SnapshotHeader {
             chain: [2, 2],
             snapshot_id: 7,

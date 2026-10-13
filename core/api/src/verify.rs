@@ -13,7 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use unzeen_ledger::verify::{SnapshotRow, Step};
+use unzeen_ledger::verify::{SnapshotRow, Step, VerifyRates};
 
 use crate::{
     AppState, auth,
@@ -66,6 +66,9 @@ pub fn snapshot_json(s: &SnapshotRow) -> Value {
     v["committedLamports"] = json!(s.committed_lamports.to_string());
     if let Some(r) = s.rate_sell {
         v["rateLamportsPerZecSell"] = json!(r.to_string());
+    }
+    if let Some(r) = s.rate_buy {
+        v["rateLamportsPerZecBuy"] = json!(r.to_string());
     }
     v["zecReserve"] = json!({
         "amountZat": s.zec_reserve_zat.to_string(),
@@ -184,20 +187,20 @@ pub async fn tick(st: &AppState) -> ApiResult<Option<Step>> {
     {
         tracing::info!(id, "verify snapshot requested (daily)");
     }
-    let rate_sell = st
-        .rate
-        .get()
-        .await
-        .ok()
-        .map(|r| apply_spread(r.lamports_per_zec, st.cfg.rate.spread_bps, false));
-    let step = st.ledger.verify_step(net, t, rate_sell).await?;
+    let rates = match st.rate.get().await {
+        Ok(r) => VerifyRates {
+            sell: Some(apply_spread(r.lamports_per_zec, st.cfg.rate.spread_bps, false)),
+            buy: Some(apply_spread(r.lamports_per_zec, st.cfg.rate.spread_bps, true)),
+        },
+        Err(_) => VerifyRates::default(),
+    };
+    let step = st.ledger.verify_step(net, t, rates).await?;
     match &step {
         Step::Built(id) => tracing::info!(id, "verify snapshot built; anchor queued"),
         Step::Skipped(id, why) => tracing::warn!(id, why, "verify snapshot skipped (will retry)"),
         Step::Collecting(id) => tracing::info!(id, "verify snapshot: relayer collecting vault balances"),
         _ => {}
     }
-    st.ledger.settle_attestations().await?;
     // Failed anchors (e.g. the attestation key had no SOL): retry every 10 min, ≤ 12 jobs.
     let n = st.ledger.verify_reanchor(net, 600.0, 12).await?;
     if n > 0 {
@@ -212,6 +215,23 @@ pub async fn scheduler_loop(st: AppState) {
         every.tick().await;
         if let Err(e) = tick(&st).await {
             tracing::warn!(code = e.code, "verify pass failed");
+        }
+    }
+}
+
+/// E14: attestations (fair-launch roots and Verify anchors) and early operator signatures
+/// (E10) run in their own loop, so a failing Verify tick never blocks them.
+pub async fn attest_loop(st: AppState) {
+    let mut every = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        every.tick().await;
+        if let Err(e) = st.ledger.settle_attestations().await {
+            tracing::warn!(error = e.kind(), "attestation settle failed");
+        }
+        match st.ledger.publish_operator_sigs().await {
+            Ok(n) if n > 0 => tracing::info!(n, "verify operator signature published"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = e.kind(), "operator signature pass failed"),
         }
     }
 }

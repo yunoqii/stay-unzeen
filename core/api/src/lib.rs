@@ -579,6 +579,7 @@ pub fn spawn_background(st: &AppState) {
         tokio::spawn(fair::scheduler_loop(st.clone()));
     }
     tokio::spawn(verify::scheduler_loop(st.clone()));
+    tokio::spawn(verify::attest_loop(st.clone()));
     tokio::spawn(creator_fees::credit_loop(st.clone()));
     tokio::spawn(stats::scheduler_loop(st.clone()));
     tokio::spawn(orders::evaluator_loop(st.clone()));

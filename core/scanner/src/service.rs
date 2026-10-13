@@ -173,20 +173,6 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool) ->
                 return Ok(());
             }
             let counts = apply_wallet_notes(c, &db, &ledger, &key, rep.tip).await?;
-            // Verify (API v0.7): spendable (>= confirmations) balance of the pool wallet at this
-            // tip, attested by the operator in the next snapshot. Core only; never logged.
-            if let Some(summary) = db
-                .get_wallet_summary(zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default())
-                .map_err(|e| anyhow!("wallet summary: {e}"))?
-            {
-                let zat: u64 = summary
-                    .account_balances()
-                    .values()
-                    .map(|b| u64::from(b.spendable_value()))
-                    .sum();
-                ledger.set_pool_meta("reserve_zat", &zat.to_string()).await?;
-                ledger.set_pool_meta("reserve_height", &rep.tip.to_string()).await?;
-            }
             let changed: BTreeMap<String, usize> = counts
                 .iter()
                 .filter(|(k, _)| **k != Observed::Unchanged)
@@ -204,6 +190,12 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool) ->
                 ms = started.elapsed().as_millis() as u64,
                 "scan pass"
             );
+            // Verify reserve sample time: taken BEFORE the payout step. If it is after a freeze
+            // started, that payout step sends nothing new (review-day8 E8), so the reserve
+            // below already reflects every payout in flight.
+            let sample_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
             if let Some(pc) = &payout_cfg {
                 let cl = client.as_mut().expect("set above");
                 let p = crate::payout::run(c, pc, &mut db, cl, &ledger, rep.tip, policy.confirmations).await?;
@@ -217,6 +209,23 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool) ->
                         "payouts"
                     );
                 }
+            }
+            // Verify (API v0.10): reserve of the pool wallet at this tip, attested by the operator
+            // in the next snapshot. E7: notes count with the same K confirmations as crediting
+            // (not the ZIP-315 default of 10 for received notes), plus our own change waiting
+            // for confirmations. Core only; never logged.
+            let k = std::num::NonZeroU32::new(policy.confirmations.max(1)).expect("max(1)");
+            let conf = zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new_symmetrical(k);
+            if let Some(summary) = db
+                .get_wallet_summary(conf)
+                .map_err(|e| anyhow!("wallet summary: {e}"))?
+            {
+                let zat: u64 = summary
+                    .account_balances()
+                    .values()
+                    .map(|b| u64::from(b.spendable_value()) + u64::from(b.change_pending_confirmation()))
+                    .sum();
+                ledger.set_reserve(zat, rep.tip, sample_at).await?;
             }
             Ok(())
         }

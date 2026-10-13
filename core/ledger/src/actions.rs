@@ -349,7 +349,7 @@ impl Ledger {
                     &j.mint,
                     &opt_i64(j.lamports_in)?,
                     &opt_i64(j.token_amount)?,
-                    &opt_i64(j.min_out)?,
+                    &opt_i64(j.min_out.map(quantize_min_out))?,
                     &j.meta,
                     &j.dest,
                     &opt_i64(j.gas_lamports)?,
@@ -834,6 +834,17 @@ impl Ledger {
     }
 }
 
+/// E4: every `min_out` written into a relayer job is rounded DOWN to 3 significant decimal
+/// digits, so the on-chain value does not reveal the exact reference price (a trigger, a
+/// quote) it was computed from. Values below 1000 already have ≤ 3 significant digits.
+pub fn quantize_min_out(v: u64) -> u64 {
+    let mut p = 1u64;
+    while v / p >= 1_000 {
+        p *= 10;
+    }
+    v / p * p
+}
+
 /// Now as unix ms, rounded down to the minute (`ActionStatus.executedAt`, API v0.5).
 pub fn minute_now_ms() -> u64 {
     let ms = std::time::SystemTime::now()
@@ -895,4 +906,24 @@ pub(crate) async fn token_journal<C: GenericClient>(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod quantize_tests {
+    use super::quantize_min_out;
+
+    #[test]
+    fn three_significant_digits_down() {
+        assert_eq!(quantize_min_out(0), 0);
+        assert_eq!(quantize_min_out(999), 999);
+        assert_eq!(quantize_min_out(1_000), 1_000);
+        assert_eq!(quantize_min_out(1_234), 1_230);
+        assert_eq!(quantize_min_out(98_765_432_109), 98_700_000_000);
+        assert_eq!(quantize_min_out(425_000_000), 425_000_000);
+        assert_eq!(quantize_min_out(u64::MAX), 18_400_000_000_000_000_000);
+        for v in [1u64, 7, 12_345, 999_999, 1_000_001, 123_456_789_012] {
+            let q = quantize_min_out(v);
+            assert!(q <= v && v - q < v / 100 + 1, "{v} -> {q}");
+        }
+    }
 }

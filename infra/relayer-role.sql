@@ -49,7 +49,8 @@ GRANT SELECT, INSERT, UPDATE ON launch_curves TO unzeen_relayer;
 
 -- Verify (0009): freeze check, vault balance snapshot and vault signatures. No access to
 -- trees, leaves or any user balance.
-GRANT SELECT (id, network, chain_id, status, freeze_until, assets_done_at),
+GRANT SELECT (id, network, chain_id, status, freeze_until, assets_done_at,
+              min_slot),               -- 0014: read vaults at finalized with minContextSlot >= min_slot
       UPDATE (solana_slot, assets_done_at)
     ON verify_snapshots TO unzeen_relayer;
 GRANT SELECT, INSERT ON verify_vaults TO unzeen_relayer;

@@ -255,11 +255,12 @@ pub async fn evaluator_loop(st: AppState) {
             delay_max: st.epochs.delay(true),
         };
         match st.ledger.orders_tick(st.cfg.cluster, &p).await {
-            Ok(r) if r.triggered + r.failed + r.expired + r.closed > 0 => tracing::info!(
+            Ok(r) if r.triggered + r.failed + r.expired + r.closed + r.errors > 0 => tracing::info!(
                 triggered = r.triggered,
                 failed = r.failed,
                 expired = r.expired,
                 closed = r.closed,
+                errors = r.errors,
                 "orders pass"
             ),
             Ok(_) => {}

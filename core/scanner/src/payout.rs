@@ -134,8 +134,12 @@ pub async fn run(
         }
     }
 
-    // 2. New payouts.
+    // 2. New payouts. None while a Verify snapshot is freezing/collecting (review-day8 E8):
+    // the reserve sampled during the freeze must already contain every payout in flight.
     if c.network == NetName::Main && send::mainnet_gate(c).is_err() {
+        return Ok(st);
+    }
+    if ledger.verify_frozen().await? {
         return Ok(st);
     }
     let ready = ledger.ready_payouts(cfg.max_batch as i64).await?;

@@ -2,7 +2,10 @@
 
 Источник правды для `core/` (Rust, API) и индексатора (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0007_intel.sql` (применяет core при старте; индексатор миграции **не** запускает и схему не меняет). Публичная сторона — `docs/API.md` v0.5, раздел «Безопасность токена и лента сделок». Обоснование схемы (тик, приманки, warm set) — `docs/analysis/token-intel.md` §2.
 
-Статус: **v2** (12.10, ордера; миграция `0011_orders.sql`). Изменения против v1:
+Статус: **v3** (13.10, кабинет создателя API.md v0.9; миграции не меняются). Изменения против v2:
+- **`holders.count`** в `token_safety.data` — целое число владельцев mint с ненулевым балансом (без `associated_bonding_curve`, base-vault пула AMM и `mayhem_token_vault`; vault пула Unzeen считаются как обычные владельцы). Читает только core для подписанного `GET /api/creator` (`CreatorToken.holders`); в публичный `TokenSafety` не выводится. **Пока `null`/нет ключа:** на тарифе Shyft Free нет `getProgramAccounts`, посчитать владельцев нечем; core тогда отдаёт `holders: null`. Включить после перехода на провайдера с GPA (или Helius DAS `getTokenAccounts`), в том же тике и с той же приманочной пачкой, что остальные поля.
+
+Изменения v2 против v1 (ордера; миграция `0011_orders.sql`):
 - **Ценовой проход и `intel_prices`.** На **каждом** тике индексатор читает кривые **всех** `intel_warm.pinned` mint (токены пула) и пишет цены в `intel_prices` в той же транзакции тика. Из них core исполняет приватные ордера (API.md v0.8). Набор опрашиваемых mint от ордеров **не зависит** — ордера не порождают ни одного RPC-запроса.
 
 Статус v1: 12.10, дни 6–7.
@@ -75,7 +78,8 @@
   "program": "spl-token" | "token-2022",
   "authorities": { "mintRevoked": bool, "freezeRevoked": bool, "metadataImmutable": bool | null,
                    "riskyExtensions": ["permanentDelegate" | "transferHook" | "transferFee" | "defaultFrozen" | "mintClose" | "pausable"] },
-  "holders": { "top10Pct": "12.5", "devPct": "3.1" | null, "unzeenPoolPct": "0.8" },   // необязательно; asOf ставит core = as_of
+  "holders": { "top10Pct": "12.5", "devPct": "3.1" | null, "unzeenPoolPct": "0.8",
+               "count": 1234 },                                                       // необязательно; asOf ставит core = as_of; count (v3) — пока не пишется
   "market": { "venue": "pumpfun" | "meteora-dbc" | "jupiter", "status": "curve" | "graduated",
               "curveProgressPct": "41.2", "lpBurnedPct": "100" },                     // проценты — десятичные строки
               // meteora-dbc: lpBurnedPct = доля LP, заблокированного навсегда (позиция DAMM v2), а не сожжённый LP-mint

@@ -1927,8 +1927,36 @@ mod verify_pl {
             "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals) VALUES ('{MINT}', 'pumpfun', 'T', 'T', 6);
              INSERT INTO {s}.token_balances (anon_pubkey, mint, available, held)
                VALUES ('\\x{}', '{MINT}', 2500000, 1);
-             INSERT INTO {s}.pool_meta (key, value) VALUES ('reserve_zat', '123456789'), ('reserve_height', '3000000');",
-            hex::encode(pk1)
+             INSERT INTO {s}.pool_meta (key, value) VALUES ('reserve_zat', '123456789'), ('reserve_height', '3000000');
+             -- v0.10 (E5/E6): creator fees of user 2 on two mints → one ZEC value for the key.
+             INSERT INTO {s}.creator_claimable (anon_pubkey, mint, lamports)
+               VALUES ('\\x{pk2}', '{MINT}', 30000000), ('\\x{pk2}', '{MINT2}', 20000000);
+             -- E9: only withdrawal gas is committed SOL.
+             INSERT INTO {s}.relayer_jobs (op, mint, token_amount, dest, gas_lamports, network, status)
+               VALUES ('transfer', '{MINT}', 1, '{MINT2}', 2000000, 'devnet', 'queued');",
+            hex::encode(pk1),
+            pk2 = hex::encode(user(2).verifying_key().to_bytes())
+        ))
+        .await;
+        // E8: a ZEC payout in flight (0.01 ZEC) does not block the snapshot.
+        let ua = unified::Address::try_from_items(
+            unified::Revision::R0,
+            vec![unified::Uitem::Data(unified::Receiver::Orchard([7; 43]))],
+        )
+        .unwrap()
+        .encode(&zcash_protocol::consensus::NetworkType::Test);
+        let r = e
+            .signed(
+                &user(1),
+                "POST",
+                "/api/actions",
+                &json!({"op":"withdraw_zec","to":ua,"amount":"1000000"}).to_string(),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        e.sql(&format!(
+            "UPDATE {s}.zec_payouts SET status = 'sent', txid = '\\x{}'",
+            "ab".repeat(32)
         ))
         .await;
         assert_eq!(e.get("/api/verify").await.status, StatusCode::NOT_FOUND);
@@ -1958,8 +1986,12 @@ mod verify_pl {
             .await,
             0
         );
+        // The queued buy waits; an earlier trade is confirmed and counted at slot 555 (E2).
         e.sql(&format!(
-            "UPDATE {s}.relayer_jobs SET status = 'queued' WHERE op = 'buy'"
+            "UPDATE {s}.relayer_jobs SET status = 'queued' WHERE op = 'buy';
+             INSERT INTO {s}.relayer_jobs (op, venue, mint, lamports_in, min_out, network, status, signature, slot,
+                                           settled_at)
+             VALUES ('buy', 'pumpfun', '{MINT}', 1000000, 1, 'devnet', 'confirmed', 'SIGOLD', 555, now());"
         ))
         .await;
 
@@ -1985,6 +2017,20 @@ mod verify_pl {
              UPDATE {s}.verify_snapshots SET solana_slot = 777, assets_done_at = now() WHERE id = {id};"
         ))
         .await;
+        // Assets are in, but the reserve was sampled before the freeze: wait for a new sample.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.verify_snapshots WHERE id = {id} AND status = 'collecting'"
+            ))
+            .await,
+            1
+        );
+        // The scanner samples the reserve after the freeze started (E7/E8).
+        e.ledger.set_reserve(123_456_789, 3_000_000, now_ms()).await.unwrap();
+        // A deposit credited after the sample is in the wallet with ≥ K confirmations: it joins
+        // the reserve (and the liabilities).
+        e.fund(3, 0, 2_000_000).await;
         wait_status(&e, id, "built").await;
 
         let snap = e.get("/api/verify").await;
@@ -1992,9 +2038,20 @@ mod verify_pl {
         assert_eq!(snap.headers["cache-control"], "public, max-age=300");
         let v = snap.body;
         assert_eq!((v["id"].as_i64(), v["leaves"].as_u64()), (Some(id as i64), Some(1024)));
-        assert_eq!(v["zecReserve"]["amountZat"], "123000000", "floored to 0.01 ZEC");
+        // 1.23456789 sampled + 0.02 credited later + 0.01 in flight = 1.26456789 → 1.26.
+        assert_eq!(v["zecReserve"]["amountZat"], "126000000", "floored to 0.01 ZEC");
         assert_eq!(v["zecReserve"]["attested"], true);
-        assert_eq!(v["committedLamports"], "5000000", "queued buy is committed SOL");
+        assert_eq!(
+            v["committedLamports"], "2000000",
+            "E9: only withdrawal gas, not the queued buy"
+        );
+        assert_eq!(v["rateLamportsPerZecBuy"], RATE.to_string());
+        assert_eq!(
+            e.one_i64(&format!("SELECT min_slot FROM {s}.verify_snapshots WHERE id = {id}"))
+                .await,
+            555,
+            "E2: highest slot of a counted trade"
+        );
         assert!(
             v.get("operator").is_none() && v.get("anchor").is_none(),
             "not anchored yet"
@@ -2003,14 +2060,16 @@ mod verify_pl {
         let trees = v["trees"].as_array().unwrap();
         let zec = trees.iter().find(|t| t["asset"] == "ZEC").unwrap();
         let zsum: u64 = zec["sum"].as_str().unwrap().parse().unwrap();
-        let real = 123_456_789 + 50_000_000;
+        // + 0.05 SOL creator fees of user 2 at 10 SOL/ZEC = 0.005 ZEC; + user 3's 0.02 ZEC.
+        let real = 123_456_789 + 50_000_000 + 500_000 + 2_000_000;
         assert!(
-            zsum >= real && zsum < real + 2 * 100_000 && zsum.is_multiple_of(100_000),
+            zsum >= real && zsum < real + 3 * 100_000 && zsum.is_multiple_of(100_000),
             "{zsum}"
         );
+        assert!(trees.iter().all(|t| t["asset"] != "SOL"), "E5: no SOL tree");
         let mt = trees.iter().find(|t| t["asset"] == MINT).unwrap();
-        assert_eq!(mt["sum"], "3000000", "2.5 + 1e-6 tokens rounded up to 3 whole tokens");
-        assert_eq!(mt["granule"], "1000000");
+        assert_eq!(mt["sum"], "2500001", "E1: exact, granule 1 base unit");
+        assert_eq!(mt["granule"], "1");
         // The vault signature checks with its own address.
         let vv = &v["vaults"][0];
         let vk = VerifyingKey::from_bytes(&b58_32(vv["address"].as_str().unwrap())).unwrap();
@@ -2048,7 +2107,7 @@ mod verify_pl {
             leaves: 1024,
             solana_slot: 777,
             zcash_height: 3_000_000,
-            zec_reserve_zat: 123_000_000,
+            zec_reserve_zat: 126_000_000,
         };
         let digest = pv::roots_digest(&header, &roots);
         assert_eq!(v["rootsDigest"], hex::encode(digest));
@@ -2105,9 +2164,18 @@ mod verify_pl {
         let op = SigningKey::from_bytes(&[9; 32]);
         let opk = bs58::encode(op.verifying_key().to_bytes()).into_string();
         let osig = bs58::encode(op.sign(&digest).to_bytes()).into_string();
+        // E10: a wrong signature is never published; the relayer's signature at claim time is
+        // published at once, before the memo tx lands.
+        let bad = bs58::encode(op.sign(b"other").to_bytes()).into_string();
         e.sql(&format!(
-            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGV', slot = 901, vault = '{opk}',
-                    out_memo = '{memo}', out_sig = '{osig}' WHERE op = 'attest' AND status = 'queued'"
+            "UPDATE {s}.relayer_jobs SET status = 'claimed', vault = '{opk}', out_sig = '{bad}'
+              WHERE op = 'attest' AND status = 'queued'"
+        ))
+        .await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(e.get("/api/verify").await.body.get("operator").is_none());
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET out_sig = '{osig}' WHERE op = 'attest' AND status = 'claimed'"
         ))
         .await;
         let mut v = Value::Null;
@@ -2119,8 +2187,24 @@ mod verify_pl {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(v["operator"]["pubkey"], opk);
+        assert!(v.get("anchor").is_none(), "signed, anchor pending");
+        // The memo tx lands: the anchor follows, with blockTime.
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGV', slot = 901,
+                    out_memo = '{memo}', out_block_time = 1792000000 WHERE op = 'attest' AND status = 'claimed'"
+        ))
+        .await;
+        for _ in 0..50 {
+            v = e.get("/api/verify").await.body;
+            if v.get("anchor").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(v["operator"]["pubkey"], opk);
         assert_eq!(v["anchor"]["solanaTx"], "SIGV");
         assert_eq!(v["anchor"]["matches"], true);
+        assert_eq!(v["anchor"]["blockTime"], 1_792_000_000);
         let hist = e.get("/api/verify/snapshots").await.body;
         assert_eq!(hist.as_array().unwrap().len(), 1, "skipped snapshots are not published");
         assert_eq!(e.get(&format!("/api/verify/{id}")).await.status, StatusCode::OK);
@@ -2177,11 +2261,27 @@ mod verify_pl {
             if ap["asset"] == "ZEC" {
                 assert_eq!(total, 123_500_000, "rounded up to 0.001 ZEC");
             } else {
-                assert_eq!(total, 3_000_000);
+                assert_eq!(total, 2_500_001);
             }
             seen += 1;
         }
         assert_eq!(seen, 2);
+        // Creator with fees on two mints: ONE ZEC value (0.5 ZEC + 0.05 SOL at 10 SOL/ZEC), piece
+        // numbers unique within the key (E5/E6), no SOL proof.
+        let p2 = e.signed(&user(2), "GET", "/api/verify/proof", "").await.body;
+        let ap = p2["proofs"].as_array().unwrap();
+        assert_eq!(ap.len(), 1, "{p2:?}");
+        assert_eq!(ap[0]["asset"], "ZEC");
+        let pcs = ap[0]["pieces"].as_array().unwrap();
+        let total: u64 = pcs
+            .iter()
+            .map(|p| p["value"].as_str().unwrap().parse::<u64>().unwrap())
+            .sum();
+        assert_eq!(total, 50_500_000);
+        let mut nums: Vec<u64> = pcs.iter().map(|p| p["piece"].as_u64().unwrap()).collect();
+        nums.sort_unstable();
+        nums.dedup();
+        assert_eq!(nums.len(), pcs.len(), "piece numbers unique per key");
         // A key with nothing: empty proofs, same padding bucket.
         let r9 = e.signed(&user(9), "GET", "/api/verify/proof", "").await;
         assert_eq!(r9.body["proofs"].as_array().unwrap().len(), 0);
@@ -2273,13 +2373,15 @@ async fn creator_fee_sweeps_credit_and_claim() {
 // ================================================================== orders (API v0.8)
 
 mod orders_v08 {
+    use unzeen_ledger::actions::quantize_min_out;
     use unzeen_ledger::orders::{buy_min_out, parse_e18, sell_min_out};
 
     use super::*;
 
     impl Env {
-        /// The indexer's price pass (INTEL.md v2) for MINT.
+        /// The indexer's price pass (INTEL.md v2) for MINT. `tick_at` = now + n ms (fresh, E16).
         async fn tick(&self, n: i64, price: &str, status: &str) {
+            let n = now_ms() as i64 + n;
             self.sql(&format!(
                 "INSERT INTO {s}.intel_prices (mint, price_sol, status, tick_at) VALUES ('{MINT}', {price}, '{status}', {n})
                  ON CONFLICT (mint) DO UPDATE SET prev_price_sol = intel_prices.price_sol,
@@ -2394,9 +2496,10 @@ mod orders_v08 {
         let lamports = job.get::<_, i64>(1) as u64;
         assert_eq!(job.get::<_, String>(0), "buy");
         assert!((990_000_000..=1_000_000_000).contains(&lamports) && lamports.is_multiple_of(1_000_000));
+        // E4: min_out from the tick price (0.9e-6), not the trigger, quantized to 3 digits.
         assert_eq!(
             job.get::<_, i64>(2) as u64,
-            buy_min_out(lamports, parse_e18("0.000001").unwrap(), 6, 500).unwrap()
+            quantize_min_out(buy_min_out(lamports, parse_e18("0.0000009").unwrap(), 6, 500).unwrap())
         );
         assert_eq!(
             (job.get::<_, String>(3), job.get::<_, bool>(4)),
@@ -2424,13 +2527,17 @@ mod orders_v08 {
         let r = post(2, create("stop_loss", 500_000_000_000, "0.000001")).await;
         assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
         let sl = r.body["id"].as_str().unwrap().to_string();
-        e.wait_order(2, &sl, |o| o["armed"] == true).await; // tick 2 (below) arms it
-        e.tick(3, "0.0000011", "curve").await; // recovered: disarmed
+        // E16: tick 2 is older than the order and is never evaluated for it.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(e.order(2, &sl).await.get("armed").is_none(), "old tick ignored");
+        e.tick(3, "0.0000009", "curve").await; // first tick after the order, below: arms
+        e.wait_order(2, &sl, |o| o["armed"] == true).await;
+        e.tick(4, "0.0000011", "curve").await; // recovered: disarmed
         e.wait_order(2, &sl, |o| o.get("armed").is_none()).await;
-        e.tick(4, "0.000001", "curve").await; // armed again
+        e.tick(5, "0.000001", "curve").await; // armed again
         e.wait_order(2, &sl, |o| o["armed"] == true).await;
         assert_eq!(e.order(2, &sl).await["status"], "open");
-        e.tick(5, "0.00000095", "curve").await; // second consecutive tick → sell
+        e.tick(6, "0.00000095", "curve").await; // second consecutive tick → sell
         let o = e.wait_order(2, &sl, |o| o["status"] == "triggered").await;
         let said = o["actionId"].as_str().unwrap();
         let min_out = e
@@ -2441,7 +2548,17 @@ mod orders_v08 {
             .await as u64;
         assert_eq!(
             min_out,
-            sell_min_out(500_000_000_000, parse_e18("0.000001").unwrap(), 6, 1_500).unwrap()
+            quantize_min_out(sell_min_out(500_000_000_000, parse_e18("0.00000095").unwrap(), 6, 1_500).unwrap()),
+            "tick price, not the trigger"
+        );
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.actions WHERE id = '\\x{said}' AND request_hash = '\\x{}'",
+                "00".repeat(32)
+            ))
+            .await,
+            0,
+            "E20: random request hash"
         );
 
         // Cancel: only from open; tokens come back.
@@ -2494,7 +2611,7 @@ mod orders_v08 {
         .await;
         e.wait_order(1, &ids[0], |o| o["status"] == "expired").await;
         // Graduated: the rest fail, holds released.
-        e.tick(6, "0.000003", "graduated").await;
+        e.tick(7, "0.000003", "graduated").await;
         for id in &ids[1..] {
             let o = e.wait_order(1, id, |o| o["status"] == "failed").await;
             assert_eq!(o["error"], "graduated");
@@ -2818,5 +2935,53 @@ async fn stats_daily_snapshot_k_anonymity() {
     e.ledger.stats_snapshot("devnet", &p).await.unwrap();
     assert_eq!(e.get("/api/stats").await.body["zecShielded"], "8");
     assert!(!e.ledger.stats_due("devnet").await.unwrap());
+    e.drop_schema().await;
+}
+
+#[tokio::test]
+async fn jupiter_devnet_and_explicit_min_out() {
+    let Some(e) = setup_with(|c| c.venues = vec!["pumpfun".into(), "jupiter".into()]).await else {
+        return;
+    };
+    let s = e.schema.clone();
+    e.fund(11, 0, 100_000_000).await;
+    // Jupiter on devnet: refused before any hold.
+    let r = e
+        .signed(
+            &user(11),
+            "POST",
+            "/api/actions",
+            &json!({"op":"buy","venue":"jupiter","mint":MINT2,"zecIn":"1000000","minOut":"5"}).to_string(),
+        )
+        .await;
+    assert_eq!(
+        (r.status, code(&r)),
+        (StatusCode::SERVICE_UNAVAILABLE, "venue_unavailable")
+    );
+    assert_eq!(e.one_i64(&format!("SELECT held_zat FROM {s}.balances")).await, 0);
+    // A mint with no pool price: minOut / minZecOut must be explicit (non-zero).
+    let buy0 = json!({"op":"buy","venue":"pumpfun","mint":MINT2,"zecIn":"1000000","minOut":"0"}).to_string();
+    assert_eq!(
+        code(&e.signed(&user(11), "POST", "/api/actions", &buy0).await),
+        "bad_request"
+    );
+    let buy = json!({"op":"buy","venue":"pumpfun","mint":MINT2,"zecIn":"1000000","minOut":"123456"}).to_string();
+    let r = e.signed(&user(11), "POST", "/api/actions", &buy).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    // E4: the user's minOut is scaled by D10 and quantized to 3 significant digits.
+    let m = e
+        .one_i64(&format!("SELECT min_out FROM {s}.relayer_jobs WHERE op = 'buy'"))
+        .await;
+    assert!(m <= 123_456 && m % 1_000 == 0 && m >= 121_000, "{m}");
+    e.sql(&format!(
+        "INSERT INTO {s}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{}', '{MINT2}', 1000)",
+        hex::encode(user(11).verifying_key().to_bytes())
+    ))
+    .await;
+    let sell0 = json!({"op":"sell","venue":"pumpfun","mint":MINT2,"amount":"1000","minZecOut":"0"}).to_string();
+    assert_eq!(
+        code(&e.signed(&user(11), "POST", "/api/actions", &sell0).await),
+        "bad_request"
+    );
     e.drop_schema().await;
 }
