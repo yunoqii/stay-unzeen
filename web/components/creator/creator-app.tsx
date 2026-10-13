@@ -1,10 +1,11 @@
 "use client";
 
+import { ErrorState } from "@/components/ui/states";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { motion, useReducedMotion } from "motion/react";
-import { ArrowClockwise, ArrowUpRight, LockSimple, RocketLaunch } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowUpRight, LockSimple } from "@phosphor-icons/react";
 import { api, ApiError, errorText } from "@/lib/api/client";
 import type { CreatorToken, PoolInfo } from "@/lib/api/types";
 import { lastRate, submitAction } from "@/lib/activity";
@@ -85,10 +86,10 @@ function Cabinet() {
         <Skeleton className="h-56 rounded-none bg-skeleton" />
       </div>
     );
-  if (load.s === "error") return <EmptyState title="Could not load your launches">{load.message}</EmptyState>;
+  if (load.s === "error") return <ErrorState error={load.message} title="Could not load your launches" />;
   if (load.tokens.length === 0)
     return (
-      <EmptyState icon={<RocketLaunch size={28} weight="thin" />} title="No launches from this key yet">
+      <EmptyState art title="No launches from this key yet">
         <p>Tokens you launch through Unzeen show up here with their fees, volume and holders.</p>
         <Button asChild className="mt-5 h-10 rounded-full px-5">
           <Link href="/launch">Launch a token</Link>

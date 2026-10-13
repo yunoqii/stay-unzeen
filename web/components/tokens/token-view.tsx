@@ -1,5 +1,6 @@
 "use client";
 
+import { ErrorState } from "@/components/ui/states";
 import Link from "next/link";
 import { use, useMemo } from "react";
 import { ArrowLeft } from "@phosphor-icons/react";
@@ -25,7 +26,7 @@ import { Analyzing } from "./analyzing";
 import { PriceChart } from "./price-chart";
 import { SafetyPanel, useSafety } from "./safety-panel";
 import { ProgressRing } from "@/components/motion/progress-ring";
-import { TokenTrades } from "./token-trades";
+import { TokenActivity } from "./token-activity";
 import { TokenGlyph } from "./token-glyph";
 import { VenueTag } from "./venue-tag";
 
@@ -55,7 +56,7 @@ function TokenByMint({ mint }: { mint: string }) {
   if (s.state === "error")
     return (
       <Frame>
-        <EmptyState title="Could not load this token">{s.error}</EmptyState>
+        <ErrorState error={s.error} title="Could not load this token" onRetry={s.retry} />
       </Frame>
     );
   if (s.state === "loading") return <TokenViewSkeleton />;
@@ -71,7 +72,7 @@ function TokenByMint({ mint }: { mint: string }) {
   if (s.state === "missing")
     return (
       <Frame>
-        <EmptyState title="Unknown token">
+        <EmptyState art title="Unknown token">
           No token at <span className="font-mono">{shortAddr(mint, 6, 6)}</span> on this network.
         </EmptyState>
       </Frame>
@@ -154,7 +155,7 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
           <div className="hatch hidden min-h-6 flex-1 opacity-50 lg:block" aria-hidden />
         </aside>
 
-        <TokenTrades mint={token.mint} feed={feed} />
+        <TokenActivity mint={token.mint} feed={feed} />
       </div>
       <div aria-hidden className="hatch h-3" />
     </Frame>

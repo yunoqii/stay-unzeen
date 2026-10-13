@@ -1,5 +1,6 @@
 "use client";
 
+import { ErrorState } from "@/components/ui/states";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
@@ -70,7 +71,7 @@ export default function FairLaunchView({ id, pool }: { id: string; pool: PoolInf
   const own = portfolio?.fairLaunches?.find((l) => l.launchId === id);
 
   if (load.state === "loading" || now === null) return <ViewSkeleton />;
-  if (load.state === "error") return <EmptyState title="Could not load this launch">{load.error}</EmptyState>;
+  if (load.state === "error") return <ErrorState error={load.error} title="Could not load this launch" />;
   if (load.state === "missing")
     return own?.status === "scheduled" ? (
       <Scheduled id={id} publishedAt={own.publishedAt} closeAt={own.closeAt} now={now} onCancelled={() => void refresh()} />

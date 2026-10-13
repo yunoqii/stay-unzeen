@@ -1,5 +1,6 @@
 "use client";
 
+import { ErrorState } from "@/components/ui/states";
 import { onTabListKeyDown } from "@/lib/tabs";
 import { useEffect, useId, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
@@ -30,7 +31,7 @@ const SOON = "Needs the full on-chain trade feed. Coming soon.";
  * Trades of one token with the All / unzeen / Whales / Dev filters. Until the full feed is switched on
  * (PoolInfo.features.fullTrades), the backend only knows unzeen trades: All = unzeen, Whales and Dev are disabled.
  */
-export function TokenTrades({ mint, feed }: { mint: string; feed: LiveFeedState }) {
+export function TokenTrades({ mint, feed, heading }: { mint: string; feed: LiveFeedState; heading?: React.ReactNode }) {
   const [filter, setFilter] = useState<TradeFilter>("all");
   const id = useId();
   const { pool } = usePool();
@@ -41,11 +42,13 @@ export function TokenTrades({ mint, feed }: { mint: string; feed: LiveFeedState 
   const hidden = Math.max(0, feed.events.length - shown);
 
   return (
-    <section aria-labelledby={`${id}-t`} className="min-w-0">
+    <section aria-labelledby={heading ? undefined : `${id}-t`} aria-label={heading ? "Trades" : undefined} className="min-w-0">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-4 py-2.5">
-        <h2 id={`${id}-t`} className="text-sm font-medium">
-          Trades
-        </h2>
+        {heading ?? (
+          <h2 id={`${id}-t`} className="text-sm font-medium">
+            Trades
+          </h2>
+        )}
         <div className="flex items-center gap-3">
           <div role="tablist" aria-label="Filter trades" onKeyDown={onTabListKeyDown} className="flex gap-0.5 rounded-full border border-border p-0.5">
             {FILTERS.map((f) => {
@@ -73,7 +76,7 @@ export function TokenTrades({ mint, feed }: { mint: string; feed: LiveFeedState 
               );
             })}
           </div>
-          <FeedStatusDot status={feed.status} beat={feed.events[0]?.id} />
+          <FeedStatusDot status={feed.status} beat={feed.events[0]?.id} updatedAt={feed.updatedAt} />
         </div>
       </header>
 
@@ -92,6 +95,7 @@ export function TokenTrades({ mint, feed }: { mint: string; feed: LiveFeedState 
             fresh={feed.fresh}
             loading={feed.loading}
             error={feed.error}
+            onRetry={feed.retry}
             dense
             emptyText="No unzeen trades on this token yet."
           />
@@ -136,7 +140,7 @@ function FilteredTrades({ mint, filter }: { mint: string; filter: TradeFilter })
     };
   }, [mint, filter, network]);
 
-  if (error && !list) return <EmptyState title="Trades unavailable" className="m-4">{error}</EmptyState>;
+  if (error && !list) return <ErrorState error={error} title="Trades unavailable" compact className="m-4" />;
   if (!list)
     return (
       <ul aria-hidden className="space-y-3 p-4">

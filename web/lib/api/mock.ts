@@ -15,6 +15,7 @@ import { checkUnz1, decodeUnz1, type ChainId } from "@/lib/crypto/unz1";
 import type { Network } from "@/lib/network";
 import { memoText, parseZip321 } from "@/lib/zip321";
 import { ApiError } from "./errors";
+import { CHAT_OPS, createChatMock, mockChatParams } from "./mock-chat";
 import type { FairHost, FairMock } from "./mock-fair";
 import type { VerifyMock } from "./mock-verify";
 import type {
@@ -25,6 +26,7 @@ import type {
   CreatorToken,
   CandleTimeframe,
   DepositInfo,
+  DiscoveryToken,
   ExecMode,
   FeedEvent,
   Order,
@@ -37,6 +39,7 @@ import type {
   RateUsed,
   SignedAction,
   Token,
+  TokenListItem,
   TokenSafety,
   TokenTrade,
   TokenWithTrades,
@@ -326,7 +329,6 @@ function authorize(
 // ---- pool and accounts (per network) ----
 
 const hex16 = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (x) => x.toString(16).padStart(2, "0")).join("");
-const UNSUPPORTED_OPS = new Set(["chat"]);
 
 function poolAddress(network: Network): string {
   // Looks like a UA (bech32 charset); not a real address.
@@ -349,14 +351,22 @@ const FEES = { nowFeeZat: NOW_FEE_ZAT, createFeeZat: "100000", withdrawZecFeeZat
 /** Mock twin of UNZEEN_CREATE_ENABLED: NEXT_PUBLIC_MOCK_CREATE_DISABLED=1 shows the disabled launch state. */
 const CREATE_ENABLED = process.env.NEXT_PUBLIC_MOCK_CREATE_DISABLED !== "1";
 
+/** NEXT_PUBLIC_MOCK_CHAT=0 shows the server without chat; NEXT_PUBLIC_MOCK_NOOP=0 without cover traffic. */
+const CHAT_ON = process.env.NEXT_PUBLIC_MOCK_CHAT !== "0";
+const NOOP_ON = process.env.NEXT_PUBLIC_MOCK_NOOP !== "0";
+/** NEXT_PUBLIC_MOCK_DISCOVERY=1: the Discovery source on /tokens (off by default, like the backend flag). */
+const DISCOVERY_ON = process.env.NEXT_PUBLIC_MOCK_DISCOVERY === "1";
+const CHAT_FEATURES = { ...(CHAT_ON ? { chat: true as const } : {}), ...(NOOP_ON ? { noop: true as const } : {}), ...(DISCOVERY_ON ? { discovery: true as const } : {}) };
+
 export function mockPool(network: Network): PoolInfo {
   const extra = {
     createEnabled: CREATE_ENABLED,
     // v0.7: with the flag off the key is absent altogether (absent = off). The condition is written on
     // process.env directly so the build drops the whole branch, names included (review F3).
     ...(process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1"
-      ? { features: { fullTrades: FULL_FEED, fairLaunch: true }, ...(fair ? { fairLaunch: fair.params(network) } : {}) }
-      : { features: { fullTrades: FULL_FEED } }),
+      ? { features: { fullTrades: FULL_FEED, fairLaunch: true, ...CHAT_FEATURES }, ...(fair ? { fairLaunch: fair.params(network) } : {}) }
+      : { features: { fullTrades: FULL_FEED, ...CHAT_FEATURES } }),
+    ...(CHAT_ON ? { chat: mockChatParams(network) } : {}),
     orders: ORDER_PARAMS,
     launchRules: {
       lockSecs: 86_400,
@@ -869,7 +879,20 @@ function submit(network: Network, method: "POST", path: string, body: string | u
     /* handled below */
   }
   if (!action?.op) throw new ApiError("bad_request", "op required", 400);
-  if (UNSUPPORTED_OPS.has(action.op)) throw new ApiError("bad_request", "op not supported yet", 400);
+  if (CHAT_OPS.has(action.op) || action.op === "noop") {
+    // Chat and cover traffic (chat.md §5.1, R8): exactly 1024 bytes, never in actions / Portfolio.actions.
+    const bytes = new TextEncoder().encode(body ?? "").length;
+    let receipt: ActionReceipt;
+    if (action.op === "noop") {
+      if (bytes !== 1024) throw new ApiError("bad_request", "noop bodies are exactly 1024 bytes", 400);
+      receipt = { id: hex16(), status: "queued" };
+    } else receipt = chat.submit(network, pubkey, action, bytes, now);
+    seenNonces.set(nonceKey, now + 120_000);
+    const act: MockAction = { id: receipt.id, network, pubkey, action, nonceKey, bodyHash: hash, receipt, status: { status: "queued" }, holdZat: N0, hidden: true };
+    actions.set(`ledger:${nonceKey}`, act);
+    byNonce.set(nonceKey, `ledger:${nonceKey}`);
+    return receipt;
+  }
   if (process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1" && fair && action.op.startsWith("fl_")) {
     execDelay({ op: "fl", pad: (action as { pad?: unknown }).pad } as unknown as SignedAction, true);
     const receipt = fair.submit(network, pubkey, action);
@@ -1266,10 +1289,13 @@ export async function handle(
 ): Promise<unknown> {
   init(Date.now());
   await loadFair();
+  // Dev-only failure injection; the literal check keeps it out of every other build.
+  if (process.env.NEXT_PUBLIC_MOCK_CHAOS === "1") await (await import("./chaos")).chaosGate(!!headers[HEADER_NONCE]);
   await delay(rand(120, 380));
   scan(Date.now());
   fair?.tick(Date.now());
   catchUpTicks(Date.now());
+  chat.tick(Date.now());
   const url = new URL(pathWithQuery, "http://mock.local");
   const p = url.pathname;
   const q = url.searchParams;
@@ -1279,7 +1305,12 @@ export async function handle(
     if (p === "/api/feed") return history.slice(0, Math.min(Number(q.get("limit") ?? 50), 200));
     // Cold mints from CA searches stay out of the public list until unzeen trades them: listing them
     // would tell everyone what someone searched for.
-    if (p === "/api/tokens") return state!.filter((s) => s.heat > 0).map((s) => ({ ...s.token }));
+    if (p === "/api/tokens" && q.has("source")) {
+      if (q.get("source") !== "discovery") throw new ApiError("bad_request", "source: discovery", 400);
+      if (!DISCOVERY_ON) throw new ApiError("not_found", `${method} ${p}`, 404);
+      return discoveryList(Date.now());
+    }
+    if (p === "/api/tokens") return state!.filter((s) => s.heat > 0).map((s) => withListFields(s, Date.now()));
     if (p === "/api/stats") return stats(Date.now());
 
     if ((m = p.match(/^\/api\/tokens\/([^/]+)$/))) {
@@ -1287,6 +1318,10 @@ export async function handle(
       if ("status" in s) return s;
       const out: TokenWithTrades = { ...s.token, trades: history.filter((e) => e.mint === s.token.mint).slice(0, 50) };
       return out;
+    }
+    if ((m = p.match(/^\/api\/tokens\/([^/]+)\/chat$/))) {
+      if (!CHAT_ON) throw new ApiError("not_found", `${method} ${p}`, 404);
+      return chat.get(network, decodeURIComponent(m[1]), q, Date.now());
     }
     if ((m = p.match(/^\/api\/tokens\/([^/]+)\/safety$/))) {
       const s = resolveMint(decodeURIComponent(m[1]));
@@ -1621,4 +1656,93 @@ function loadVerify(): Promise<VerifyMock> {
 export async function mockTakeSnapshot(network: Network): Promise<number> {
   init(Date.now());
   return (await loadVerify()).takeSnapshot(network);
+}
+
+// ---- token chat (API.md v0.12) ----
+
+/** Account value for chat admission: ZEC available + held + tokens at the current price (chat.md §4.1). */
+function accountValueZat(network: Network, pubkey: string): bigint {
+  const a = account(network, pubkey);
+  let lamports = N0;
+  for (const h of a.holdings) {
+    const s = state?.find((x) => x.token.mint === h.mint);
+    if (!s) continue;
+    const whole = Number(BigInt(h.amount) + BigInt(h.held)) / 10 ** s.token.decimals;
+    lamports += BigInt(Math.floor(whole * s.price * 1e9));
+  }
+  return a.zecBalance + a.zecHeld + (lamports * ZAT) / BigInt(mockRate(false).lamportsPerZec);
+}
+
+const chat = createChatMock(
+  {
+    pool: (network) => mockPool(network),
+    accountValueZat,
+    frozen: (network, pubkey) => account(network, pubkey).frozen,
+    isCreator: (network, pubkey, mint) => {
+      const c = creators.get(mint);
+      return !!c && c.network === network && c.pubkey === pubkey;
+    },
+    isPublicMint: (mint) => !!state?.some((s) => s.token.mint === mint && s.heat > 0),
+    isUnzeenLaunch: (mint) => unzeenLaunches.has(mint) || !!state?.some((s) => s.token.mint === mint && s.token.symbol === "GHOST"),
+  },
+  { chatter: true },
+);
+
+// ---- /tokens list fields and Discovery (API.md v0.12) ----
+
+const DAY = 24 * 3_600_000;
+
+/** Curve progress from market cap: log scale, ~1500 SOL fills the curve (mock only). */
+function mockCurvePct(s: MockTokenState): string | undefined {
+  if (s.token.status !== "curve") return undefined;
+  const mcap = s.price * s.supply;
+  const p = ((Math.log10(Math.max(10, mcap)) - 1) / (Math.log10(1500) - 1)) * 100;
+  return trimDecimals(Math.max(1, Math.min(99, p)), 1);
+}
+
+function withListFields(s: MockTokenState, now: number): TokenListItem {
+  let vol = 0;
+  let trades = 0;
+  for (const e of history) {
+    if (e.mint !== s.token.mint || now - e.ts > DAY || e.kind === "create") continue;
+    vol += Number(e.solAmount) / 1e9;
+    trades++;
+  }
+  const curve = mockCurvePct(s);
+  return {
+    ...s.token,
+    unzeenLaunch: unzeenLaunches.has(s.token.mint) || s.token.symbol === "GHOST",
+    volume24hSol: trimDecimals(vol, 3),
+    unzeenTrades24h: trades,
+    ...(curve ? { curveProgressPct: curve } : {}),
+  };
+}
+
+let discovery: DiscoveryToken[] | null = null;
+function discoveryList(now: number): DiscoveryToken[] {
+  if (!discovery) {
+    const rnd = seeded("discovery");
+    const names: Array<[string, string]> = [["BLINK", "Blink"], ["MIRE", "Mire Frog"], ["FOG", "Fog Machine"], ["LURK", "Lurker"], ["HAZE", "Purple Haze"], ["SOOT", "Soot Sprite"], ["GLOOM", "Gloom"], ["UMBRA2", "Umbra Two"], ["MURK", "Murk"], ["DIM", "Dim Sum"], ["NIGHT", "Night Shift"], ["OWL", "Night Owl"], ["SHH", "Shh"], ["QUIET", "Quiet Part"], ["DRIFT", "Drift"], ["STEALTH", "Stealth Cat"], ["VAPOR", "Vapor"], ["ASH", "Ash"]];
+    discovery = names.map(([symbol, name], i) => {
+      const venue: DiscoveryToken["venue"] = rnd() < 0.7 ? "pumpfun" : "meteora-dbc";
+      const price = logRand(1e-8, 2e-7);
+      const graduated = rnd() < 0.1;
+      const mcap = price * SUPPLY;
+      return {
+        mint: mintFor(venue, "disc:" + symbol),
+        symbol,
+        name,
+        venue,
+        status: graduated ? "graduated" : "curve",
+        decimals: DECIMALS[venue],
+        priceSol: plain(price, 4),
+        marketCapSol: trimDecimals(mcap, 2),
+        createdAt: now - Math.floor((i + rnd()) * 6 * 60_000),
+        unzeenLaunch: false,
+        ...(graduated ? {} : { curveProgressPct: trimDecimals(2 + rnd() * 95, 1) }),
+        asOf: Math.floor(now / 60_000) * 60_000,
+      } satisfies DiscoveryToken;
+    });
+  }
+  return discovery.map((t) => ({ ...t }));
 }

@@ -2,9 +2,9 @@
 
 import { useEffect, useId, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { LockSimple, LockSimpleOpen } from "@phosphor-icons/react";
 import { DecryptText } from "@/components/motion/decrypt-text";
 import { ProgressRing } from "@/components/motion/progress-ring";
+import { SealedMark } from "./sealed-mark";
 import { formatPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -59,8 +59,8 @@ export function FairReveal() {
           label={phase === "open" ? `Bids sealed, reveal in ${left} seconds` : "Bids revealed"}
         >
           <span className="grid place-items-center">
-            {phase === "open" ? <LockSimple size={18} weight="light" className="text-muted-foreground" /> : <LockSimpleOpen size={18} weight="light" className="text-zec" />}
-            <span className="tabular mt-1 font-mono text-2xl">{phase === "open" ? `${left}s` : "open"}</span>
+            <SealedMark revealed={phase === "revealed"} size={44} />
+            <span className="tabular mt-1 font-mono text-lg">{phase === "open" ? `${left}s` : "open"}</span>
           </span>
         </ProgressRing>
         <div>

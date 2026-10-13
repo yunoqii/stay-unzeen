@@ -29,6 +29,10 @@ const CODES: BaseCode[] = [
   "order_limit",
   "order_not_open",
   "order_unsupported_mint",
+  "chat_text_invalid",
+  "chat_not_eligible",
+  "chat_muted",
+  "not_creator",
   "internal",
 ];
 
@@ -118,6 +122,10 @@ const UI_TEXT: Record<BaseCode | ClientErrorCode, string> = {
   order_limit: "You have the maximum number of open orders. Cancel one first.",
   order_not_open: "This order is no longer open: it already triggered, expired or was cancelled.",
   order_unsupported_mint: "Orders work only for pump.fun tokens on the bonding curve that the pool already trades.",
+  chat_text_invalid: "This message can't be posted: it has hidden or control characters, or is too long.",
+  chat_not_eligible: "Your account is below the minimum to post in token chats.",
+  chat_muted: "You can't post in this chat for now.",
+  not_creator: "Only the token's creator can do that.",
   internal: "Something went wrong on our side. Try again.",
   network: "Can't reach Unzeen. Check your connection.",
   locked: "Unlock your anon key to continue.",

@@ -5,6 +5,7 @@ import type { FeedStatus } from "@/lib/api/client";
 import type { FeedEvent } from "@/lib/api/types";
 import { useNow } from "@/hooks/use-now";
 import { cn } from "@/lib/utils";
+import { ErrorState, StaleNote } from "@/components/ui/states";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/layout/page-shell";
 import { FeedItem } from "./feed-item";
@@ -16,18 +17,14 @@ interface Props {
   error: string | null;
   dense?: boolean;
   emptyText?: string;
+  onRetry?: () => void;
 }
 
-export function LiveFeed({ events, fresh, loading, error, dense, emptyText = "Nothing yet. The pool is quiet." }: Props) {
+export function LiveFeed({ events, fresh, loading, error, dense, emptyText = "Nothing yet. The pool is quiet.", onRetry }: Props) {
   const now = useNow(1000);
   if (loading) return <FeedSkeleton dense={dense} />;
-  if (error)
-    return (
-      <EmptyState title="Feed unavailable" className="m-4">
-        {error}
-      </EmptyState>
-    );
-  if (events.length === 0) return <EmptyState title={emptyText} className="m-4" />;
+  if (error) return <ErrorState error={error} title="Feed unavailable" onRetry={onRetry} compact className="m-4" />;
+  if (events.length === 0) return <EmptyState art title={emptyText} className="m-4" />;
 
   return (
     <ol aria-live="polite" aria-relevant="additions" className="relative">
@@ -57,7 +54,7 @@ function FeedSkeleton({ dense }: { dense?: boolean }) {
 }
 
 /** Connection state; while live, every new event sends one ring out of the dot (`beat` = latest event id). */
-export function FeedStatusDot({ status, beat }: { status: FeedStatus; beat?: string }) {
+export function FeedStatusDot({ status, beat, updatedAt }: { status: FeedStatus; beat?: string; updatedAt?: number | null }) {
   const label = status === "live" ? "Live" : status === "connecting" ? "Connecting" : "Reconnecting";
   const reduce = useReducedMotion();
   return (
@@ -80,6 +77,7 @@ export function FeedStatusDot({ status, beat }: { status: FeedStatus; beat?: str
         />
       </span>
       {label}
+      {status === "offline" && updatedAt ? <StaleNote at={updatedAt} after={0} className="ml-1" /> : null}
     </span>
   );
 }

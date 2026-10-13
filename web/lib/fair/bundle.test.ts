@@ -78,6 +78,8 @@ describe.skipIf(!built)("sealed-bid launch stays out of the main bundle (.next)"
     // least not be initial.
     for (const c of marked) expect(initial.has(c), c).toBe(false);
     if (process.env.CHECK_SEALED_STRICT === "1") expect(marked).toEqual([]);
+    // Dev-only chaos panel (NEXT_PUBLIC_MOCK_CHAOS=1) must never ship in a public build.
+    if (process.env.CHECK_SEALED_STRICT === "1") expect(all.filter((c) => read(c).includes("uz-chaos"))).toEqual([]);
     else expect(marked.some((c) => lazy.has(c)) || marked.length === 0).toBe(true);
   });
 });

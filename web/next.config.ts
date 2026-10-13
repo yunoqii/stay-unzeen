@@ -70,6 +70,12 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_MOCK_FAIR_LAUNCH: process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH ?? "",
     NEXT_PUBLIC_FAIR_LAUNCH_BUILD: process.env.NEXT_PUBLIC_FAIR_LAUNCH_BUILD ?? "",
     NEXT_PUBLIC_MOCK_CREATE_DISABLED: process.env.NEXT_PUBLIC_MOCK_CREATE_DISABLED ?? "",
+    // Dev-only failure injection (lib/api/chaos.ts): must be inlined so a public build drops it.
+    NEXT_PUBLIC_MOCK_CHAOS: process.env.NEXT_PUBLIC_MOCK_CHAOS ?? "",
+    NEXT_PUBLIC_MOCK_CHAT: process.env.NEXT_PUBLIC_MOCK_CHAT ?? "",
+    NEXT_PUBLIC_MOCK_NOOP: process.env.NEXT_PUBLIC_MOCK_NOOP ?? "",
+    NEXT_PUBLIC_MOCK_DISCOVERY: process.env.NEXT_PUBLIC_MOCK_DISCOVERY ?? "",
+    NEXT_PUBLIC_COVER_TRAFFIC: process.env.NEXT_PUBLIC_COVER_TRAFFIC ?? "",
   },
   cacheComponents: true,
   partialPrefetching: true,

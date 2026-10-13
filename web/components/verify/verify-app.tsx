@@ -141,7 +141,7 @@ function VerifyView({ network }: { network: Network }) {
     );
   if (load.status === "empty")
     return (
-      <EmptyState title="No snapshot yet">
+      <EmptyState art title="No snapshot yet">
         <p>The pool publishes its first root at 00:00 UTC. Come back then: this page checks it right here, in your browser.</p>
         {mockTools && <div className="mt-5 flex justify-center">{mockTools}</div>}
       </EmptyState>

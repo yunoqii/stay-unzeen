@@ -118,8 +118,18 @@ export function unlock(n: Network, pubkey: string, secretKey: Uint8Array) {
   const s = slot(n);
   s.secret = secretKey;
   s.pubkey = pubkey;
-  s.autoLock = setTimeout(() => lock(n), AUTO_LOCK_MS);
+  s.autoLock = setTimeout(() => {
+    lock(n);
+    autoLockListeners.forEach((l) => l(n));
+  }, AUTO_LOCK_MS);
   recompute();
+}
+
+const autoLockListeners = new Set<(n: Network) => void>();
+/** The key locked itself after AUTO_LOCK_MS (not a lock the user asked for). */
+export function onAutoLock(l: (n: Network) => void): () => void {
+  autoLockListeners.add(l);
+  return () => void autoLockListeners.delete(l);
 }
 
 export function lock(n: Network = getNetwork()) {

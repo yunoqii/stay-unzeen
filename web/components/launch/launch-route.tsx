@@ -22,7 +22,7 @@ export function LaunchRoute({ params }: { params: Promise<{ id: string }> }) {
   if (!pool && !error) return <Skeleton className="h-72 rounded-2xl" />;
   if (!View || !pool || !sealedOn(pool) || !/^[0-9a-f]{32}$/.test(id))
     return (
-      <EmptyState title="Nothing to see here">
+      <EmptyState art title="Nothing to see here">
         This page stayed unzeen.{" "}
         <Link href="/launch" className="text-foreground underline underline-offset-4 hover:text-zec">
           Back to Launch

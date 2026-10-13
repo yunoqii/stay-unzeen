@@ -22,7 +22,7 @@ import type { Network } from "@/lib/network";
 export const POLL_MIN_MS = 10_000;
 export const POLL_JITTER_MS = 5_000;
 
-type Entry = { id: string; data: Portfolio | null; error: string | null };
+type Entry = { id: string; data: Portfolio | null; error: string | null; at: number | null };
 
 let activeId: string | null = null;
 let entry: Entry | null = null;
@@ -46,7 +46,7 @@ async function load() {
   try {
     const data = await api.getPortfolio(signer);
     if (activeId !== id) return;
-    entry = { id, data, error: null };
+    entry = { id, data, error: null, at: Date.now() };
     const [network, pubkey] = id.split(":") as [Network, string];
     applyActionStatuses(network, pubkey, data.actions);
     // v0.8: orders ride along in the same poll; trades they turned into join the local history.
@@ -54,7 +54,7 @@ async function load() {
     void applyPolledStatuses(network, pubkey, data.actions, Date.now(), fromOrders);
   } catch (e) {
     if (activeId !== id) return;
-    entry = { id, data: entry?.id === id ? entry.data : null, error: errorText(e) };
+    entry = { id, data: entry?.id === id ? entry.data : null, error: errorText(e), at: entry?.id === id ? entry.at : null };
   } finally {
     if (inflight === id) inflight = null;
     emit();
@@ -112,5 +112,5 @@ export function usePortfolio() {
   useLoop(id);
   const current = useSyncExternalStore(subscribe, () => entry, () => null);
   const mine = current && current.id === id ? current : null;
-  return { portfolio: mine?.data ?? null, error: mine?.error ?? null, refresh: load, keyId: id };
+  return { portfolio: mine?.data ?? null, error: mine?.error ?? null, updatedAt: mine?.at ?? null, refresh: load, keyId: id };
 }

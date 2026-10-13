@@ -61,6 +61,12 @@ function storage(): Kv {
   return (kv ??= idb() ?? memoryKv());
 }
 
+/** The same encrypted local store, for other per-key blobs (lib/chat/own.ts). Values are always AES-GCM blobs. */
+export const localKv = (): Kv => storage();
+
+/** Slot of this key's chat data (own nicknames), next to its history. */
+export const chatSlot = (network: Network, pubkey: string) => `chat:${historySlot(network, pubkey)}`;
+
 // ---- state per slot ----
 
 type Status = "loading" | "ready" | "error";
@@ -151,6 +157,7 @@ export async function forgetHistory(network: Network, pubkey: string): Promise<v
   emit();
   try {
     await storage().del(id);
+    await storage().del(chatSlot(network, pubkey));
   } catch {
     /* nothing stored */
   }

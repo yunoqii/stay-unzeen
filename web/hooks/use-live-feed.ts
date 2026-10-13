@@ -20,6 +20,10 @@ export interface LiveFeed {
   status: FeedStatus;
   loading: boolean;
   error: string | null;
+  /** Last time the feed was known current (connected or an event arrived); null before that. */
+  updatedAt: number | null;
+  /** Re-run the initial load after an error. */
+  retry: () => void;
 }
 
 /** History (GET /api/feed, or /api/tokens/:mint/trades), then /ws/feed[?mint=] for new events. */
@@ -29,6 +33,8 @@ export function useLiveFeed({ limit = 50, mint, initial }: Options = {}): LiveFe
   const [loading, setLoading] = useState(!initial);
   const [error, setError] = useState<string | null>(null);
   const [fresh, setFresh] = useState<ReadonlySet<string>>(() => new Set());
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const hasInitial = initial !== undefined;
 
   const network = useNetwork(); // refetch / resubscribe on Devnet <-> Mainnet
@@ -42,8 +48,13 @@ export function useLiveFeed({ limit = 50, mint, initial }: Options = {}): LiveFe
           if (mint && e.mint !== mint) return; // server filters by ?mint=, keep the guard anyway
           setEvents((prev) => (prev.some((p) => p.id === e.id) ? prev : [e, ...prev].slice(0, limit)));
           setFresh((prev) => new Set([e.id, ...Array.from(prev).slice(0, limit * 2)]));
+          setUpdatedAt(Date.now());
         },
-        (s) => alive && setStatus(s),
+        (s) => {
+          if (!alive) return;
+          setStatus(s);
+          if (s === "live") setUpdatedAt(Date.now());
+        },
         { mint },
       );
     };
@@ -56,6 +67,8 @@ export function useLiveFeed({ limit = 50, mint, initial }: Options = {}): LiveFe
           if (!alive) return;
           setEvents(list);
           setLoading(false);
+          setError(null);
+          setUpdatedAt(Date.now());
           start();
         })
         .catch((e: unknown) => {
@@ -69,7 +82,12 @@ export function useLiveFeed({ limit = 50, mint, initial }: Options = {}): LiveFe
       alive = false;
       unsubscribe();
     };
-  }, [limit, mint, hasInitial, network]);
+  }, [limit, mint, hasInitial, network, attempt]);
 
-  return { events, fresh, status, loading, error };
+  const retry = () => {
+    setLoading(true);
+    setError(null);
+    setAttempt((a) => a + 1);
+  };
+  return { events, fresh, status, loading, error, updatedAt, retry };
 }

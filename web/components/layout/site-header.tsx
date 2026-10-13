@@ -12,8 +12,10 @@ import { KeyStatus } from "./key-status";
 import { NetworkBanner } from "./network-banner";
 import { NetworkSwitch } from "./network-switch";
 import { PortfolioSync } from "./portfolio-sync";
+import { CoverTraffic } from "./cover-traffic";
+import { ConnectionBanner } from "@/components/ui/states";
 import { Wordmark } from "./logo";
-import { NAV, isActive } from "./nav-items";
+import { NAV, NAV_SECONDARY, isActive } from "./nav-items";
 
 export function SiteHeader() {
   return (
@@ -42,9 +44,11 @@ export function SiteHeader() {
           <NetworkSwitch />
           <KeyStatus />
           <PortfolioSync />
+          <CoverTraffic />
         </div>
       </div>
       <NetworkBanner />
+      <ConnectionBanner />
     </header>
   );
 }
@@ -57,7 +61,7 @@ function DesktopNavList({ pathname }: { pathname: string | null }) {
   return (
           // New style (owner review): the proximity dock runs on the feed and token pages only for now.
           <ProximityDock enabled={pathname === "/" || !!pathname?.startsWith("/token/")} className="flex items-center gap-1">
-            {NAV.map((item) => {
+            {[...NAV, ...NAV_SECONDARY].map((item) => {
               const active = pathname !== null && isActive(pathname, item.href);
               return (
                 <DockItem key={item.href} className="relative">

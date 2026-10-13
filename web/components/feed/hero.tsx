@@ -8,33 +8,46 @@ import { motion } from "motion/react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
-/** Can this device afford the WebGL eclipse? Otherwise the static one stays (FRONTEND.md moment 2). */
-function webglAllowed(): boolean {
-  if (new URLSearchParams(window.location.search).get("eclipse") === "static") return false;
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
+type EclipseMode = "static" | "video" | "gl";
+
+/**
+ * Which eclipse this device gets (FRONTEND.md moment 2):
+ *   - reduced motion / Save-Data: the poster (a still frame of the loop), nothing moves, nothing heavy loads;
+ *   - capable device with WebGL: the interactive shader (it leans toward the pointer: the loop cannot);
+ *   - everything else (few cores / little memory / no WebGL): the 1.5 MB H.264 loop, hardware-decoded.
+ * `?eclipse=static|video|gl` forces one (demos, screenshots).
+ */
+function eclipseMode(): EclipseMode {
+  const forced = new URLSearchParams(window.location.search).get("eclipse");
+  if (forced === "static" || forced === "video" || forced === "gl") return forced;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return "static";
   const nav = navigator as Navigator & { deviceMemory?: number; connection?: { saveData?: boolean } };
-  if (nav.connection?.saveData) return false;
-  if ((nav.hardwareConcurrency ?? 8) < 4 || (nav.deviceMemory ?? 8) < 4) return false;
+  if (nav.connection?.saveData) return "static";
+  if ((nav.hardwareConcurrency ?? 8) < 4 || (nav.deviceMemory ?? 8) < 4) return "video";
   try {
     const c = document.createElement("canvas");
-    return !!(c.getContext("webgl2") ?? c.getContext("webgl"));
+    return c.getContext("webgl2") ?? c.getContext("webgl") ? "gl" : "video";
   } catch {
-    return false;
+    return "video";
   }
 }
 
 const EclipseGL = dynamic(() => import("./eclipse-gl"), { ssr: false });
 
-/** Static eclipse (CSS) under a lazily loaded WebGL one; the static one is also the fallback. */
+/** Static eclipse (CSS) first; then the poster, the loop or the WebGL one on top, by device. */
 function Eclipse() {
-  const [gl, setGl] = useState(false);
+  const [mode, setMode] = useState<EclipseMode | null>(null);
   const [ready, setReady] = useState(false);
   const [visible, setVisible] = useState(true);
   const box = useRef<HTMLDivElement>(null);
+  const video = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const decide = () => setGl(webglAllowed());
+    const decide = () => {
+      setReady(false);
+      setMode(eclipseMode());
+    };
     // Off the critical path: decide after the feed had its first paint.
     const idle = window.requestIdleCallback ? window.requestIdleCallback(decide, { timeout: 1500 }) : window.setTimeout(decide, 300);
     mq.addEventListener("change", decide);
@@ -47,22 +60,58 @@ function Eclipse() {
 
   useEffect(() => {
     const el = box.current;
-    if (!el || !gl) return;
+    if (!el || (mode !== "gl" && mode !== "video")) return;
     const io = new IntersectionObserver(([e]) => setVisible(e.isIntersecting));
     io.observe(el);
     return () => io.disconnect();
-  }, [gl]);
+  }, [mode]);
+
+  // The loop plays only while on screen.
+  useEffect(() => {
+    const v = video.current;
+    if (!v || mode !== "video") return;
+    if (visible) void v.play().catch(() => {});
+    else v.pause();
+  }, [mode, visible]);
 
   return (
     <div ref={box} aria-hidden className="pointer-events-none absolute -top-44 right-[-14rem] size-[24rem] opacity-70 sm:-top-44 sm:right-[-6rem] sm:size-[30rem] sm:opacity-100 lg:right-0">
-      {/* Ambient glow: mood borrowed from a looping glow video, rebuilt as a CSS gradient in Zcash yellow (no video, no request). */}
+      {/* Ambient glow in Zcash yellow. */}
       <div className="uz-glow absolute inset-[-35%] rounded-full bg-[radial-gradient(closest-side,rgb(244_183_40/0.14),rgb(244_183_40/0.05)_45%,transparent_70%)] blur-2xl" />
       <div className={cn("absolute inset-0 transition-opacity duration-700", ready && "opacity-0")}>
         <div className="absolute inset-0 rounded-full bg-[radial-gradient(closest-side,transparent_88%,rgb(244_183_40/0.35)_95%,transparent)] blur-2xl" />
         <div className="absolute inset-[6%] rounded-full shadow-[0_0_0_1px_rgb(244_183_40/0.55),0_0_60px_6px_rgb(244_183_40/0.18)]" />
         <div className="absolute inset-[6%] translate-x-[3%] translate-y-[-2%] rounded-full bg-[radial-gradient(circle_at_65%_35%,#121215,#060607_60%)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.04)]" />
       </div>
-      {gl && (
+      {(mode === "static" || mode === "video") && (
+        // The frame is 16:9 with the disc at ~41% of its height, 72% across: scaled and shifted so the disc sits where the CSS one is.
+        // The frame background is the page colour already; the radial mask fades its edges.
+        <div
+          className={cn("absolute top-1/2 left-1/2 aspect-video h-[215%] -translate-x-[72%] -translate-y-1/2 opacity-0 transition-opacity duration-700", ready && "opacity-100")}
+          // The disc sits at 72% of the frame's width; a radial mask hides the frame's edges.
+          style={{ maskImage: "radial-gradient(ellipse 30% 50% at 72% 50%, #000 55%, transparent 100%)", WebkitMaskImage: "radial-gradient(ellipse 30% 50% at 72% 50%, #000 55%, transparent 100%)" }}
+        >
+          {mode === "video" ? (
+            <video
+              ref={video}
+              className="size-full object-cover"
+              src="/hero/eclipse-loop.mp4"
+              poster="/hero/eclipse-poster.webp"
+              muted
+              loop
+              playsInline
+              autoPlay
+              preload="metadata"
+              disablePictureInPicture
+              onLoadedData={() => setReady(true)}
+            />
+          ) : (
+            // eslint-disable-next-line @next/next/no-img-element -- a local still, no optimizer round-trip needed
+            <img src="/hero/eclipse-poster.webp" alt="" className="size-full object-cover" onLoad={() => setReady(true)} />
+          )}
+        </div>
+      )}
+      {mode === "gl" && (
         <div className={cn("absolute inset-[-16.667%] opacity-0 transition-opacity duration-700", ready && "opacity-100")}>
           <EclipseGL active={visible} onReady={() => setReady(true)} />
         </div>

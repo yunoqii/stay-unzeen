@@ -3,11 +3,11 @@
 import { useEffect, useState } from "react";
 import { api, errorText } from "@/lib/api/client";
 import { useNetwork } from "@/lib/network";
-import type { Token } from "@/lib/api/types";
+import type { TokenListItem } from "@/lib/api/types";
 
 /** GET /api/tokens, refreshed every `refreshMs` and whenever `refreshKey` changes. */
 export function useTokens(refreshKey?: unknown, refreshMs = 15_000) {
-  const [tokens, setTokens] = useState<Token[] | null>(null);
+  const [tokens, setTokens] = useState<TokenListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const network = useNetwork(); // refetch / resubscribe on Devnet <-> Mainnet

@@ -32,3 +32,31 @@ export function padAction(action: SignedAction): PaddedAction {
   const bare = byteLength(JSON.stringify({ ...rest, pad: "" }));
   return { ...rest, pad: randomChars(padTarget(bare) - bare) } as PaddedAction;
 }
+
+/** Ops whose body must be exactly PAD_MIN bytes (chat.md §5.1, R8): never a bigger bucket. */
+export const EXACT_OPS: ReadonlySet<string> = new Set(["chat", "chat_delete", "chat_hide", "chat_report", "noop"]);
+
+export class BodyTooLong extends Error {
+  constructor(public readonly bytes: number) {
+    super(`body is ${bytes} bytes before filler, more than ${PAD_MIN}`);
+  }
+}
+
+/** Bytes of the body without filler (`"pad":""`), i.e. what the content itself costs. */
+export const bareBytes = (action: SignedAction): number => {
+  const { pad: _drop, ...rest } = action as PaddedAction;
+  void _drop;
+  return byteLength(JSON.stringify({ ...rest, pad: "" }));
+};
+
+/**
+ * Chat and noop bodies: exactly PAD_MIN bytes on the wire, like an ordinary buy, so the size says
+ * neither "chat" nor how long the text is. Throws BodyTooLong instead of spilling into the next bucket.
+ */
+export function padExact(action: SignedAction, size = PAD_MIN): PaddedAction {
+  const bare = bareBytes(action);
+  if (bare > size) throw new BodyTooLong(bare);
+  const { pad: _drop, ...rest } = action as PaddedAction;
+  void _drop;
+  return { ...rest, pad: randomChars(size - bare) } as PaddedAction;
+}

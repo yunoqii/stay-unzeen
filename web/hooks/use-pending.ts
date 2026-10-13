@@ -10,7 +10,7 @@ export type PendingState<T> =
   | { state: "pending"; retryAt: number }
   | { state: "ready"; data: T }
   | { state: "missing" }
-  | { state: "error"; error: string };
+  | { state: "error"; error: string; retry: () => void };
 
 /** Never hammer: at least 1 s, at most 90 s between retries, whatever retryAfterMs says. */
 export const clampRetry = (ms: number) => Math.min(90_000, Math.max(1_000, Number.isFinite(ms) ? ms : 5_000));
@@ -22,6 +22,8 @@ export const clampRetry = (ms: number) => Math.min(90_000, Math.max(1_000, Numbe
 export function usePending<T>(key: string, load: () => Promise<T | PendingResponse | null>, refreshMs?: number): PendingState<T> {
   const network = useNetwork();
   const [st, setSt] = useState<{ key: string; value: PendingState<T> }>({ key: "", value: { state: "loading" } });
+  const [attempt, setAttempt] = useState(0);
+  const retry = () => setAttempt((a) => a + 1);
 
   useEffect(() => {
     let alive = true;
@@ -44,7 +46,7 @@ export function usePending<T>(key: string, load: () => Promise<T | PendingRespon
         })
         .catch((e: unknown) => {
           if (!alive) return;
-          setSt((prev) => (prev.key === id && prev.value.state === "ready" ? prev : { key: id, value: { state: "error", error: errorText(e) } }));
+          setSt((prev) => (prev.key === id && prev.value.state === "ready" ? prev : { key: id, value: { state: "error", error: errorText(e), retry } }));
           if (refreshMs) timer = setTimeout(run, refreshMs);
         });
     };
@@ -55,7 +57,7 @@ export function usePending<T>(key: string, load: () => Promise<T | PendingRespon
     };
     // `load` is expected to change only with `key`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, network, refreshMs]);
+  }, [key, network, refreshMs, attempt]);
 
   return st.key === `${network}:${key}` ? st.value : { state: "loading" };
 }

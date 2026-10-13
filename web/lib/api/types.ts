@@ -49,6 +49,36 @@ export interface Token {
   createdAt: number; // unix ms
 }
 
+/** v0.12: element of GET /api/tokens (Token + the fields the /tokens filters need). */
+export interface TokenListItem extends Token {
+  /** Launched through Unzeen (a public create of the pool). */
+  unzeenLaunch: boolean;
+  /** Pool trade volume of the mint over 24 h (buy + sell), SOL. */
+  volume24hSol: DecimalString;
+  /** Pool trades of the mint over 24 h. */
+  unzeenTrades24h: number;
+  /** Only with status "curve" and an indexer snapshot. */
+  curveProgressPct?: DecimalString;
+}
+
+/** v0.12: element of GET /api/tokens?source=discovery (indexer snapshot), only with features.discovery. */
+export interface DiscoveryToken {
+  mint: string;
+  /** May be "" while metadata is not read yet. */
+  symbol: string;
+  name: string;
+  venue: "pumpfun" | "meteora-dbc";
+  status: "curve" | "graduated";
+  decimals: number;
+  priceSol: DecimalString;
+  marketCapSol: DecimalString;
+  createdAt: number;
+  curveProgressPct?: DecimalString;
+  unzeenLaunch: boolean;
+  /** unix ms of the indexer tick the numbers belong to. */
+  asOf: number;
+}
+
 /** GET /api/tokens/:mint — last 50 trades, newest first. */
 export type TokenWithTrades = Token & { trades: FeedEvent[] };
 
@@ -92,7 +122,15 @@ export interface PoolInfo {
     fullTrades: boolean;
     /** v0.6: false -> the whole fair-launch surface is hidden (no UI, no code loaded). */
     fairLaunch?: boolean;
+    /** v0.12 chat: absent = no chat (no tab, every chat_* op -> 400). */
+    chat?: true;
+    /** v0.12: GET /api/tokens?source=discovery (fresh launchpad tokens via the indexer). Off by default. */
+    discovery?: true;
+    /** v0.12 cover traffic (R8): the server accepts `op:"noop"`. Absent = the client sends none. */
+    noop?: true;
   };
+  /** v0.12 chat: only with features.chat. */
+  chat?: ChatParams;
   /** v0.6: only with features.fairLaunch = true. */
   fairLaunch?: FairLaunchParams;
   /** v0.8: private orders (limit / take-profit / stop-loss). Absent = the server has no orders. */
@@ -195,7 +233,13 @@ export type SignedAction =
       exec?: "delayed" | "max"; // "now" -> 400
     }
   | { op: "order_cancel"; orderId: string }
-  | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean }
+  // Chat (v0.12): body exactly ChatParams.bodyBytes (1024), never in Portfolio.actions.
+  | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean; slow?: boolean }
+  | { op: "chat_delete"; id: string }
+  | { op: "chat_hide"; id: string }
+  | { op: "chat_report"; id: string; reason: ChatReportReason }
+  // Cover traffic (v0.12, R8): same endpoint, same 1024 bytes, no effect.
+  | { op: "noop" }
   // v0.6 fair-launch (only with features.fairLaunch; otherwise 400 like an unknown op)
   | { op: "fl_create"; venue: "pumpfun"; meta: { name: string; symbol: string; image?: string }; windowSecs: number }
   | { op: "fl_bid"; launchId: string; holdZat: Zatoshis; ciphertext: string }
@@ -229,6 +273,8 @@ export interface ActionReceipt {
   rate?: RateUsed; // buy / sell / create / withdraw_token
   /** v0.6: fl_create only. */
   launchId?: string;
+  /** v0.12: op "chat" only: your nickname in this token's chat (member or creator, by the badge flag). */
+  nick?: string;
 }
 
 /** GET /api/actions/:id (owner only). */
@@ -292,13 +338,51 @@ export interface OrdersParams {
   priceTick: { minSecs: number; maxSecs: number };
 }
 
+// ---- chat (docs/API.md v0.12, "Чат") ----
+
+export type ChatReportReason = "spam" | "scam" | "abuse";
+/** v0.12 tombstones; "creator" is not one (creator hides stay as messages with hiddenByCreator), still tolerated. */
+export type ChatRemovedReason = "deleted" | "creator" | "reports" | "operator";
+
+/** PoolInfo.chat */
+export interface ChatParams {
+  /** Admission: ZEC available + held + tokens at the tick price must be at least this (zatoshis). */
+  minAccountZat: Zatoshis;
+  maxChars: number; // 280
+  maxJsonBytes: number; // 800: JSON.stringify(text) in UTF-8
+  bodyBytes: number; // 1024: every chat_* body is exactly this long
+  rate: { minIntervalSecs: number; perHour: number; perDay: number };
+  reportHideThreshold: number;
+  slowDelaySecs: { min: number; max: number };
+  retentionDays: number;
+}
+
 export interface ChatMessage {
+  /** 32 hex, 128 random bits. */
   id: string;
   mint: string;
-  nick: string; // short hash H(anonPubkey || mint)
-  text: string;
+  /** 8 chars Crockford base32, lower case: HMAC(K_chat, ...) on the server. No pubkey, no signature anywhere. */
+  nick: string;
+  /** The creator's separate nickname in this chat (verified by the pool, not by a public proof). */
   isCreator: boolean;
+  text: string;
+  /** unix ms: the epoch boundary it was published on, never the time the request arrived. */
   ts: number;
+  /** Decimal string, publication order; random within one batch. */
+  seq: string;
+  /** Hidden by the token's creator: the text stays, a reader can reveal it; re-sent in `after=` with a new seq. */
+  hiddenByCreator?: true;
+}
+
+/** GET /api/tokens/:mint/chat */
+export interface ChatPage {
+  messages: ChatMessage[];
+  /** Tombstones, kept 24 h. */
+  removed: { id: string; reason: ChatRemovedReason }[];
+  /** Highest seq of the events in this page: pass it as after=. */
+  cursor: string;
+  more: boolean;
+  pad?: string;
 }
 
 /** v0.9: GET /api/creator (signed). Owner only; none of it is public anywhere (T1). */
@@ -382,6 +466,10 @@ export type ErrorCode =
   | "order_limit" // 422 (v0.8): > 10 open orders per key or > 4 per key and mint
   | "order_not_open" // 409 (v0.8): order_cancel of an order that is no longer open
   | "order_unsupported_mint" // 422 (v0.8): mint not traded by the pool, not pump.fun, or graduated
+  | "chat_text_invalid" // 400 (v0.12)
+  | "chat_not_eligible" // 403 (v0.12): account below PoolInfo.chat.minAccountZat; never says by how much
+  | "chat_muted" // 403 (v0.12)
+  | "not_creator" // 403 (v0.12)
   | "internal";
 
 export interface ApiErrorBody {

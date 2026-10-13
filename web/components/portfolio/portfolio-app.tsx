@@ -9,6 +9,7 @@ import { useActions } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
 import { useNetwork } from "@/lib/network";
 import { sealedOn } from "@/lib/features";
+import { StaleNote } from "@/components/ui/states";
 import type { FairBid, OwnFairLaunch } from "@/lib/api/types";
 import { usePool } from "@/hooks/use-pool";
 import { usePortfolio } from "@/hooks/use-portfolio";
@@ -41,7 +42,7 @@ export function PortfolioApp() {
 }
 
 function PortfolioView() {
-  const { portfolio, error } = usePortfolio();
+  const { portfolio, error, updatedAt } = usePortfolio();
   const { pool } = usePool();
   const { tokens } = useTokens();
   const [withdraw, setWithdraw] = useState<{ tab: WithdrawTab; mint: string | null } | null>(null);
@@ -61,7 +62,8 @@ function PortfolioView() {
         {error && (
           <p role="alert" className="flex items-center gap-2 rounded-xl border border-border bg-surface-1 px-4 py-3 text-sm text-muted-foreground">
             <WarningCircle size={16} weight="light" className="shrink-0 text-zec" aria-hidden />
-            {error}
+            <span className="flex-1">{error}</span>
+            <StaleNote at={updatedAt} after={0} />
           </p>
         )}
         <BalanceCard portfolio={portfolio} onWithdraw={() => open("zec")} />

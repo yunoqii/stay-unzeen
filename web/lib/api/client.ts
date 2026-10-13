@@ -5,7 +5,8 @@
 
 import { signRequest, type SignedHeaders, type Signer } from "@/lib/crypto/sign";
 import { networkConfig } from "@/lib/network";
-import { padAction } from "@/lib/pad";
+import { trackRequest } from "@/lib/connectivity";
+import { EXACT_OPS, padAction, padExact } from "@/lib/pad";
 import { ApiError, errorFromResponse } from "./errors";
 import * as mock from "./mock";
 import type {
@@ -13,14 +14,16 @@ import type {
   ActionStatus,
   Candle,
   CandleTimeframe,
+  ChatPage,
   CreatorCabinet,
+  DiscoveryToken,
   FeedEvent,
   PendingResponse,
   PlatformStats,
   PoolInfo,
   Portfolio,
   SignedAction,
-  Token,
+  TokenListItem,
   TokenSafety,
   TokenTrade,
   TokenWithTrades,
@@ -66,6 +69,9 @@ export interface CandlesQuery {
   to?: number; // unix seconds
 }
 
+/** Chat (API.md v0.12): one of the three, never combined. */
+export type ChatQuery = { limit?: number } | { before: string; limit?: number } | { after: string };
+
 export interface FeedSubscription {
   /** Only events for this mint (WS /ws/feed?mint=). */
   mint?: string;
@@ -74,7 +80,7 @@ export interface FeedSubscription {
 /** Everything the UI can ask of the backend. Signed calls take a Signer from lib/crypto/session. */
 export interface Api {
   getFeed(limit?: number): Promise<FeedEvent[]>;
-  getTokens(): Promise<Token[]>;
+  getTokens(): Promise<TokenListItem[]>;
   /**
    * null when the mint does not exist (404 not_found). A cold mint (first CA search) answers 202
    * pending: it is queued for the next fixed tick (token-intel DRAFT).
@@ -94,6 +100,10 @@ export interface Api {
   getAction(signer: Signer, id: string): Promise<ActionStatus>;
   getCreator(signer: Signer): Promise<CreatorCabinet>;
   getStats(): Promise<PlatformStats>;
+  /** v0.12 (features.discovery): fresh launchpad tokens, public and the same for everyone. */
+  getDiscovery(): Promise<DiscoveryToken[]>;
+  /** Chat (v0.12): public, unsigned, identical for every reader. */
+  getChat(mint: string, q?: ChatQuery): Promise<ChatPage>;
   /**
    * Plain GET for features that bring their own endpoints and load on demand (their paths stay out
    * of the main bundle). Same transport, signing and error mapping as everything else.
@@ -156,7 +166,23 @@ async function mockCall<T>(call: Call): Promise<T> {
   return mock.handle(networkConfig().id, call.method, call.path, body, headers as Partial<SignedHeaders>) as Promise<T>;
 }
 
-function makeApi(send: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscribeFeed"]): Api {
+/** Report every call to the connection banner: transport failures and 5xx count, other answers do not. */
+function tracked(send: <T>(call: Call) => Promise<T>): <T>(call: Call) => Promise<T> {
+  return async <T,>(call: Call) => {
+    const done = trackRequest();
+    try {
+      const r = await send<T>(call);
+      done("ok");
+      return r;
+    } catch (e) {
+      done(e instanceof ApiError && (e.code === "network" || e.status >= 500) ? "transport" : "http");
+      throw e;
+    }
+  };
+}
+
+function makeApi(rawSend: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscribeFeed"]): Api {
+  const send = tracked(rawSend);
   const get = <T>(path: string, signer?: Signer) => send<T>({ method: "GET", path, signer });
   const post = <T>(path: string, body: unknown, signer?: Signer, retries?: number) =>
     send<T>({ method: "POST", path, body, signer, retries });
@@ -188,10 +214,20 @@ function makeApi(send: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscr
     // The anon pubkey never goes into a URL path or query (access logs = IP <-> key). Header only.
     getPortfolio: (signer) => get("/api/portfolio", signer),
     // Padded to a fixed size bucket before signing: the length must not reveal the op or the mode.
-    postAction: (signer, action) => post("/api/actions", padAction(action), signer, 2),
+    // Chat and noop: exactly 1024 bytes (chat.md §5.1); a longer one throws before anything is signed.
+    postAction: (signer, action) => post("/api/actions", EXACT_OPS.has(action.op) ? padExact(action) : padAction(action), signer, 2),
     getAction: (signer, id) => get(`/api/actions/${enc(id)}`, signer),
     getCreator: (signer) => get("/api/creator", signer),
     getStats: () => get("/api/stats"),
+    getDiscovery: () => get("/api/tokens?source=discovery"),
+    getChat: (mint, q = {}) =>
+      get(
+        `/api/tokens/${enc(mint)}/chat${qs({
+          limit: "limit" in q ? q.limit : undefined,
+          before: "before" in q ? q.before : undefined,
+          after: "after" in q ? q.after : undefined,
+        })}`,
+      ),
     request: (path, signer) => get(path, signer),
     subscribeFeed,
   };

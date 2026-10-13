@@ -190,7 +190,10 @@ export function PriceChart({
     const lines: IPriceLine[] = triggers
       .filter((t) => t.price > 0)
       .map((t) => series.createPriceLine({ price: t.price, color: "rgba(244,183,40,0.55)", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: t.label }));
-    return () => lines.forEach((l) => series.removePriceLine(l));
+    // On unmount the chart is removed first (effect above): its series are disposed by then.
+    return () => {
+      if (chart.current) lines.forEach((l) => series.removePriceLine(l));
+    };
   }, [triggers, showMarkers, readyTick]);
 
   // History for the selected timeframe.

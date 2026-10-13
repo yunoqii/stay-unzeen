@@ -1,3 +1,4 @@
+import { EmptyArt } from "./empty-art";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -24,17 +25,22 @@ export function PageShell({ eyebrow, title, lead, children, className, hatch = t
   );
 }
 
-/** Quiet empty state: a silhouette, not an illustration. */
+/**
+ * Quiet empty state. `art` adds the owner's redaction-tape illustration (/illustrations/empty.webp); if
+ * it fails to load, the soft silhouette behind the text is all that remains.
+ */
 export function EmptyState({
   icon,
   title,
   children,
   className,
+  art = false,
 }: {
   icon?: React.ReactNode;
   title: string;
   children?: React.ReactNode;
   className?: string;
+  art?: boolean;
 }) {
   return (
     <div
@@ -44,9 +50,11 @@ export function EmptyState({
       )}
     >
       <div aria-hidden className="absolute top-1/2 left-1/2 size-48 -translate-x-1/2 -translate-y-1/2 rounded-full bg-surface-1 blur-3xl" />
+      {art && <EmptyArt />}
       {icon && <div className="relative mb-4 text-muted-foreground">{icon}</div>}
       <p className="relative text-sm font-medium">{title}</p>
       {children && <div className="relative mt-2 max-w-sm text-sm text-pretty text-muted-foreground">{children}</div>}
     </div>
   );
 }
+

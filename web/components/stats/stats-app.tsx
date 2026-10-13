@@ -1,9 +1,9 @@
 "use client";
 
+import { ErrorState } from "@/components/ui/states";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { ChartBar } from "@phosphor-icons/react";
 import { api, ApiError, errorText } from "@/lib/api/client";
 import type { KAmount, KCount, PlatformStats, Venue } from "@/lib/api/types";
 import { formatCompact, formatPrice } from "@/lib/format";
@@ -67,11 +67,11 @@ export function StatsApp() {
     );
   if (load.s === "none")
     return (
-      <EmptyState icon={<ChartBar size={28} weight="thin" />} title="Stats appear after the first daily snapshot">
+      <EmptyState art title="Stats appear after the first daily snapshot">
         The pool publishes them once a day, at 00:00 UTC. Nothing here is live.
       </EmptyState>
     );
-  if (load.s === "error") return <EmptyState title="Could not load the stats">{load.message}</EmptyState>;
+  if (load.s === "error") return <ErrorState error={load.message} title="Could not load the stats" />;
 
   const d = load.data;
   const cells: Array<[string, React.ReactNode, string]> = [
