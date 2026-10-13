@@ -1,0 +1,27 @@
+// Reference for web/components/layout/logo.tsx (frontend owns the real file).
+// Mark = D tape (yellow, torn right end). Wordmark = D2a: "un▬een", the tape hides the z.
+// The visible name is always present for machines and screen readers (aria-label / sr-only text).
+import { cn } from "@/lib/utils";
+
+const TAPE_D =
+  "M2,21 L62,21 L56,23.75 L62,26.5 L60.5,29.25 L62,32 L56,34.75 L62,37.5 L60.5,40.25 L62,43 L2,43Z";
+
+/** Tape mark: a strip of yellow redaction tape with a torn end. */
+export function TapeMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 64 64" aria-hidden className={cn("size-6", className)}>
+      <path transform="rotate(-14 32 32)" d={TAPE_D} fill="var(--zec)" />
+    </svg>
+  );
+}
+
+/** Mark + wordmark. The wordmark SVG lives in /brand/unzeen-wordmark-on-dark.svg (outlined Geist Black). */
+export function Wordmark({ className }: { className?: string }) {
+  return (
+    <span className={cn("inline-flex items-center gap-2", className)} aria-label="unzeen" role="img">
+      <TapeMark />
+      {/* height 20-24px in the header; never below 16px */}
+      <img src="/brand/unzeen-wordmark-on-dark.svg" alt="" aria-hidden className="h-5 w-auto" />
+    </span>
+  );
+}
