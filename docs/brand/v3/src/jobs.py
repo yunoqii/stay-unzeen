@@ -27,6 +27,7 @@ for k, n in DIRS:
 J(u("logos.html"), 1800, 1060, 1, os.path.join(OUT, "logo-sheet.png"))
 J(u("preview-profile.html"), 1460, 3080, 1, os.path.join(OUT, "preview-profile.png"))
 J(u("preview-safezone.html"), 1600, 2940, 1, os.path.join(OUT, "preview-banner-safezone.png"))
+J(u("d2-sheet.html"), 1600, 900, 1, os.path.join(OUT, "d2-sheet.png"))
 J(u("overview.html"), 2400, 1800, 1, os.path.join(OUT, "overview.png"))
 only = os.environ.get("ONLY")
 if only: jobs = [j for j in jobs if re.search(only, j["out"])]

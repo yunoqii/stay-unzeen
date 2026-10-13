@@ -13,3 +13,10 @@
 Файлы: `svg/` (знаки, lockup, wordmark, favicon; текст переведён в кривые, шрифт не нужен), `png/` (512, @4x lockup, favicon 16/32/48/180), `x/` (avatar 400 и @2x, banner 1500×500 и @2x).
 
 Пересборка (офлайн): `PYTHON=<python с fonttools> PUPPETEER_CORE=<путь к puppeteer-core> sh src/render.sh` (`ONLY=<regex>` — часть). Шрифты Geist лежат локально в `src/fonts` (OFL), сеть не используется.
+
+## D2: доработка wordmark Tape (`d2-sheet.png`)
+Владелец выбрал D · Tape. В исходном wordmark лента идёт по середине «zee» и читается как зачёркивание. Два исправления:
+- **D2a · z only** (`svg/d2a-tape-*`, `png/d2a-tape-*`): лента закрывает только «z» → «un▬een», читается как «unseen». Плюс: в знаке нет буквы Z (правила бренда Zcash).
+- **D2b · low strip** (`svg/d2b-tape-*`, `png/d2b-tape-*`): тонкая лента-ярлык по базовой линии под «zee». Слово читается целиком.
+
+Во всех текстах v3 нет слова «Solana»: бренд не привязан к одной сети. Био: «Private trading for launchpads, paid in shielded ZEC. Launch anywhere. Stay unzeen.»

@@ -154,13 +154,30 @@ def mark_g(k, u, light=False, small=False):
     if k == "e": return f(u, fg=INK, bar=ZEC, bg=LIGHT, small=small)
 
 
-def wordmark(k, x, base, size, color, u, light=False):
+def wordmark(k, x, base, size, color, u, light=False, tv=None):
     font, tr = WORD[k]
     o = outline(font, "unzeen", tr)
     s = size / o["upm"]
     paths = "".join(f'<path d="{g["d"]}"/>' for g in o["glyphs"])
     out = f'<g transform="translate({x} {base}) scale({s})" fill="{color}">{paths}</g>'
     extra = ""
+    if k == "d" and tv == "z":  # d2a: the tape hides the z only -> "un▬een" (reads as unseen; no Z in the mark either)
+        g = o["glyphs"]
+        zx0, zx1 = g[2]["x"] * s + x + 1, (g[2]["x"] + g[2]["adv"]) * s + x - 1
+        xh = o["xh"] * s
+        h = xh * 1.04
+        y0 = base - xh * 1.05
+        d = tape_path(zx0, y0, zx1 - zx0, h, teeth=3, tear=(zx1 - zx0) * 0.16)
+        return out.replace(paths, "".join(f'<path d="{gg["d"]}"/>' for i, gg in enumerate(o["glyphs"]) if i != 2)) + \
+            f'<g transform="rotate(-4 {(zx0+zx1)/2} {y0+h/2})"><path d="{d}" fill="{ZEC}"/></g>', o["width"] * s
+    if k == "d" and tv == "low":  # d2b: a thin label strip under "zee", over the baseline only: tape, not a strike
+        g = o["glyphs"]
+        zx0, zx1 = g[2]["x"] * s + x - 6, (g[4]["x"] + g[4]["adv"]) * s + x + 10
+        xh = o["xh"] * s
+        h = xh * 0.26
+        y0 = base - h * 0.55
+        d = tape_path(zx0, y0, zx1 - zx0, h, teeth=2, tear=h * 0.45)
+        return out + f'<g transform="rotate(-2.5 {(zx0+zx1)/2} {y0+h/2})"><path d="{d}" fill="{ZEC}"/></g>', o["width"] * s
     if k == "d":  # the tape over "zee": covers the middle band of the x-height, letters still read
         g = o["glyphs"]
         zx0, zx1 = g[2]["x"] * s + x - 4, (g[4]["x"] + g[4]["adv"]) * s + x + 2
@@ -172,13 +189,13 @@ def wordmark(k, x, base, size, color, u, light=False):
     return out + extra, o["width"] * s
 
 
-def lockup(k, light=False):
+def lockup(k, light=False, tv=None):
     H = 120
     msize = 84
     body = f'<g transform="translate(18 18) scale({msize/64})">{mark_g(k, "L"+k+("l" if light else "d"), light)}</g>'
     size = 76 if k != "a" else 68
     color = INK if light else PAPER
-    wm, ww = wordmark(k, 18 + msize + 26, 87, size, color, k, light)
+    wm, ww = wordmark(k, 18 + msize + 26, 87, size, color, k, light, tv)
     W = int(18 + msize + 26 + ww + 26)
     return svg(W, H, body + wm, bg=LIGHT if light else INK, title="unzeen")
 
@@ -203,6 +220,14 @@ def main():
         write(f"{n}-wordmark-dark.svg", svg(int(ww + 8), 80, wm))
     # avatar marks (no ground): visor rising from the bottom edge
     write("e-visor-avatar-body.svg", svg(64, 64, mark_visor("av", fg=INK0, bar="#F4B728", crop=True)))
+    # D2: two fixes for the Tape wordmark so "unzeen" does not read as struck through
+    for tv, nm in (("z", "d2a-tape"), ("low", "d2b-tape")):
+        write(f"{nm}-lockup-dark.svg", lockup("d", tv=tv))
+        write(f"{nm}-lockup-light.svg", lockup("d", light=True, tv=tv))
+        wm, ww = wordmark("d", 4, 66, 76, PAPER, "d2" + tv, tv=tv)
+        write(f"{nm}-wordmark-dark.svg", svg(int(ww + 12), 84, wm))
+        wm, ww = wordmark("d", 4, 66, 76, INK, "d2l" + tv, tv=tv)
+        write(f"{nm}-wordmark-light.svg", svg(int(ww + 12), 84, wm, bg=LIGHT))
     write("e-visor-avatar-yellow.svg", svg(64, 64, mark_visor("ay", crop=True)))
     print("ok")
 

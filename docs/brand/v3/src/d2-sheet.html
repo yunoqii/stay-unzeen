@@ -1,0 +1,24 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Unzeen v3 · Tape wordmark fixes</title>
+<link rel="stylesheet" href="base.css">
+<style>
+  body { width: 1600px; height: 900px; padding: 40px 48px; }
+  h1 { font: 500 15px "Geist Mono"; color: var(--fog-3); margin-bottom: 22px; }
+  .row { display: grid; grid-template-columns: 260px 560px 1fr; gap: 32px; align-items: center; padding: 22px 0; border-top: 1px solid var(--hair); }
+  .t b { display: block; font: 600 20px "Geist"; margin-bottom: 6px; } .t span { font: 12px/1.5 "Geist Mono"; color: var(--fog-3); }
+  .lk img { height: 84px; display: block; border-radius: 6px; } .lk img + img { margin-top: 10px; }
+  .hdr { display: flex; align-items: center; justify-content: space-between; background: var(--ink-1); border: 1px solid var(--hair-2); border-radius: 10px; padding: 14px 18px; width: 620px; }
+  .hdr img { height: 26px; display: block; } .hdr nav { font: 14px "Geist"; color: var(--fog-3); display: flex; gap: 20px; }
+  .sm { display: flex; gap: 20px; align-items: center; margin-top: 12px; } .sm img { display: block; }
+</style></head><body>
+<h1>D · Tape wordmark: current vs two fixes · lockup dark / light · in a site header (26px) · small (16px)</h1>
+<script>
+const rows = [
+  ["d-tape", "D · current", "tape across the middle of zee: reads as a strikethrough"],
+  ["d2a-tape", "D2a · z only", "the tape hides the z and nothing else: un▬een. Reads as unseen, and the mark carries no Z"],
+  ["d2b-tape", "D2b · low strip", "a thin label strip along the baseline under zee: tape, not a strike"],
+];
+for (const [f, t, l] of rows) document.write(`<div class="row"><div class="t"><b>${t}</b><span>${l}</span></div>
+  <div class="lk"><img src="../svg/${f}-lockup-dark.svg"><img src="../svg/${f}-lockup-light.svg"></div>
+  <div><div class="hdr"><img src="../svg/${f}-wordmark-dark.svg"><nav><span>Feed</span><span>Launch</span><span>Verify</span></nav></div>
+  <div class="sm"><img src="../svg/${f}-wordmark-dark.svg" style="height:16px"><img src="../svg/${f}-wordmark-dark.svg" style="height:20px"></div></div></div>`);
+</script></body></html>
