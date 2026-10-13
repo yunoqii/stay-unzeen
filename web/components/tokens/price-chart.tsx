@@ -1,5 +1,6 @@
 "use client";
 
+import { onTabListKeyDown } from "@/lib/tabs";
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import type { CandlestickData, IChartApi, IPriceLine, ISeriesApi, ISeriesMarkersPluginApi, HistogramData, SeriesMarker, Time, UTCTimestamp } from "lightweight-charts";
@@ -87,7 +88,7 @@ export function PriceChart({
         autoSize: true,
         layout: {
           background: { type: lc.ColorType.Solid, color: "transparent" },
-          textColor: cssVar("--faint-foreground", "#73737d"),
+          textColor: cssVar("--faint-foreground", "#7c7c86"),
           fontFamily: "var(--font-geist-mono), ui-monospace, monospace",
           fontSize: 11,
           attributionLogo: false,
@@ -149,21 +150,36 @@ export function PriceChart({
     }
     const step = TF_SEC[tf];
     const { up, down } = colors.current;
-    const list: SeriesMarker<Time>[] = markers
-      .filter((f) => f.kind !== "withdraw_token")
-      .map((f) => {
-        const buy = f.kind !== "sell";
-        return {
-          time: (Math.floor(f.ts / 1000 / step) * step) as UTCTimestamp,
-          position: buy ? "belowBar" : "aboveBar",
-          shape: buy ? "arrowUp" : "arrowDown",
-          color: buy ? up : down,
-          // A fill of one of your private orders reads as such (still local only, behind Peek).
-          text: f.via ? `${ORDER_LABEL[f.via]} filled` : buy ? "You bought" : "You sold",
-          size: 0.8,
-        } satisfies SeriesMarker<Time>;
-      })
-      .sort((a, b) => (a.time as number) - (b.time as number));
+    // One marker per bar and side (several fills in one candle read "×3"), and only the latest buy and the
+    // latest sell carry a text label: labels on neighbouring bars overprint each other at 5m and wider.
+    const groups = new Map<string, { time: number; buy: boolean; n: number; via?: Fill["via"] }>();
+    for (const f of markers) {
+      if (f.kind === "withdraw_token") continue;
+      const buy = f.kind !== "sell";
+      const time = Math.floor(f.ts / 1000 / step) * step;
+      const k = `${time}:${buy ? "b" : "s"}`;
+      const g = groups.get(k);
+      if (g) {
+        g.n += 1;
+        g.via = g.via ?? f.via;
+      } else groups.set(k, { time, buy, n: 1, via: f.via });
+    }
+    const sorted = [...groups.values()].sort((a, b) => a.time - b.time);
+    const lastBuy = sorted.findLast((g) => g.buy);
+    const lastSell = sorted.findLast((g) => !g.buy);
+    const list: SeriesMarker<Time>[] = sorted.map((g) => {
+      const label = g.via ? `${ORDER_LABEL[g.via]} filled` : g.buy ? "You bought" : "You sold";
+      const labelled = g === lastBuy || g === lastSell;
+      return {
+        time: g.time as UTCTimestamp,
+        position: g.buy ? "belowBar" : "aboveBar",
+        shape: g.buy ? "arrowUp" : "arrowDown",
+        color: g.buy ? up : down,
+        // A fill of one of your private orders reads as such (still local only, behind Peek).
+        text: labelled ? `${label}${g.n > 1 ? ` ×${g.n}` : ""}` : g.n > 1 ? `×${g.n}` : "",
+        size: 0.8,
+      } satisfies SeriesMarker<Time>;
+    });
     marks.current.setMarkers(list);
   }, [markers, showMarkers, tf, state, readyTick]);
 
@@ -233,15 +249,16 @@ export function PriceChart({
         <h2 id="chart-title" className="text-sm font-medium">
           Price <span className="font-normal text-faint-foreground">· SOL</span>
         </h2>
-        <div role="tablist" aria-label="Timeframe" className="flex gap-0.5 rounded-full border border-border p-0.5">
+        <div role="tablist" aria-label="Timeframe" onKeyDown={onTabListKeyDown} className="flex gap-0.5 rounded-full border border-border p-0.5">
           {TIMEFRAMES.map((t) => (
             <button
               key={t}
               role="tab"
               aria-selected={tf === t}
+              tabIndex={tf === t ? 0 : -1}
               onClick={() => setTf(t)}
               className={cn(
-                "relative rounded-full px-2.5 py-1 font-mono text-[11px] transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                "hit relative rounded-full px-2.5 py-1 font-mono text-[11px] transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
                 tf === t ? "text-foreground" : "text-faint-foreground hover:text-muted-foreground",
               )}
             >

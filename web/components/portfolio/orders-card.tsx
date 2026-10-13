@@ -77,7 +77,7 @@ export function OrdersCard({ orders, tokens }: { orders: Order[] | null; tokens:
         {ORDERS_PRIVACY_NOTE} Place new ones from a token page.{" "}
         {live[0] && (
           <Link href={`/token/${live[0].mint}`} className="underline-offset-4 hover:text-muted-foreground hover:underline">
-            Open the latest
+            Open {byMint.get(live[0].mint) ? `$${byMint.get(live[0].mint)!.symbol}` : "the latest token"}
           </Link>
         )}
       </p>

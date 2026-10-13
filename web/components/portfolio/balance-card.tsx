@@ -98,7 +98,7 @@ export function BalanceCard({ portfolio, onWithdraw }: { portfolio: Portfolio | 
       )}
 
       <div className="relative mt-6 flex flex-col gap-2 sm:flex-row">
-        <Button asChild size="lg" className="h-11 flex-1 rounded-full text-sm">
+        <Button asChild size="lg" className="h-11 shrink-0 sm:flex-1 rounded-full text-sm">
           <Link href="/pay">
             <ArrowDown weight="bold" />
             Top up
@@ -107,7 +107,7 @@ export function BalanceCard({ portfolio, onWithdraw }: { portfolio: Portfolio | 
         <Button
           variant="outline"
           size="lg"
-          className="h-11 flex-1 rounded-full border-border bg-surface-1 text-sm hover:border-border-strong hover:bg-surface-2"
+          className="h-11 shrink-0 sm:flex-1 rounded-full border-border bg-surface-1 text-sm hover:border-border-strong hover:bg-surface-2"
           onClick={onWithdraw}
           disabled={!portfolio}
         >

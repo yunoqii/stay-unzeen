@@ -1,5 +1,6 @@
 "use client";
 
+import { onTabListKeyDown } from "@/lib/tabs";
 import Link from "next/link";
 import { useRef, useState } from "react";
 import { ArrowRight } from "@phosphor-icons/react";
@@ -34,16 +35,17 @@ export function HomeClient() {
       <Hero onBuy={onBuy} />
 
       <div className="relative mx-auto max-w-6xl px-0 pt-6 sm:px-6 lg:pt-10">
-        <div role="tablist" aria-label="Home sections" className="mx-4 mb-4 flex gap-1 rounded-full border border-border p-1 sm:mx-0 lg:hidden">
+        <div role="tablist" aria-label="Home sections" onKeyDown={onTabListKeyDown} className="mx-4 mb-4 flex gap-1 rounded-full border border-border p-1 sm:mx-0 lg:hidden">
           {(["feed", "hot"] as const).map((t) => (
             <button
               key={t}
               role="tab"
               aria-selected={tab === t}
+              tabIndex={tab === t ? 0 : -1}
               aria-controls={`panel-${t}`}
               onClick={() => setTab(t)}
               className={cn(
-                "relative flex-1 rounded-full py-2 text-sm transition-colors duration-150",
+                "relative flex-1 rounded-full py-2 text-sm transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
                 tab === t ? "text-foreground" : "text-muted-foreground",
               )}
             >

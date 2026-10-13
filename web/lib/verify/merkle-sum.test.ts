@@ -19,6 +19,7 @@ import {
   ZEC_ASSET,
   type SumNode,
 } from "./merkle-sum";
+import { claimableZat, compareWithPortfolio } from "./own";
 import V from "./testdata/verify-vectors.json";
 
 const CORE = path.resolve(__dirname, "../../../core/testdata/verify-vectors.json");
@@ -95,6 +96,150 @@ describe("verify vectors (core/testdata/verify-vectors.json)", () => {
     expect(verifyVault(V.chainId, V.snapshotId, v)).toBe(true);
     expect(verifyVault(V.chainId, V.snapshotId + 1, v)).toBe(false);
     expect(verifyVault("0101", V.snapshotId, v)).toBe(false);
+  });
+});
+
+// ---- v0.10: creator fees inside the ZEC leaf, mint granule 1, no SOL tree ----
+
+describe("verify vectors: creatorSnapshot (API v0.10)", () => {
+  const C = V.creatorSnapshot;
+  const VAULT_SEED = new Uint8Array(32).fill(5);
+  const VAULT = base58.encode(ed25519.getPublicKey(VAULT_SEED));
+  const snap = (): VerifySnapshot => ({
+    id: C.snapshotId,
+    chainId: C.chainId,
+    takenAt: C.snapshot.takenAtSec * 1000,
+    rootsDigest: C.snapshot.rootsDigest,
+    leaves: C.snapshot.leaves,
+    solanaSlot: C.snapshot.solanaSlot,
+    zcashHeight: C.snapshot.zcashHeight,
+    operator: { pubkey: C.snapshot.operatorPubkey, sig: C.snapshot.operatorSig },
+    trees: [
+      { asset: "ZEC", decimals: 8, granule: C.zecTree.granule, root: C.zecTree.root.hash, sum: C.zecTree.root.sum },
+      { asset: C.mintTree.mint, decimals: 6, granule: C.mintTree.granule, root: C.mintTree.root.hash, sum: C.mintTree.root.sum },
+    ],
+    // The vector's vault carries balances only; signed here with a test key (vaults are not in the digest).
+    vaults: C.snapshot.vaults.map((v) => ({
+      address: VAULT,
+      sig: base58.encode(ed25519.sign(enc.encode(vaultMessage(C.chainId, C.snapshotId, VAULT)), VAULT_SEED)),
+      lamports: v.lamports,
+      tokens: v.tokens,
+    })),
+    committedLamports: C.snapshot.committedLamports,
+    rateLamportsPerZecSell: C.rateLamportsPerZecSell,
+    rateLamportsPerZecBuy: C.rateLamportsPerZecBuy,
+    zecReserve: { amountZat: C.snapshot.zecReserveZat, height: C.snapshot.zcashHeight, attested: true },
+  });
+  const rootOf = (leaves: SumNode[]) => {
+    let lvl = leaves;
+    while (lvl.length > 1) lvl = Array.from({ length: lvl.length / 2 }, (_, i) => nodeOf(lvl[2 * i], lvl[2 * i + 1]));
+    return lvl[0];
+  };
+  const pathOf = (leaves: SumNode[], idx: number) => {
+    const out: { hash: string; sum: string }[] = [];
+    let lvl = leaves;
+    while (lvl.length > 1) {
+      const sib = lvl[idx ^ 1];
+      out.push({ hash: bytesToHex(sib.hash), sum: sib.sum.toString() });
+      lvl = Array.from({ length: lvl.length / 2 }, (_, i) => nodeOf(lvl[2 * i], lvl[2 * i + 1]));
+      idx >>= 1;
+    }
+    return out;
+  };
+  const treeLeaves = (t: typeof C.zecTree, asset: Uint8Array): SumNode[] =>
+    t.leaves.map((l) => {
+      const h = leafHash({ chainId: C.chainId, snapshotId: C.snapshotId, asset, anonPubkey: b(l.anonPubkey), piece: l.piece, value: n(l.value), blind: b(l.blind) });
+      expect(bytesToHex(h)).toBe(l.leaf);
+      return { hash: h, sum: n(l.value) };
+    });
+
+  it("creator ZEC value = balance + ceil(Σ claimable × 1e8 / rateBuy), rounded up to 0.001 ZEC", () => {
+    const claim = claimableZat(C.creator.claimable.map((c) => ({ solAmount: c.lamports })), C.rateLamportsPerZecBuy);
+    expect(claim.toString()).toBe(C.creator.claimableZat);
+    const value = n(C.creator.balanceZat) + claim;
+    expect(value.toString()).toBe(C.creator.valueZat);
+    const g = n(C.zecTree.granule);
+    expect((((value + g - n(1)) / g) * g).toString()).toBe(C.creator.roundedZat);
+    // The creator's pieces in the ZEC tree add up to exactly that.
+    const mine = C.zecTree.leaves.filter((l) => !l.dummy && l.anonPubkey === C.creator.anonPubkey);
+    expect(mine.reduce((x, l) => x + n(l.value), n(0)).toString()).toBe(C.creator.roundedZat);
+    // No rate = nothing folded in.
+    expect(claimableZat([{ solAmount: "1" }], undefined)).toBe(n(0));
+  });
+
+  it("leaves and roots of the ZEC and mint (granule 1) trees", () => {
+    expect(bytesToHex(base58.decode(C.mintTree.mint))).toBe(C.mintTree.asset);
+    const z = rootOf(treeLeaves(C.zecTree, ZEC_ASSET));
+    expect([bytesToHex(z.hash), z.sum.toString()]).toEqual([C.zecTree.root.hash, C.zecTree.root.sum]);
+    const m = rootOf(treeLeaves(C.mintTree, b(C.mintTree.asset)));
+    expect([bytesToHex(m.hash), m.sum.toString()]).toEqual([C.mintTree.root.hash, C.mintTree.root.sum]);
+    expect(C.mintTree.leaves.some((l) => n(l.value) % n(1_000_000) !== n(0))).toBe(true);
+  });
+
+  it("digest, operator signature, no SOL tree", () => {
+    const s = snap();
+    expect(rootsDigest(s)).toBe(C.snapshot.rootsDigest);
+    const c = checkSnapshot(s, C.snapshot.operatorPubkey);
+    expect(c).toMatchObject({ digestOk: true, operator: "verified", anchor: "pending", allVaultsOk: true });
+    // Signed before the memo-tx (v0.10): verified signature, anchor still pending.
+    expect(s.anchor).toBeUndefined();
+    const withSol = snap();
+    withSol.trees.push({ asset: "SOL", decimals: 9, granule: "1000000", root: "00".repeat(32), sum: "0" });
+    expect(checkSnapshot(withSol, C.snapshot.operatorPubkey).error).toMatch(/unknown asset id/);
+  });
+
+  it("solvency matches creatorSnapshot.solvency", () => {
+    const s = snap();
+    const rows = solvency(s, checkSnapshot(s, C.snapshot.operatorPubkey));
+    expect(rows.map((r) => r.asset)).toEqual(["ZEC", C.mintTree.mint]);
+    const zec = rows[0];
+    expect(zec.liabilities.toString()).toBe(C.solvency.zec.liabilities);
+    expect(zec.provenZat!.toString()).toBe(C.solvency.zec.solCoverZat);
+    expect(zec.attestedZat!.toString()).toBe(C.solvency.zec.reserveZat);
+    expect(zec.covered).toBe(C.solvency.zec.covered);
+    const mint = rows[1];
+    expect([mint.liabilities.toString(), mint.assets.toString(), mint.covered]).toEqual([C.solvency.mint.liabilities, C.solvency.mint.assets, C.solvency.mint.covered]);
+  });
+
+  it("the creator's own proof: committed ZEC covers balance + claimable (page and offline script)", async () => {
+    const s = snap();
+    const pk = base58.encode(b(C.creator.anonPubkey));
+    const proofFor = (t: typeof C.zecTree, asset: string, assetBytes: Uint8Array, decimals: number) => {
+      const leaves = treeLeaves(t, assetBytes);
+      const pieces = t.leaves
+        .filter((l) => !l.dummy && l.anonPubkey === C.creator.anonPubkey)
+        .map((l) => ({ piece: l.piece, leafIndex: l.index, value: l.value, blind: l.blind, path: pathOf(leaves, l.index) }));
+      return { asset, decimals, pieces };
+    };
+    const proof: VerifyProof = {
+      snapshotId: C.snapshotId,
+      truncated: false,
+      proofs: [proofFor(C.zecTree, "ZEC", ZEC_ASSET, 8), proofFor(C.mintTree, C.mintTree.mint, b(C.mintTree.asset), 6)],
+    };
+    const r = checkProof(s, proof, pk);
+    expect(r.ok).toBe(true);
+    expect(r.assets.find((a) => a.asset === "ZEC")!.committed.toString()).toBe(C.creator.roundedZat);
+
+    const portfolio = {
+      zecBalance: C.creator.balanceZat,
+      zecHeld: "0",
+      holdings: [{ mint: C.mintTree.mint, amount: "1500000", held: "0" }],
+      claimable: C.creator.claimable.map((c) => ({ mint: c.mint, solAmount: c.lamports })),
+      deposits: [],
+      actions: [],
+      orders: [],
+    };
+    const cmp = compareWithPortfolio({ proof, result: r }, s, portfolio);
+    expect(cmp.rows.find((x) => x.asset === "ZEC")).toMatchObject({ now: n(C.creator.valueZat), status: "covered" });
+    expect(cmp.rows.every((x) => x.status === "covered")).toBe(true);
+
+    const mjs = (await import(/* @vite-ignore */ path.resolve(__dirname, "../../public/verify/verify-proof.mjs"))) as {
+      check(f: unknown, op?: string): { ok: boolean; lines: string[] };
+    };
+    const res = mjs.check({ anonPubkey: pk, snapshot: s, proof }, C.snapshot.operatorPubkey);
+    expect(res.ok).toBe(true);
+    expect(res.lines.some((l) => l.startsWith("WAIT signed, anchor pending"))).toBe(true);
+    expect(res.lines.some((l) => l.includes(`proven (SOL) + ${C.solvency.zec.reserveZat} attested`) && l.includes(C.solvency.zec.solCoverZat))).toBe(true);
   });
 });
 

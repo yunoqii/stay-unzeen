@@ -133,7 +133,7 @@ export function describe(a: Pick<TrackedAction, "op" | "symbol">): string {
     case "withdraw_token":
       return `${sym} withdrawal`;
     case "claim":
-      return "Creator fees claim";
+      return a.symbol ? `Claim ${sym} fees` : "Claim creator fees";
   }
 }
 

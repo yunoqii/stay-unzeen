@@ -366,10 +366,10 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
 
         <div className="border-t border-border/60 pt-3">
           <p className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>Max slippage from the trigger</span>
+            <span>Max slippage</span>
             <span className="tabular text-foreground">{slippage / 100}%</span>
           </p>
-          <div role="radiogroup" aria-label="Max slippage from the trigger" className="mt-2 grid grid-cols-6 gap-1">
+          <div role="radiogroup" aria-label="Max slippage" className="mt-2 grid grid-cols-6 gap-1">
             {SLIPPAGE_CHOICES.map((b) => (
               <Chip key={b} role="radio" aria-checked={slippage === b} active={slippage === b} onClick={() => setSlipOverride((o) => ({ ...o, [kind]: b }))} className="w-full justify-center px-0">
                 {b / 100}%
@@ -377,8 +377,10 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
             ))}
           </div>
           <p className="mt-1.5 text-[11px] text-pretty text-faint-foreground">
-            {sell ? "Never sells below the trigger minus this." : "Never pays above the trigger plus this."} If the batch can’t fill inside it, the order fails and the hold
-            returns.
+            {kind === "stop_loss"
+              ? "Sells only while the price is within this of the trigger. "
+              : ""}
+            Measured from the price check that triggers it; min received is rounded down. If the batch can’t fill inside it, the order fails and the hold returns.
           </p>
         </div>
       </div>

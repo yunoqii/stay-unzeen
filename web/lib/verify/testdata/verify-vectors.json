@@ -1,6 +1,229 @@
 {
-  "_comment": "Verify vectors (API.md v0.7). Integers big-endian. Signing keys are ed25519 seeds of repeated bytes (TEST ONLY).",
+  "_comment": "Verify vectors (API.md v0.7; creatorSnapshot: v0.10). Integers big-endian. Signing keys are ed25519 seeds of repeated bytes (TEST ONLY).",
   "chainId": "0202",
+  "creatorSnapshot": {
+    "_comment": "API v0.10: creator fees inside the ZEC leaf (ceil(lamports*1e8/rateBuy), summed per key), mint granule 1, no SOL tree. Solvency: mint sum <= vault tokens; ZEC sum <= zecReserve + floor((lamports - committed)*1e8/rateSell).",
+    "chainId": "0202",
+    "creator": {
+      "anonPubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+      "balanceZat": "120000000",
+      "claimable": [
+        {
+          "lamports": "30000000",
+          "mint": "So11111111111111111111111111111111111111112"
+        },
+        {
+          "lamports": "20000000",
+          "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+        }
+      ],
+      "claimableZat": "502513",
+      "roundedZat": "120600000",
+      "valueZat": "120502513"
+    },
+    "mintTree": {
+      "asset": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001",
+      "granule": "1",
+      "leaves": [
+        {
+          "anonPubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+          "blind": "5151515151515151515151515151515151515151515151515151515151515151",
+          "dummy": false,
+          "index": 0,
+          "leaf": "051700685b14671e5ff4e20ee2f2e85f5c68c43ea50c50743e65448125859089",
+          "piece": 0,
+          "value": "1000000"
+        },
+        {
+          "anonPubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+          "blind": "5252525252525252525252525252525252525252525252525252525252525252",
+          "dummy": false,
+          "index": 1,
+          "leaf": "4d56f9062dabad822ac5cf85ac510bbee8fec2cd42576211c98bdefb3e3758e9",
+          "piece": 1,
+          "value": "500000"
+        },
+        {
+          "anonPubkey": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+          "blind": "5353535353535353535353535353535353535353535353535353535353535353",
+          "dummy": false,
+          "index": 2,
+          "leaf": "e3eb6579a73aea52134a12b42323796528961081bb48b2221adf9cb2caa18fcf",
+          "piece": 0,
+          "value": "1500001"
+        },
+        {
+          "anonPubkey": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+          "blind": "5454545454545454545454545454545454545454545454545454545454545454",
+          "dummy": false,
+          "index": 3,
+          "leaf": "652c7ae1990e49203fc99303748ffda6670abd53ca30690ac74879db224df4bd",
+          "piece": 1,
+          "value": "0"
+        },
+        {
+          "anonPubkey": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+          "blind": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+          "dummy": true,
+          "index": 4,
+          "leaf": "0acfd971ee7a133e3fd3444b7a7e00b804d5105932950521390c66dc2b04b441",
+          "piece": 0,
+          "value": "0"
+        },
+        {
+          "anonPubkey": "d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "blind": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+          "dummy": true,
+          "index": 5,
+          "leaf": "be320b6c4aaea6738494737b0b58d6aa0008cb9e75aff7a171550a1f3eae73ac",
+          "piece": 0,
+          "value": "0"
+        },
+        {
+          "anonPubkey": "d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6",
+          "blind": "e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6",
+          "dummy": true,
+          "index": 6,
+          "leaf": "929729ec113ecfb7832993f691dcdb77e38dff73650b3348c2bbf57ed2562dc4",
+          "piece": 0,
+          "value": "0"
+        },
+        {
+          "anonPubkey": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "blind": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+          "dummy": true,
+          "index": 7,
+          "leaf": "b4d68e255b48ffa6c383d96a15c1968fd2160bdde9c6252a75dab0cd098841ba",
+          "piece": 0,
+          "value": "0"
+        }
+      ],
+      "mint": "So11111111111111111111111111111111111111112",
+      "root": {
+        "hash": "5381dd21750624d10d6a879606acbf9723325eedab9181dcb7465df7aec9b6a0",
+        "sum": "3000001"
+      }
+    },
+    "rateLamportsPerZecBuy": "9950000000",
+    "rateLamportsPerZecSell": "10050000000",
+    "snapshot": {
+      "committedLamports": "2000000",
+      "leaves": 8,
+      "operatorPubkey": "J2xccRtuG43drESLYznHhLhQkLTdfepcKYbiQ9BsJVaf",
+      "operatorSig": "4YygN62pbCw81w47b4zk5k1SvifnvnzkZwbry3AGBwn8W9ivALbLs3qu98PGSkbsGCouZWdiLv8ERDyab5zLHzMn",
+      "rootsDigest": "5c1656a5cbd73101fb468c6bdd05a3ef5878ff23462bfbbd1433f6e6b1f6b6dc",
+      "solanaSlot": 400100000,
+      "takenAtSec": 1792022400,
+      "vaults": [
+        {
+          "lamports": "2000000000",
+          "tokens": [
+            {
+              "amount": "3000001",
+              "mint": "So11111111111111111111111111111111111111112"
+            }
+          ]
+        }
+      ],
+      "zcashHeight": 3110000,
+      "zecReserveZat": "1000000000"
+    },
+    "snapshotId": 8,
+    "solvency": {
+      "mint": {
+        "assets": "3000001",
+        "covered": true,
+        "liabilities": "3000001"
+      },
+      "zec": {
+        "covered": true,
+        "liabilities": "170600000",
+        "reserveZat": "1000000000",
+        "solCoverZat": "19880597"
+      }
+    },
+    "zecTree": {
+      "granule": "100000",
+      "leaves": [
+        {
+          "anonPubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+          "blind": "4141414141414141414141414141414141414141414141414141414141414141",
+          "dummy": false,
+          "index": 0,
+          "leaf": "fea74e184cefa9b2a145e7f91c2a89b876284ce149229303ad7d7184ef04a8f3",
+          "piece": 0,
+          "value": "60000000"
+        },
+        {
+          "anonPubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+          "blind": "4242424242424242424242424242424242424242424242424242424242424242",
+          "dummy": false,
+          "index": 1,
+          "leaf": "0898c91381d9990214c94e0545e80e84f93f73429631cdfec3f720980ab0bf5f",
+          "piece": 1,
+          "value": "0"
+        },
+        {
+          "anonPubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+          "blind": "4343434343434343434343434343434343434343434343434343434343434343",
+          "dummy": false,
+          "index": 2,
+          "leaf": "50e5a5a8f4e9787308e977f6997c87281830976db160b45b6ddf8b4109a18b57",
+          "piece": 2,
+          "value": "60600000"
+        },
+        {
+          "anonPubkey": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+          "blind": "4444444444444444444444444444444444444444444444444444444444444444",
+          "dummy": false,
+          "index": 3,
+          "leaf": "f9c5bc8f812ecc215f72751cb18c1b3978f920b543738523d83c977ee5c628a5",
+          "piece": 0,
+          "value": "20000000"
+        },
+        {
+          "anonPubkey": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+          "blind": "4545454545454545454545454545454545454545454545454545454545454545",
+          "dummy": false,
+          "index": 4,
+          "leaf": "68c59687f4e25207e9839cf5996e58fa5111cb776f51f2c4429eec0a38c4862a",
+          "piece": 1,
+          "value": "30000000"
+        },
+        {
+          "anonPubkey": "d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "blind": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+          "dummy": true,
+          "index": 5,
+          "leaf": "0d4bda6956c5a44e9816f5821bdc1ac092cc29b11e46aadfaeda73193029476b",
+          "piece": 0,
+          "value": "0"
+        },
+        {
+          "anonPubkey": "d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6",
+          "blind": "e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6",
+          "dummy": true,
+          "index": 6,
+          "leaf": "32bf784cd784fe1579106791dab3802fb83ae4b8a2e3730ab2d3ee5665cedc50",
+          "piece": 0,
+          "value": "0"
+        },
+        {
+          "anonPubkey": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "blind": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+          "dummy": true,
+          "index": 7,
+          "leaf": "a390d738437971e43aed46294524281030b6d45df67e5c5f1826a46db9c0b28f",
+          "piece": 0,
+          "value": "0"
+        }
+      ],
+      "root": {
+        "hash": "6a47dc1e6b44272d56becb0c6663cef04ac67adf1467b1981a3d16c40a038076",
+        "sum": "170600000"
+      }
+    }
+  },
   "mintLeaf": {
     "anonPubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
     "asset": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001",

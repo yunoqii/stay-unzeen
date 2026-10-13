@@ -1,5 +1,6 @@
 "use client";
 
+import { onTabListKeyDown } from "@/lib/tabs";
 import { useEffect, useId, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { api, errorText } from "@/lib/api/client";
@@ -21,6 +22,8 @@ const FILTERS: { id: TradeFilter; label: string; needsFull: boolean }[] = [
   { id: "dev", label: "Dev", needsFull: true },
 ];
 
+const PAGE = 15;
+
 const SOON = "Needs the full on-chain trade feed. Coming soon.";
 
 /**
@@ -33,6 +36,9 @@ export function TokenTrades({ mint, feed }: { mint: string; feed: LiveFeedState 
   const { pool } = usePool();
   const FULL_TRADES = pool?.features?.fullTrades === true;
   const usesFull = FULL_TRADES && filter !== "unzeen";
+  // A long tape pushes the safety panel and the rest of the page far down (worst on a phone): show a page at a time.
+  const [shown, setShown] = useState(PAGE);
+  const hidden = Math.max(0, feed.events.length - shown);
 
   return (
     <section aria-labelledby={`${id}-t`} className="min-w-0">
@@ -41,7 +47,7 @@ export function TokenTrades({ mint, feed }: { mint: string; feed: LiveFeedState 
           Trades
         </h2>
         <div className="flex items-center gap-3">
-          <div role="tablist" aria-label="Filter trades" className="flex gap-0.5 rounded-full border border-border p-0.5">
+          <div role="tablist" aria-label="Filter trades" onKeyDown={onTabListKeyDown} className="flex gap-0.5 rounded-full border border-border p-0.5">
             {FILTERS.map((f) => {
               const disabled = f.needsFull && !FULL_TRADES;
               const on = filter === f.id;
@@ -51,11 +57,12 @@ export function TokenTrades({ mint, feed }: { mint: string; feed: LiveFeedState 
                   role="tab"
                   type="button"
                   aria-selected={on}
+                  tabIndex={on ? 0 : -1}
                   aria-disabled={disabled || undefined}
                   title={disabled ? SOON : undefined}
                   onClick={() => !disabled && setFilter(f.id)}
                   className={cn(
-                    "relative rounded-full px-2.5 py-1 text-xs transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                    "hit relative rounded-full px-2.5 py-1 text-xs transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
                     on ? "text-foreground" : "text-muted-foreground hover:text-foreground",
                     disabled && "cursor-not-allowed text-faint-foreground/60 hover:text-faint-foreground/60",
                   )}
@@ -79,14 +86,25 @@ export function TokenTrades({ mint, feed }: { mint: string; feed: LiveFeedState 
       {usesFull ? (
         <FilteredTrades key={filter} mint={mint} filter={filter} />
       ) : (
-        <LiveFeed
-          events={feed.events}
-          fresh={feed.fresh}
-          loading={feed.loading}
-          error={feed.error}
-          dense
-          emptyText="No unzeen trades on this token yet."
-        />
+        <>
+          <LiveFeed
+            events={hidden ? feed.events.slice(0, shown) : feed.events}
+            fresh={feed.fresh}
+            loading={feed.loading}
+            error={feed.error}
+            dense
+            emptyText="No unzeen trades on this token yet."
+          />
+          {hidden > 0 && (
+            <button
+              type="button"
+              onClick={() => setShown((n) => n + PAGE)}
+              className="w-full border-t border-border/60 px-4 py-3 text-sm text-muted-foreground transition-colors duration-150 hover:bg-surface-1 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset"
+            >
+              Show {Math.min(PAGE, hidden)} more
+            </button>
+          )}
+        </>
       )}
     </section>
   );

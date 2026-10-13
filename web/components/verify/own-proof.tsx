@@ -1,5 +1,6 @@
 "use client";
 
+import { onTabListKeyDown } from "@/lib/tabs";
 import { useId, useState } from "react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
@@ -10,7 +11,7 @@ import { getSigner, useKeyState } from "@/lib/crypto/session";
 import { shortAddr } from "@/lib/format";
 import type { Network } from "@/lib/network";
 import { assetLabel, fmtAmount, fmtUtc } from "@/lib/verify/display";
-import { checkOwnBalance, compareWithPortfolio, downloadJson, proofJson, type CompareStatus, type OwnCheck } from "@/lib/verify/own";
+import { checkOwnBalance, claimableZat, compareWithPortfolio, downloadJson, proofJson, type CompareStatus, type OwnCheck } from "@/lib/verify/own";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -126,13 +127,14 @@ export function OwnProof({ snap, network, available, symbols }: { snap: VerifySn
             <Reveal key={`ok-${own.snapshotId}`}>
               <Summary own={own} snap={snap} symbols={symbols} />
               {/* asset tabs */}
-              <div role="tablist" aria-label="Assets in your proof" className="mt-5 flex flex-wrap gap-1.5">
+              <div role="tablist" aria-label="Assets in your proof" onKeyDown={onTabListKeyDown} className="mt-5 flex flex-wrap gap-1.5">
                 {own.result.assets.map((a, i) => (
                   <button
                     key={a.asset}
                     role="tab"
                     id={`${tabsId}-t${i}`}
                     aria-selected={i === asset}
+                    tabIndex={i === asset ? 0 : -1}
                     aria-controls={`${tabsId}-p`}
                     onClick={() => {
                       setAsset(i);
@@ -188,8 +190,8 @@ function Summary({ own, snap, symbols }: { own: OwnCheck; snap: VerifySnapshot; 
             <span className="text-muted-foreground">{assetLabel(a.asset, symbols)}</span>
             <span className="font-mono tabular">
               <span className="text-faint-foreground">committed ≥ </span>
-              {fmtAmount(a.committed, a.decimals, a.asset === "ZEC" || a.asset === "SOL" ? 3 : 0)}
-              {a.asset === "ZEC" || a.asset === "SOL" ? ` ${a.asset}` : ""}
+              {fmtAmount(a.committed, a.decimals, a.asset === "ZEC" ? 3 : Math.min(3, a.decimals))}
+              {a.asset === "ZEC" ? " ZEC" : ""}
             </span>
           </li>
         ))}
@@ -221,6 +223,8 @@ function BalanceCompare({ own, snap, symbols }: { own: OwnCheck; snap: VerifySna
   if (!portfolio) return null;
   const { rows, changed } = compareWithPortfolio(own, snap, portfolio);
   if (rows.length === 0) return null;
+  // v0.10: creator fees to claim are inside the ZEC leaf, converted at the snapshot's buy rate.
+  const fees = claimableZat(portfolio.claimable, snap.rateLamportsPerZecBuy);
   const bad = rows.filter((r) => r.status === "short" || r.status === "missing");
   return (
     <div className={cn("mt-4 border p-3", bad.length ? "border-sell/40 bg-sell/5" : "border-border")}>
@@ -234,8 +238,8 @@ function BalanceCompare({ own, snap, symbols }: { own: OwnCheck; snap: VerifySna
       </p>
       <ul className="mt-2 space-y-1">
         {rows.map((r) => {
-          const frac = r.asset === "ZEC" || r.asset === "SOL" ? 3 : Math.min(3, r.decimals);
-          const unit = r.asset === "ZEC" || r.asset === "SOL" ? ` ${r.asset}` : "";
+          const frac = r.asset === "ZEC" ? 3 : Math.min(3, r.decimals);
+          const unit = r.asset === "ZEC" ? " ZEC" : "";
           const tone = r.status === "covered" ? "text-zec" : r.status === "short" || r.status === "missing" ? "text-sell" : "text-muted-foreground";
           return (
             <li key={r.asset} className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 text-xs sm:grid-cols-[minmax(0,0.6fr)_minmax(0,1fr)_auto]">
@@ -249,6 +253,11 @@ function BalanceCompare({ own, snap, symbols }: { own: OwnCheck; snap: VerifySna
           );
         })}
       </ul>
+      {fees > BigInt(0) && (
+        <p className="mt-2 text-[11px] text-pretty text-faint-foreground">
+          ZEC includes {fmtAmount(fees, 8, 3)} ZEC of creator fees you can claim, at this snapshot&apos;s rate.
+        </p>
+      )}
       {bad.length > 0 && (
         <p className="mt-2 text-[11px] text-pretty text-muted-foreground">
           Download the proof and keep it: it is signed evidence of what the pool committed to your key at {fmtUtc(snap.takenAt)}. Your balance from this

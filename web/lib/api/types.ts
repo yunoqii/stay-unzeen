@@ -188,7 +188,7 @@ export type SignedAction =
       triggerPriceSol: DecimalString;
       /** limit_buy: zatoshis; the sell kinds: token base units. */
       amount: string;
-      /** 50..5000; default PoolInfo.orders.defaultSlippageBps[kind]. Measured from the trigger price. */
+      /** 50..5000; default PoolInfo.orders.defaultSlippageBps[kind]. v0.10: measured from the price tick that triggers it (minOut rounded down to 3 significant digits by the server). */
       slippageBps?: number;
       /** 3600..PoolInfo.orders.maxTtlSecs; default 86400. expiresAt is rounded UP to the hour. */
       ttlSecs?: number;
@@ -578,15 +578,20 @@ export interface OwnFairLaunch {
 
 // ---- Verify (v0.7): proof of liabilities, public vaults, attested ZEC reserve ----
 
-/** "ZEC", "SOL" (creator fees owed, v0.8) or a base58 mint. In hashes: ZEC = 32 zero bytes, SOL = 32 × 0xFF, a mint = its 32 decoded bytes. */
-export type AssetId = "ZEC" | "SOL" | (string & {});
+/**
+ * "ZEC" or a base58 mint. In hashes: ZEC = 32 zero bytes, a mint = its 32 decoded bytes. v0.10: there is no
+ * "SOL" tree any more (creator fees owed are in the creator's ZEC leaf); any other id is an unknown asset.
+ */
+export type AssetId = "ZEC" | (string & {});
 
 export interface VerifyAnchor {
   /** SPL Memo tx whose data is exactly the 64-hex rootsDigest. */
   solanaTx: string;
   slot: number;
-  /** Memo read back from the chain equals rootsDigest. false = incident. */
+  /** Memo read back from the chain equals rootsDigest. false = incident (re-anchored automatically). */
   matches: boolean;
+  /** v0.10: block time of the memo-tx (unix s), null while unknown. */
+  blockTime?: number | null;
 }
 
 /** GET /api/verify/snapshots: root history, newest first. */
@@ -603,7 +608,7 @@ export interface VerifySnapshotSummary {
 export interface VerifyTree {
   asset: AssetId;
   decimals: number;
-  /** Rounding granule in base units (ZEC 100000 zat, a mint 10^decimals). */
+  /** Rounding granule in base units (ZEC 100000 zat; v0.10: a mint "1", exact sums). */
   granule: string;
   /** hex, 32 bytes */
   root: string;
@@ -627,14 +632,19 @@ export interface VerifySnapshot extends VerifySnapshotSummary {
   leaves: number;
   solanaSlot: number;
   zcashHeight: number;
-  /** Pool attestation key (base58) + its signature over the 32 digest bytes. Present once anchored. */
+  /**
+   * Pool attestation key (base58) + its signature over the 32 digest bytes. v0.10: present as soon as the
+   * key signed the digest, before the memo-tx; `anchor` follows once the memo-tx is confirmed.
+   */
   operator?: { pubkey: string; sig: string };
   trees: VerifyTree[];
   vaults: VerifyVault[];
-  /** SOL already promised to queued jobs: subtracted from the cover. */
+  /** v0.10: only the gas of queued token withdrawals: subtracted from the cover. */
   committedLamports: Lamports;
   /** Rate SOL counts towards the ZEC cover. Absent = there was no rate. */
   rateLamportsPerZecSell?: Lamports;
+  /** v0.10: rate creators' claimable lamports were converted into ZEC liabilities at (ceil). */
+  rateLamportsPerZecBuy?: Lamports;
   /** Rounded DOWN to 0.01 ZEC. Stated by the operator, not proven. */
   zecReserve: { amountZat: Zatoshis; height: number; attested: true };
 }

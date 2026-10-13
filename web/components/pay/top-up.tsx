@@ -155,9 +155,9 @@ function DepositRequest({
   const current = phase.step === "credited" ? 2 : phase.step === "seen" ? 1 : 0;
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-10">
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-10">
       {/* QR side */}
-      <section aria-label="Payment QR" className="order-2 lg:order-1">
+      <section aria-label="Payment QR" className="order-2 min-w-0 lg:order-1">
         <QrRing
           value={uri}
           progress={progress}
@@ -180,7 +180,7 @@ function DepositRequest({
       </section>
 
       {/* Controls side */}
-      <div className="order-1 space-y-5 lg:order-2">
+      <div className="order-1 min-w-0 space-y-5 lg:order-2">
         <div>
           <label htmlFor="topup-amount" className="text-sm text-muted-foreground">
             Amount
@@ -273,20 +273,20 @@ function DepositRequest({
 
         {phase.step === "credited" ? (
           <div className="flex flex-col gap-2 sm:flex-row">
-            <Button asChild size="lg" className="h-11 flex-1 rounded-full text-sm">
+            <Button asChild size="lg" className="h-11 shrink-0 sm:flex-1 rounded-full text-sm">
               <Link href="/portfolio">
                 Back to portfolio
                 <ArrowRight weight="light" />
               </Link>
             </Button>
-            <Button variant="outline" size="lg" className="h-11 flex-1 rounded-full text-sm" onClick={onAgain}>
+            <Button variant="outline" size="lg" className="h-11 shrink-0 sm:flex-1 rounded-full text-sm" onClick={onAgain}>
               Top up again
             </Button>
           </div>
         ) : (
           <div className="flex flex-col gap-2 sm:flex-row">
             {API_MODE === "real" && phase.step === "waiting" && uri && (
-              <Button variant="outline" size="lg" className="h-11 flex-1 rounded-full text-sm" onClick={markSent}>
+              <Button variant="outline" size="lg" className="h-11 shrink-0 sm:flex-1 rounded-full text-sm" onClick={markSent}>
                 I&apos;ve sent it
               </Button>
             )}
@@ -301,7 +301,7 @@ function DepositRequest({
                     toast.error("The mock wallet rejected this URI");
                   }
                 }}
-                className="h-11 flex-1 rounded-full border border-dashed border-border-strong px-4 font-mono text-xs tracking-wide text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                className="h-11 shrink-0 sm:flex-1 rounded-full border border-dashed border-border-strong px-4 font-mono text-xs tracking-wide text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               >
                 Simulate payment (mock)
               </button>

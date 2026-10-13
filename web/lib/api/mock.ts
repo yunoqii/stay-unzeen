@@ -1600,6 +1600,7 @@ function loadVerify(): Promise<VerifyMock> {
     m.createVerifyMock({
       chainId: (network) => mockPool(network).chainId as "0202" | "0101",
       rateSell: () => BigInt(mockRate(false).lamportsPerZec),
+      rateBuy: () => BigInt(mockRate(true).lamportsPerZec),
       accounts(network) {
         const out: { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[]; claimLamports: bigint }[] = [];
         for (const [key, a] of accounts) {

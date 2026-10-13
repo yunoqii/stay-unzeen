@@ -77,7 +77,7 @@ export function FairCreateForm({ pool, meta, onMeta }: { pool: PoolInfo; meta: M
 
   return (
     <div>
-      <div className="grid gap-x-10 gap-y-8 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid grid-cols-1 gap-x-10 gap-y-8 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="space-y-8">
           <FormStep n="01" title="Token">
             <TokenMetaFields value={meta} onChange={onMeta} errors={metaErrors} showErrors={tried} disabled={busy} />

@@ -33,7 +33,7 @@ describe("mock Verify: full own-balance scenario", () => {
     vi.advanceTimersByTime(20_000);
     expect(mockDepositPhase("devnet", memo).phase).toBe("credited");
 
-    // 2. The operator takes a snapshot: not anchored, not signed yet.
+    // 2. The operator takes a snapshot: not signed, not anchored yet.
     const id = await mockTakeSnapshot("devnet");
     const fresh = await call<VerifySnapshot>("/api/verify");
     expect(fresh.id).toBe(id);
@@ -41,8 +41,15 @@ describe("mock Verify: full own-balance scenario", () => {
     expect(fresh.anchor).toBeUndefined();
     expect(checkSnapshot(fresh, MOCK_OPERATOR_PUBKEY)).toMatchObject({ digestOk: true, operator: "pending", anchor: "pending", allVaultsOk: true });
 
-    // 3. A few seconds later the memo-tx is confirmed: signature and anchor appear.
-    vi.advanceTimersByTime(7_000);
+    // 3. v0.10: the operator signs right away, before the memo-tx ("Signed · Anchor pending").
+    vi.advanceTimersByTime(1_500);
+    const signedOnly = await call<VerifySnapshot>(`/api/verify/${id}`);
+    expect(signedOnly.operator).toBeDefined();
+    expect(signedOnly.anchor).toBeUndefined();
+    expect(checkSnapshot(signedOnly, MOCK_OPERATOR_PUBKEY)).toMatchObject({ digestOk: true, operator: "verified", anchor: "pending" });
+
+    // 4. A few seconds later the memo-tx is confirmed: the anchor appears.
+    vi.advanceTimersByTime(24_000);
     const snap = await call<VerifySnapshot>(`/api/verify/${id}`);
     expect(snap.leaves).toBeGreaterThanOrEqual(1024);
     expect(checkSnapshot(snap, pinnedOperator("devnet"))).toMatchObject({ digestOk: true, operator: "verified", anchor: "anchored", allVaultsOk: true });
@@ -129,7 +136,7 @@ describe("Verify robustness (review E1, E3, E11, E12)", () => {
   type Mjs = { check(f: unknown, op?: string, opts?: { trustAnyOperator?: boolean }): { ok: boolean; lines: string[] } };
   const loadMjs = async () => (await import(/* @vite-ignore */ path.resolve(__dirname, "../../public/verify/verify-proof.mjs"))) as Mjs;
 
-  it("SOL tree (creator fees), mint granule from the snapshot, dedupe, pinned operator, balance compare", async () => {
+  it("creator fees in the ZEC leaf (v0.10), mint granule 1, dedupe, pinned operator, balance compare", async () => {
     const sk = crypto.getRandomValues(new Uint8Array(32));
     const me = signerFromSecret(sk);
     const signed = async <T,>(p: string): Promise<T> => {
@@ -146,21 +153,25 @@ describe("Verify robustness (review E1, E3, E11, E12)", () => {
     mockCreditCreatorFees("devnet", me.pubkey, tokens[0].mint, BigInt(12_345_678));
 
     const id = await mockTakeSnapshot("devnet");
-    vi.advanceTimersByTime(7_000);
+    vi.advanceTimersByTime(9_000);
     const snap = await call<VerifySnapshot>(`/api/verify/${id}`);
-    const sol = snap.trees.find((t) => t.asset === "SOL")!;
-    expect(sol).toMatchObject({ decimals: 9, granule: "1000000" });
-    for (const t of snap.trees) if (t.asset !== "ZEC" && t.asset !== "SOL") expect(t.granule).toBe("1"); // E1
+    expect(snap.trees.some((t) => t.asset === "SOL")).toBe(false); // v0.10: no SOL tree
+    expect(snap.rateLamportsPerZecBuy).toMatch(/^[1-9]\d*$/);
+    for (const t of snap.trees) if (t.asset !== "ZEC") expect(t.granule).toBe("1"); // E1
     const check = checkSnapshot(snap, MOCK_OPERATOR_PUBKEY);
     expect(check).toMatchObject({ digestOk: true, operator: "verified", allVaultsOk: true, duplicateVaults: [] });
     const rows = solvency(snap, check);
-    expect(rows.map((r) => r.asset).slice(0, 2)).toEqual(["ZEC", "SOL"]);
+    expect(rows[0].asset).toBe("ZEC");
     for (const r of rows) expect(r.covered).toBe(true);
 
     const proof = await signed<VerifyProof>(`/api/verify/proof?snapshot=${id}`);
     const res = checkProof(snap, proof, me.pubkey);
     expect(res.ok).toBe(true);
-    expect(res.assets.find((a) => a.asset === "SOL")!.committed >= BigInt(12_345_678)).toBe(true);
+    // ZEC leaf = available + held + ceil(claimable × 1e8 / rateLamportsPerZecBuy), rounded up to 0.001 ZEC.
+    const rateBuy = BigInt(snap.rateLamportsPerZecBuy!);
+    const claimZat = (BigInt(12_345_678) * BigInt(100_000_000) + rateBuy - BigInt(1)) / rateBuy;
+    expect(res.assets.some((a) => a.asset === "SOL")).toBe(false);
+    expect(res.assets.find((a) => a.asset === "ZEC")!.committed >= BigInt(30_000_000) + claimZat).toBe(true);
 
     // E11: committed vs the portfolio now.
     const portfolio = await signed<Portfolio>("/api/portfolio");
@@ -173,7 +184,7 @@ describe("Verify robustness (review E1, E3, E11, E12)", () => {
     expect(compareWithPortfolio(own, snap, extra).rows.find((r) => r.committed === null)!.status).toBe("missing");
     expect(compareWithPortfolio(own, snap, { ...extra, deposits: [{ id: "x", amountZat: "1", status: "credited", publicSource: false, ts: snap.takenAt } as never] }).rows.find((r) => r.asset === "ZEC")!.status).toBe("changed");
 
-    // Offline script: SOL works; signatures need a pinned key or an explicit opt-in.
+    // Offline script: creator snapshot works; signatures need a pinned key or an explicit opt-in.
     const mjs = await loadMjs();
     const file = proofFile(snap, proof, me.pubkey);
     expect(mjs.check(file, MOCK_OPERATOR_PUBKEY).ok).toBe(true);
@@ -192,7 +203,11 @@ describe("Verify robustness (review E1, E3, E11, E12)", () => {
     if (single !== undefined) expect(solvency(dup, dc).find((r) => r.asset === tokens[0].mint)!.assets).toBe(single);
     expect(mjs.check({ ...file, snapshot: dup }, MOCK_OPERATOR_PUBKEY).ok).toBe(false);
 
-    // E3: any asset id that is not ZEC, SOL or a base58 mint fails the checks, never crashes.
+    // E3: any asset id that is not ZEC or a base58 mint (v0.10: "SOL" too) fails the checks, never crashes.
+    const solOdd = structuredClone(snap);
+    solOdd.trees.push({ asset: "SOL", decimals: 9, granule: "1000000", root: "00".repeat(32), sum: "1" });
+    expect(checkSnapshot(solOdd, MOCK_OPERATOR_PUBKEY).error).toMatch(/unknown asset id/);
+    expect(mjs.check({ ...file, snapshot: solOdd }, MOCK_OPERATOR_PUBKEY).ok).toBe(false);
     const odd = structuredClone(snap);
     odd.trees.push({ asset: "USDC-0O", decimals: 6, granule: "1", root: "00".repeat(32), sum: "1" });
     expect(() => mjs.check({ ...file, snapshot: odd }, MOCK_OPERATOR_PUBKEY)).not.toThrow();

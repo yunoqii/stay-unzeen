@@ -80,18 +80,16 @@ export function changedSince(p: PortfolioLike, takenAt: number): boolean {
  * Compare what the pool committed to this key (proof) with what the portfolio shows now. Liabilities
  * are `available + held` per asset, so the same is used here. Only computed in this browser.
  */
-export function compareWithPortfolio(own: Pick<OwnCheck, "result" | "proof">, snap: Pick<VerifySnapshot, "takenAt" | "trees">, p: PortfolioLike): { rows: CompareRow[]; changed: boolean } {
+export function compareWithPortfolio(own: Pick<OwnCheck, "result" | "proof">, snap: Pick<VerifySnapshot, "takenAt" | "trees" | "rateLamportsPerZecBuy">, p: PortfolioLike): { rows: CompareRow[]; changed: boolean } {
   const changed = changedSince(p, snap.takenAt);
   const now = new Map<string, bigint>();
   const add = (k: string, v: bigint) => v > BigInt(0) && now.set(k, (now.get(k) ?? BigInt(0)) + v);
   const u = (v: string) => (/^\d+$/.test(v) ? BigInt(v) : BigInt(0));
-  add("ZEC", u(p.zecBalance) + u(p.zecHeld));
+  add("ZEC", u(p.zecBalance) + u(p.zecHeld) + claimableZat(p.claimable, snap.rateLamportsPerZecBuy));
   for (const h of p.holdings) add(h.mint, u(h.amount) + u(h.held));
-  // Creator fees owed are their own tree only when the snapshot has one (else they are folded into ZEC).
-  if (snap.trees.some((t) => t.asset === "SOL")) add("SOL", p.claimable.reduce((s, c) => s + u(c.solAmount), BigInt(0)));
 
   const rows: CompareRow[] = [];
-  const decimalsOf = (a: string) => snap.trees.find((t) => t.asset === a)?.decimals ?? (a === "ZEC" ? 8 : a === "SOL" ? 9 : 6);
+  const decimalsOf = (a: string) => snap.trees.find((t) => t.asset === a)?.decimals ?? (a === "ZEC" ? 8 : 6);
   for (const a of own.result.assets) {
     const n = now.get(a.asset) ?? BigInt(0);
     rows.push({ asset: a.asset, decimals: a.decimals, committed: a.committed, now: n, status: a.committed >= n ? "covered" : changed ? "changed" : "short" });
@@ -101,4 +99,16 @@ export function compareWithPortfolio(own: Pick<OwnCheck, "result" | "proof">, sn
     rows.push({ asset, decimals: decimalsOf(asset), committed: null, now: n, status: own.proof.truncated ? "truncated" : changed ? "changed" : "missing" });
   }
   return { rows, changed };
+}
+
+/**
+ * v0.10: creator fees owed sit in the creator's ZEC leaf: ceil(Σ claimable lamports × 1e8 / rateLamportsPerZecBuy).
+ * No rate in the snapshot = nothing to add (the server skips a snapshot with claimable but no rate).
+ */
+export function claimableZat(claimable: Pick<Portfolio["claimable"][number], "solAmount">[], rateLamportsPerZecBuy?: string): bigint {
+  const rate = rateLamportsPerZecBuy && /^\d+$/.test(rateLamportsPerZecBuy) ? BigInt(rateLamportsPerZecBuy) : BigInt(0);
+  if (rate === BigInt(0)) return BigInt(0);
+  const lamports = claimable.reduce((s, c) => s + (/^\d+$/.test(c.solAmount) ? BigInt(c.solAmount) : BigInt(0)), BigInt(0));
+  if (lamports === BigInt(0)) return BigInt(0);
+  return (lamports * BigInt(100_000_000) + rate - BigInt(1)) / rate;
 }

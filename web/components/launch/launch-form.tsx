@@ -146,12 +146,15 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
   const nowZat = nf && "zat" in nf ? nf.zat : ZERO;
   const total = fee === null ? null : fee + (initial.ok && initial.zat ? initial.zat : ZERO) + nowZat;
   const balance = portfolio ? BigInt(portfolio.zecBalance) : null;
-  const short = total !== null && balance !== null && balance < total;
+  // While the launch is queued its own hold is already off the balance: "not enough" would then describe the
+  // launch you just signed, not the form. Re-check once it settles.
+  const inFlight = active?.status.status === "queued" || active?.status.status === "sent";
+  const short = !inFlight && total !== null && balance !== null && balance < total;
   const frozen = portfolio?.frozen ?? false;
 
   if (pool?.createEnabled === false || disabledByServer) return <LaunchDisabled />;
 
-  const canSubmit = unlocked && !busy && metaOk && initial.ok && !short && !frozen && portfolio !== null && pool !== null;
+  const canSubmit = unlocked && !busy && !inFlight && metaOk && initial.ok && !short && !frozen && portfolio !== null && pool !== null;
 
   const submit = async () => {
     setTried(true);
@@ -183,8 +186,8 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
   const minted = active?.status.status === "executed" ? active.status.fill?.mint : undefined;
 
   return (
-    <div className="grid gap-x-10 gap-y-8 lg:grid-cols-[minmax(0,1fr)_340px]">
-      <div className="space-y-8">
+    <div className="grid grid-cols-1 gap-x-10 gap-y-8 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="min-w-0 space-y-8">
         <FormStep n="01" title="Token">
           <TokenMetaFields value={meta} onChange={onMeta} errors={metaErrors} showErrors={tried} disabled={busy} />
         </FormStep>
@@ -270,7 +273,7 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
         </FormStep>
       </div>
 
-      <aside className="space-y-4 lg:sticky lg:top-[calc(var(--header-h)+1.5rem)] lg:self-start">
+      <aside className="min-w-0 space-y-4 lg:sticky lg:top-[calc(var(--header-h)+1.5rem)] lg:self-start">
         <p className="text-xs text-muted-foreground">In the feed</p>
         <FeedPreview meta={meta} venue={venue} />
 

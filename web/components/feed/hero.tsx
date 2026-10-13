@@ -54,7 +54,7 @@ function Eclipse() {
   }, [gl]);
 
   return (
-    <div ref={box} aria-hidden className="pointer-events-none absolute -top-40 right-[-12rem] size-[30rem] sm:-top-44 sm:right-[-6rem] lg:right-0">
+    <div ref={box} aria-hidden className="pointer-events-none absolute -top-44 right-[-14rem] size-[24rem] opacity-70 sm:-top-44 sm:right-[-6rem] sm:size-[30rem] sm:opacity-100 lg:right-0">
       {/* Ambient glow: mood borrowed from a looping glow video, rebuilt as a CSS gradient in Zcash yellow (no video, no request). */}
       <div className="uz-glow absolute inset-[-35%] rounded-full bg-[radial-gradient(closest-side,rgb(244_183_40/0.14),rgb(244_183_40/0.05)_45%,transparent_70%)] blur-2xl" />
       <div className={cn("absolute inset-0 transition-opacity duration-700", ready && "opacity-0")}>

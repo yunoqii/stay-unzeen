@@ -14,10 +14,12 @@
 //      vault address counted once;
 //   4. every piece of your balance climbs its Merkle-sum path to the tree root (hash and sum); pieces
 //      and leaf positions are distinct and inside the tree, values are multiples of the tree's granule;
-//   5. solvency: mints by signed vault balances, SOL (creator fees owed, if present) by spare vault SOL,
-//      ZEC by the remaining spare SOL (proven) + reserve (attested by the operator).
-// Asset ids: "ZEC" (32 zero bytes), "SOL" (32 × 0xFF) or a base58 mint (32 bytes). Any other id is
+//   5. solvency: mints by signed vault balances; ZEC by spare vault SOL (Σ lamports − committedLamports,
+//      converted at rateLamportsPerZecSell: proven) + reserve (attested by the operator). Creator fees
+//      owed are inside the creators' ZEC leaves (API v0.10), there is no SOL tree.
+// Asset ids: "ZEC" (32 zero bytes) or a base58 mint (32 bytes). Any other id (including "SOL") is
 // reported as a failed check, never a crash.
+// A signed snapshot may not be anchored yet (v0.10: the operator signs before the memo-tx).
 // Then compare the digest with the memo of the anchor tx in any Solana explorer or RPC you trust.
 
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
@@ -59,10 +61,9 @@ const tag = (t) => Buffer.from(`unzeen/verify/v1/${t}`);
 const isUint = (v) => typeof v === "string" && /^\d{1,40}$/.test(v);
 const isHex32 = (v) => typeof v === "string" && /^[0-9a-f]{64}$/i.test(v);
 
-/** 32 bytes of an asset id, or null for an id that is not ZEC, SOL or a 32-byte base58 mint. */
+/** 32 bytes of an asset id, or null for an id that is not ZEC or a 32-byte base58 mint. */
 export function asset32(a) {
   if (a === "ZEC") return Buffer.alloc(32);
-  if (a === "SOL") return Buffer.alloc(32, 0xff);
   try {
     const b = b58decode(a);
     return b.length === 32 ? b : null;
@@ -129,10 +130,13 @@ export function check(file, operator, opts = {}) {
     else if (opts.trustAnyOperator) out.push("WARN operator key NOT compared with a pinned key (--trust-any-operator): anyone could have signed this");
     else all = ok(false, "operator key pinned (pass --operator <key from the README>, or --trust-any-operator)") && all;
   } else {
-    out.push("WAIT snapshot not signed / anchored yet");
+    out.push("WAIT snapshot not signed yet");
     // Asked to check against a pinned key: no signature is not a pass.
     if (pinned) all = ok(false, "operator signature present") && all;
   }
+
+  if (s.operator && !s.anchor) out.push("WAIT signed, anchor pending: the memo-tx is not confirmed yet (compare the digest later)");
+  else if (s.anchor && s.anchor.matches === false) out.push("WARN anchor memo does not match the digest (the pool re-anchors automatically)");
 
   // 3. vaults, each address once
   const seen = new Set();
@@ -202,20 +206,15 @@ export function check(file, operator, opts = {}) {
   // 5. solvency (each vault once, signed only)
   const lamports = signed.reduce((n, v) => n + (isUint(v.lamports) ? BigInt(v.lamports) : 0n), 0n);
   const committedL = isUint(s.committedLamports) ? BigInt(s.committedLamports) : 0n;
-  const spareAll = lamports > committedL ? lamports - committedL : 0n;
-  const solTree = s.trees.find((t) => t.asset === "SOL");
-  const solLiab = solTree && isUint(solTree.sum) ? BigInt(solTree.sum) : 0n;
+  const spare = lamports > committedL ? lamports - committedL : 0n;
   for (const t of s.trees) {
     if (!asset32(t.asset)) {
       all = ok(false, `${String(t.asset).slice(0, 48)}: unknown asset id, can't check solvency`) && all;
     } else if (t.asset === "ZEC") {
-      const spare = spareAll > solLiab ? spareAll - solLiab : 0n;
       const proven = s.rateLamportsPerZecSell ? (spare * 100_000_000n) / BigInt(s.rateLamportsPerZecSell) : 0n;
       const attested = BigInt(s.zecReserve.amountZat);
       // Informational: part of the ZEC cover is the operator's statement, so it does not set the exit code.
       ok(BigInt(t.sum) <= proven + attested, `ZEC liabilities ${t.sum} <= ${proven} proven (SOL) + ${attested} attested (operator) zat  [informational: attested part]`);
-    } else if (t.asset === "SOL") {
-      all = ok(BigInt(t.sum) <= spareAll, `SOL (creator fees owed) ${t.sum} <= spare vault lamports ${spareAll}`) && all;
     } else {
       const held = signed.flatMap((v) => v.tokens).filter((x) => x.mint === t.asset).reduce((n, x) => n + (isUint(x.amount) ? BigInt(x.amount) : 0n), 0n);
       all = ok(BigInt(t.sum) <= held, `${t.asset} liabilities ${t.sum} <= vaults ${held}`) && all;

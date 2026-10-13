@@ -1,4 +1,4 @@
-// Mock of core's Verify (docs/API.md v0.7). Loaded by lib/api/mock.ts on the first /api/verify* call,
+// Mock of core's Verify (docs/API.md v0.7, v0.10). Loaded by lib/api/mock.ts on the first /api/verify* call,
 // so pages that never verify carry none of it.
 //
 // Builds real Merkle-sum trees with the same hashes as core (lib/verify/merkle-sum.ts, checked against
@@ -7,7 +7,9 @@
 // (TEST ONLY seeds), so the browser-side checks run exactly as against core.
 //
 // History: one snapshot a day at 00:00 UTC for the last week. "Take a snapshot" (mock only) plays the
-// devnet operator command; its signature and anchor appear a few seconds later, as after the memo-tx.
+// devnet operator command; v0.10: the operator signature appears right away (~1.5 s), the anchor a few
+// seconds later, once the memo-tx is confirmed ("Signed · Anchor pending" in between).
+// v0.10: no SOL tree; a creator's claimable lamports are folded into their ZEC leaf at rateLamportsPerZecBuy.
 
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -23,6 +25,8 @@ export interface VerifyHost {
   chainId(network: Network): "0202" | "0101";
   /** lamports per ZEC on the sell side (what SOL counts for in the ZEC cover). */
   rateSell(): bigint;
+  /** v0.10: lamports per ZEC on the buy side (creators' claimable -> ZEC liabilities, ceil). */
+  rateBuy(): bigint;
   /** Every mock account with a balance right now: available + held. */
   accounts(network: Network): { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[]; claimLamports?: bigint }[];
   /** Tokens the mock market knows (synthetic holders pick from these). */
@@ -40,14 +44,13 @@ export interface VerifyMock {
 const N0 = BigInt(0);
 const ZAT = BigInt(100_000_000);
 const ZEC_GRANULE = BigInt(100_000);
-/** v0.8: SOL tree (creator fees owed), granule 0.001 SOL. */
-const SOL_GRANULE = BigInt(1_000_000);
 const RESERVE_STEP = BigInt(1_000_000);
 const MIN_LEAVES = 1024;
 const DAY = 86_400_000;
 const HISTORY_DAYS = 7;
 const RETENTION_MS = 48 * 3_600_000;
-const ANCHOR_DELAY_MS = 6_000;
+const SIGN_DELAY_MS = 1_500;
+const ANCHOR_DELAY_MS = 25_000; // longer than one 10 s poll of /verify, so "Signed · Anchor pending" is visible in the demo
 const PROOF_BUCKET = 65_536; // API v0.7 final: always exactly 64 KiB
 const PROOF_LIMIT_PER_MIN = 10;
 const MAX_PROOF_ASSETS = 12;
@@ -114,10 +117,12 @@ interface OwnerLeaf {
 
 interface Snap {
   pub: VerifySnapshot;
-  /** Signature and anchor become public at this time (memo-tx confirmed). */
+  /** v0.10: the operator signature is public from here (before the memo-tx). */
+  signAt: number;
+  /** The anchor is public from here (memo-tx confirmed). */
   anchorAt: number;
   operator: { pubkey: string; sig: string };
-  anchor: { solanaTx: string; slot: number; matches: boolean };
+  anchor: { solanaTx: string; slot: number; matches: boolean; blockTime: number | null };
   /** Kept 48 h: tree levels per asset and the owner bindings. */
   levels: Map<AssetId, SumNode[][]> | null;
   owners: Map<string, OwnerLeaf[]> | null;
@@ -152,20 +157,21 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
   function real(network: Network): Holder[] {
     return host.accounts(network).map((a) => {
       const balances = new Map<AssetId, bigint>();
-      if (a.zat > N0) balances.set("ZEC", a.zat);
+      // v0.10: creator fees owed are in the creator's ZEC leaf: ceil(claimable × 1e8 / rateLamportsPerZecBuy).
+      const rateBuy = host.rateBuy();
+      const claimZat = a.claimLamports && a.claimLamports > N0 ? (a.claimLamports * ZAT + rateBuy - BigInt(1)) / rateBuy : N0;
+      if (a.zat + claimZat > N0) balances.set("ZEC", a.zat + claimZat);
       for (const t of a.tokens) if (t.amount > N0) balances.set(t.mint, (balances.get(t.mint) ?? N0) + t.amount);
-      // v0.8: creator fees owed are a liability in SOL (its own tree).
-      if (a.claimLamports && a.claimLamports > N0) balances.set("SOL", a.claimLamports);
       return { pubkey: a.pubkey, balances };
     });
   }
 
-  function build(network: Network, id: number, takenAt: number, holders: Holder[], now: number, anchorAt: number): Snap {
+  function build(network: Network, id: number, takenAt: number, holders: Holder[], now: number, signAt: number, anchorAt: number): Snap {
     const chainId = host.chainId(network);
     const decimals = new Map<string, number>(host.tokens().map((t) => [t.mint, t.decimals]));
-    // Review E1: mint trees use 1 base unit (vaults hold exactly Σ balances); ZEC and SOL round up.
-    const granuleOf = (asset: AssetId) => (asset === "ZEC" ? ZEC_GRANULE : asset === "SOL" ? SOL_GRANULE : BigInt(1));
-    const decimalsOf = (asset: AssetId) => (asset === "ZEC" ? 8 : asset === "SOL" ? 9 : (decimals.get(asset) ?? 6));
+    // Review E1 / v0.10: mint trees use 1 base unit (vaults hold exactly Σ balances); ZEC rounds up to 0.001.
+    const granuleOf = (asset: AssetId) => (asset === "ZEC" ? ZEC_GRANULE : BigInt(1));
+    const decimalsOf = (asset: AssetId) => (asset === "ZEC" ? 8 : (decimals.get(asset) ?? 6));
 
     // Pieces per asset: rounded UP, split into 2-4.
     const pieces = new Map<AssetId, { pubkey: Uint8Array; owner: string; piece: number; value: bigint }[]>([["ZEC", []]]);
@@ -222,7 +228,7 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
     const seeds = vaultSeeds(network);
     const vaultTokens: { mint: string; amount: bigint }[][] = seeds.map(() => []);
     for (const t of trees) {
-      if (t.asset === "ZEC" || t.asset === "SOL") continue;
+      if (t.asset === "ZEC") continue;
       const total = (BigInt(t.sum) * BigInt(10_000 + Math.floor(rnd() * 400))) / BigInt(10_000) + BigInt(t.granule);
       // One or two vaults per mint, like mint_vaults in the relayer.
       const a = Math.floor(rnd() * seeds.length);
@@ -234,11 +240,10 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
     const zecLiab = BigInt(trees.find((t) => t.asset === "ZEC")?.sum ?? "0");
     const rate = host.rateSell();
     const reserve = ((zecLiab * BigInt(58 + Math.floor(rnd() * 10))) / BigInt(100) / RESERVE_STEP) * RESERVE_STEP;
-    const committed = BigInt(Math.floor((0.3 + rnd() * 2.5) * 1e9));
+    // v0.10: only the gas of queued token withdrawals.
+    const committed = BigInt(Math.floor((0.002 + rnd() * 0.02) * 1e9));
     const lamportsNeeded = ((zecLiab - reserve) * rate) / ZAT;
-    // Creator fees owed (SOL tree) are paid from the same vault SOL: covered first, the rest backs ZEC.
-    const solLiab = BigInt(trees.find((t) => t.asset === "SOL")?.sum ?? "0");
-    const lamportsTotal = (lamportsNeeded * BigInt(108 + Math.floor(rnd() * 10))) / BigInt(100) + committed + solLiab + BigInt(250_000_000);
+    const lamportsTotal = (lamportsNeeded * BigInt(108 + Math.floor(rnd() * 10))) / BigInt(100) + committed + BigInt(250_000_000);
     const weights = seeds.map(() => 1 + rnd() * 3);
     const wsum = weights.reduce((x, y) => x + y, 0);
     let given = N0;
@@ -267,6 +272,7 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
       vaults,
       committedLamports: committed.toString(),
       rateLamportsPerZecSell: rate.toString(),
+      rateLamportsPerZecBuy: host.rateBuy().toString(),
       zecReserve: { amountZat: reserve.toString(), height: zcashHeight, attested: true as const },
     };
     const digest = rootsDigest(base);
@@ -274,9 +280,10 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
     const keep = now - takenAt < RETENTION_MS;
     return {
       pub,
+      signAt,
       anchorAt,
       operator: { pubkey: OPERATOR_PUBKEY, sig: base58.encode(ed25519.sign(hexToBytes(digest), OPERATOR_SEED)) },
-      anchor: { solanaTx: b58(88), slot: solanaSlot + 40 + Math.floor(rnd() * 30), matches: true },
+      anchor: { solanaTx: b58(88), slot: solanaSlot + 40 + Math.floor(rnd() * 30), matches: true, blockTime: Math.floor(anchorAt / 1000) },
       levels: keep ? levels : null,
       owners: keep ? owners : null,
     };
@@ -292,14 +299,15 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
       const takenAt = today - d * DAY;
       // Your own (mock) balance is in the last two snapshots: the ones whose proofs are still kept.
       const holders = [...synthetic(network, takenAt / DAY), ...(d <= 1 ? real(network) : [])];
-      l.push(build(network, 100 - d, takenAt, holders, now, takenAt + 90_000));
+      l.push(build(network, 100 - d, takenAt, holders, now, takenAt + 30_000, takenAt + 90_000));
     }
     snaps[network] = l;
     return l;
   }
 
   function publicOf(s: Snap, now: number): VerifySnapshot {
-    if (now < s.anchorAt) return structuredClone(s.pub);
+    if (now < s.signAt) return structuredClone(s.pub);
+    if (now < s.anchorAt) return { ...structuredClone(s.pub), operator: { ...s.operator } };
     return { ...structuredClone(s.pub), operator: { ...s.operator }, anchor: { ...s.anchor } };
   }
 
@@ -384,7 +392,7 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
       const now = Date.now();
       const takenAt = Math.floor(now / 60_000) * 60_000;
       const id = l[l.length - 1].pub.id + 1;
-      l.push(build(network, id, takenAt, [...synthetic(network, Math.floor(now / DAY)), ...real(network)], now, now + ANCHOR_DELAY_MS));
+      l.push(build(network, id, takenAt, [...synthetic(network, Math.floor(now / DAY)), ...real(network)], now, now + SIGN_DELAY_MS, now + ANCHOR_DELAY_MS));
       // 48 h retention: only the latest two keep paths and key bindings in the mock.
       for (const s of l.slice(0, -2)) {
         s.levels = null;

@@ -21,6 +21,13 @@ export function usePeek() {
  * An amount behind the veil. Screen readers hear "hidden" instead of the number until peeked. On Peek a
  * plain text amount "decrypts" from shade glyphs (feedback that it was hidden, now shown).
  */
+/**
+ * What sits under the blur while veiled: a fixed stand-in, not the real digits. A blurred "1" is a faint dot
+ * and a blurred "1234.5678" is a wide smear, so blurring the real text leaked the size of the amount (and very
+ * short amounts looked like nothing was there at all).
+ */
+const VEIL = "00.000";
+
 export function Veiled({ children, className }: { children: React.ReactNode; className?: string }) {
   const { shown } = usePeek();
   const text = typeof children === "string" || typeof children === "number" ? String(children) : null;
@@ -33,7 +40,7 @@ export function Veiled({ children, className }: { children: React.ReactNode; cla
           shown ? "opacity-100 blur-none select-auto" : "opacity-70 blur-veil",
         )}
       >
-        {shown && text !== null ? <DecryptText text={text} /> : children}
+        {shown && text !== null ? <DecryptText text={text} /> : !shown && text !== null ? VEIL : children}
       </span>
       {!shown && <span className="sr-only">hidden</span>}
     </span>

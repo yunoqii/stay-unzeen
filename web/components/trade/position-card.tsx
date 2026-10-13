@@ -40,6 +40,9 @@ export function PositionCard({ token, priceSol }: { token: Token; priceSol: stri
 
   const sellRate = pool?.rate ? BigInt(pool.rate.lamportsPerZecSell) : lastRate(network, "sell") ? BigInt(lastRate(network, "sell")!.lamportsPerZec) : ZERO;
   const u = unrealized(pos, priceSol, token.decimals, sellRate);
+  // Value = what you hold now (the pool's ledger), not what this device's history explains: a position bought
+  // before the history began (or partly sold since) still has a value even when its PnL can't be computed.
+  const value = held !== null && held > ZERO ? unrealized({ ...pos, qty: held }, priceSol, token.decimals, sellRate) : u;
   const entry = avgEntrySol(pos, token.decimals);
   const incomplete = pos.incomplete || expired > 0 || (held !== null && held > pos.qty);
   const pnl = u ? u.pnlZat + pos.realizedZat : pos.realizedZat;
@@ -67,7 +70,7 @@ export function PositionCard({ token, priceSol }: { token: Token; priceSol: stri
             <Veiled>{entry === null ? "—" : `${formatPrice(entry)} SOL`}</Veiled>
           </Cell>
           <Cell label="Value">
-            <Veiled>{u ? `≈ ${formatZec(u.valueZat.toString())} ZEC` : "—"}</Veiled>
+            <Veiled>{value ? `≈ ${formatZec(value.valueZat.toString())} ZEC` : "—"}</Veiled>
           </Cell>
           <Cell label="PnL">
             <Veiled>

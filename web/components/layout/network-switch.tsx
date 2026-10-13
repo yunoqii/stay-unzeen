@@ -48,7 +48,7 @@ export function NetworkSwitch() {
             data-network={n}
             onClick={() => choose(n)}
             className={cn(
-              "relative h-full rounded-full px-2.5 transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none sm:px-3",
+              "hit relative h-full rounded-full px-2.5 transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none sm:px-3",
               active ? (real ? "text-zec" : "text-foreground") : "text-muted-foreground hover:text-foreground",
             )}
           >

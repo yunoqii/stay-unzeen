@@ -1,5 +1,6 @@
 "use client";
 
+import { onTabListKeyDown } from "@/lib/tabs";
 import Link from "next/link";
 import { useId, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
@@ -42,12 +43,13 @@ export function TradePanel({ token, priceSol }: { token: Token; priceSol: string
       <h2 id={`${tabsId}-title`} className="sr-only">
         Trade ${token.symbol}
       </h2>
-      <div role="tablist" aria-label="Side" className="grid grid-cols-3 gap-1 rounded-full border border-border p-1">
+      <div role="tablist" aria-label="Side" onKeyDown={(e) => onTabListKeyDown(e, true)} className="grid grid-cols-3 gap-1 rounded-full border border-border p-1">
         {(["buy", "sell", "orders"] as const).map((s) => (
           <button
             key={s}
             role="tab"
             aria-selected={side === s}
+            tabIndex={side === s ? 0 : -1}
             // Orders stay reachable when unsupported: the panel explains why instead of a dead tab.
             aria-disabled={s === "orders" && !support.ok ? true : undefined}
             title={s === "orders" && !support.ok ? support.reason : undefined}
@@ -417,7 +419,7 @@ function Quote({
           <dd className="tabular text-right text-muted-foreground">{v}</dd>
         </div>
       ))}
-      <p className="pt-1 text-[11px] text-faint-foreground">At the current price and the last rate the pool fixed. Final rate locks when the pool accepts.</p>
+      <p className="pt-1 text-[11px] text-faint-foreground">At the current price and the last rate the pool fixed. Final rate locks when the pool accepts; min received is rounded down.</p>
     </dl>
   );
 }

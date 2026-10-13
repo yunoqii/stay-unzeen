@@ -185,8 +185,8 @@ export function StatsApp() {
 
 function Cell({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <span className="tabular text-right">
-      <span className="mr-1.5 text-[11px] text-faint-foreground sm:hidden">{label}</span>
+    <span className="tabular flex flex-col gap-0.5 sm:block sm:text-right">
+      <span className="text-[11px] whitespace-nowrap text-faint-foreground sm:hidden">{label}</span>
       {children}
     </span>
   );

@@ -40,6 +40,7 @@
 - —
 
 ## Решения
+- 13.10 (владелец): репо открываем 28.10 в 20:00 UTC (4 ч раскрытия fair-launch принимаем); внутренние доки (docs/analysis, docs/sessions, STATUS, CLAUDE.md, .claude/) выносим из публичного репо; судьям — 3–5 разных devnet demo-ключей в описании формы; ребаланс SOL через NEAR Intents — автоматизировать
 - 13.10 (лид, по review-day8.md): гранула деревьев mint = 1 базовая единица (E1); дерево SOL убрать, claimable учитывать в ZEC-листе по курсу buy (E5/E6); дальнейшие creator fees fair-запуска — создателю (только комиссия launch-tx — пулу); min_out от цены тика + квантование ВСЕХ min_out до 3 значащих цифр (E4); подпись оператора публикуется до якоря (E10); пакет «демо-устойчивость Verify» E2/E7/E8/E9/E14/E16 — до записи видео
 - 12.10 (лид, по review-fair-launch.md): раунд drand = R(closeAt + 30 с) + 1 (memo с корнем гарантированно до раунда, поле beforeRound); два ключа аттестаций — отдельный для fair-launch и для Verify (F14); кап 1024 заявки на запуск; fl_* в actions удаляются через 48 ч; фича в бандле только при явном =1, test:bundle:strict — обязательный шаг деплоя
 - 12.10 (лид, по verify.md/orders.md): резерв ZEC — «attested by operator» (доказать без viewing key нельзя, ZIP 311 без Orchard/Ironwood; ZK proof of reserves — roadmap); корень Verify раз в сутки (devnet — вручную) + якорь memo-tx в Solana; один ключ аттестаций пула для memo Verify и fair-launch; ордера только по mint пула, TTL ≤ 72 ч, только delayed/max, цена с тика индексатора; bracket — вне MVP. План: Verify — дни 11–12 вместе с fair-launch; лимитки — дни 13–14 (вместо слота Jupiter)
@@ -104,5 +105,7 @@
 - VPS живой 29.10–22.11: мониторинг uptime, балансов TAZ/devnet-SOL/demo-ключей, запасной lightwalletd; логи по чек-листу H9
 - Description ≤2000 символов (what it does / why it doesn't leak / real vs mock) + demo-ключи
 - Публичный деплой до 28.10 собирать с `NEXT_PUBLIC_FAIR_LAUNCH_BUILD=0` и `UNZEEN_FAIR_LAUNCH=0` (кода fair-launch нет в бандле); 28.10 перед открытием репо — включить
-- 28.10 до 20:00 UTC открыть репо, проверить в инкогнито, отправить форму; после отправки черновик не пересохранять
+- Перед открытием: вынести внутренние доки (docs/analysis, docs/sessions, docs/STATUS.md, CLAUDE.md, .claude/, docs/screenshots/design-review) в приватный репо и добавить в .gitignore; решить вопрос истории git
+- Накопить TAZ на 3–5 demo-ключей судей
+- 28.10 в 20:00 UTC открыть репо, проверить в инкогнито, отправить форму; после отправки черновик не пересохранять
 - Копить TAZ заранее (фаусет 0.125/сутки) для demo-ключей

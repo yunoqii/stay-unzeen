@@ -15,10 +15,9 @@ export function fmtAmount(v: bigint, decimals: number, maxFrac = 3): string {
   return grouped + (f ? "." + f : "");
 }
 
-/** Ticker of an asset: "ZEC", "SOL" (creator fees owed), the token symbol when known, else a short mint. */
+/** Ticker of an asset: "ZEC", the token symbol when known, else a short mint. */
 export function assetLabel(asset: AssetId, symbols: Map<string, string>): string {
   if (asset === "ZEC") return "ZEC";
-  if (asset === "SOL") return "SOL";
   const s = symbols.get(asset);
   return s ? `$${s}` : shortAddr(asset, 4, 4);
 }

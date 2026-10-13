@@ -1,5 +1,6 @@
 "use client";
 
+import { onTabListKeyDown } from "@/lib/tabs";
 import { forwardRef, useEffect, useId, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowUpRight, CheckCircle, ShieldWarning, WarningCircle, X } from "@phosphor-icons/react";
@@ -61,12 +62,13 @@ export const WithdrawPanel = forwardRef<HTMLElement, Props>(function WithdrawPan
           <X size={14} weight="light" />
         </button>
       </div>
-      <div role="tablist" aria-label="What to withdraw" className="mt-4 grid grid-cols-2 gap-1 rounded-full border border-border p-1">
+      <div role="tablist" aria-label="What to withdraw" onKeyDown={onTabListKeyDown} className="mt-4 grid grid-cols-2 gap-1 rounded-full border border-border p-1">
         {(["token", "zec"] as const).map((t) => (
           <button
             key={t}
             role="tab"
             aria-selected={tab === t}
+            tabIndex={tab === t ? 0 : -1}
             onClick={() => onTab(t)}
             className={cn(
               "relative rounded-full py-2 text-sm transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",

@@ -26,6 +26,16 @@ const ICON: Record<Tone, React.ReactNode> = {
 export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { snap: VerifySnapshot; check: SnapshotCheck; isLatest: boolean; pinned: string | null; network: Network }) {
   const vaultsOk = Object.values(check.vaults).filter(Boolean).length;
   const op = check.operator;
+  // v0.10: the operator signs before the memo-tx; in between the snapshot is "Signed · Anchor pending".
+  const signedOk = op === "verified" || op === "unpinned";
+  const anchorLabel =
+    check.anchor === "anchored"
+      ? "Anchored on Solana"
+      : check.anchor === "mismatch"
+        ? "Anchor memo does not match"
+        : signedOk
+          ? "Signed ✓ · Anchor pending"
+          : "Not anchored yet";
   const rows: { tone: Tone; label: string; detail: React.ReactNode }[] = [
     {
       tone: check.digestOk ? "ok" : "bad",
@@ -48,7 +58,7 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
         op === "verified"
           ? "Ed25519 over the recomputed digest, by the attestation key pinned in this app."
           : op === "pending"
-            ? "The operator signs once the root is anchored on Solana."
+            ? "The operator signs the digest right after the snapshot is built, before it goes on Solana."
             : op === "unpinned"
               ? "This build has no pinned attestation key to compare with. Compare the key with the one in the README."
               : op === "wrong_key"
@@ -107,7 +117,7 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
             <span className="mt-0.5">{ICON[check.anchor === "anchored" ? "ok" : check.anchor === "pending" ? "wait" : "bad"]}</span>
             <div className="min-w-0 flex-1">
               <p className={cn("text-sm", check.anchor === "mismatch" && "text-sell")}>
-                {check.anchor === "anchored" ? "Anchored on Solana" : check.anchor === "pending" ? "Not anchored yet" : "Anchor memo does not match"}
+                {anchorLabel}
               </p>
               {snap.anchor ? (
                 <dl className="mt-1 space-y-1 text-xs">
@@ -142,7 +152,9 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
                 </dl>
               ) : (
                 <p className="mt-0.5 text-xs text-pretty text-faint-foreground">
-                  The root goes on Solana as a memo, so it cannot be shown differently to different people. Usually within a minute.
+                  {signedOk
+                    ? "The operator already signed this digest. The memo-tx that puts it on Solana follows, usually within a minute."
+                    : "The root goes on Solana as a memo, so it cannot be shown differently to different people. Usually within a minute."}
                 </p>
               )}
               {check.anchor === "mismatch" && (

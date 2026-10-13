@@ -78,7 +78,7 @@ function VerifyView({ network }: { network: Network }) {
     };
   }, [reload]);
 
-  // Signature and anchor arrive with the memo-tx: re-read until they do.
+  // v0.10: the signature comes first, the anchor once the memo-tx is confirmed: re-read until both are in.
   const snap = load.status === "ready" ? load.snap : null;
   const waiting = !!snap && (!snap.anchor || !snap.operator);
   useEffect(() => {
@@ -114,7 +114,7 @@ function VerifyView({ network }: { network: Network }) {
 
   const takeMockSnapshot = async () => {
     const id = await mockTakeSnapshot(network);
-    toast("Mock operator took snapshot #" + id, { description: "Signature and anchor follow in a few seconds, as after the memo-tx." });
+    toast("Mock operator took snapshot #" + id, { description: "The signature follows in a moment, the Solana anchor about half a minute later." });
     setLoad({ status: "loading" });
     setSelected(null);
     setReload((r) => r + 1);
@@ -179,7 +179,7 @@ function VerifyView({ network }: { network: Network }) {
         <SolvencyTable rows={rows} symbols={symbols} />
       </section>
 
-      <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-8">
+      <div className="grid grid-cols-1 gap-12 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-8">
         <section aria-labelledby="own-t" className="min-w-0">
           <SectionTitle id="own-t" title="Check my balance" note="Your share of each tree, recomputed from your own key up to the published roots." />
           <OwnProof key={`${network}:${snap.id}`} snap={snap} network={network} available={proofAvailable} symbols={symbols} />

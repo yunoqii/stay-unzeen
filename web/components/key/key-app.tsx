@@ -491,13 +491,13 @@ function UnlockedCard({ pubkey, network }: { pubkey: string; network: Network })
           again.
         </p>
         <div className="mt-6 flex flex-col gap-2 sm:flex-row">
-          <Button asChild size="lg" className="h-11 flex-1 rounded-full text-sm">
+          <Button asChild size="lg" className="h-11 shrink-0 sm:flex-1 rounded-full text-sm">
             <Link href="/portfolio">
               Go to portfolio
               <ArrowRight weight="light" />
             </Link>
           </Button>
-          <Button variant="outline" size="lg" className="h-11 flex-1 rounded-full text-sm" onClick={() => lock()}>
+          <Button variant="outline" size="lg" className="h-11 shrink-0 sm:flex-1 rounded-full text-sm" onClick={() => lock()}>
             <LockKey weight="light" />
             Lock
           </Button>

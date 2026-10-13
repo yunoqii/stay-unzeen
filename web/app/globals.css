@@ -22,7 +22,7 @@
   --uz-ink-3: #18181c;
   --uz-ink-4: #232328;
   --uz-fog-1: #3a3a41;
-  --uz-fog-2: #73737d;
+  --uz-fog-2: #7c7c86; /* 4.9:1 on ink-0, 4.56:1 on ink-2 (WCAG AA for the 11px captions that use it) */
   --uz-fog-3: #8b8b95;
   --uz-fog-4: #b9b9c1;
   --uz-paper: #ededf0;
@@ -181,6 +181,19 @@
 }
 
 @layer utilities {
+  /* Invisible touch extension for compact controls (segmented switches, copy icons): the drawn size stays,
+     the tappable box grows to ~40px tall. Vertical only, so neighbours in a row never overlap. */
+  .hit {
+    position: relative;
+  }
+  .hit::before {
+    content: "";
+    position: absolute;
+    inset: -8px 0;
+  }
+  .hit-lg::before {
+    inset: -12px -8px;
+  }
   .tabular {
     font-variant-numeric: tabular-nums;
   }

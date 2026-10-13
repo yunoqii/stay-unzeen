@@ -17,7 +17,7 @@ import { usePool } from "@/hooks/use-pool";
 import { useNow } from "@/hooks/use-now";
 import { KeyGate } from "@/components/key/key-gate";
 import { EmptyState } from "@/components/layout/page-shell";
-import { PeekProvider, PeekToggle, Veiled } from "@/components/portfolio/peek";
+import { PeekProvider, PeekToggle, Veiled, usePeek } from "@/components/portfolio/peek";
 import { TokenGlyph } from "@/components/tokens/token-glyph";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -144,6 +144,7 @@ function TokenCard({ t, pool, index, onClaimed }: { t: CreatorToken; pool: PoolI
 
   const cap = BigInt(t.cap.capTokens || "0");
   const pos = BigInt(t.cap.positionTokens || "0");
+  const peek = usePeek();
   const capPct = cap > N0 ? Math.min(100, Number((pos * BigInt(10_000)) / cap) / 100) : 0;
   const locked = BigInt(t.lock.lockedAmount || "0");
   const tokens = (v: bigint) => formatCompact(unitsToNumber(v.toString(), t.decimals));
@@ -243,7 +244,8 @@ function TokenCard({ t, pool, index, onClaimed }: { t: CreatorToken; pool: PoolI
               <motion.div
                 className={cn("h-full origin-left", capPct >= 90 ? "bg-sell" : "bg-zec")}
                 initial={reduce ? false : { scaleX: 0 }}
-                animate={{ scaleX: capPct / 100 }}
+                // The bar is the position too: it stays empty until Peek, like the number above it.
+                animate={{ scaleX: peek.shown ? capPct / 100 : 0 }}
                 transition={{ duration: 0.5, ease: EASE }}
               />
             </div>

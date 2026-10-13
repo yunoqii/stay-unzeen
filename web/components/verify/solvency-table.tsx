@@ -9,10 +9,10 @@ import { cn } from "@/lib/utils";
 const EASE = [0.16, 1, 0.3, 1] as const;
 
 /**
- * One row per tree. Mints: liabilities ≤ Σ signed vault balances, fully checkable. SOL (creator fees
- * owed): ≤ spare vault SOL, which it takes first. ZEC: the cover is
- * spare SOL on the vaults (proven) plus the operator's reserve statement (attested), drawn as two
- * segments of one bar, so the attested part is never mistaken for a proof.
+ * One row per tree. Mints: liabilities ≤ Σ signed vault balances, fully checkable (granule 1). ZEC
+ * (creator fees owed included, API v0.10): the cover is spare SOL on the vaults (proven) plus the
+ * operator's reserve statement (attested), drawn as two segments of one bar, so the attested part is
+ * never mistaken for a proof.
  */
 export function SolvencyTable({ rows, symbols }: { rows: SolvencyRow[]; symbols: Map<string, string> }) {
   if (rows.length === 0) return <p className="text-sm text-muted-foreground">No liabilities in this snapshot.</p>;
@@ -36,22 +36,20 @@ export function SolvencyTable({ rows, symbols }: { rows: SolvencyRow[]; symbols:
 
 function Row({ r, label, i }: { r: SolvencyRow; label: string; i: number }) {
   const bps = coverageBps(r.assets, r.liabilities);
-  const sol = r.asset === "SOL";
-  const unit = r.asset === "ZEC" ? "ZEC" : sol ? "SOL" : "";
+  const unit = r.asset === "ZEC" ? "ZEC" : "";
   const zec = r.kind === "proven_attested";
   const ok = r.covered && r.vaultsSigned;
-  // Mint trees are in whole tokens (granule = 1 token): no fractions next to them.
-  // Fraction digits follow the tree's granule (review E1: a mint granule may be 1 base unit), at most 3.
-  const frac = zec || sol ? 3 : Math.min(3, Math.max(0, r.decimals - granuleExp(r.granule)));
+  // Fraction digits follow the tree's granule (v0.10: a mint granule is 1 base unit), at most 3.
+  const frac = zec ? 3 : Math.min(3, Math.max(0, r.decimals - granuleExp(r.granule)));
   const unknown = r.kind === "unknown";
   return (
     <li className="grid grid-cols-2 gap-x-4 gap-y-2 px-4 py-3.5 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)] md:items-center">
-      <span className="min-w-0">
+      <span className="col-span-2 min-w-0 md:col-span-1">
         <span className="font-medium">{label}</span>
-        {sol && <span className="block text-[11px] text-faint-foreground">Creator fees owed</span>}
+        {zec && <span className="block text-[11px] text-faint-foreground">Incl. creator fees owed</span>}
       </span>
       <Num label="Liabilities" v={`${fmtAmount(r.liabilities, r.decimals, frac)} ${unit}`} />
-      <Num label="Assets" v={`${fmtAmount(r.assets, r.decimals, frac)} ${unit}`} className="col-start-2 md:col-start-auto" />
+      <Num label="Assets" v={`${fmtAmount(r.assets, r.decimals, frac)} ${unit}`} className="max-md:items-end max-md:text-right" />
       <div className="col-span-2 md:col-span-1">
         <Bar r={r} i={i} />
         <p className="mt-1 font-mono text-[10px] text-faint-foreground tabular">
@@ -69,8 +67,7 @@ function Row({ r, label, i }: { r: SolvencyRow; label: string; i: number }) {
           {ok ? <CheckCircle size={13} weight="fill" className="text-zec" aria-hidden /> : <WarningCircle size={13} weight="fill" aria-hidden />}
           {unknown ? "Unknown asset" : !r.vaultsSigned ? "Unsigned vault" : !r.covered ? "Not covered" : zec ? "Proven SOL + attested ZEC" : "Proven"}
         </span>
-        {unknown && <p className="mt-1 text-[11px] text-pretty text-faint-foreground">Not ZEC, SOL or a Solana mint: this page can&apos;t check it.</p>}
-        {sol && <p className="mt-1 text-[11px] text-pretty text-faint-foreground">Paid from vault SOL, counted before the ZEC cover.</p>}
+        {unknown && <p className="mt-1 text-[11px] text-pretty text-faint-foreground">Not ZEC or a Solana mint: this page can&apos;t check it.</p>}
         {zec && (
           <p className="mt-1 text-[11px] text-pretty text-faint-foreground">
             Attested by the operator, not cryptographically proven.{" "}
@@ -91,8 +88,9 @@ function granuleExp(g?: string): number {
 
 function Num({ label, v, className }: { label: string; v: string; className?: string }) {
   return (
-    <span className={cn("text-right font-mono text-sm tabular", className)}>
-      <span className="mr-2 font-sans text-[11px] text-faint-foreground md:hidden">{label}</span>
+    // Phone: label above the number, Liabilities left and Assets right, so 15-digit amounts fit in half a row.
+    <span className={cn("flex min-w-0 flex-col font-mono text-sm break-all tabular md:block md:text-right", className)}>
+      <span className="font-sans text-[11px] text-faint-foreground md:hidden">{label}</span>
       {v}
     </span>
   );

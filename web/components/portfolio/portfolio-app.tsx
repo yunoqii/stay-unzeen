@@ -57,7 +57,7 @@ function PortfolioView() {
 
   return (
     <div className="ledger lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)] lg:items-start">
-      <div className="ledger-col self-stretch">
+      <div className="ledger-col self-stretch max-lg:contents!">
         {error && (
           <p role="alert" className="flex items-center gap-2 rounded-xl border border-border bg-surface-1 px-4 py-3 text-sm text-muted-foreground">
             <WarningCircle size={16} weight="light" className="shrink-0 text-zec" aria-hidden />
@@ -76,9 +76,14 @@ function PortfolioView() {
           </span>
           <ArrowRight size={14} weight="light" aria-hidden />
         </Link>
-        <div aria-hidden className="min-h-0 flex-1" />
+        {/* Settings sit under the holdings: the right column grows with withdraw, orders and activity, the left one did not. */}
+        {/* On a phone the columns dissolve into one list and Settings goes last, after orders and deposits. */}
+        <div className="max-lg:order-last">
+          <SettingsCard />
+        </div>
+        <div aria-hidden className="min-h-0 flex-1 max-lg:hidden" />
       </div>
-      <div className="ledger-col self-stretch">
+      <div className="ledger-col self-stretch max-lg:contents!">
         <AnimatePresence initial={false}>
           {withdraw && portfolio && (
             <motion.div
@@ -108,8 +113,7 @@ function PortfolioView() {
         <OrdersCard orders={portfolio?.orders ?? null} tokens={tokens} />
         <SessionActivity actions={actions} />
         <DepositsList deposits={portfolio?.deposits ?? null} confirmations={pool?.confirmations} />
-        <SettingsCard />
-        <div aria-hidden className="min-h-0 flex-1" />
+        <div aria-hidden className="min-h-0 flex-1 max-lg:hidden" />
       </div>
     </div>
   );
