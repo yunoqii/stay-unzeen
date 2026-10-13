@@ -16,6 +16,9 @@ import type { Network } from "@/lib/network";
 import { memoText, parseZip321 } from "@/lib/zip321";
 import { ApiError } from "./errors";
 import { CHAT_OPS, createChatMock, mockChatParams } from "./mock-chat";
+import { createScenarioMock, type ScenarioHost } from "./mock-scenarios";
+import { DEFAULT_SCENARIO_PARAMS } from "@/lib/scenarios/catalog";
+import type { ValidateCtx } from "@/lib/scenarios/validate";
 import type { FairHost, FairMock } from "./mock-fair";
 import type { VerifyMock } from "./mock-verify";
 import { ZEC_SPL_MINT } from "@/lib/quotes";
@@ -34,6 +37,7 @@ import type {
   OrderKind,
   WithdrawPart,
   OrdersParams,
+  ScenarioParams,
   PlatformStats,
   PoolInfo,
   Rates,
@@ -527,7 +531,14 @@ const CHAT_ON = process.env.NEXT_PUBLIC_MOCK_CHAT !== "0";
 const NOOP_ON = process.env.NEXT_PUBLIC_MOCK_NOOP !== "0";
 /** NEXT_PUBLIC_MOCK_DISCOVERY=1: the Discovery source on /tokens (off by default, like the backend flag). */
 const DISCOVERY_ON = process.env.NEXT_PUBLIC_MOCK_DISCOVERY === "1";
-const CHAT_FEATURES = { ...(CHAT_ON ? { chat: true as const } : {}), ...(NOOP_ON ? { noop: true as const } : {}), ...(DISCOVERY_ON ? { discovery: true as const } : {}) };
+/** v0.19 scenarios: on by default (owner 13.10: the flag is on on the public deploy). */
+const SCENARIOS_ON = process.env.NEXT_PUBLIC_MOCK_SCENARIOS !== "0";
+const CHAT_FEATURES = {
+  ...(CHAT_ON ? { chat: true as const } : {}),
+  ...(NOOP_ON ? { noop: true as const } : {}),
+  ...(DISCOVERY_ON ? { discovery: true as const } : {}),
+  ...(SCENARIOS_ON ? { scenarios: true as const } : {}),
+};
 
 /**
  * DRAFT v0.18 display rates: one public answer per minute, the same for everyone. ZEC/SOL drifts within
@@ -541,13 +552,14 @@ export function mockRates(now: number): Rates {
   const zecUsd = solUsd * zecSol;
   const ethUsd = 3_912.5 * wave(29, 0.01);
   const fix = (n: number, d: number) => n.toFixed(d);
+  // v0.18 shape: USD prices and the two pairs, 6 significant digits.
+  const sig6 = (n: number) => String(Number(n.toPrecision(6)));
+  void fix;
   return {
-    zecUsd: fix(zecUsd, 2),
-    solUsd: fix(solUsd, 2),
-    ethUsd: fix(ethUsd, 2),
-    zecSol: fix(zecSol, 6),
-    zecEth: fix(zecUsd / ethUsd, 6),
+    usd: { ZEC: sig6(zecUsd), SOL: sig6(solUsd), ETH: sig6(ethUsd) },
+    pairs: { "ZEC/SOL": sig6(zecSol), "ZEC/ETH": sig6(zecUsd / ethUsd) },
     approximate: true,
+    source: "near-1click",
     ts: minute * 60_000,
   };
 }
@@ -561,6 +573,7 @@ export function mockPool(network: Network): PoolInfo {
       ? { features: { fullTrades: FULL_FEED, fairLaunch: true, ...CHAT_FEATURES }, ...(fair ? { fairLaunch: fair.params(network) } : {}) }
       : { features: { fullTrades: FULL_FEED, ...CHAT_FEATURES } }),
     ...(CHAT_ON ? { chat: mockChatParams(network) } : {}),
+    ...(SCENARIOS_ON ? { scenarios: scenarioParams() } : {}),
     orders: ORDER_PARAMS,
     quotes: mockQuotes(network),
     venues: mockVenues(network),
@@ -596,6 +609,8 @@ interface MockAccount {
   claimable: Map<string, bigint>;
   /** v0.14 creator fees of ZEC pairs owed, zatoshis per mint (credited 1:1). */
   claimableZat: Map<string, bigint>;
+  /** Running sum of credited shielded deposits (scenario trigger deposit_received; never sales or claims). */
+  depositedZat: bigint;
 }
 
 const accounts = new Map<string, MockAccount>(); // `${network}:${pubkey}`
@@ -615,6 +630,7 @@ function account(network: Network, pubkey: string): MockAccount {
       deposits: [],
       claimable: new Map(),
       claimableZat: new Map(),
+      depositedZat: BigInt(0),
     };
     accounts.set(key, a);
   }
@@ -637,6 +653,7 @@ function portfolioOf(network: Network, pubkey: string): Portfolio {
       .filter((x) => x.network === network && x.pubkey === pubkey && !x.hidden)
       .map((x) => ({ id: x.id, kind: x.action.op as NonNullable<NonNullable<Portfolio["actions"]>[number]["kind"]>, ...x.status })),
     orders: ordersOf(network, pubkey, Date.now()),
+    ...(SCENARIOS_ON ? { scenarios: scenarios.list(network, pubkey, Date.now()) } : {}),
     ...(fair ? fair.portfolio(network, pubkey) : {}),
   };
 }
@@ -689,6 +706,7 @@ function scan(now: number) {
     const pub = decodeUnz1(n.memo!, chainIdOf(pool)).anonPubkey;
     const a = account(n.network, pub);
     a.zecBalance += n.amountZat;
+    a.depositedZat += n.amountZat;
     a.deposits.unshift({ id: hex16(), amountZat: n.amountZat.toString(), status: "credited", ts: Math.floor(now / 86_400_000) * 86_400_000 });
     n.outcome = "credited";
   }
@@ -858,7 +876,8 @@ const WITHDRAW_OPS = new Set(["withdraw_token", "withdraw_zec"]);
 
 function execDelay(action: SignedAction, padOnly = false): [number, number] {
   const pad = (action as { pad?: unknown }).pad;
-  if (pad !== undefined && (typeof pad !== "string" || pad.length > 8192)) throw new ApiError("bad_request", "pad: expected a string", 400);
+  // v0.19: the pad limit goes from 8192 to 16384 (scenario_create bodies are 16 KiB).
+  if (pad !== undefined && (typeof pad !== "string" || pad.length > 16384)) throw new ApiError("bad_request", "pad: expected a string", 400);
   if (padOnly) return [0, 0];
   const mode = "exec" in action ? action.exec : undefined;
   if (mode === undefined) return EXEC_DELAY_MS[action.op] ?? [5_000, 10_000];
@@ -895,7 +914,7 @@ interface MockAction {
 const actions = new Map<string, MockAction>();
 const byNonce = new Map<string, string>(); // nonceKey -> action id
 
-const isUint = (v: unknown): v is string => typeof v === "string" && /^(0|[1-9]\d{0,18})$/.test(v);
+const isUint = (v: unknown): v is string => typeof v === "string" && /^(0|[1-9]\d{0,37})$/.test(v); // v0.18: up to 38 digits
 function amountOf(v: unknown, field: string, positive = true): bigint {
   if (!isUint(v)) throw new ApiError("bad_request", `${field}: expected an integer string in base units`, 400);
   const b = BigInt(v);
@@ -1199,6 +1218,21 @@ function submit(network: Network, method: "POST", path: string, body: string | u
       if (bytes !== 1024) throw new ApiError("bad_request", "noop bodies are exactly 1024 bytes", 400);
       receipt = { id: hex16(), status: "queued" };
     } else receipt = chat.submit(network, pubkey, action, bytes, now);
+    seenNonces.set(nonceKey, now + 120_000);
+    const act: MockAction = { id: receipt.id, network, pubkey, action, nonceKey, bodyHash: hash, receipt, status: { status: "queued" }, holdZat: N0, hidden: true };
+    actions.set(`ledger:${nonceKey}`, act);
+    byNonce.set(nonceKey, `ledger:${nonceKey}`);
+    return receipt;
+  }
+  if (action.op.startsWith("scenario_")) {
+    // v0.19: create is exactly 16 KiB (bigger only with a launch image), start / cancel exactly 1 KiB.
+    if (!SCENARIOS_ON) throw new ApiError("bad_request", "unknown op", 400);
+    const bytes = new TextEncoder().encode(body ?? "").length;
+    const create = action.op === "scenario_create";
+    if (create ? bytes < 16_384 || (bytes > 16_384 && !JSON.stringify(action).includes('"image"')) : bytes !== 1024)
+      throw new ApiError("bad_request", create ? "scenario_create bodies are 16384 bytes" : "scenario_start / scenario_cancel bodies are 1024 bytes", 400);
+    execDelay(action, true);
+    const receipt = scenarios.submit(network, pubkey, action as Parameters<typeof scenarios.submit>[2], now);
     seenNonces.set(nonceKey, now + 120_000);
     const act: MockAction = { id: receipt.id, network, pubkey, action, nonceKey, bodyHash: hash, receipt, status: { status: "queued" }, holdZat: N0, hidden: true };
     actions.set(`ledger:${nonceKey}`, act);
@@ -1753,6 +1787,7 @@ export async function handle(
   fair?.tick(Date.now());
   catchUpTicks(Date.now());
   chat.tick(Date.now());
+  if (SCENARIOS_ON) scenarios.tick(Date.now());
   const url = new URL(pathWithQuery, "http://mock.local");
   const p = url.pathname;
   const q = url.searchParams;
@@ -2208,4 +2243,109 @@ function discoveryList(now: number): DiscoveryToken[] {
     });
   }
   return discovery.map((t) => ({ ...t }));
+}
+
+// ---- scenarios (v0.19): executor over the same action path, compressed clock ----
+
+function scenarioParams(): ScenarioParams {
+  // Chat blocks only with the chat feature; the sealed-bid launch blocks never in this build (P10).
+  return { ...DEFAULT_SCENARIO_PARAMS, blocks: DEFAULT_SCENARIO_PARAMS.blocks.filter((b) => b !== "chat" || CHAT_ON) };
+}
+
+/** A pool token the indexer prices on every tick: pump.fun curve or Meteora DBC, SOL pair, still on the curve. */
+const isPriced = (s: MockTokenState) => (s.token.venue === "pumpfun" || s.token.venue === "meteora-dbc") && s.token.quote === "SOL" && s.token.status === "curve";
+
+function poolToken(mint: string): MockTokenState | null {
+  return state?.find((x) => x.token.mint === mint && x.heat > 0) ?? null;
+}
+
+function scenarioCtx(network: Network, now: number): ValidateCtx {
+  const pool = mockPool(network);
+  const facts = (mint: string) => {
+    const s = poolToken(mint);
+    return s ? { mint, symbol: s.token.symbol, decimals: s.token.decimals, venue: s.token.venue, quote: s.token.quote ?? "SOL", status: s.token.status, priced: isPriced(s) } : null;
+  };
+  return {
+    params: scenarioParams(),
+    now,
+    minDepositZat: pool.minDepositZat,
+    venues: (pool.venues ?? []).map((v) => v.venue),
+    features: { fl: fair !== null, chat: pool.features?.chat === true, fullTrades: FULL_FEED },
+    priced: (mint) => !!facts(mint)?.priced,
+    network,
+    minActionZat: pool.minActionZat,
+    venueInfo: pool.venues,
+    orders: ORDER_PARAMS,
+    token: facts,
+  };
+}
+
+/** SOL per whole token of a guard's limit price (pairs priced in their quote are converted at the mock parity). */
+const limitSol = (s: MockTokenState, limit: string) => Number(limit) * SOL_PER_QUOTE[s.token.quote ?? "SOL"];
+
+/** Steps of a plan go through exactly the path a signed manual action takes (accept -> batch -> execute). */
+function internalSubmit(network: Network, pubkey: string, action: SignedAction, now: number): ActionReceipt {
+  if (CHAT_OPS.has(action.op)) return chat.submit(network, pubkey, action, 1024, now);
+  if (LEDGER_OPS.has(action.op)) {
+    const r = ledgerOp(network, pubkey, action, now);
+    if (!r.act.hidden) actions.set(r.receipt.id, { ...r.act, id: r.receipt.id, network, pubkey, action, nonceKey: "", bodyHash: "", receipt: r.receipt });
+    return r.receipt;
+  }
+  const [lo, hi] = execDelay(action);
+  const accepted = accept(network, pubkey, action);
+  const id = hex16();
+  const act: MockAction = { ...accepted, id, nonceKey: "", bodyHash: "", receipt: { ...accepted.receipt, id } };
+  actions.set(id, act);
+  if (act.parts) schedulePartsOf(act);
+  else setTimeout(() => execute(act), act.review ? rand(60_000, 120_000) : rand(lo, hi));
+  return act.receipt;
+}
+
+const scenarioHost: ScenarioHost = {
+  pool: (network) => mockPool(network),
+  validateCtx: scenarioCtx,
+  zecBalance: (network, pubkey) => account(network, pubkey).zecBalance,
+  tokenBalance: (network, pubkey, mint) => BigInt(account(network, pubkey).holdings.find((h) => h.mint === mint)?.amount ?? "0"),
+  depositedTotal: (network, pubkey) => account(network, pubkey).depositedZat,
+  frozen: (network, pubkey) => account(network, pubkey).frozen,
+  submit: internalSubmit,
+  action: (id) => actions.get(id)?.status,
+  order: (id) => orders.get(id)?.pub,
+  priceTick: (mint) => {
+    const s = poolToken(mint);
+    return s && isPriced(s) ? { tick: lastOrderTick ?? 0, priceSol: s.price } : null;
+  },
+  curve: (mint) => {
+    const s = poolToken(mint);
+    if (!s) return null;
+    return { pct: s.token.status === "graduated" ? 100 : Number(mockCurvePct(s) ?? 0), graduated: s.token.status === "graduated" };
+  },
+  safety: (mint) => {
+    const s = poolToken(mint);
+    return s ? safetyOf(s) : null;
+  },
+  buyMinOut: (mint, zat, guard) => {
+    const s = poolToken(mint);
+    if (!s || !(s.price > 0)) throw new ApiError("venue_unavailable", "no price", 503);
+    const sol = Number((zat * BigInt(mockRate(true).lamportsPerZec)) / ZAT) / 1e9;
+    const price = "slippageBps" in guard ? s.price : limitSol(s, guard.limitPrice);
+    const slip = "slippageBps" in guard ? guard.slippageBps / 10_000 : 0;
+    return BigInt(Math.max(0, Math.floor((sol / price) * (1 - slip) * 10 ** s.token.decimals)));
+  },
+  sellMinOut: (mint, amount, guard) => {
+    const s = poolToken(mint);
+    if (!s || !(s.price > 0)) throw new ApiError("venue_unavailable", "no price", 503);
+    if ("slippageBps" in guard) return (sellZat(s, amount, rateFor(s, false)) * BigInt(10_000 - guard.slippageBps)) / BigInt(10_000);
+    const lamports = BigInt(Math.floor((Number(amount) / 10 ** s.token.decimals) * limitSol(s, guard.limitPrice) * 1e9));
+    return (lamports * ZAT) / BigInt(mockRate(false).lamportsPerZec);
+  },
+};
+
+const scenarios = createScenarioMock(scenarioHost, () => scenarioParams());
+
+// The executor runs on its own clock too, not only when a request comes in (compressed time, demo).
+if (SCENARIOS_ON && typeof window !== "undefined") {
+  setInterval(() => {
+    if (state) scenarios.tick(Date.now());
+  }, 2_000);
 }

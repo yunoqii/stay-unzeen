@@ -144,25 +144,28 @@ export interface Candle {
 }
 
 /**
- * DRAFT (API.md v0.18, not in the contract yet): public display rates, GET /api/rates or PoolInfo.rates.
- * Same answer for every visitor, refreshed by a background job on the server. Display only: never the price
- * of an action (that one comes from the action's own quote / receipt). All values are decimal strings.
+ * v0.18 GET /api/rates: public display rates, approximate, display only (never the price of an action — that
+ * one comes from PoolInfo.rate / the receipt's RateUsed). Same answer for everyone, refreshed by a server timer
+ * (1Click, ~60 s); 503 until the first data. All values are decimal strings (6 significant digits).
  */
 export interface Rates {
-  /** USD per 1 ZEC. */
-  zecUsd: DecimalString;
-  /** USD per 1 SOL. */
-  solUsd: DecimalString;
-  /** USD per 1 ETH. */
-  ethUsd: DecimalString;
-  /** SOL per 1 ZEC. */
-  zecSol: DecimalString;
-  /** ETH per 1 ZEC. */
-  zecEth: DecimalString;
-  /** Always true: an indicative public rate, shown with "≈". */
+  usd: { ZEC: DecimalString; SOL: DecimalString; ETH: DecimalString };
+  /** SOL / ETH per 1 ZEC (from the same USD prices). */
+  pairs: { "ZEC/SOL": DecimalString; "ZEC/ETH": DecimalString };
   approximate: true;
-  /** Unix ms of the server's last refresh. */
+  source: "near-1click";
+  /** Unix ms when the server's timer got the prices. */
   ts: number;
+}
+
+/** v0.18 PoolInfo.chain: the chain of this origin. */
+export interface ChainInfo {
+  id: "solana" | "hood";
+  network: "mainnet-beta" | "devnet" | "hood" | "hood-testnet";
+  mainnet: boolean;
+  /** Gas / quote coin: lamports or wei in the *Lamports fields. */
+  native: { symbol: "SOL" | "ETH"; decimals: 9 | 18 };
+  evmChainId?: 4663 | 46630;
 }
 
 /** GET /api/pool: public, no pubkey, no cookies. Same for every user. */
@@ -170,8 +173,10 @@ export interface PoolInfo {
   /** Pool Unified Address (Orchard/Ironwood receiver only). */
   address: string;
   network: "main" | "test";
-  /** 2 bytes hex for the unz1 memo and HTTP signatures: only "0202" (testnet + devnet) or "0101" (mainnet + mainnet-beta). */
+  /** 2 bytes hex for the unz1 memo and HTTP signatures: "0202" (testnet + devnet) or "0101" (mainnet + mainnet-beta); v0.18 + "0111" / "0212" (Robinhood Chain). */
   chainId: string;
+  /** v0.18: the chain of this origin. Absent on older servers (= Solana). */
+  chain?: ChainInfo;
   /** Below this a deposit is not credited (stays with the pool as dust). */
   minDepositZat: Zatoshis;
   /** Minimum amount of an action from the balance (zecIn / withdraw_zec). */
@@ -202,7 +207,11 @@ export interface PoolInfo {
     discovery?: true;
     /** v0.12 cover traffic (R8): the server accepts `op:"noop"`. Absent = the client sends none. */
     noop?: true;
+    /** v0.19 scenarios (UNZEEN_SCENARIOS). Absent = off, every scenario_* op -> 400. */
+    scenarios?: true;
   };
+  /** v0.19: only with features.scenarios. */
+  scenarios?: ScenarioParams;
   /** v0.12 chat: only with features.chat. */
   chat?: ChatParams;
   /** v0.6: only with features.fairLaunch = true. */
@@ -224,8 +233,6 @@ export interface PoolInfo {
     /** v0.17: ZEC pairs: max first buy of `create` in ZEC SPL units (= zatoshis), step 0.0001 ZEC; only venues with the ZEC pair on (`{}` on devnet). */
     maxInitialBuyZecUnitsByVenue?: Record<string, string>;
   };
-  /** DRAFT v0.18: display rates (alternative to GET /api/rates). Absent on older servers. */
-  rates?: Rates;
   /** v0.4: public rate from the background cache. Absent = no rate (actions -> 503). */
   rate?: {
     lamportsPerZec: Lamports; // mid
@@ -276,6 +283,8 @@ export interface Portfolio {
   fairBids?: FairBid[];
   /** v0.6, only with features.fairLaunch: launches created by this key. */
   fairLaunches?: OwnFairLaunch[];
+  /** v0.19, only with features.scenarios: at most 5, active first, then closed within 24 h. */
+  scenarios?: Scenario[];
 }
 
 /** Body of POST /api/actions. anonPubkey/nonce/ts/sig go in x-unzeen-* headers, not here. */
@@ -341,7 +350,12 @@ export type SignedAction =
   | { op: "fl_create"; venue: "pumpfun"; meta: { name: string; symbol: string; image?: string }; windowSecs: number }
   | { op: "fl_bid"; launchId: string; holdZat: Zatoshis; ciphertext: string }
   | { op: "fl_cancel"; launchId: string }
-  | { op: "fl_cancel_launch"; launchId: string };
+  | { op: "fl_cancel_launch"; launchId: string }
+  // v0.19 scenarios (only with features.scenarios). create: body padded to 16 KiB; start/cancel: 1 KiB.
+  | { op: "scenario_create"; plan: ScenarioPlan; replaces?: string } // -> { id, status: "active" | "waiting_start" }
+  | { op: "scenario_start"; id: string } // -> { id, status: "active" }
+  | { op: "scenario_cancel"; id: string } // -> { id, status: "cancelled" }
+  | { op: "scenario_cancel"; all: true };
 
 /**
  * What actually goes on the wire: the action plus `pad`, random filler that brings every body to a
@@ -372,13 +386,15 @@ export type SolRateUsed = RateUsed & { lamportsPerZec: Lamports };
 /** POST /api/actions. */
 export interface ActionReceipt {
   id: string; // 32 hex
-  /** v0.8: order_create answers "open", order_cancel "cancelled"; claim answers "executed" (v0.7). */
-  status: ActionState | "open" | "cancelled";
+  /** v0.8: order_create answers "open", order_cancel "cancelled"; claim answers "executed" (v0.7). v0.19: scenario_* answer their plan status. */
+  status: ActionState | "open" | "cancelled" | "active" | "waiting_start";
   rate?: RateUsed; // buy / sell / create / withdraw_token
   /** v0.6: fl_create only. */
   launchId?: string;
   /** v0.12: op "chat" only: your nickname in this token's chat (member or creator, by the badge flag). */
   nick?: string;
+  /** v0.19: scenario_cancel {all: true} answers { ids, status: "cancelled" } (no id). */
+  ids?: string[];
 }
 
 /** GET /api/actions/:id (owner only). */
@@ -610,6 +626,10 @@ export type ErrorCode =
   | "chat_not_eligible" // 403 (v0.12): account below PoolInfo.chat.minAccountZat; never says by how much
   | "chat_muted" // 403 (v0.12)
   | "not_creator" // 403 (v0.12)
+  | "scenario_invalid" // 400 (v0.19): structure, references, ranges; details { step, code }
+  | "scenario_rule" // 422 (v0.19): privacy rule P1-P9; details { step, code }
+  | "scenario_limit" // 422 (v0.19): more than maxActivePerKey active plans
+  | "scenario_not_active" // 409 (v0.19): start / cancel from the wrong status
   | "internal";
 
 export interface ApiErrorBody {
@@ -919,4 +939,167 @@ export interface VerifyProof {
   truncated: boolean;
   /** Spaces: the response is always exactly 65536 bytes, its size says nothing about the assets. */
   pad?: string;
+}
+
+// ---- scenarios (API.md v0.19, Scenarios section; vectors core/testdata/scenario-vectors.json) ----
+// One signature, a linear chain of at most 12 blocks that the server runs step by step through the same
+// paths as manual actions. Every type of the feature lives here, so the diff against API.md v0.19 is one place.
+
+export type ScenarioBlockType =
+  | "manual_start"
+  | "time_at"
+  | "price_cross"
+  | "deposit_received"
+  | "own_result"
+  | "curve_progress"
+  | "wait_fixed"
+  | "wait_random"
+  | "buy"
+  | "sell"
+  | "sell_all"
+  | "swap"
+  | "dca"
+  | "order_place"
+  | "order_cancel"
+  | "create"
+  | "claim"
+  | "withdraw_token"
+  | "withdraw_zec"
+  | "check_safety"
+  | "repeat"
+  | "end"
+  | "chat";
+// The sealed-bid launch blocks of the spec are not part of this union on purpose: their names must not
+// reach a public bundle before 28.10 (P10). They join through the lazy fair-launch chunk later.
+
+/** PoolInfo.scenarios (v0.19). The floors are published for the UI's "≈"; the server enforces them. */
+export interface ScenarioParams {
+  /** Enabled blocks (no chat without features.chat). */
+  blocks: ScenarioBlockType[];
+  maxSteps: number; // 12
+  maxRuns: number; // 40
+  maxActivePerKey: number; // 3
+  /** maxNoWithdraw (v0.19): plans without withdraw_* may live up to 7 days. */
+  ttlSecs: { min: number; max: number; maxNoWithdraw?: number; default: number };
+  floors: ScenarioFloors;
+}
+
+export interface ScenarioFloors {
+  afterDepositSecs: [number, number];
+  timeAtJitterSecs: [number, number];
+  fixedWaitJitterPct: number;
+  /** v0.19: at least ±30 s. */
+  fixedWaitJitterMinSecs?: number;
+  withdrawAfterTradeMinSecs: number;
+  withdrawExtraSecs: [number, number];
+  swapGapSecs: [number, number];
+  swapShaveBps: [number, number];
+  chatAfterTradeSecs: [number, number];
+  repeatJitterPct: number;
+  dcaWeightJitterPct: number;
+  tradeGapEpochs: [number, number];
+}
+
+export type MintRef = string | { step: number };
+export type AmountSpec = { abs: string } | { pct: number; of: "balance" | { step: number } };
+export type Guard = { slippageBps: number } | { limitPrice: DecimalString };
+export type OnFailTarget = "stop" | "skip" | { goto: number };
+export type OnFail = OnFailTarget | { retry: 1 | 2 | 3; then: OnFailTarget };
+
+export interface SafetyRequire {
+  authoritiesRevoked?: boolean;
+  noRiskyExtensions?: boolean;
+  maxTop10Pct?: number;
+  /** features.fullTrades only. */
+  maxDevPct?: number;
+  minLpBurnedPct?: number;
+  /** features.fullTrades only. */
+  maxSniperPct?: number;
+}
+
+type OrderCreateBody = Extract<SignedAction, { op: "order_create" }>;
+type CreateBody = Extract<SignedAction, { op: "create" }>;
+export type ScenarioOrder = Omit<OrderCreateBody, "op" | "amount" | "mint"> & { amount: AmountSpec; mint: MintRef };
+export type ScenarioCreate = Omit<CreateBody, "op" | "initialBuyZec"> & { initialBuyZec?: AmountSpec };
+type TradeExec = "now" | "delayed" | "max";
+
+export type ScenarioBlock =
+  | { type: "manual_start" }
+  | { type: "time_at"; at: number }
+  | { type: "price_cross"; mint: MintRef; op: "gte" | "lte"; priceSol: DecimalString; timeoutSecs?: number }
+  | { type: "deposit_received"; minZat: Zatoshis; timeoutSecs?: number }
+  | { type: "own_result"; ref: { step: number } | { orderId: string } | { actionId: string }; on: "filled" | "failed" | "any"; timeoutSecs?: number }
+  | { type: "curve_progress"; mint: MintRef; gtePct?: number; graduated?: true; timeoutSecs?: number }
+  | { type: "wait_fixed"; secs: number }
+  | { type: "wait_random"; minSecs: number; maxSecs: number }
+  | { type: "buy"; venue: Venue; mint: MintRef; zec: AmountSpec; guard: Guard; exec: TradeExec }
+  | { type: "sell"; venue: Venue; mint: MintRef; amount: AmountSpec; guard: Guard; exec: TradeExec }
+  | { type: "sell_all"; venue: Venue; mint: MintRef; guard: Guard; exec: TradeExec }
+  | { type: "swap"; from: MintRef; to: MintRef; amount: AmountSpec; guardSell: Guard; guardBuy: Guard; venueSell?: Venue; venueBuy?: Venue; exec: "delayed" | "max" }
+  | { type: "dca"; side: "buy" | "sell"; venue: Venue; mint: MintRef; total: AmountSpec; slices: number; everySecs: { min: number; max: number }; guard: Guard; exec: "delayed" | "max" }
+  | { type: "order_place"; order: ScenarioOrder }
+  | { type: "order_cancel"; ref: { step: number } | { orderId: string } }
+  | { type: "create"; create: ScenarioCreate }
+  | { type: "claim"; mint?: MintRef }
+  | { type: "withdraw_token"; mint: MintRef; amount: AmountSpec; to: string | string[]; smart?: { parts: number; maxDelayMin: number }; exec: "delayed" | "max" }
+  | { type: "withdraw_zec"; to: string; amount: AmountSpec; exec: "delayed" | "max" }
+  | { type: "check_safety"; mint: MintRef; require: SafetyRequire; onFalse: "stop" | { goto: number } }
+  | { type: "repeat"; from: number; times: number }
+  | { type: "end" }
+  | { type: "chat"; mint: MintRef; text: string; showCreatorBadge?: boolean };
+
+export interface ScenarioStep {
+  /** 0..maxSteps-1, unique in the plan. */
+  id: number;
+  block: ScenarioBlock;
+  /** Default "stop". */
+  onFail?: OnFail;
+}
+
+export interface ScenarioPlan {
+  v: 1;
+  /** Default ttlSecs.default; expiresAt is rounded UP to the hour. */
+  ttlSecs?: number;
+  steps: ScenarioStep[];
+}
+
+export type ScenarioStatus = "waiting_start" | "active" | "done" | "failed" | "cancelled" | "expired";
+export type ScenarioStepStatus = "pending" | "waiting" | "running" | "done" | "skipped" | "failed";
+
+/**
+ * Error of a scenario step. ErrorCode plus two the draft names in prose but does not list (difference to
+ * report): "timeout" (a trigger ran out of time) and "check_failed" (check_safety said no and onFalse is "stop").
+ */
+export type ScenarioStepError = ErrorCode | "timeout" | "check_failed";
+
+export interface ScenarioStepState {
+  id: number;
+  status: ScenarioStepStatus;
+  runs: number;
+  /** Unix ms, rounded DOWN to the minute. */
+  nextAt?: number;
+  actionId?: string;
+  orderId?: string;
+  error?: ScenarioStepError;
+}
+
+/** Portfolio.scenarios[] (owner only). */
+export interface Scenario {
+  id: string;
+  status: ScenarioStatus;
+  /** Unix ms, rounded down to the minute. */
+  createdAt: number;
+  /** Unix ms, rounded up to the hour. */
+  expiresAt: number;
+  cursor: number;
+  /** Echo of the plan: addresses and UA masked (Ab3d…9xYz), chat text / launch meta without content. */
+  plan: ScenarioPlan;
+  steps: ScenarioStepState[];
+  error?: ScenarioStepError;
+}
+
+/** details of scenario_invalid / scenario_rule errors. */
+export interface ScenarioErrorDetails {
+  step: number;
+  code: string;
 }

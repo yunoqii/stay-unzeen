@@ -33,6 +33,10 @@ const CODES: BaseCode[] = [
   "chat_not_eligible",
   "chat_muted",
   "not_creator",
+  "scenario_invalid",
+  "scenario_rule",
+  "scenario_limit",
+  "scenario_not_active",
   "internal",
 ];
 
@@ -126,6 +130,10 @@ const UI_TEXT: Record<BaseCode | ClientErrorCode, string> = {
   chat_not_eligible: "Your account is below the minimum to post in token chats.",
   chat_muted: "You can't post in this chat for now.",
   not_creator: "Only the token's creator can do that.",
+  scenario_invalid: "This scenario has a block the pool can't run. Check the highlighted step.",
+  scenario_rule: "This scenario breaks a privacy rule. Check the highlighted step.",
+  scenario_limit: "You already have the maximum number of active scenarios. Cancel one first.",
+  scenario_not_active: "This scenario is no longer waiting for that: it already started, finished or was cancelled.",
   internal: "Something went wrong on our side. Try again.",
   network: "Can't reach Unzeen. Check your connection.",
   locked: "Unlock your anon key to continue.",

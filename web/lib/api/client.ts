@@ -6,7 +6,7 @@
 import { signRequest, type SignedHeaders, type Signer } from "@/lib/crypto/sign";
 import { networkConfig } from "@/lib/network";
 import { trackRequest } from "@/lib/connectivity";
-import { EXACT_OPS, padAction, padExact } from "@/lib/pad";
+import { EXACT_OPS, padAction, padExact, padScenario } from "@/lib/pad";
 import { ApiError, errorFromResponse } from "./errors";
 import * as mock from "./mock";
 import type {
@@ -228,7 +228,8 @@ function makeApi(rawSend: <T>(call: Call) => Promise<T>, subscribeFeed: Api["sub
     getPortfolio: (signer) => get("/api/portfolio", signer),
     // Padded to a fixed size bucket before signing: the length must not reveal the op or the mode.
     // Chat and noop: exactly 1024 bytes (chat.md §5.1); a longer one throws before anything is signed.
-    postAction: (signer, action) => post("/api/actions", EXACT_OPS.has(action.op) ? padExact(action) : padAction(action), signer, 2),
+    postAction: (signer, action) =>
+      post("/api/actions", EXACT_OPS.has(action.op) ? padExact(action) : action.op === "scenario_create" ? padScenario(action) : padAction(action), signer, 2),
     getAction: (signer, id) => get(`/api/actions/${enc(id)}`, signer),
     getCreator: (signer) => get("/api/creator", signer),
     getStats: () => get("/api/stats"),

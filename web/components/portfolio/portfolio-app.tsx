@@ -18,6 +18,7 @@ import { KeyGate } from "@/components/key/key-gate";
 import { BalanceCard } from "./balance-card";
 import { CreatorFees } from "./creator-fees";
 import { OrdersCard } from "./orders-card";
+import { ScenariosCard } from "./scenarios-card";
 import { DepositsList } from "./deposits-list";
 import { HoldingsList } from "./holdings-list";
 import { PeekProvider } from "./peek";
@@ -112,6 +113,7 @@ function PortfolioView() {
         {Sealed && sealedOn(pool) && portfolio && (portfolio.fairBids?.length || portfolio.fairLaunches?.length) ? (
           <Sealed bids={portfolio.fairBids ?? []} launches={portfolio.fairLaunches ?? []} />
         ) : null}
+        {pool?.features?.scenarios && <ScenariosCard scenarios={portfolio?.scenarios} />}
         <OrdersCard orders={portfolio?.orders ?? null} tokens={tokens} />
         <SessionActivity actions={actions} />
         <DepositsList deposits={portfolio?.deposits ?? null} confirmations={pool?.confirmations} />

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { RatesStrip } from "./rates-strip";
 
 const LINKS = [
+  { href: "/scenarios", label: "Scenarios" },
   { href: "/docs", label: "Docs" },
   { href: "/tokens", label: "Tokens" },
   { href: "/stats", label: "Stats" },

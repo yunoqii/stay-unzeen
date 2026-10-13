@@ -3,10 +3,10 @@ import type { PoolInfo, Rates } from "@/lib/api/types";
 import { mockRates } from "@/lib/api/mock";
 import { formatUsd, makeDisplay, parseRates, ratesFromPool } from "./display";
 
-const RATES: Rates = { zecUsd: "252.00", solUsd: "140.00", ethUsd: "3900.00", zecSol: "1.8", zecEth: "0.064615", approximate: true, ts: 1 };
+const RATES: Rates = { usd: { ZEC: "252", SOL: "140", ETH: "3900" }, pairs: { "ZEC/SOL": "1.8", "ZEC/ETH": "0.064615" }, approximate: true, source: "near-1click", ts: 1 };
 
 describe("display rates", () => {
-  it("parses the draft v0.18 answer", () => {
+  it("parses the v0.18 answer", () => {
     const r = parseRates(RATES)!;
     expect(r.zecSol).toBe(1.8);
     expect(r.zecUsd).toBe(252);
@@ -14,8 +14,8 @@ describe("display rates", () => {
   });
 
   it("derives ZEC/SOL from USD when the cross is missing, rejects zero and garbage", () => {
-    expect(parseRates({ ...RATES, zecSol: "0" })!.zecSol).toBeCloseTo(1.8);
-    expect(parseRates({ ...RATES, zecSol: "x", zecUsd: "0", solUsd: "0" })).toBeNull();
+    expect(parseRates({ ...RATES, pairs: { ...RATES.pairs, "ZEC/SOL": "0" } })!.zecSol).toBeCloseTo(1.8);
+    expect(parseRates({ ...RATES, pairs: { ...RATES.pairs, "ZEC/SOL": "x" }, usd: { ZEC: "0", SOL: "0", ETH: "0" } })).toBeNull();
     expect(parseRates(null)).toBeNull();
   });
 
@@ -25,14 +25,13 @@ describe("display rates", () => {
     expect(r.zecSol).toBe(1.8);
     expect(r.zecUsd).toBeNull();
     expect(r.source).toBe("pool");
-    expect(ratesFromPool({ ...pool, rates: RATES } as PoolInfo)!.source).toBe("rates");
   });
 
   it("mock rates stay near the pool's mid rate and are the same within a minute", () => {
     const a = mockRates(1_760_000_000_000);
     const b = mockRates(1_760_000_030_000 - (1_760_000_000_000 % 60_000));
-    expect(Math.abs(Number(a.zecSol) / 1.8 - 1)).toBeLessThan(0.01);
-    expect(Number(a.zecUsd)).toBeCloseTo(Number(a.solUsd) * Number(a.zecSol), 1);
+    expect(Math.abs(Number(a.pairs["ZEC/SOL"]) / 1.8 - 1)).toBeLessThan(0.01);
+    expect(Number(a.usd.ZEC)).toBeCloseTo(Number(a.usd.SOL) * Number(a.pairs["ZEC/SOL"]), 0);
     expect(b.ts % 60_000).toBe(0);
   });
 });

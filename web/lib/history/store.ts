@@ -67,6 +67,9 @@ export const localKv = (): Kv => storage();
 /** Slot of this key's chat data (own nicknames), next to its history. */
 export const chatSlot = (network: Network, pubkey: string) => `chat:${historySlot(network, pubkey)}`;
 
+/** Slot of this key's scenario drafts and local plan names (lib/scenarios/store.ts). */
+export const scenarioSlot = (network: Network, pubkey: string) => `scenarios:${historySlot(network, pubkey)}`;
+
 // ---- state per slot ----
 
 type Status = "loading" | "ready" | "error";
@@ -158,6 +161,7 @@ export async function forgetHistory(network: Network, pubkey: string): Promise<v
   try {
     await storage().del(id);
     await storage().del(chatSlot(network, pubkey));
+    await storage().del(scenarioSlot(network, pubkey));
   } catch {
     /* nothing stored */
   }

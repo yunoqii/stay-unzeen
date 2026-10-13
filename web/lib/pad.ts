@@ -34,7 +34,10 @@ export function padAction(action: SignedAction): PaddedAction {
 }
 
 /** Ops whose body must be exactly PAD_MIN bytes (chat.md §5.1, R8): never a bigger bucket. */
-export const EXACT_OPS: ReadonlySet<string> = new Set(["chat", "chat_delete", "chat_hide", "chat_report", "noop"]);
+export const EXACT_OPS: ReadonlySet<string> = new Set(["chat", "chat_delete", "chat_hide", "chat_report", "noop", "scenario_start", "scenario_cancel"]);
+
+/** DRAFT v0.19: every scenario_create body is exactly this size, so it does not reveal the number of steps. */
+export const SCENARIO_BODY_BYTES = 16_384;
 
 export class BodyTooLong extends Error {
   constructor(public readonly bytes: number) {
@@ -59,4 +62,12 @@ export function padExact(action: SignedAction, size = PAD_MIN): PaddedAction {
   const { pad: _drop, ...rest } = action as PaddedAction;
   void _drop;
   return { ...rest, pad: randomChars(size - bare) } as PaddedAction;
+}
+
+/**
+ * scenario_create: exactly SCENARIO_BODY_BYTES. A plan with a launch image (create, up to 512 KiB) cannot
+ * fit; it falls back to the ordinary buckets, like a manual create with an image.
+ */
+export function padScenario(action: SignedAction): PaddedAction {
+  return bareBytes(action) <= SCENARIO_BODY_BYTES ? padExact(action, SCENARIO_BODY_BYTES) : padAction(action);
 }

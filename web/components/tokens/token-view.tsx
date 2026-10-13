@@ -3,7 +3,9 @@
 import { ErrorState } from "@/components/ui/states";
 import Link from "next/link";
 import { use, useMemo, useState } from "react";
-import { ArrowLeft } from "@phosphor-icons/react";
+import { ArrowLeft, FlowArrow } from "@phosphor-icons/react";
+import { usePool } from "@/hooks/use-pool";
+import { handOffMint } from "@/lib/scenarios/handoff";
 import { CopyButton } from "@/components/ui/copy-button";
 import { api } from "@/lib/api/client";
 import { fillsOf } from "@/lib/history/reduce";
@@ -11,7 +13,7 @@ import { useHistory } from "@/lib/history/store";
 import { isSolanaAddress } from "@/lib/trade";
 import { cn } from "@/lib/utils";
 import type { FeedEvent, TokenWithTrades } from "@/lib/api/types";
-import { formatCompact, formatPrice, shortAddr, timeAgo } from "@/lib/format";
+import { formatCompact, formatPrice, shortAddr, timeAgo, unitsToNumber } from "@/lib/format";
 import { eventQuote, quoteOfMint, quotePerSol, tokenQuote } from "@/lib/quotes";
 import type { Quote } from "@/lib/api/types";
 import { QuoteBadge } from "./quote-badge";
@@ -178,6 +180,7 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
             </CopyButton>
           </div>
         </div>
+        <AutomateLink mint={token.mint} />
       </header>
 
       {quote === "ZEC" && <ZecPairNote />}
@@ -265,9 +268,9 @@ function useLivePrice(token: TokenWithTrades, events: FeedEvent[]): { sol: strin
   const base = { sol: token.priceSol, quote: Number(token.priceQuote) > 0 ? token.priceQuote : undefined };
   const e = events.find((x) => x.kind !== "create");
   if (!e || token.trades.some((t) => t.id === e.id)) return base;
-  const tokens = Number(e.tokenAmount) / 10 ** e.decimals;
+  const tokens = unitsToNumber(e.tokenAmount, e.decimals);
   if (!(tokens > 0)) return base;
-  const sol = Number(e.solAmount) / 1e9;
+  const sol = unitsToNumber(e.solAmount, 9);
   const q = eventQuote(e);
   return {
     sol: sol > 0 ? plain(sol / tokens) : base.sol,
@@ -314,5 +317,21 @@ function ZecPairNote() {
         SOL rate in between.
       </span>
     </p>
+  );
+}
+
+/** Opens the scenario builder for this token; the mint is handed over in memory, never in the URL. */
+function AutomateLink({ mint }: { mint: string }) {
+  const { pool } = usePool();
+  if (!pool?.features?.scenarios) return null;
+  return (
+    <Link
+      href="/scenarios"
+      onClick={() => handOffMint(mint)}
+      className="inline-flex h-9 items-center gap-1.5 self-center rounded-full border border-border px-4 text-sm text-muted-foreground transition-colors hover:border-zec/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+    >
+      <FlowArrow size={15} weight="duotone" className="text-zec" aria-hidden />
+      Automate
+    </Link>
   );
 }

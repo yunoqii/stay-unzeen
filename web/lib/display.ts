@@ -1,7 +1,7 @@
 // Display currency (owner decision 13.10): prices, market caps, volumes, trade sizes and PnL read in ZEC by
 // default, the market's own currency. One switch flips them to the chain's native coin (SOL on Solana).
-// Converted figures carry "≈" and use the public display rate (DRAFT API v0.18, GET /api/rates or
-// PoolInfo.rates), never the rate of an action: that one always comes from the action's own quote.
+// Converted figures carry "≈" and use the public display rate (API v0.18, GET /api/rates), never the rate
+// of an action: that one always comes from the action's own quote.
 //
 // Pure helpers here; React stores in lib/display-store.ts.
 
@@ -38,29 +38,27 @@ const pos = (v: string | number | undefined | null): number | null => {
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 
-/** API answer -> numbers. Garbage or zero fields become null (never a division by zero downstream). */
+/** API answer (v0.18 Rates) -> numbers. Garbage or zero fields become null (never a division by zero downstream). */
 export function parseRates(r: Rates | null | undefined): DisplayRates | null {
-  if (!r) return null;
-  const zecSol = pos(r.zecSol) ?? (pos(r.zecUsd) && pos(r.solUsd) ? pos(r.zecUsd)! / pos(r.solUsd)! : null);
-  const zecUsd = pos(r.zecUsd);
-  const ethUsd = pos(r.ethUsd);
+  if (!r || typeof r !== "object") return null;
+  const zecUsd = pos(r.usd?.ZEC);
+  const solUsd = pos(r.usd?.SOL);
+  const ethUsd = pos(r.usd?.ETH);
   const out: DisplayRates = {
-    zecSol,
+    zecSol: pos(r.pairs?.["ZEC/SOL"]) ?? (zecUsd && solUsd ? zecUsd / solUsd : null),
     zecUsd,
-    solUsd: pos(r.solUsd),
+    solUsd,
     ethUsd,
-    zecEth: pos(r.zecEth) ?? (zecUsd && ethUsd ? zecUsd / ethUsd : null),
+    zecEth: pos(r.pairs?.["ZEC/ETH"]) ?? (zecUsd && ethUsd ? zecUsd / ethUsd : null),
     ts: Number.isFinite(r.ts) ? r.ts : 0,
     source: "rates",
   };
   return out.zecSol || out.zecUsd ? out : null;
 }
 
-/** Fallback when the server has no display rates: the pool's public mid ZEC/SOL rate, no USD. */
+/** Fallback while GET /api/rates is unavailable (503 before the first data): the pool's mid ZEC/SOL rate, no USD. */
 export function ratesFromPool(pool: PoolInfo | null | undefined): DisplayRates | null {
   if (!pool) return null;
-  const fromField = parseRates(pool.rates);
-  if (fromField) return fromField;
   const lamports = pos(pool.rate?.lamportsPerZec);
   if (!lamports) return null;
   return { zecSol: lamports / 1e9, zecUsd: null, solUsd: null, ethUsd: null, zecEth: null, ts: pool.rate?.ts ?? 0, source: "pool" };

@@ -38,7 +38,7 @@ type Flow = null | "create" | "restore";
 const SURFACE = { duration: 0.3, ease: [0.16, 1, 0.3, 1] as const };
 
 /** Where to go after unlocking, from ?next=. Whitelisted: never an open redirect. */
-const NEXT_PATHS = ["/portfolio", "/pay", "/launch", "/verify", "/creator"] as const;
+const NEXT_PATHS = ["/portfolio", "/pay", "/launch", "/verify", "/creator", "/scenarios"] as const;
 
 function nextPath(): string | null {
   const n = new URLSearchParams(window.location.search).get("next");

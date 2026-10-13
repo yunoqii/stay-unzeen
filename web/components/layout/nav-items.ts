@@ -1,4 +1,4 @@
-import { Broadcast, Coins, RocketLaunch, Wallet, SealCheck, type Icon } from "@phosphor-icons/react";
+import { Broadcast, Coins, FlowArrow, RocketLaunch, Wallet, SealCheck, type Icon } from "@phosphor-icons/react";
 
 export interface NavItem {
   href: string;
@@ -15,7 +15,10 @@ export const NAV: NavItem[] = [
 ];
 
 /** Desktop header only; on phones these live in the footer. */
-export const NAV_SECONDARY: NavItem[] = [{ href: "/docs", label: "Docs", icon: SealCheck }];
+export const NAV_SECONDARY: NavItem[] = [
+  { href: "/scenarios", label: "Scenarios", icon: FlowArrow },
+  { href: "/docs", label: "Docs", icon: SealCheck },
+];
 
 export function isActive(pathname: string, href: string) {
   return href === "/" ? pathname === "/" || pathname.startsWith("/token/") : pathname.startsWith(href);

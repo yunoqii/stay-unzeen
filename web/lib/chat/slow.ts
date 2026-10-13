@@ -3,6 +3,8 @@
 // later, no public marker) is on by default when this browser saw an own action of this mint in the
 // last 10 minutes. Judged only from local data (encrypted history + this tab's actions), never asked.
 
+import { unitsToNumber } from "@/lib/format";
+
 export const SLOW_WINDOW_MS = 10 * 60_000;
 const DAY_MS = 24 * 3_600_000;
 
@@ -29,8 +31,9 @@ export function ownAmounts(entries: readonly OwnFill[], now: number): number[] {
     const f = e.fill;
     if (f.zecSpent) out.push(Number(f.zecSpent) / 1e8);
     if (f.zecCredited) out.push(Number(f.zecCredited) / 1e8);
-    if (f.solAmount) out.push(Number(f.solAmount) / 1e9);
-    if (f.tokenAmount && e.decimals !== undefined) out.push(Number(f.tokenAmount) / 10 ** e.decimals);
+    // v0.18: token / lamport amounts may exceed 2^53 — convert through the exact decimal string, not Number().
+    if (f.solAmount) out.push(unitsToNumber(f.solAmount, 9));
+    if (f.tokenAmount && e.decimals !== undefined) out.push(unitsToNumber(f.tokenAmount, e.decimals));
   }
   return out.filter((n) => Number.isFinite(n) && n > 0);
 }
