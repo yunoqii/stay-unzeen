@@ -35,16 +35,23 @@
 - **Промпт:**
   > Seamless tileable film grain texture, 256x256, monochrome white noise on fully transparent background, fine and even, no patterns, no vignette, suitable as a 5% opacity overlay on a dark UI.
 
-## 5. Пустые состояния: силуэт
+## 5. Пустые состояния: «отредактированная» строка (v2, по замечанию владельца)
 - **Где:** `EmptyState` (портфель без токенов, лента токена без сделок, 404).
-- **Файл:** `web/public/illustrations/silhouette.svg` (векторный, ≤ 15 КБ) или `.webp` 480×480.
+- **Файл:** `web/public/illustrations/empty.svg` (вектор, ≤ 15 КБ) или `empty.webp` 960×480 с прозрачным фоном.
+- **Идея:** не человек-силуэт (клише), а наш собственный язык — строка ленты, закрытая «цензурной лентой». Есть запись, но не видно, чья.
 - **Fallback:** текущий размытый круг (`page-shell.tsx`).
-- **Промпт:**
-  > A single anonymous human silhouette from the shoulders up, seen from behind, dissolving into soft blur at the bottom, rendered in dark grays on transparent background, with a faint thin yellow (#F4B728) rim light along one shoulder. Minimal, flat, no face, no details, no text. Vector-like, simple shapes.
+- **Промпт (вариант A — ledger):**
+  > Minimal flat vector illustration on a fully transparent background. Three thin horizontal hairline rows like a financial ledger, drawn in dark graphite gray (#2A2A30) with 1px strokes. The middle row is covered by a strip of diagonal hatching, 45-degree thin lines in warm yellow (#F4B728) at 40% opacity, like redaction tape over a document line. At the left end of the hidden row, a tiny solid yellow dot. Generous negative space, no text, no letters, no numbers, no people, no gradients, no shadows, no 3D. Precise, editorial, quiet. Aspect 2:1.
+- **Промпт (вариант B — тень без объекта):**
+  > Minimal flat vector illustration on a fully transparent background: a soft elliptical cast shadow on an invisible floor, in dark gray (#1C1C20) with blurred edges, but no object casting it — the space above the shadow is empty. A single thin yellow (#F4B728) hairline arc hovers where the object's top edge would be, like an eclipse rim. No text, no people, no gradients except the shadow blur, no 3D render. Quiet, mysterious, editorial. Aspect 2:1.
 
-## 6. Fair-launch reveal: частицы → логотип (будущее)
-- **Где:** `/launch`, момент раскрытия (FRONTEND.md, момент 4). Сейчас превью раскрывает заявки расшифровкой глифов без частиц.
-- **Файл:** не нужен: частицы рисуются кодом из картинки токена (`/media/…`). Если нужна заглушка-логотип: `web/public/launch/placeholder-mark.svg`, 128×128.
+## 6. Fair-launch: знак «запечатанной заявки» (v2, по замечанию владельца)
+- **Где:** `/launch` (режим sealed bids), карточка запуска до reveal, заглушка логотипа токена.
+- **Файл:** `web/public/launch/sealed-mark.svg`, 128×128 viewBox, прозрачный фон, ≤ 6 КБ.
+- **Идея:** не «монета с затмением» (повтор героя), а печать: круг, разрезанный по горизонтали «цензурной» штриховкой — до раунда drand содержимое скрыто, после reveal штриховка уходит (это анимирует фронт).
 - **Fallback:** монограмма токена.
-- **Промпт:**
-  > A simple abstract coin mark, 128x128, a thin yellow (#F4B728) ring with a small offset black disc inside (eclipse motif), transparent background, flat vector, no text.
+- **Промпт (вариант A — печать):**
+  > Flat vector icon, 128x128, transparent background. A circular seal outline in thin warm yellow (#F4B728) 2px stroke. A horizontal band across the middle third of the circle is filled with 45-degree thin diagonal hatching in the same yellow, like redaction tape sealing the center. Above and below the band, inside the circle, solid near-black (#0B0B0D). Twelve tiny evenly spaced tick marks on the outer edge of the circle like a timer dial. Geometric, crisp, no text, no letters, no gradients, no 3D, no glow.
+- **Промпт (вариант B — конверт-глиф):**
+  > Flat vector icon, 128x128, transparent background. Three stacked horizontal bars of block glyph texture (like ▓▒░ characters, rendered as tiny squares) in decreasing density from left to right, warm yellow (#F4B728) on near-black, enclosed by a thin rounded-square outline. Feels like encrypted data waiting to be revealed. Pixel-precise, no text, no gradients, no 3D.
+- Частицы «собираются в логотип» по-прежнему рисуются кодом из картинки токена — отдельный ассет не нужен.
