@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Signer } from "@solana/web3.js";
+import { Keypair, type Signer } from "@solana/web3.js";
 import { Relayer, type RelayerEvent } from "../../src/relayer/engine";
 import { InMemoryJobQueue } from "../../src/relayer/memory-queue";
 import { cryptoRng, seededRng } from "../../src/relayer/random";
@@ -123,5 +123,79 @@ describe("N-4: batch order inside an epoch is random", () => {
     q.enqueue(buy(MINT_A), { notBefore: t + 1, id: "late" });
     q.enqueue(buy(MINT_A), { notBefore: t, id: "early" });
     expect((await q.claim({ workerId: "w", now: t + 2, leaseMs: 1, lane: "batch" }))!.id).toBe("early");
+  });
+});
+
+describe("RELAYER v5 §3: attest lane", () => {
+  const ROOT = "cd".repeat(32);
+  const attest = (purpose: "fair" | "verify"): JobSpec => ({ kind: "attest", memo: ROOT, purpose });
+  const fairCreate = (): JobSpec => ({ kind: "fair_create", venue: "pumpfun", meta: { name: "F", symbol: "F" }, lamportsIn: 1_000_000n, minOut: 1n, mintKeypair: Keypair.generate() });
+
+  it("in-memory queue: attest only in its lane, fair before verify; no lane = attest first", async () => {
+    const t = 1_700_000_000_000;
+    const L = 60_000;
+    const q = new InMemoryJobQueue(seededRng(3));
+    const v = q.enqueue(attest("verify"), { notBefore: t - 10_000, execMode: "delayed" });
+    const fc = q.enqueue(fairCreate(), { notBefore: t - 20_000, execMode: "now" });
+    const f = q.enqueue(attest("fair"), { notBefore: t, execMode: "now" });
+    const claim = (lane?: "now" | "batch" | "attest") => q.claim({ workerId: "w", now: t, leaseMs: L, ...(lane ? { lane } : {}) });
+    expect((await claim("attest"))!.id).toBe(f.id);
+    expect((await claim("attest"))!.id).toBe(v.id);
+    expect(await claim("attest")).toBeNull();
+    expect((await claim("now"))!.id).toBe(fc.id);
+    expect(await claim("now")).toBeNull();
+    expect(await claim("batch")).toBeNull();
+
+    const q2 = new InMemoryJobQueue(seededRng(4));
+    q2.enqueue(fairCreate(), { notBefore: t - 20_000, execMode: "now" });
+    const a = q2.enqueue(attest("fair"), { notBefore: t, execMode: "now" });
+    expect((await q2.claim({ workerId: "w", now: t, leaseMs: L }))!.id).toBe(a.id);
+  });
+
+  it("the fair-launch root goes out while the now lane is stuck in a long fair_create", async () => {
+    const chain = new FakeChain();
+    const clock = new FakeClock(1_700_000_000_000, chain);
+    const inv = new FakeInventory();
+    const pool = new VaultPool(vaults(1, inv), inv, seededRng(5));
+    const q = new InMemoryJobQueue(seededRng(5));
+    const attestKey = Keypair.generate();
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let inSubmit!: () => void;
+    const reached = new Promise<void>((r) => (inSubmit = r));
+    const kinds = new Map<string, JobSpec["kind"]>();
+    class Gated extends FakeExecutor {
+      override async prepare(spec: JobSpec, vault: Signer) {
+        const tx = await super.prepare(spec, vault);
+        kinds.set(tx.signature, spec.kind);
+        return tx;
+      }
+      override async submit(tx: SignedTx): Promise<void> {
+        if (kinds.get(tx.signature) === "fair_create") {
+          inSubmit();
+          await gate;
+        }
+        return super.submit(tx);
+      }
+    }
+    const ex = new Gated(chain);
+    // attest signs with its own key (no vault lease), like AttestExecutor
+    const attestEx = Object.assign(Object.create(ex) as Gated, { ownSigner: () => attestKey });
+    const relayer = new Relayer({ queue: q, pool, executors: { trade: { pumpfun: ex }, withdraw: ex, attest: attestEx }, probe: chain, clock, rng: seededRng(5) });
+
+    const fc = q.enqueue(fairCreate(), { notBefore: clock.now(), execMode: "now" });
+    const nowLane = relayer.tick("now");
+    await reached; // fair_create is mid-send on the only vault
+    const a = q.enqueue(attest("fair"), { notBefore: clock.now(), execMode: "now" });
+    expect(await relayer.tick("now")).toBe(false); // the now lane never takes it
+    expect(await relayer.tick("attest")).toBe(true);
+    expect(q.get(a.id)!.state).toBe("executed");
+    const ex1 = q.get(a.id)!.result;
+    expect(ex1?.status === "executed" && ex1.execution.kind === "attest" && ex1.execution.vault).toBe(attestKey.publicKey.toBase58());
+    expect(q.get(fc.id)!.state).toBe("queued"); // still in flight
+    release();
+    expect(await nowLane).toBe(true);
+    expect(q.get(fc.id)!.state).toBe("executed");
   });
 });

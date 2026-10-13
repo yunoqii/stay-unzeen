@@ -293,6 +293,12 @@ const QUOTE_TO_BASE = 1;
  * - swap (v1, the first buy of create_pool_with_first_buy): exact-in, the whole
  *   `amountIn` is spent, tokens = outputAmount.
  */
+/** Creator share of a DBC trading fee (config `creatorTradingFeePercentage`, floor; the partner gets the rest). */
+export function dbcCreatorFee(tradingFee: bigint, creatorPct: number): bigint {
+  if (!Number.isInteger(creatorPct) || creatorPct < 0 || creatorPct > 100) throw new RangeError("bad creator fee percentage");
+  return (tradingFee * BigInt(creatorPct)) / 100n;
+}
+
 export function dbcSwapAmounts(ev: { kind: "swap2"; e: DbcSwap2Event } | { kind: "swap"; e: DbcSwapEvent }): {
   isBuy: boolean;
   tokenAmount: bigint;
@@ -568,8 +574,13 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     const swap = dbcSwapEvents(tx).find((e) => e.pool.equals(init.pool));
     let tokenAmount = 0n;
     let solAmount = 0n;
+    let creatorFee: bigint | null = 0n;
     if (swap) {
       ({ tokenAmount, solAmount } = dbcSwapAmounts({ kind: "swap", e: swap }));
+      const pct = await this.poolConfig()
+        .then((c) => Number(c.creatorTradingFeePercentage))
+        .catch(() => null);
+      creatorFee = pct === null ? null : dbcCreatorFee(toBig(swap.swapResult.tradingFee), pct);
     } else {
       tokenAmount = tokenDelta(tx, vaultPk, mint);
       if (tokenAmount > 0n) return null; // a buy happened but its event is unreadable: never guess SOL
@@ -593,6 +604,7 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
       decimals: mi?.decimals ?? UNZEEN_DBC_CURVE.tokenDecimals,
       amountsKnown: true,
       fromEvent: swap !== undefined,
+      creatorFee,
     };
   }
 

@@ -78,6 +78,7 @@ export class PostgresJobQueue implements JobQueue {
   private v3Columns: Promise<boolean> | null = null;
   private v4Schema: Promise<boolean> | null = null;
   private blockTimeCol: Promise<{ name: string; ts: boolean } | null> | null = null;
+  private creatorFeeCol: Promise<boolean> | null = null;
 
   constructor(o: PostgresJobQueueOptions) {
     this.pool = o.pool;
@@ -169,11 +170,33 @@ export class PostgresJobQueue implements JobQueue {
     return this.blockTimeCol;
   }
 
+  /** RELAYER v6 (core 0013): relayer_jobs.out_creator_fee exists and is writable for this role. Cached. */
+  private hasCreatorFee(): Promise<boolean> {
+    if (!this.creatorFeeCol) {
+      this.creatorFeeCol = this.pool
+        .query<{ ok: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = current_schema() AND table_name = 'relayer_jobs'
+                             AND column_name = 'out_creator_fee')
+                  AND has_column_privilege(current_user, 'relayer_jobs', 'out_creator_fee', 'UPDATE') AS ok`,
+        )
+        .then((r) => r.rows[0]?.ok === true)
+        .catch((e) => {
+          this.creatorFeeCol = null;
+          throw e;
+        });
+    }
+    return this.creatorFeeCol;
+  }
+
   async claim(opts: { workerId: string; now: number; leaseMs: number; lane?: Lane }): Promise<ClaimedJob | null> {
     this.leaseMs = opts.leaseMs;
     const leaseId = `${opts.workerId}:${randomBytes(6).toString("hex")}`;
     let laneSql = "";
-    if (opts.lane !== undefined) {
+    if (opts.lane === "attest") {
+      // RELAYER v5 §3: attest has its own loop (any exec_mode), never behind a fair_create / epoch.
+      laneSql = `AND op = 'attest'`;
+    } else if (opts.lane !== undefined) {
       if (await this.hasExecMode()) {
         laneSql =
           opts.lane === "now"
@@ -182,18 +205,29 @@ export class PostgresJobQueue implements JobQueue {
       } else if (opts.lane === "now") {
         return null; // before 0005 every job is 'delayed'
       }
+      laneSql += ` AND op <> 'attest'`; // served by the attest lane only
     }
-    // Now lane: FIFO. Batch: random order inside an epoch (N-4).
-    const tieBreak = opts.lane === "now" ? "id" : "random()";
+    // Now lane: FIFO. Batch: random order inside an epoch (N-4). Attest: FIFO.
+    const tieBreak = opts.lane === "batch" || opts.lane === undefined ? "random()" : "id";
+    // Attest lane: fair-launch roots (deadline: the drand round) before Verify anchors.
+    // No lane: attest jobs first.
+    const priority =
+      opts.lane === "attest"
+        ? `(meta->>'purpose' IS NOT DISTINCT FROM 'verify'), `
+        : opts.lane === undefined
+          ? `(op <> 'attest'), `
+          : "";
     const v3 = await this.hasV3();
     // RELAYER v4 §1: while a Verify snapshot of this network is freezing/collecting,
-    // no NEW job is taken (both lanes, every op incl. fair_create / attest).
+    // no NEW job is taken (both lanes, every op incl. fair_create; attest exempt, E21).
     // In-flight rows (claimed/sent, lease ran out) are still driven to the end:
     // core waits for exactly those before it reads the ledger.
+    // E21: attest is exempt (memo signed and paid by an attestation key, never a vault:
+    // no ledger/vault balance moves), so a fair-launch root is not held up to 120 s.
     const freeze = (await this.hasV4())
-      ? `AND NOT EXISTS (SELECT 1 FROM verify_snapshots v
+      ? `AND (op = 'attest' OR NOT EXISTS (SELECT 1 FROM verify_snapshots v
                           WHERE v.network = $2 AND v.status IN ('freezing', 'collecting')
-                            AND v.freeze_until > now())`
+                            AND v.freeze_until > now()))`
       : "";
     // DB clock (not opts.now): all relayers and core agree on time.
     const res = await this.pool.query<JobRow>(
@@ -203,7 +237,7 @@ export class PostgresJobQueue implements JobQueue {
             AND ((status = 'queued' AND not_before <= now() ${freeze})
               OR (status IN ('claimed', 'sent') AND lease_until < now()))
             ${laneSql}
-          ORDER BY (status = 'queued'), not_before, ${tieBreak}
+          ORDER BY ${priority}(status = 'queued'), not_before, ${tieBreak}
           LIMIT 1
           FOR UPDATE SKIP LOCKED)
        UPDATE relayer_jobs j
@@ -319,16 +353,20 @@ export class PostgresJobQueue implements JobQueue {
       if (res.rowCount !== 1) throw new LeaseLostError(job.id);
       return;
     }
+    // v6: exact launch-tx creator fee (create / fair_create), when known and the column exists.
+    const fee = e.kind === "create" && e.creatorFee !== undefined && e.creatorFee !== null && (await this.hasCreatorFee()) ? e.creatorFee : null;
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
       const outLamports = e.kind === "withdraw" ? 0n : e.solAmount;
+      const params: unknown[] = [job.id, e.slot, e.mint, e.tokenAmount.toString(), outLamports.toString(), e.networkFee.toString(), e.signature, job.leaseId];
+      if (fee !== null) params.push(fee.toString());
       const res = await client.query(
         `UPDATE relayer_jobs
             SET status = 'confirmed', slot = $2, out_mint = $3, out_token_amount = $4,
-                out_lamports = $5, network_fee = $6, updated_at = now()
+                out_lamports = $5, network_fee = $6, updated_at = now()${fee !== null ? ", out_creator_fee = $9" : ""}
           WHERE id = $1 AND status = 'sent' AND signature = $7 AND claimed_by = $8 AND settled_at IS NULL`,
-        [job.id, e.slot, e.mint, e.tokenAmount.toString(), outLamports.toString(), e.networkFee.toString(), e.signature, job.leaseId],
+        params,
       );
       if (res.rowCount !== 1) throw new LeaseLostError(job.id);
       if (e.kind === "create") await this.writeCreateFeed(client, job, e);

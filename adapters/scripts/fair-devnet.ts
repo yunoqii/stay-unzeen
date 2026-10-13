@@ -119,7 +119,9 @@ async function main(): Promise<void> {
         const r = await row(id);
         if (r.status === "failed") throw new Error(`job failed: ${r.error_code} (${r.error_message})`);
         if (r.status === "confirmed") return r;
-        if (!(await rt.relayer.tick("now"))) await new Promise((res) => setTimeout(res, 1_000));
+        // attest has its own lane (RELAYER v5 §3); now = fair_create.
+        const worked = (await rt.relayer.tick("attest")) || (await rt.relayer.tick("now"));
+        if (!worked) await new Promise((res) => setTimeout(res, 1_000));
       }
       throw new Error("job did not finish");
     };

@@ -55,19 +55,29 @@ export class InMemoryJobQueue implements JobQueue {
 
   /**
    * Same order as the Postgres queue: earliest `notBefore`; ties (one epoch)
-   * in random order for the batch lane, FIFO for the now lane.
+   * in random order for the batch lane, FIFO for the now / attest lanes.
+   * Attest jobs only in the attest lane (fair first) or, without a lane, first.
    */
   async claim(opts: { workerId: string; now: number; leaseMs: number; lane?: Lane }): Promise<ClaimedJob | null> {
     let due: Row[] = [];
+    // Priority class (lower first): attest lane -> fair before verify; no lane -> attest first.
+    const cls = (r: Row): number => {
+      if (opts.lane === "attest") return r.spec.kind === "attest" && r.spec.purpose === "verify" ? 1 : 0;
+      if (opts.lane === undefined) return r.spec.kind === "attest" ? 0 : 1;
+      return 0;
+    };
     for (const r of this.rows.values()) {
       if (r.state !== "queued" || r.notBefore > opts.now) continue;
       if (r.leaseId !== null && r.leaseUntil > opts.now) continue;
-      if (opts.lane !== undefined && (opts.lane === "now") !== (r.execMode === "now")) continue;
-      if (due.length === 0 || r.notBefore < due[0]!.notBefore) due = [r];
-      else if (r.notBefore === due[0]!.notBefore) due.push(r);
+      const attest = r.spec.kind === "attest";
+      if (opts.lane === "attest" && !attest) continue;
+      if ((opts.lane === "now" || opts.lane === "batch") && (attest || (opts.lane === "now") !== (r.execMode === "now"))) continue;
+      const head = due[0];
+      if (!head || cls(r) < cls(head) || (cls(r) === cls(head) && r.notBefore < head.notBefore)) due = [r];
+      else if (cls(r) === cls(head) && r.notBefore === head.notBefore) due.push(r);
     }
     if (due.length === 0) return null;
-    const best = opts.lane === "now" ? due[0]! : due[this.rng.int(0, due.length - 1)]!;
+    const best = opts.lane === "now" || opts.lane === "attest" ? due[0]! : due[this.rng.int(0, due.length - 1)]!;
     best.leaseId = randomBytes(8).toString("hex");
     best.leaseUntil = opts.now + opts.leaseMs;
     best.claims += 1;

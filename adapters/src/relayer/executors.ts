@@ -169,6 +169,7 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
         symbol: r.symbol,
         imageUrl,
         market: await this.adapter.market(r.mint).catch(() => null),
+        creatorFee: r.creatorFee ?? null,
       };
     }
     const r = await this.adapter.tradeResult(spec.kind, a.signature, a.vault, spec.mint);
@@ -278,7 +279,9 @@ export class AttestExecutor implements JobExecutor<Extract<JobSpec, { kind: "att
   async result(spec: Extract<JobSpec, { kind: "attest" }>, a: SentAttempt): Promise<Execution | null> {
     const attester = this.of(spec);
     const r = await attester.result(a.signature);
-    if (!r) return null;
+    // F2: core needs out_block_time (beforeRound / anchor.blockTime); a confirmed
+    // tx without blockTime yet is re-read later instead of confirming without it.
+    if (!r || r.blockTime === null) return null;
     // v4 out_sig: over the job's memo (= what core compares against), never over chain data.
     const outSig = signDetached(attester.key, attestSigMessage(spec.memo));
     return { kind: "attest", signature: r.signature, slot: r.slot, vault: r.signer, memo: r.memo, networkFee: r.networkFee, blockTime: r.blockTime, outSig };

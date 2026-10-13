@@ -274,6 +274,28 @@ describe.skipIf(!DB)("PostgresJobQueue (live Postgres, temp schema)", () => {
     ]);
   });
 
+  it("v6: create writes out_creator_fee (0013) when the adapter knows it", async () => {
+    // 0013 DDL in the temp schema (core may not have applied it locally yet)
+    await pool.query(`ALTER TABLE relayer_jobs ADD COLUMN IF NOT EXISTS out_creator_fee BIGINT CHECK (out_creator_fee >= 0)`);
+    const q = new PostgresJobQueue({ pool, network: "devnet" }); // fresh column cache
+    const claim = () => q.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000 });
+    await pool.query(`DELETE FROM relayer_jobs`);
+    const exec = (sig: string, creatorFee: bigint | null) => ({
+      kind: "create" as const, signature: sig, slot: 9, vault: "vC", mint: Keypair.generate().publicKey.toBase58(), creator: "cr", tokenAmount: 777n, solAmount: 50_000n,
+      networkFee: 5_000n, decimals: 6, blockTime: 1_760_000_000, name: "U", symbol: "U", imageUrl: null, market: null, creatorFee,
+    });
+    const ids: string[] = [];
+    for (const [sig, fee] of [["sigF1", 1_234n], ["sigF2", null]] as const) {
+      const id = await insert({ op: "create", venue: "pumpfun", lamports_in: 50_000, min_out: 1, network: "devnet", meta: { name: "U", symbol: "U" } });
+      ids.push(id);
+      const c = (await claim())!;
+      await q.reportSent(c, { signature: sig, lastValidBlockHeight: 1, vault: "vC", sentAt: Date.now() });
+      await q.reportResult(c, { status: "executed", execution: exec(sig, fee) });
+    }
+    const r = (await pool.query(`SELECT id::text, out_creator_fee::text AS f FROM relayer_jobs WHERE id = ANY($1::bigint[]) ORDER BY id`, [ids])).rows;
+    expect(r.map((x) => x.f)).toEqual(["1234", null]); // unknown -> NULL, core estimates
+  });
+
   it("advisory vault lock: exclusive across connections, released on release() and on disconnect", async () => {
     const lockPool = new pg.Pool({ connectionString: DB, max: 4 });
     const otherPool = new pg.Pool({ connectionString: DB, max: 4 });
@@ -359,6 +381,37 @@ describe.skipIf(!DB)("PostgresJobQueue (live Postgres, temp schema)", () => {
     await pool.query(`DELETE FROM relayer_jobs`);
     await insert({ ...buyJob, exec_mode: "now" });
     expect(await claim()).not.toBeNull();
+  });
+
+  it("RELAYER v5 §3: attest lane takes only attest (fair before verify); now/batch never take attest", async () => {
+    await pool.query(`DELETE FROM relayer_jobs`);
+    const root = "ab".repeat(32);
+    const mint = Keypair.generate();
+    const fair = await insert({ op: "fair_create", venue: "pumpfun", lamports_in: 1_000_000, min_out: 5, meta: { name: "F", symbol: "F" }, network: "devnet", mint_secret: Buffer.from(mint.secretKey), exec_mode: "now" });
+    const verify = await insert({ op: "attest", meta: { memo: root, purpose: "verify" }, network: "devnet", exec_mode: "delayed", not_before: new Date(Date.now() - 5_000) });
+    const fairAttest = await insert({ op: "attest", meta: { memo: root, purpose: "fair" }, network: "devnet", exec_mode: "now" });
+    const lane = (l: "now" | "batch" | "attest") => q.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000, lane: l });
+    // fair-launch root first although the Verify anchor is older (deadline = drand round)
+    const a1 = (await lane("attest"))!;
+    expect(a1.id).toBe(fairAttest);
+    expect(a1.spec).toEqual({ kind: "attest", memo: root, purpose: "fair" });
+    expect((await lane("attest"))!.id).toBe(verify);
+    expect(await lane("attest")).toBeNull();
+    // the now lane only sees fair_create, never an attest
+    await pool.query(`UPDATE relayer_jobs SET status = 'queued', claimed_by = NULL WHERE op = 'attest'`);
+    expect((await lane("now"))!.id).toBe(fair);
+    expect(await lane("now")).toBeNull();
+    expect(await lane("batch")).toBeNull();
+    // without a lane: attest first
+    await pool.query(`UPDATE relayer_jobs SET status = 'queued', claimed_by = NULL`);
+    expect((await claim())!.spec.kind).toBe("attest");
+    // F2: confirmed attest stores out_block_time
+    await pool.query(`UPDATE relayer_jobs SET status = 'queued', claimed_by = NULL`);
+    const c = (await lane("attest"))!;
+    await q.reportSent(c, { signature: "sigA", lastValidBlockHeight: 9, vault: "AttestKey", sentAt: Date.now() });
+    await q.reportResult(c, { status: "executed", execution: { kind: "attest", signature: "sigA", slot: 7, vault: "AttestKey", memo: root, networkFee: 5000n, blockTime: 1_760_000_123, outSig: "S" } });
+    const r = (await pool.query(`SELECT status, out_block_time, out_memo FROM relayer_jobs WHERE id = $1`, [c.id])).rows[0];
+    expect(r).toEqual({ status: "confirmed", out_block_time: "1760000123", out_memo: root });
   });
 
   it("N-4: jobs of one epoch are claimed in random order (statistical)", async () => {

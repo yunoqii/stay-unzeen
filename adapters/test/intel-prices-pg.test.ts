@@ -72,4 +72,16 @@ describe.skipIf(!DB || !fs.existsSync(path.resolve(__dirname, "../../core/migrat
     const last = (await pool.query(`SELECT value FROM intel_meta WHERE key = 'last_tick_at'`)).rows[0].value;
     expect(last).toBe("3000");
   });
+
+  it("a mint listed twice in one tick does not abort the tick transaction", async () => {
+    const store = new PgIntelStore(pool, "devnet");
+    const M = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+    await store.commitTick(commit(5000, [
+      { mint: M, priceSol: "0.1", status: "curve" },
+      { mint: M, priceSol: "0.2", status: "curve" },
+    ]));
+    const r = (await pool.query(`SELECT price_sol::text, tick_at::text FROM intel_prices WHERE mint = $1`, [M])).rows;
+    expect(r).toEqual([{ price_sol: "0.2", tick_at: "5000" }]);
+    expect((await pool.query(`SELECT value FROM intel_meta WHERE key = 'last_tick_at'`)).rows[0].value).toBe("5000");
+  });
 });

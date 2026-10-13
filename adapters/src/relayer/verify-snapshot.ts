@@ -48,6 +48,26 @@ export interface SnapshotRequest {
   chainId: string;
   /** unix ms; nothing is written after it. */
   freezeUntil: number;
+  /**
+   * E2 (review-day8): `verify_snapshots.min_slot` = highest slot of the trades
+   * settled since the previous snapshot. The ledger counts them at `confirmed`,
+   * so the finalized read must not be older than this slot. Absent before core
+   * adds the column.
+   */
+  minSlot?: number;
+}
+
+/** The RPC has not finalized `minContextSlot` yet (or answered from an older slot). */
+export class MinSlotNotReachedError extends Error {
+  constructor() {
+    super("finalized slot has not reached the snapshot's min_slot yet");
+    this.name = "MinSlotNotReachedError";
+  }
+}
+
+function isMinSlotError(e: unknown): boolean {
+  const m = e instanceof Error ? e.message : String(e);
+  return /minimum context slot|-32016/i.test(m);
 }
 
 // ---------------------------------------------------------------------------
@@ -99,18 +119,48 @@ export class SlotMismatchError extends Error {
  * chunks are fetched together, pinned with `minContextSlot` = the highest slot
  * seen; if any chunk answers from another slot, the whole read is repeated.
  */
-export async function readOnOneSlot(reader: FinalizedReader, keys: readonly PublicKey[], tries = 6): Promise<SlotAccounts> {
+export async function readOnOneSlot(reader: FinalizedReader, keys: readonly PublicKey[], tries = 6, minSlot?: number): Promise<SlotAccounts> {
   const chunks: PublicKey[][] = [];
   for (let i = 0; i < keys.length; i += GMA_LIMIT) chunks.push(keys.slice(i, i + GMA_LIMIT) as PublicKey[]);
   if (chunks.length === 0) chunks.push([]);
-  let pin: number | undefined;
+  let pin: number | undefined = minSlot;
   for (let t = 0; t < tries; t++) {
-    const parts = await Promise.all(chunks.map((c) => reader.read(c, pin)));
+    let parts: SlotAccounts[];
+    try {
+      parts = await Promise.all(chunks.map((c) => reader.read(c, pin)));
+    } catch (e) {
+      if (minSlot !== undefined && isMinSlotError(e)) throw new MinSlotNotReachedError();
+      throw e;
+    }
     const slots = new Set(parts.map((p) => p.slot));
+    if (minSlot !== undefined && Math.min(...slots) < minSlot) throw new MinSlotNotReachedError(); // RPC ignored minContextSlot
     if (slots.size === 1) return { slot: parts[0]!.slot, accounts: parts.flatMap((p) => p.accounts) };
     pin = Math.max(...slots);
   }
   throw new SlotMismatchError();
+}
+
+/**
+ * E2: `readOnOneSlot` pinned to `minSlot`, retried every `retryMs` while the
+ * finalized slot lags behind it (~32 slots ≈ 13 s after the last confirmed
+ * trade), but never past `deadline` (the freeze end): then MinSlotNotReachedError.
+ */
+export async function readAtLeast(
+  reader: FinalizedReader,
+  keys: readonly PublicKey[],
+  minSlot: number | undefined,
+  deadline: number,
+  clock: { now: () => number; sleep: (ms: number) => Promise<void> } = { now: Date.now, sleep: (ms) => new Promise((r) => setTimeout(r, ms)) },
+  retryMs = 1_000,
+): Promise<SlotAccounts> {
+  for (;;) {
+    try {
+      return await readOnOneSlot(reader, keys, 6, minSlot);
+    } catch (e) {
+      if (!(e instanceof MinSlotNotReachedError) || clock.now() + retryMs >= deadline) throw e;
+      await clock.sleep(retryMs);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,9 +232,10 @@ export interface CollectedSnapshot {
 /** Reads, filters and signs. Pure w.r.t. the DB (testable with a fake reader). */
 export async function collectVaultSnapshot(
   reader: FinalizedReader,
-  req: Pick<SnapshotRequest, "id" | "chainId">,
+  req: Pick<SnapshotRequest, "id" | "chainId"> & Partial<Pick<SnapshotRequest, "minSlot" | "freezeUntil">>,
   signers: readonly SnapshotSigner[],
   mints: readonly string[],
+  clock?: { now: () => number; sleep: (ms: number) => Promise<void> },
 ): Promise<CollectedSnapshot> {
   if (!/^[0-9a-f]{4}$/.test(req.chainId)) throw new Error("bad chain id");
   const byAddr = new Map<string, SnapshotSigner>();
@@ -194,7 +245,10 @@ export async function collectVaultSnapshot(
     byAddr.set(a, prev ? { key: s.key, always: prev.always || s.always } : s);
   }
   const plan = await planBalances(reader, [...byAddr.keys()], mints);
-  const { slot, accounts } = await readOnOneSlot(reader, plan.keys);
+  const { slot, accounts } =
+    req.minSlot !== undefined
+      ? await readAtLeast(reader, plan.keys, req.minSlot, req.freezeUntil ?? Infinity, clock)
+      : await readOnOneSlot(reader, plan.keys);
   const vaults: SignedVaultBalance[] = [];
   for (const b of balancesFromAccounts(plan, accounts)) {
     const s = byAddr.get(b.address)!;
@@ -221,21 +275,44 @@ export interface VerifySnapshotStore {
 }
 
 export class PgVerifySnapshotStore implements VerifySnapshotStore {
+  private minSlotCol: Promise<boolean> | null = null;
+
   constructor(
     private readonly pool: Pool,
     private readonly network: SolanaNetwork,
   ) {}
 
+  /** E2: core's `verify_snapshots.min_slot` exists and this role may read it. Cached. */
+  private hasMinSlot(): Promise<boolean> {
+    if (!this.minSlotCol) {
+      this.minSlotCol = this.pool
+        .query<{ ok: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = current_schema() AND table_name = 'verify_snapshots' AND column_name = 'min_slot')
+                  AND has_column_privilege(current_user, 'verify_snapshots', 'min_slot', 'SELECT') AS ok`,
+        )
+        .then((r) => r.rows[0]?.ok === true)
+        .catch((e) => {
+          this.minSlotCol = null;
+          throw e;
+        });
+    }
+    return this.minSlotCol;
+  }
+
   async pending(): Promise<SnapshotRequest | null> {
-    const r = await this.pool.query<{ id: number; chain_id: string; until_ms: string }>(
-      `SELECT id, chain_id, (extract(epoch FROM freeze_until) * 1000)::bigint AS until_ms
+    const ms = await this.hasMinSlot();
+    const r = await this.pool.query<{ id: number; chain_id: string; until_ms: string; min_slot?: string | null }>(
+      `SELECT id, chain_id, (extract(epoch FROM freeze_until) * 1000)::bigint AS until_ms${ms ? ", min_slot" : ""}
          FROM verify_snapshots
         WHERE network = $1 AND status = 'collecting' AND assets_done_at IS NULL AND freeze_until > now()
         ORDER BY id LIMIT 1`,
       [this.network],
     );
     const row = r.rows[0];
-    return row ? { id: row.id, chainId: row.chain_id, freezeUntil: Number(row.until_ms) } : null;
+    if (!row) return null;
+    const min = row.min_slot === undefined || row.min_slot === null ? undefined : Number(row.min_slot);
+    return { id: row.id, chainId: row.chain_id, freezeUntil: Number(row.until_ms), ...(min !== undefined ? { minSlot: min } : {}) };
   }
 
   async write(id: number, slot: number, vaults: readonly SignedVaultBalance[]): Promise<boolean> {
@@ -325,7 +402,16 @@ export class VaultSnapshotter {
     if (!req) return "idle";
     const started = (this.o.now ?? Date.now)();
     const [signers, mints] = await Promise.all([this.o.signers(), this.o.mints.mints()]);
-    const snap = await collectVaultSnapshot(this.o.reader, req, signers, mints);
+    let snap: CollectedSnapshot;
+    try {
+      const clock = { now: this.o.now ?? Date.now, sleep: (ms: number) => (this.o.sleep ?? abortableSleep)(ms) };
+      snap = await collectVaultSnapshot(this.o.reader, req, signers, mints, clock);
+    } catch (e) {
+      if (!(e instanceof MinSlotNotReachedError)) throw e;
+      // E2: finalized never caught up with min_slot inside the freeze: never write an older view.
+      this.o.log?.("verify snapshot: finalized slot did not reach min_slot before the freeze ended; core skips this snapshot");
+      return "late";
+    }
     if ((this.o.now ?? Date.now)() >= req.freezeUntil) {
       this.o.log?.("verify snapshot: freeze ended before the assets were read; core skips this snapshot");
       return "late";

@@ -11,10 +11,12 @@ import { PostgresJobQueue, rowToSpec } from "../src/relayer/postgres-queue";
 import { ATTEST_PATH, FAIR_ATTEST_PATH, deriveAttestKeypair } from "../src/attest";
 import {
   GMA_LIMIT,
+  MinSlotNotReachedError,
   PgVerifySnapshotStore,
   SlotMismatchError,
   VaultSnapshotter,
   collectVaultSnapshot,
+  readAtLeast,
   readOnOneSlot,
   tokenAmountOf,
   verifyFrozen,
@@ -98,6 +100,17 @@ describe("AttestExecutor out_sig", () => {
     expect(r?.kind).toBe("attest");
     if (r?.kind !== "attest") throw new Error();
     expect(verifyDetached(key.publicKey.toBase58(), Buffer.alloc(32, 0xab), r.outSig!)).toBe(true);
+    expect(r.blockTime).toBe(1);
+  });
+
+  it("F2: no blockTime yet -> not readable (re-read later, never confirmed without out_block_time)", async () => {
+    const key = Keypair.generate();
+    const fake = {
+      key,
+      result: async (signature: string) => ({ signature, slot: 5, signer: key.publicKey.toBase58(), memo: ROOT, networkFee: 5000n, blockTime: null }),
+    } as unknown as Attester;
+    const r = await new AttestExecutor(fake).result({ kind: "attest", memo: ROOT, purpose: "fair" }, { signature: "s", lastValidBlockHeight: 1, vault: key.publicKey.toBase58(), sentAt: 0 });
+    expect(r).toBeNull();
   });
 });
 
@@ -219,6 +232,58 @@ describe("collectVaultSnapshot", () => {
   });
 });
 
+/** A finalized RPC that is `lag` ms behind: slot = finalizedAt(now); minContextSlot above it -> -32016. */
+class LaggingReader extends FakeReader {
+  constructor(private readonly finalized: () => number, private readonly ignorePin = false) {
+    super();
+  }
+  override async read(keys: readonly PublicKey[], minContextSlot?: number): Promise<SlotAccounts> {
+    this.pins.push(minContextSlot);
+    const slot = this.finalized();
+    if (!this.ignorePin && minContextSlot !== undefined && slot < minContextSlot) {
+      throw new Error("failed to get info about account: Minimum context slot has not been reached (-32016)");
+    }
+    return { slot, accounts: keys.map((k) => this.accounts.get(k.toBase58()) ?? null) };
+  }
+}
+
+describe("E2: snapshot read pinned to min_slot", () => {
+  const keys = (n: number) => Array.from({ length: n }, () => Keypair.generate().publicKey);
+  it("waits until finalized reaches min_slot, then reads at >= min_slot", async () => {
+    let now = 0;
+    const clock = { now: () => now, sleep: async (ms: number) => void (now += ms) };
+    const r = new LaggingReader(() => 1_000 + Math.floor(now / 400)); // +1 slot / 400 ms
+    const out = await readAtLeast(r, keys(3), 1_020, 120_000, clock);
+    expect(out.slot).toBeGreaterThanOrEqual(1_020);
+    expect(r.pins.every((p) => p !== undefined && p >= 1_020)).toBe(true);
+    expect(now).toBeGreaterThanOrEqual(8_000); // ~20 slots of finality lag
+  });
+  it("an RPC that ignores minContextSlot is not trusted with an older slot", async () => {
+    await expect(readOnOneSlot(new LaggingReader(() => 900, true), keys(2), 6, 1_000)).rejects.toBeInstanceOf(MinSlotNotReachedError);
+  });
+  it("never past the freeze: snapshotter reports late and writes nothing", async () => {
+    let now = 1_000;
+    const writes: number[] = [];
+    const s = new VaultSnapshotter({
+      store: { pending: async () => ({ id: 4, chainId: "0202", freezeUntil: 6_000, minSlot: 5_000 }), write: async (id) => (writes.push(id), true) },
+      reader: new LaggingReader(() => 100),
+      signers: async () => [{ key: Keypair.generate(), always: true }],
+      mints: { mints: async () => [] },
+      now: () => now,
+      sleep: async (ms) => void (now += ms),
+    });
+    expect(await s.tick()).toBe("late");
+    expect(writes).toEqual([]);
+    expect(now).toBeLessThan(6_000);
+  });
+  it("without min_slot (core before the column) the read is unpinned as before", async () => {
+    const r = new FakeReader();
+    const snap = await collectVaultSnapshot(r, { id: 1, chainId: "0202" }, [{ key: Keypair.generate(), always: true }], []);
+    expect(snap.slot).toBe(100);
+    expect(r.pins).toEqual([undefined]);
+  });
+});
+
 describe("VaultSnapshotter", () => {
   it("idle without a pending snapshot; late when the freeze ended while reading", async () => {
     const writes: number[] = [];
@@ -279,7 +344,7 @@ describe.skipIf(!DB)("Verify v4 (live Postgres, temp schema)", () => {
     await admin?.end();
   });
 
-  const claim = (lane?: "now" | "batch") => q.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000, ...(lane ? { lane } : {}) });
+  const claim = (lane?: "now" | "batch" | "attest") => q.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000, ...(lane ? { lane } : {}) });
   const snapshot = async (status: string, freezeSecs: number, network = "devnet") =>
     (
       await pool.query<{ id: number }>(
@@ -289,7 +354,7 @@ describe.skipIf(!DB)("Verify v4 (live Postgres, temp schema)", () => {
       )
     ).rows[0]!.id;
 
-  it("freeze: no new job in either lane (buy, fair_create, attest) while freezing/collecting; in-flight recovery continues", async (ctx) => {
+  it("freeze: no new buy / fair_create in either lane while freezing/collecting (attest exempt, E21); in-flight recovery continues", async (ctx) => {
     if (!has0009) ctx.skip();
     const mint = Keypair.generate();
     await pool.query(`INSERT INTO relayer_jobs (op, venue, mint, lamports_in, min_out, network, exec_mode) VALUES ('buy','pumpfun',$1,1000,1,'devnet','now')`, [mint.publicKey.toBase58()]);
@@ -316,6 +381,8 @@ describe.skipIf(!DB)("Verify v4 (live Postgres, temp schema)", () => {
     const rec = await claim("batch");
     expect(rec?.id).toBe(inflight); // recovery of the in-flight row only
     expect(await claim("batch")).toBeNull();
+    // E21: attest is not frozen (attestation key, no vault / ledger movement) and has its own lane
+    expect((await claim("attest"))?.spec.kind).toBe("attest");
     expect(await claim()).toBeNull();
 
     await pool.query(`UPDATE verify_snapshots SET status = 'collecting' WHERE id = $1`, [sid]);
@@ -328,7 +395,7 @@ describe.skipIf(!DB)("Verify v4 (live Postgres, temp schema)", () => {
       const j = await claim();
       if (j) ops.add(j.spec.kind);
     }
-    expect(ops).toEqual(new Set(["buy", "fair_create", "attest"]));
+    expect(ops).toEqual(new Set(["buy", "fair_create"]));
     await pool.query(`DELETE FROM verify_snapshots WHERE id IN ($1, $2)`, [sid, other]);
   });
 

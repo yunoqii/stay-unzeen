@@ -12,6 +12,7 @@ import { priorityFeeCacheFromConfig, type PriorityFeeCache } from "../fees";
 import { KeyStore, ageCipher, resolveAgeIdentity } from "../keystore";
 import { metadataStoreFromEnv, type MetadataStore } from "../metadata";
 import { LookupTables } from "../alt";
+import { JUPITER_PROGRAM_ID, JupiterAdapter, JupiterClient, jupiterOptionsFromEnv } from "../jupiter";
 import { DBC_PROGRAM_ID, MeteoraDbcAdapter, dbcConfigAddress, derivePartnerKeypair } from "../meteora";
 import { PumpFunAdapter } from "../pumpfun";
 import { txPipeline, type TxPipeline } from "../sender";
@@ -137,6 +138,8 @@ export interface RelayerRuntime {
   adapter: PumpFunAdapter;
   /** Meteora DBC adapter; null when no config key is set for this network. */
   meteora: MeteoraDbcAdapter | null;
+  /** Jupiter venue; mainnet only (null elsewhere: jobs fail venue_unavailable unsigned). */
+  jupiter: JupiterAdapter | null;
   pool: VaultPool;
   queue: PostgresJobQueue;
   mintVaults: MintVaults;
@@ -197,7 +200,7 @@ export async function poolSnapshotSigners(o: {
  * Venue programs the fee estimate is asked for (programs only: no vault, mint
  * or user). One estimate over all venues -> ONE price for every pool tx.
  */
-export const FEE_ESTIMATE_PROGRAMS: readonly string[] = [PUMP_PROGRAM_ID.toBase58(), DBC_PROGRAM_ID.toBase58()];
+export const FEE_ESTIMATE_PROGRAMS: readonly string[] = [PUMP_PROGRAM_ID.toBase58(), DBC_PROGRAM_ID.toBase58(), JUPITER_PROGRAM_ID.toBase58()];
 
 export function defaultMediaDir(cfg: Pick<AdapterConfig, "cluster">, env: NodeJS.ProcessEnv = process.env): string {
   const home = env.UNZEEN_HOME?.trim() || path.join(os.homedir(), ".unzeen");
@@ -253,8 +256,12 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
         lookupTables,
       })
     : null;
-  const trade: Partial<Record<"pumpfun" | "meteora-dbc", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
+  const trade: Partial<Record<"pumpfun" | "meteora-dbc" | "jupiter", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
   if (meteora) trade["meteora-dbc"] = new VenueTradeExecutor(meteora, metadata);
+  // Jupiter: mainnet only (no devnet deployment). Elsewhere the venue has no executor,
+  // so its jobs fail `venue_unavailable` before anything is signed.
+  const jupiter = o.cfg.cluster === "mainnet-beta" ? buildJupiter(o.cfg.cluster, o.connection, fees, pipeline, env) : null;
+  if (jupiter) trade.jupiter = new VenueTradeExecutor(jupiter, null);
   const attester = new Attester(o.connection, deriveAttestKeypair(o.keys.creatorSeed, "verify"), fees, pipeline);
   const fairAttester = new Attester(o.connection, deriveAttestKeypair(o.keys.creatorSeed, "fair"), fees, pipeline);
   const online = new OnlinePumpSdk(o.connection);
@@ -290,7 +297,21 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     ...(o.leaseMs ? { leaseMs: o.leaseMs } : {}),
     ...(o.onEvent ? { onEvent: o.onEvent } : {}),
   });
-  return { relayer, adapter, meteora, pool, queue, mintVaults, metadata, fees, pipeline, attester, fairAttester, launchCurves, snapshotter };
+  return { relayer, adapter, meteora, jupiter, pool, queue, mintVaults, metadata, fees, pipeline, attester, fairAttester, launchCurves, snapshotter };
+}
+
+/** Jupiter venue on the pool pipeline: same fee cache (one CU price), same tip and broadcaster. */
+export function buildJupiter(cluster: string, connection: Connection, fees: PriorityFeeCache, pipeline: TxPipeline, env: NodeJS.ProcessEnv): JupiterAdapter {
+  const j = jupiterOptionsFromEnv(env);
+  return new JupiterAdapter({
+    connection,
+    cluster,
+    client: new JupiterClient(j.client),
+    priorityMicroLamports: fees,
+    pipeline,
+    computeUnits: j.computeUnits,
+    slippageBps: j.slippageBps,
+  });
 }
 
 export function makePools(url: string, vaultCount: number, schema?: string): { db: pg.Pool; lockDb: pg.Pool } {

@@ -219,13 +219,19 @@ export interface PumpFeeState {
   /** Lamports already sitting on the creator wallet (normally 0). */
   wallet: bigint;
   /**
-   * Lamports the vault lends the creator wallet in the same tx: pump's
+   * Lamports the vault gives the creator wallet in the same tx: pump's
    * `collect_creator_fee` pays nothing unless the wallet stays rent-exempt
    * afterwards ("Creator account does not have enough rent-exemption
-   * lamports", devnet 2026-10-12), and a fresh creator holds 0. The final
-   * transfer returns it, the wallet ends at 0.
+   * lamports", devnet 2026-10-12), and a fresh creator holds 0.
+   * E15 (review-day8): this rent STAYS on the creator wallet for good (~0.00089
+   * SOL per launch, pool cost). Returning it made the final transfer exact, so
+   * a fee accrued between build and landing left a remainder below rent and
+   * the tx failed "insufficient funds for rent". Now the wallet ends at
+   * `walletRent` + whatever accrued late; that excess goes next pass (`wallet`).
    */
   topUp: bigint;
+  /** Rent floor the creator wallet keeps (0-byte system account). */
+  walletRent: bigint;
 }
 
 export function pumpFeeState(
@@ -242,17 +248,22 @@ export function pumpFeeState(
     vaultExists: vault !== null,
     wallet: walletLamports,
     topUp: walletLamports >= walletRent ? 0n : walletRent - walletLamports,
+    walletRent,
   };
 }
 
-/** Lamports that reach the vault net (fees + whatever the wallet held); the loan is not counted. */
+/** Lamports that reach the vault (fees + what the wallet held above its rent floor); the rent top-up is not counted. */
 export function pumpTransferAmount(s: PumpFeeState): bigint {
-  return s.bucket + s.vaultAboveRent + s.wallet;
+  return s.bucket + s.vaultAboveRent + (s.wallet > s.walletRent ? s.wallet - s.walletRent : 0n);
 }
 
-/** Lamports the final creator -> vault transfer moves: everything, the wallet ends at exactly 0. */
+/**
+ * Lamports the final creator -> vault transfer moves: everything above the
+ * rent floor as known at build time (E15). The wallet keeps >= its rent, so a
+ * late accrual only stays there instead of failing the tx.
+ */
 export function pumpReturnAmount(s: PumpFeeState): bigint {
-  return pumpTransferAmount(s) + s.topUp;
+  return pumpTransferAmount(s);
 }
 
 /**
@@ -393,27 +404,28 @@ export class PumpFeeVenue implements FeeVenue {
 
   collected(tx: VersionedTransactionResponse, t: FeeTarget): bigint | null {
     if (tx.meta?.err) return null;
-    // The tx succeeded, so the creator wallet ended at 0: the vault got exactly the transfer.
+    // E15: the creator wallet keeps its rent (+ any late accrual), so the vault got
+    // exactly the creator -> vault system transfer of this (successful) tx.
     const creator = new PublicKey(t.authority);
     const keys = tx.transaction.message.getAccountKeys(
       tx.meta?.loadedAddresses ? { accountKeysFromLookups: tx.meta.loadedAddresses } : undefined,
     );
-    for (let i = 0; i < keys.length; i++) {
-      if (!keys.get(i)?.equals(creator)) continue;
-      const pre = BigInt(tx.meta?.preBalances[i] ?? 0);
-      const post = BigInt(tx.meta?.postBalances[i] ?? 0);
-      if (post !== 0n) return null;
-      const events = anchorEventPayloads(tx, PUMP_PROGRAM_ID, COLLECT_EVENT_DISC).map((p) => {
-        try {
-          return PUMP_SDK.decodeCollectCreatorFeeEventBc(p);
-        } catch {
-          return null;
-        }
-      });
-      const ev = events.find((e) => e?.creator.equals(creator));
-      return ev ? pre + toBig(ev.creatorFee) : null;
+    const events = anchorEventPayloads(tx, PUMP_PROGRAM_ID, COLLECT_EVENT_DISC).map((p) => {
+      try {
+        return PUMP_SDK.decodeCollectCreatorFeeEventBc(p);
+      } catch {
+        return null;
+      }
+    });
+    if (!events.some((e) => e?.creator.equals(creator))) return null;
+    let back = 0n;
+    for (const ci of tx.transaction.message.compiledInstructions) {
+      if (!keys.get(ci.programIdIndex)?.equals(SystemProgram.programId)) continue;
+      const d = Buffer.from(ci.data);
+      if (d.length !== 12 || d.readUInt32LE(0) !== 2) continue;
+      if (keys.get(ci.accountKeyIndexes[0]!)?.equals(creator)) back += d.readBigUInt64LE(4);
     }
-    return null;
+    return back;
   }
 
   private target(mint: PublicKey, creator: PublicKey, s: PumpFeeState, rent: bigint): FeeTarget {
@@ -423,8 +435,9 @@ export class PumpFeeVenue implements FeeVenue {
       mint: mint.toBase58(),
       authority: creator.toBase58(),
       lamports: pumpTransferAmount(s),
-      lockedRent: !s.vaultExists && s.bucket > 0n ? rent : 0n,
-      frontLamports: s.topUp,
+      // creator vault rent (when sweep creates it) + the wallet rent top-up (E15: stays on the creator)
+      lockedRent: (!s.vaultExists && s.bucket > 0n ? rent : 0n) + s.topUp,
+      frontLamports: 0n,
     };
   }
 

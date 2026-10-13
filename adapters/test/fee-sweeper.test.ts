@@ -1,5 +1,6 @@
 import BN from "bn.js";
-import { Keypair, PublicKey, SystemProgram, TransactionInstruction, type Signer, type VersionedTransactionResponse } from "@solana/web3.js";
+import { Keypair, MessageV0, PublicKey, SystemProgram, TransactionInstruction, type Signer, type VersionedTransactionResponse } from "@solana/web3.js";
+import { PumpFeeVenue } from "../src/creator-fees";
 import { NATIVE_MINT, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { describe, expect, it } from "vitest";
 import {
@@ -146,7 +147,7 @@ describe("fee sweep: one creator per transaction (H7)", () => {
     expect(() => assertSingleAuthority(ixs.slice(0, 1), vault, a)).not.toThrow();
   });
 
-  it("real pump builder: only vault + creator sign, creator ends at 0", async () => {
+  it("real pump builder: only vault + creator sign; E15: the rent top-up stays on the creator", async () => {
     const vault = Keypair.generate().publicKey;
     const creator = Keypair.generate().publicKey;
     const state = pumpFeeState({ creatorFee: new BN(50_000) }, { lamports: 890_880 + 40_000, data: Buffer.alloc(0) }, 890_880n, 0n);
@@ -156,7 +157,13 @@ describe("fee sweep: one creator per transaction (H7)", () => {
     expect(ixs).toHaveLength(4);
     expect(pumpTransferAmount(state)).toBe(90_000n);
     expect(state.topUp).toBe(890_880n);
-    expect(pumpReturnAmount(state)).toBe(90_000n + 890_880n); // loan + fees: wallet 0 -> 0
+    // E15: only the fees go back; the wallet ends at its rent (+ any fee accrued after the build),
+    // so a late accrual can no longer leave a sub-rent remainder ("insufficient funds for rent").
+    expect(pumpReturnAmount(state)).toBe(90_000n);
+    // next pass: rent floor kept, only the excess (a late accrual) is collected, no new top-up
+    const later = pumpFeeState({ creatorFee: new BN(0) }, { lamports: 890_880, data: Buffer.alloc(0) }, 890_880n, 890_880n + 7_000n);
+    expect(later.topUp).toBe(0n);
+    expect(pumpTransferAmount(later)).toBe(7_000n);
   });
 
   it("real DBC builder: only vault + authority sign, temp accounts closed to the vault", async () => {
@@ -258,5 +265,33 @@ describe("fee sweep: bookkeeping", () => {
       const dir = new CreatorDirectory(SEED, 3);
     expect(dir.has(deriveCreatorKeypair(SEED, 2).publicKey.toBase58())).toBe(true);
     expect(dir.missing([deriveCreatorKeypair(SEED, 3).publicKey.toBase58()])).toHaveLength(1);
+  });
+});
+
+describe("E15: PumpFeeVenue.collected with the rent kept on the creator", () => {
+  it("vault got exactly the creator -> vault transfer, also when a late fee stayed on the wallet", async () => {
+    const vault = Keypair.generate();
+    const creator = Keypair.generate();
+    const state = pumpFeeState({ creatorFee: new BN(50_000) }, { lamports: 890_880 + 40_000, data: Buffer.alloc(0) }, 890_880n, 0n);
+    const ixs = await pumpFeeInstructions({ mint: Keypair.generate().publicKey, creator: creator.publicKey, quoteMint: PublicKey.default, vault: vault.publicKey, state });
+    const msg = MessageV0.compile({ payerKey: vault.publicKey, instructions: ixs, recentBlockhash: PublicKey.default.toBase58() });
+    const ev = Buffer.alloc(8 + 8 + 32 + 8 + 32);
+    Buffer.from([122, 2, 127, 1, 14, 191, 12, 175]).copy(ev, 0);
+    creator.publicKey.toBuffer().copy(ev, 16);
+    ev.writeBigUInt64LE(90_000n + 3_000n, 48); // 3 000 accrued after the build
+    const keys = msg.staticAccountKeys;
+    const ci = keys.findIndex((k) => k.equals(creator.publicKey));
+    const pre = keys.map(() => 0);
+    const post = keys.map(() => 0);
+    post[ci] = 890_880 + 3_000; // rent floor + late accrual
+    const tx = {
+      slot: 1,
+      transaction: { message: msg, signatures: [] },
+      meta: { err: null, fee: 10_000, preBalances: pre, postBalances: post, logMessages: [`Program data: ${ev.toString("base64")}`], innerInstructions: [], loadedAddresses: { writable: [], readonly: [] } },
+    } as unknown as VersionedTransactionResponse;
+    const venue = new PumpFeeVenue({} as never, { has: () => true, get: () => creator } as never, { mints: async () => [] });
+    const t = { venue: "pumpfun" as const, kind: "creator" as const, mint: "m", authority: creator.publicKey.toBase58(), lamports: 0n, lockedRent: 0n, frontLamports: 0n };
+    expect(venue.collected(tx, t)).toBe(90_000n);
+    expect(venue.collected({ ...tx, meta: { ...tx.meta!, logMessages: [] } } as VersionedTransactionResponse, t)).toBeNull(); // no collect event
   });
 });

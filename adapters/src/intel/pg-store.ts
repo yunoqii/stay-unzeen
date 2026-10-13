@@ -104,6 +104,7 @@ export class PgIntelStore implements IntelStore {
       this.pricesWritable = this.db
         .query<{ ok: boolean }>(
           `SELECT to_regclass('intel_prices') IS NOT NULL
+                  AND has_table_privilege('intel_prices', 'SELECT')
                   AND has_table_privilege('intel_prices', 'INSERT')
                   AND has_table_privilege('intel_prices', 'UPDATE') AS ok`,
         )
@@ -117,7 +118,8 @@ export class PgIntelStore implements IntelStore {
   }
 
   async commitTick(t: TickCommit): Promise<void> {
-    const prices = t.prices && t.prices.length > 0 && (await this.canWritePrices()) ? t.prices : [];
+    // One row per mint: a duplicate in one INSERT ... ON CONFLICT DO UPDATE aborts the whole tick.
+    const prices = t.prices && t.prices.length > 0 && (await this.canWritePrices()) ? uniqueByMint(t.prices) : [];
     const c = await this.db.connect();
     try {
       await c.query("BEGIN");
@@ -216,4 +218,11 @@ export function safetyData(row: TokenSafety): Record<string, unknown> {
   if (row.dev && !row.unzeen) d.dev = row.dev;
   if (row.firstBlocks) d.firstBlocks = row.firstBlocks;
   return d;
+}
+
+/** Last row per mint wins (INTEL v2: one intel_prices row per mint per tick). */
+export function uniqueByMint<T extends { mint: string }>(rows: readonly T[]): T[] {
+  const m = new Map<string, T>();
+  for (const r of rows) m.set(r.mint, r);
+  return [...m.values()];
 }

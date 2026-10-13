@@ -184,6 +184,8 @@ export interface CreateExecution {
   /** Sanitized image URL served by us / IPFS; null without image. */
   imageUrl: string | null;
   market: { priceSol: string; marketCapSol: string; status: "curve" | "graduated" } | null;
+  /** RELAYER v6 `out_creator_fee` (0013): creator fee of this launch tx; null = unknown (core estimates). */
+  creatorFee?: bigint | null;
 }
 
 /** attest: memo read back from the confirmed tx (`out_memo`); `vault` = attestation key. */
@@ -227,9 +229,14 @@ export type ExecMode = "now" | "delayed" | "max";
  *   (never queued behind an epoch batch);
  * - "batch": delayed/max, random order among jobs of the same epoch
  *   (same not_before), N-4.
- * Omitted: any job (tests, single-loop tools).
+ * - "attest": only op = 'attest' (RELAYER v5 §3). Its own loop, so the
+ *   fair-launch root goes out within the ~30 s before the drand round even
+ *   while the now lane drives a long fair_create / the batch lane an epoch.
+ *   Attest jobs are never taken by the now / batch lanes. Fair-launch attests
+ *   before Verify ones (the Verify anchor has no deadline).
+ * Omitted: any job, attest first (tests, single-loop tools).
  */
-export type Lane = "now" | "batch";
+export type Lane = "now" | "batch" | "attest";
 
 /** Storage of relayer jobs (in-memory now, Postgres per docs/RELAYER.md later). */
 export interface JobQueue {

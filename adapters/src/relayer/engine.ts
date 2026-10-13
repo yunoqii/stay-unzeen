@@ -124,16 +124,23 @@ export class Relayer {
   }
 
   /**
-   * R-relayer-1: two independent loops in one process. The now lane polls
-   * often and is never stuck behind an epoch being executed by the batch lane.
+   * R-relayer-1: independent loops in one process. The now lane polls often
+   * and is never stuck behind an epoch being executed by the batch lane.
+   * RELAYER v5 §3: attest has a third loop of its own, so a fair-launch root
+   * is sent within its ~30 s window even while the now lane is busy with a
+   * long fair_create (attest signs with its own key: no vault contention).
    * Errors are reported without the lane (R-relayer-6: no exec_mode in logs).
    */
   async runLanes(
     signal: AbortSignal,
-    idle: { nowMs: number; batchMs: number } = { nowMs: 300, batchMs: 1_000 },
+    idle: { nowMs: number; batchMs: number; attestMs?: number } = { nowMs: 300, batchMs: 1_000 },
     onError?: (e: unknown) => void,
   ): Promise<void> {
-    await Promise.all([this.run(signal, idle.nowMs, onError, "now"), this.run(signal, idle.batchMs, onError, "batch")]);
+    await Promise.all([
+      this.run(signal, idle.nowMs, onError, "now"),
+      this.run(signal, idle.batchMs, onError, "batch"),
+      this.run(signal, idle.attestMs ?? idle.nowMs, onError, "attest"),
+    ]);
   }
 
   /** Runs until `signal` aborts; sleeps `idleMs` when nothing is due. */
