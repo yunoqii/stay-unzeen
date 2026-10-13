@@ -269,7 +269,7 @@ describe("swapAmounts / fillMarket", () => {
 // adapter: signing through the pool pipeline, simulation guard, devnet
 // ---------------------------------------------------------------------------
 
-function fakeConnection(vault: PublicKey, build: JupiterBuild, sim: { lamports: (pre: number) => number; tokens: bigint; err?: unknown }) {
+function fakeConnection(vault: PublicKey, build: JupiterBuild, sim: { lamports: (pre: number) => number; tokens: bigint; err?: unknown; others?: { key: PublicKey; pre: bigint; post: bigint | null }[] }) {
   const VAULT_LAMPORTS = 1_000_000_000;
   const tokenAcc = (amount: bigint) => {
     const d = Buffer.alloc(165);
@@ -279,7 +279,15 @@ function fakeConnection(vault: PublicKey, build: JupiterBuild, sim: { lamports: 
   const simulated: VersionedTransaction[] = [];
   const conn = {
     getMultipleAccountsInfo: async (keys: PublicKey[]) =>
-      keys.map((k) => (k.equals(MINT) ? { owner: TOKEN_PROGRAM_ID, lamports: 1, data: Buffer.alloc(82), executable: false } : { owner: SystemProgram.programId, lamports: VAULT_LAMPORTS, data: Buffer.alloc(0), executable: false })),
+      keys.map((k) => {
+        const o = sim.others?.find((x) => x.key.equals(k));
+        if (o) {
+          const d = tokenAcc(o.pre);
+          vault.toBuffer().copy(d, 32); // a token account OF THE VAULT (e.g. its USDC stock)
+          return { owner: TOKEN_PROGRAM_ID, lamports: 2_039_280, data: d, executable: false };
+        }
+        return k.equals(MINT) ? { owner: TOKEN_PROGRAM_ID, lamports: 1, data: Buffer.alloc(82), executable: false } : { owner: SystemProgram.programId, lamports: VAULT_LAMPORTS, data: Buffer.alloc(0), executable: false };
+      }),
     getAccountInfo: async () => null,
     getAddressLookupTable: async (key: PublicKey) => {
       const addrs = build.addressesByLookupTableAddress[key.toBase58()];
@@ -292,8 +300,15 @@ function fakeConnection(vault: PublicKey, build: JupiterBuild, sim: { lamports: 
       };
     },
     getLatestBlockhash: async () => ({ blockhash: bs58.encode(Buffer.alloc(32, 7)), lastValidBlockHeight: 1_000 }),
-    simulateTransaction: async (tx: VersionedTransaction) => {
+    simulateTransaction: async (tx: VersionedTransaction, cfg?: { accounts?: { addresses: string[] } }) => {
       simulated.push(tx);
+      const extra = (cfg?.accounts?.addresses ?? []).slice(2).map((a) => {
+        const o = sim.others?.find((x) => x.key.toBase58() === a);
+        if (!o || o.post === null) return null;
+        const d = tokenAcc(o.post);
+        vault.toBuffer().copy(d, 32);
+        return { lamports: 2_039_280, data: [d.toString("base64"), "base64"], owner: TOKEN_PROGRAM_ID.toBase58(), executable: false, rentEpoch: 0 };
+      });
       return {
         value: {
           err: sim.err ?? null,
@@ -301,6 +316,7 @@ function fakeConnection(vault: PublicKey, build: JupiterBuild, sim: { lamports: 
           accounts: [
             { lamports: sim.lamports(VAULT_LAMPORTS), data: ["", "base64"], owner: SystemProgram.programId.toBase58(), executable: false, rentEpoch: 0 },
             { lamports: 2_039_280, data: [tokenAcc(sim.tokens).toString("base64"), "base64"], owner: TOKEN_PROGRAM_ID.toBase58(), executable: false, rentEpoch: 0 },
+            ...extra,
           ],
         },
       };
@@ -375,6 +391,21 @@ describe("JupiterAdapter", () => {
     await expect(sellLow.a.prepareSell(MINT.toBase58(), 1_000_000_000n, BigInt(s.otherAmountThreshold), { vault })).rejects.toMatchObject({ code: "slippage" });
     const sellOk = adapterFor(s, { lamports: (p) => p + Number(s.outAmount), tokens: 0n });
     await expect(sellOk.a.prepareSell(MINT.toBase58(), 1_000_000_000n, BigInt(s.otherAmountThreshold), { vault })).resolves.toMatchObject({ kind: "sell" });
+  });
+
+  it("guard (audit A7): a route that takes ANOTHER vault asset (USDC stock) is refused, even with SOL >= minOut", async () => {
+    const s = fixtureFor("sell", vault.publicKey);
+    // a writable account of Jupiter's swap instruction, presented as the vault's USDC stock account
+    const own = [getAssociatedTokenAddressSync(MINT, vault.publicKey, false, TOKEN_PROGRAM_ID), getAssociatedTokenAddressSync(NATIVE_MINT, vault.publicKey, false, TOKEN_PROGRAM_ID)].map((k) => k.toBase58());
+    const victim = new PublicKey(s.swapInstruction.accounts.find((a) => a.isWritable && !a.isSigner && !own.includes(a.pubkey))!.pubkey);
+    const forged = adapterFor(s, { lamports: (p) => p + Number(s.outAmount), tokens: 0n, others: [{ key: victim, pre: 50_000_000n, post: 0n }] });
+    await expect(forged.a.prepareSell(MINT.toBase58(), 1_000_000_000n, BigInt(s.otherAmountThreshold), { vault })).rejects.toThrow(/another token account of the vault/);
+    const closed = adapterFor(s, { lamports: (p) => p + Number(s.outAmount), tokens: 0n, others: [{ key: victim, pre: 1n, post: null }] });
+    await expect(closed.a.prepareSell(MINT.toBase58(), 1_000_000_000n, BigInt(s.otherAmountThreshold), { vault })).rejects.toThrow(/another token account/);
+    const untouched = adapterFor(s, { lamports: (p) => p + Number(s.outAmount), tokens: 0n, others: [{ key: victim, pre: 50_000_000n, post: 50_000_000n }] });
+    await expect(untouched.a.prepareSell(MINT.toBase58(), 1_000_000_000n, BigInt(s.otherAmountThreshold), { vault })).resolves.toMatchObject({ kind: "sell" });
+    // the simulation asked for that account too
+    expect(untouched.simulated).toHaveLength(1);
   });
 
   it("devnet -> venue_unavailable without asking Jupiter; create -> bad_request", async () => {

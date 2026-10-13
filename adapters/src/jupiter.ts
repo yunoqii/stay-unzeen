@@ -617,7 +617,7 @@ export class JupiterAdapter {
     } catch (e) {
       throw this.sendError(e);
     }
-    if (this.simulate) await this.guard(tx, ctx);
+    if (this.simulate) await this.guard(tx, ctx, lookupTables);
     this.routeOf.set(tx.signature, routeStatus(b));
     return { ...tx, kind: side, mint: mintStr, vault: vault.publicKey.toBase58(), expectedOut: BigInt(b.outAmount) };
   }
@@ -627,15 +627,34 @@ export class JupiterAdapter {
    * next anyway) and checks the vault's balances: buy -> tokens +>= minOut and
    * SOL -<= amountIn + fees + ATA rent; sell -> tokens -<= amount and SOL +>=
    * minOut - fees. Any failure = stage "preflight": nothing was sent.
+   *
+   * Audit A7: EVERY token account of the vault the tx can write (quote stock USDC / ZEC SPL, other
+   * mints, a wSOL leftover) is simulated too; none of them may decrease. Only the mint's ATA may
+   * (sell, within the amount). A forged route paying with another vault asset is refused.
    */
-  private async guard(tx: SignedTx, c: CheckContext): Promise<void> {
+  private async guard(tx: SignedTx, c: CheckContext, lookupTables: readonly AddressLookupTableAccount[] = []): Promise<void> {
     const pre = await this.vaultBalances(c);
+    const vtx = VersionedTransaction.deserialize(tx.raw);
+    const keys = vtx.message.getAccountKeys({ addressLookupTableAccounts: [...lookupTables] });
+    const writable: PublicKey[] = [];
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys.get(i)!;
+      if (vtx.message.isAccountWritable(i) && !k.equals(c.taker) && !k.equals(pre.ata)) writable.push(k);
+    }
+    const others: { key: PublicKey; amount: bigint }[] = [];
+    for (let i = 0; i < writable.length; i += 100) {
+      const chunk = writable.slice(i, i + 100);
+      const infos = await this.rpc(() => this.connection.getMultipleAccountsInfo(chunk, "confirmed"));
+      infos.forEach((a, j) => {
+        if (a && isTokenAccountOf(a, c.taker)) others.push({ key: chunk[j]!, amount: tokenAmountOf(a.data) });
+      });
+    }
     let sim;
     try {
-      sim = await this.connection.simulateTransaction(VersionedTransaction.deserialize(tx.raw), {
+      sim = await this.connection.simulateTransaction(vtx, {
         sigVerify: false,
         commitment: "confirmed",
-        accounts: { encoding: "base64", addresses: [c.taker.toBase58(), pre.ata.toBase58()] },
+        accounts: { encoding: "base64", addresses: [c.taker.toBase58(), pre.ata.toBase58(), ...others.map((o) => o.key.toBase58())] },
       });
     } catch (e) {
       throw new AdapterError("venue_unavailable", "simulation unavailable", { stage: "preflight", cause: e });
@@ -650,6 +669,11 @@ export class JupiterAdapter {
     const tokens = tokenAmountOf(ta?.data[0] ? Buffer.from(ta.data[0], "base64") : null) - pre.tokens;
     const txCost = SIGNATURE_FEE + (BigInt(this.cu) * BigInt(this.priority.microLamports()) + 999_999n) / 1_000_000n + (this.pipeline?.tip?.lamports ?? 0n);
     const fail = (why: string) => new AdapterError("venue_unavailable", `jupiter guard: ${why}`, { stage: "preflight" });
+    others.forEach((o, j) => {
+      const a = sim.value.accounts?.[2 + j];
+      const post = a?.data?.[0] ? tokenAmountOf(Buffer.from(a.data[0], "base64")) : 0n; // closed = 0
+      if (post < o.amount) throw fail("another token account of the vault would decrease");
+    });
     if (c.side === "buy") {
       if (tokens < c.minOut) throw new AdapterError("slippage", "simulated buy gives less than minOut", { stage: "preflight" });
       if (-lamports > c.amountIn + txCost + ATA_RENT_ALLOWANCE) throw fail("vault would pay more than the buy");
@@ -750,4 +774,10 @@ export function jupiterOptionsFromEnv(env: NodeJS.ProcessEnv): { client: Jupiter
     computeUnits: int("JUPITER_CU_LIMIT", JUPITER_CU, 200_000, 1_400_000),
     slippageBps: int("JUPITER_SLIPPAGE_BPS", JUPITER_DEFAULT_SLIPPAGE_BPS, 0, 5_000),
   };
+}
+
+/** An SPL / Token-2022 token account whose owner is `owner`. */
+function isTokenAccountOf(a: { owner: PublicKey; data: Buffer }, owner: PublicKey): boolean {
+  if (!a.owner.equals(TOKEN_PROGRAM_ID) && !a.owner.equals(TOKEN_2022_PROGRAM_ID)) return false;
+  return a.data.length >= 165 && a.data.subarray(32, 64).equals(owner.toBuffer());
 }

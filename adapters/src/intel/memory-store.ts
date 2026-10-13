@@ -62,8 +62,12 @@ export class MemoryIntelStore implements IntelStore {
     return { ...(s.socials ? { socials: s.socials } : {}), ...(s.image ? { image: s.image } : {}), fetchedAt: s.asOf, ok: true };
   }
 
+  /** market_trades rows (UNIQUE signature, ix). */
+  readonly marketTrades = new Map<string, NonNullable<TickCommit["marketTrades"]>[number]>();
+
   async commitTick(t: TickCommit): Promise<void> {
     this.commits.push(t);
+    for (const m of t.marketTrades ?? []) if (!this.marketTrades.has(`${m.signature}:${m.ix}`)) this.marketTrades.set(`${m.signature}:${m.ix}`, m);
     for (const r of t.rows) {
       this.safety.set(r.mint, r);
       this.missing.delete(r.mint);

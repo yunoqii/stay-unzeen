@@ -9,9 +9,9 @@ import path from "node:path";
 import { loadConfig, makeConnection } from "../src/config";
 import { loadRepoEnv, redactSecrets } from "../src/env";
 import { BagsCreatorFunder, BagsWalletStore, deriveBagsFunderKeypair } from "../src/bags";
-import { CreatorKeyring, FileCreatorIndexCounter } from "../src/keys";
+import { CreatorKeyring, CreatorPubkeyFile } from "../src/keys";
 import { formatUnits } from "../src/math";
-import { openKeys } from "../src/relayer/runtime";
+import { makePools, openKeys, relayerCreatorCounter, relayerNetwork } from "../src/relayer/runtime";
 
 loadRepoEnv();
 const argv = process.argv.slice(2);
@@ -28,9 +28,19 @@ async function main(): Promise<void> {
   const bal = BigInt(await conn.getBalance(funder.publicKey, "confirmed"));
   console.log(`funder ${funder.publicKey.toBase58()} ${formatUnits(bal, 9)} SOL; ${store.unused().length} funded unused wallet(s); target ${count}, ${formatUnits(amount, 9)} SOL each`);
   if (argv.includes("--dry-run")) return;
-  const creators = new CreatorKeyring(keys.creatorSeed, new FileCreatorIndexCounter(path.join(cfg.keysDir, "creator-counter.json")));
-  const n = await new BagsCreatorFunder({ connection: conn, funder, creators, store, amount, priorityMicroLamports: cfg.priorityMicroLamports }).ensure(count);
-  console.log(`funded ${n} wallet(s)`);
+  // Audit A10: the SAME counter as the relayer (RELAYER_STATE=postgres -> the Postgres one), and the
+  // public creator registry (indexer T1): a launch wallet index is never handed to another launch.
+  const url = process.env.DATABASE_URL_RELAYER?.trim();
+  const pools = url ? makePools(url, keys.vaults.length) : null;
+  try {
+    const counter = relayerCreatorCounter(cfg.keysDir, pools?.db ?? null, relayerNetwork(cfg), process.env);
+    const creators = new CreatorKeyring(keys.creatorSeed, counter, CreatorPubkeyFile.inDir(cfg.keysDir));
+    const n = await new BagsCreatorFunder({ connection: conn, funder, creators, store, amount, priorityMicroLamports: cfg.priorityMicroLamports }).ensure(count);
+    console.log(`funded ${n} wallet(s)`);
+  } finally {
+    await pools?.db.end();
+    await pools?.lockDb.end();
+  }
 }
 
 main().catch((e) => {

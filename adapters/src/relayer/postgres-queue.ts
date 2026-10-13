@@ -700,6 +700,10 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
       // LaunchLab (proposed): meta.platform = "stonk" | "bonk" | "unzeen".
       const plat = (m as { platform?: unknown }).platform;
       if (plat !== undefined && plat !== null && (typeof plat !== "string" || !/^[a-z]{2,16}$/.test(plat))) throw new Error(`job ${row.id}: bad meta.platform`);
+      // Audit A4 (proposed): SOL of the held first buy (Bags) that will use this create's vault.
+      const res = (m as { reserve_lamports?: unknown }).reserve_lamports;
+      const reserve = res === undefined || res === null ? null : typeof res === "number" && Number.isSafeInteger(res) && res >= 0 ? BigInt(res) : typeof res === "string" && /^\d{1,19}$/.test(res) ? BigInt(res) : undefined;
+      if (reserve === undefined) throw new Error(`job ${row.id}: bad meta.reserve_lamports`);
       return {
         kind: "create",
         venue: venue(row),
@@ -708,6 +712,7 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
         minOut: row.min_out === null ? 0n : big(row.min_out, "min_out"),
         ...(typeof q === "string" && q !== "SOL" ? { quote: q } : {}),
         ...(typeof plat === "string" ? { platform: plat } : {}),
+        ...(reserve !== null && reserve > 0n ? { reserveLamports: reserve } : {}),
       };
     }
     case "fair_create": {

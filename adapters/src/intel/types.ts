@@ -112,6 +112,8 @@ export interface TickCommit {
    * tick_at = tickStartedAt). Empty when the pass failed (nothing written).
    */
   prices?: PriceRow[];
+  /** UNZEEN_INTEL_FULL_TRADES=1: trades of hot warm mints since the last tick (`market_trades`). */
+  marketTrades?: MarketTradeRow[];
 }
 
 /** `intel_prices` row: SOL per 1 whole token (> 0), curve status. */
@@ -150,4 +152,23 @@ export interface OffchainInfo {
   image?: string;
   fetchedAt: number;
   ok: boolean;
+}
+
+/** `market_trades` row (INTEL.md): public trade, tags already applied (T1 respected). */
+export interface MarketTradeRow {
+  mint: string;
+  kind: "buy" | "sell";
+  venue: "pumpfun" | "meteora-dbc" | "raydium-launchlab";
+  symbol: string;
+  decimals: number;
+  trader: string;
+  unzeen: boolean;
+  tags: ("whale" | "dev" | "sniper")[];
+  tokenAmount: bigint;
+  solAmount: bigint;
+  signature: string;
+  ix: number;
+  slot: number;
+  /** unix ms */
+  ts: number;
 }

@@ -1,6 +1,9 @@
-import { PUMP_PROGRAM_ID, bondingCurvePda } from "@pump-fun/pump-sdk";
-import type { Connection, PublicKey } from "@solana/web3.js";
-import { extractCreateEvents, extractTradeEvents } from "../events";
+import { createHash } from "node:crypto";
+import { PUMP_PROGRAM_ID } from "@pump-fun/pump-sdk";
+import { PublicKey, type Connection, type VersionedTransactionResponse } from "@solana/web3.js";
+import { anchorEventPayloads, extractCreateEvents, extractTradeEvents } from "../events";
+import { decodePoolCreateEvent, decodeTradeEvent as decodeLaunchLabTrade } from "../launchlab";
+import { dbcInitEvents, dbcSwap2Events, dbcSwapAmounts } from "../meteora";
 import { getTransactionAnyVersion } from "../tx";
 import { pct } from "./metrics";
 import type { TokenSafety } from "./types";
@@ -31,6 +34,8 @@ export interface FirstBlockTrade {
   user: string;
   isBuy: boolean;
   tokenAmount: bigint;
+  /** DBC / LaunchLab: the pool of the event (kept only for the mint's own pool). */
+  pool?: string;
 }
 
 export function classifyFirstBlocks(p: {
@@ -74,8 +79,49 @@ export interface FullIntel {
   firstBlocks(
     mint: PublicKey,
     ctx: { supply: bigint; poolVaults: ReadonlySet<string>; unzeenLaunch: boolean },
-  ): Promise<{ firstBlocks: NonNullable<TokenSafety["firstBlocks"]>; createUser: string | null } | null>;
+  ): Promise<{ firstBlocks: NonNullable<TokenSafety["firstBlocks"]>; createUser: string | null; createSlot: number } | null>;
   devHistory(dev: string): Promise<TokenSafety["dev"] | null>;
+}
+
+const LL_PROGRAM = new PublicKey("LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj");
+const evDisc = (name: string) => createHash("sha256").update(`event:${name}`).digest().subarray(0, 8);
+const LL_TRADE = evDisc("TradeEvent");
+const LL_CREATE = evDisc("PoolCreateEvent");
+
+/** First-block facts of one landed tx touching `mint`, any venue (pump.fun / DBC / LaunchLab). */
+export function firstBlockFacts(tx: VersionedTransactionResponse, mint: PublicKey): { createUser: string | null; pools: string[]; trades: FirstBlockTrade[] } {
+  const payer = tx.transaction.message.staticAccountKeys[0]?.toBase58() ?? "";
+  let createUser: string | null = null;
+  const pools: string[] = [];
+  const trades: FirstBlockTrade[] = [];
+  for (const c of extractCreateEvents(tx, PUMP_PROGRAM_ID)) if (c.mint.equals(mint)) createUser = c.user.toBase58();
+  for (const t of extractTradeEvents(tx, PUMP_PROGRAM_ID)) {
+    if (!t.mint.equals(mint)) continue;
+    trades.push({ slot: tx.slot, user: t.user.toBase58(), isBuy: t.isBuy, tokenAmount: BigInt(t.tokenAmount.toString(10)) });
+  }
+  for (const e of dbcInitEvents(tx)) {
+    if (!e.baseMint.equals(mint)) continue;
+    createUser = e.creator.toBase58();
+    pools.push(e.pool.toBase58());
+  }
+  for (const p of anchorEventPayloads(tx, LL_PROGRAM, LL_CREATE)) {
+    const c = decodePoolCreateEvent(p);
+    if (!c) continue;
+    // PoolCreateEvent has no mint: the create tx of THIS mint is the one we are reading (its oldest signatures).
+    createUser = createUser ?? c.creator.toBase58();
+    pools.push(c.pool.toBase58());
+  }
+  for (const e of dbcSwap2Events(tx)) {
+    const a = dbcSwapAmounts({ kind: "swap2", e });
+    trades.push({ slot: tx.slot, user: payer, isBuy: a.isBuy, tokenAmount: a.tokenAmount, pool: e.pool.toBase58() });
+  }
+  for (const p of anchorEventPayloads(tx, LL_PROGRAM, LL_TRADE)) {
+    const e = decodeLaunchLabTrade(p);
+    if (!e) continue;
+    const buy = e.direction === 0;
+    trades.push({ slot: tx.slot, user: payer, isBuy: buy, tokenAmount: buy ? e.amountOut : e.amountIn, pool: e.pool.toBase58() });
+  }
+  return { createUser, pools, trades };
 }
 
 export class RpcFullIntel implements FullIntel {
@@ -87,17 +133,21 @@ export class RpcFullIntel implements FullIntel {
     private readonly maxTx = 12,
   ) {}
 
+  /**
+   * Any venue: the MINT's oldest signatures (its create and the first trades of pump.fun, DBC and
+   * LaunchLab all touch it). DBC / LaunchLab events carry the pool, not the mint: only events of
+   * the pool created in this mint's create tx count; their trader = the tx fee payer.
+   */
   async firstBlocks(
     mint: PublicKey,
     ctx: { supply: bigint; poolVaults: ReadonlySet<string>; unzeenLaunch: boolean },
-  ): Promise<{ firstBlocks: NonNullable<TokenSafety["firstBlocks"]>; createUser: string | null } | null> {
-    const curve = bondingCurvePda(mint);
+  ): Promise<{ firstBlocks: NonNullable<TokenSafety["firstBlocks"]>; createUser: string | null; createSlot: number } | null> {
     let before: string | undefined;
     let oldest: { signature: string; slot: number }[] = [];
     for (let page = 0; page < this.maxPages; page++) {
-      const sigs = await this.read.getSignaturesForAddress(curve, { limit: 1000, ...(before ? { before } : {}) });
+      const sigs = await this.read.getSignaturesForAddress(mint, { limit: 1000, ...(before ? { before } : {}) });
       if (sigs.length === 0) break;
-      oldest = sigs.map((s) => ({ signature: s.signature, slot: s.slot }));
+      oldest = sigs.filter((s) => s.err === null).map((s) => ({ signature: s.signature, slot: s.slot }));
       before = sigs[sigs.length - 1]!.signature;
       if (sigs.length < 1000) break;
       if (page === this.maxPages - 1) return null; // history too long for the budget: no claim
@@ -106,20 +156,22 @@ export class RpcFullIntel implements FullIntel {
     const createSlot = Math.min(...oldest.map((s) => s.slot));
     const window = oldest.filter((s) => s.slot <= createSlot + this.windowSlots).slice(-this.maxTx);
     const trades: FirstBlockTrade[] = [];
+    const pools = new Set<string>();
     let createUser: string | null = null;
-    for (const s of window) {
+    for (const s of window.sort((a, b) => a.slot - b.slot)) {
       const tx = await getTransactionAnyVersion(this.read, s.signature).catch(() => null); // v1 included
       if (!tx || tx.meta?.err) continue;
-      for (const c of extractCreateEvents(tx, PUMP_PROGRAM_ID)) if (c.mint.equals(mint)) createUser = c.user.toBase58();
-      for (const t of extractTradeEvents(tx, PUMP_PROGRAM_ID)) {
-        if (!t.mint.equals(mint)) continue;
-        trades.push({ slot: tx.slot, user: t.user.toBase58(), isBuy: t.isBuy, tokenAmount: BigInt(t.tokenAmount.toString(10)) });
-      }
+      const f = firstBlockFacts(tx, mint);
+      if (f.createUser) createUser = f.createUser;
+      for (const p of f.pools) pools.add(p);
+      trades.push(...f.trades);
     }
+    const mine = trades.filter((t) => t.pool === undefined || pools.has(t.pool));
     const devs = new Set(createUser && !ctx.unzeenLaunch ? [createUser] : []);
     return {
-      firstBlocks: classifyFirstBlocks({ createSlot, devs, poolVaults: ctx.poolVaults, trades, supply: ctx.supply, windowSlots: this.windowSlots, unzeenLaunch: ctx.unzeenLaunch }),
+      firstBlocks: classifyFirstBlocks({ createSlot, devs, poolVaults: ctx.poolVaults, trades: mine, supply: ctx.supply, windowSlots: this.windowSlots, unzeenLaunch: ctx.unzeenLaunch }),
       createUser: ctx.unzeenLaunch ? null : createUser,
+      createSlot,
     };
   }
 
@@ -129,4 +181,3 @@ export class RpcFullIntel implements FullIntel {
     return h ? { address: dev, launchesSeen: h.launches, rugsSeen: h.rugs, since: h.since } : null;
   }
 }
-

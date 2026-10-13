@@ -26,7 +26,9 @@ import { solanaKeysDir } from "../src/config";
 import { dbcConfigAddress } from "../src/meteora";
 import pg from "pg";
 import { RpcChainReader } from "../src/intel/reader";
-import { Discovery, DbcStreamSource, MemoryDiscoveryStore, PumpLogsSource, PumpPollSource, loadDiscoveryConfig, type CreateSource, type DiscoveryStore } from "../src/intel/discovery";
+import { Discovery, DbcStreamSource, MemoryDiscoveryStore, PumpLogsSource, PumpPollSource, launchLabCreatesFromNotification, launchLabStreamRequest, loadDiscoveryConfig, type CreateSource, type DiscoveryStore } from "../src/intel/discovery";
+import { DevIndex, MemoryCreateIndex, PgCreateIndex, RpcRugChecker, type CreateIndexStore } from "../src/intel/dev-index";
+import { ParsedTradeStream } from "../src/intel/trades";
 import { PgDiscoveryStore, RpcDiscoveryChain } from "../src/intel/discovery-pg";
 
 loadRepoEnv();
@@ -61,6 +63,23 @@ async function main(): Promise<void> {
   const base = process.env.UNZEEN_METADATA_BASE_URL?.trim();
   const media = base ? new LocalMetadataStore(process.env.UNZEEN_MEDIA_DIR?.trim() || process.env.UNZEEN_METADATA_DIR?.trim() || defaultMediaDir({ cluster: cfg.cluster }), base) : null;
   if (!media) log("WARN UNZEEN_METADATA_BASE_URL not set: token images are not mirrored (socials still are)");
+  // INTEL_FULL: dev history = own index of creates (+ lazy rug checks on the read provider).
+  let devIndex: DevIndex | null = null;
+  if (cfg.full) {
+    let cstore: CreateIndexStore = new MemoryCreateIndex();
+    if (db) {
+      const p = new PgCreateIndex(db, cfg.cluster);
+      if (await p.available()) cstore = p;
+      else log("WARN intel_creates (proposed core table) missing or not writable: dev index kept in memory only");
+    }
+    devIndex = new DevIndex(cstore, new RpcRugChecker(reader.read));
+  }
+  // UNZEEN_INTEL_FULL_TRADES: trade feed of hot warm mints (+ decoys) over Helius Parsed Streams.
+  let tradeStream: ParsedTradeStream | null = null;
+  if (cfg.fullTrades) {
+    if (cfg.streamUrl) tradeStream = new ParsedTradeStream(cfg.streamUrl, { maxPerHour: cfg.tradesMaxPerHour });
+    else log("WARN UNZEEN_INTEL_FULL_TRADES=1 but no Parsed Streams URL (INTEL_TRADES_STREAM_URL / Helius key, mainnet): feed off");
+  }
   const indexer = new IntelIndexer({
     store,
     reader,
@@ -72,7 +91,8 @@ async function main(): Promise<void> {
         : cfg.curveMode === "off"
           ? null
           : new PollingCurveWatcher(reader.read, cryptoRng),
-    full: cfg.full ? new RpcFullIntel(reader.read) : null,
+    full: cfg.full ? new RpcFullIntel(reader.read, devIndex) : null,
+    trades: tradeStream ? { source: tradeStream, whaleLamports: cfg.whaleLamports, sniperSlots: cfg.sniperSlots } : null,
     // Meteora DBC launches of Unzeen's config: progress / graduated / locked LP.
     dbcConfig: dbcConfigAddress(cfg.cluster),
   });
@@ -89,15 +109,41 @@ async function main(): Promise<void> {
     if (dcfg.pump === "poll") sources.push(new PumpPollSource(chain.conn));
     if (dcfg.pump === "ws") sources.push(new PumpLogsSource(chain.conn));
     if (dcfg.dbcStreamUrl) sources.push(new DbcStreamSource(dcfg.dbcStreamUrl, { maxPerHour: dcfg.dbcMaxPerHour }));
+    // Dev index: LaunchLab creates too (not discovery candidates); pump creators need the logs source.
+    if (devIndex && cfg.streamUrl) sources.push(launchLabCreates(cfg.streamUrl, cfg.createsMaxPerHour));
+    if (devIndex && dcfg.pump !== "ws") log("WARN dev index: pump.fun creators need INTEL_DISCOVERY_PUMP=ws (the poll source has no CreateEvent)");
     let dstore: DiscoveryStore = new MemoryDiscoveryStore();
     if (db) {
       const pgs = new PgDiscoveryStore(db, cfg.cluster);
       if (await pgs.available().catch(() => false)) dstore = pgs;
       else log("WARN intel_discovery (proposed core table) missing or not writable: discovery kept in memory only");
     }
-    discovery = new Discovery({ store: dstore, chain, sources, rng: cryptoRng, max: dcfg.max, windowMs: dcfg.windowMs, burst: dcfg.burst });
+    discovery = new Discovery({
+      store: dstore,
+      chain,
+      sources,
+      rng: cryptoRng,
+      max: dcfg.max,
+      windowMs: dcfg.windowMs,
+      burst: dcfg.burst,
+      ...(devIndex ? { onCreates: (c) => devIndex!.record(c) } : {}),
+    });
     log(`discovery ON rpc=${maskUrl(dcfg.rpcUrl)} (${dcfg.rpcSource}) pump=${dcfg.pump} dbc=${dcfg.dbcStreamUrl ? "stream" : "off"} max=${dcfg.max}/${dcfg.windowMs / 3_600_000}h`);
   }
+  // Dev index without discovery: the same public create streams, drained every 60 s.
+  let createFeed: CreateSource[] = [];
+  if (devIndex && !discovery) {
+    if (!dcfg.rpcUrl) log("WARN INTEL_FULL: no Helius URL for the create streams: dev history stays empty");
+    else {
+      const chain = new RpcDiscoveryChain(dcfg.rpcUrl, { rps: dcfg.rps, wsUrl: dcfg.wsUrl });
+      createFeed = [new PumpLogsSource(chain.conn)];
+      if (dcfg.dbcStreamUrl) createFeed.push(new DbcStreamSource(dcfg.dbcStreamUrl, { maxPerHour: dcfg.dbcMaxPerHour }));
+      if (cfg.streamUrl) createFeed.push(launchLabCreates(cfg.streamUrl, cfg.createsMaxPerHour));
+    }
+  }
+  const drainCreates = async () => {
+    for (const s of createFeed) await devIndex!.record(await s.drain()).catch(() => log("WARN dev index write failed"));
+  };
   const dfmt = (r: Awaited<ReturnType<Discovery["tick"]>>) =>
     `discovery #${r.tick} seen=${r.seen} admitted=${r.admitted} active=${r.active} removed=${r.removed} reads=${r.reads} errors=${r.errors} ${r.ms}ms`;
 
@@ -113,10 +159,22 @@ async function main(): Promise<void> {
   } else {
     const ac = new AbortController();
     for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => ac.abort());
+    const feed = (async () => {
+      while (!ac.signal.aborted && createFeed.length > 0) {
+        await new Promise<void>((r) => {
+          const t = setTimeout(r, 60_000);
+          ac.signal.addEventListener("abort", () => (clearTimeout(t), r()), { once: true });
+        });
+        await drainCreates();
+      }
+      for (const s of createFeed) s.stop?.();
+    })();
     await Promise.all([
-      indexer.run(ac.signal, (r) => log(fmt(r))),
+      indexer.run(ac.signal, (r) => log(fmt(r) + (r.trades !== undefined ? ` trades=${r.trades}` : ""))),
       discovery ? discovery.run(ac.signal, (r) => log(dfmt(r))) : Promise.resolve(),
+      feed,
     ]);
+    tradeStream?.stop();
   }
   if (store instanceof PgIntelStore) await store.stop();
   await db?.end();
@@ -128,3 +186,8 @@ main()
     console.error(`[intel] fatal: ${redactSecrets(e instanceof Error ? e.message : String(e))}`);
     process.exit(1);
   });
+
+/** LaunchLab creates over Parsed Streams (dev index only). */
+function launchLabCreates(url: string, maxPerHour: number): CreateSource {
+  return new DbcStreamSource(url, { request: launchLabStreamRequest(), parse: launchLabCreatesFromNotification, name: "launchlab-stream", maxPerHour });
+}

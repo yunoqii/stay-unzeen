@@ -44,6 +44,12 @@ export interface CreateJobSpec {
   quote?: string;
   /** LaunchLab platform (core `meta.platform`: "stonk" | "bonk" | "unzeen"). */
   platform?: string;
+  /**
+   * Audit A4 (proposed core `meta.reserve_lamports`): SOL a LATER job of the same launch will spend
+   * from this create's vault (Bags: the held first buy, pinned to that vault). Counted when the
+   * vault is chosen; nothing is spent by the create itself.
+   */
+  reserveLamports?: bigint;
   /** Minimum tokens of the first buy. */
   minOut: bigint;
 }

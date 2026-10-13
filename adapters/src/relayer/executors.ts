@@ -148,6 +148,8 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
       case "buy":
         return { minSol: spec.lamportsIn + BUY_SOL_HEADROOM };
       case "create":
+        // A4: + the SOL of the later first buy pinned to this vault (Bags), with its own headroom.
+        return { minSol: spec.lamportsIn + CREATE_SOL_HEADROOM + (spec.reserveLamports ? spec.reserveLamports + BUY_SOL_HEADROOM : 0n) };
       case "fair_create":
         return { minSol: spec.lamportsIn + CREATE_SOL_HEADROOM };
       case "sell":

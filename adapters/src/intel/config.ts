@@ -22,6 +22,17 @@ export interface IntelConfig {
   full: boolean;
   /** Curve updates: poll (default; Shyft Free WS refused from our host 12.10) | ws | off. INTEL_CURVE_MODE. */
   curveMode: "poll" | "ws" | "off";
+  /** UNZEEN_INTEL_FULL_TRADES=1: market_trades feed of hot warm mints (Helius Parsed Streams). */
+  fullTrades: boolean;
+  /** Parsed Streams URL (INTEL_TRADES_STREAM_URL, else mainnet wss://beta.helius-rpc.com/?api-key=<key of SOLANA_RPC_URL_MAINNET>). Never logged. */
+  streamUrl: string | null;
+  /** Budget guards, notifications per hour (1 credit each): trade feed / LaunchLab creates of the dev index. */
+  tradesMaxPerHour: number;
+  createsMaxPerHour: number;
+  /** UNZEEN_WHALE_LAMPORTS (default 1 SOL, the threshold core uses for pool trades). */
+  whaleLamports: bigint;
+  /** INTEL_SNIPER_SLOTS: buys within create slot .. + N (default 4). */
+  sniperSlots: number;
   warnings: string[];
 }
 
@@ -60,6 +71,12 @@ export function loadIntelConfig(env: NodeJS.ProcessEnv = process.env): IntelConf
     ipfsGateway: env.INTEL_IPFS_GATEWAY?.trim() || "https://ipfs.io/ipfs",
     full: env.INTEL_FULL?.trim() === "1",
     curveMode: curveMode(env.INTEL_CURVE_MODE),
+    fullTrades: env.UNZEEN_INTEL_FULL_TRADES?.trim() === "1",
+    streamUrl: streamUrl(cluster, env),
+    tradesMaxPerHour: posInt(env.INTEL_TRADES_MAX_PER_H, 600),
+    createsMaxPerHour: posInt(env.INTEL_CREATES_MAX_PER_H, 300),
+    whaleLamports: BigInt(posInt(env.UNZEEN_WHALE_LAMPORTS, 1_000_000_000)),
+    sniperSlots: posInt(env.INTEL_SNIPER_SLOTS, 4),
     warnings,
   };
 }
@@ -78,4 +95,23 @@ function curveMode(v: string | undefined): IntelConfig["curveMode"] {
   const m = v?.trim() || "poll";
   if (m !== "poll" && m !== "ws" && m !== "off") throw new Error(`INTEL_CURVE_MODE must be poll|ws|off, got "${m}"`);
   return m;
+}
+
+function posInt(v: string | undefined, d: number): number {
+  const n = Number(v?.trim() || d);
+  if (!Number.isSafeInteger(n) || n <= 0) throw new Error(`expected a positive integer, got "${v}"`);
+  return n;
+}
+
+/** Helius Parsed Streams (mainnet only; the devnet endpoint is not documented). */
+function streamUrl(cluster: "devnet" | "mainnet-beta", env: NodeJS.ProcessEnv): string | null {
+  const explicit = env.INTEL_TRADES_STREAM_URL?.trim();
+  if (explicit) return explicit;
+  if (cluster !== "mainnet-beta") return null;
+  try {
+    const key = new URL(env.SOLANA_RPC_URL_MAINNET?.trim() || "").searchParams.get("api-key");
+    return key ? `wss://beta.helius-rpc.com/?api-key=${encodeURIComponent(key)}` : null;
+  } catch {
+    return null;
+  }
 }

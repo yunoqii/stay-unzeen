@@ -117,7 +117,22 @@ export class PgIntelStore implements IntelStore {
     return this.pricesWritable;
   }
 
+  private tradesWritable: Promise<boolean> | null = null;
+
+  /** market_trades (core 0007) insertable by this role. Cached. */
+  private canWriteTrades(): Promise<boolean> {
+    this.tradesWritable ??= this.db
+      .query<{ ok: boolean }>(`SELECT to_regclass('market_trades') IS NOT NULL AND has_table_privilege('market_trades', 'INSERT') AS ok`)
+      .then((r) => r.rows[0]?.ok === true)
+      .catch(() => {
+        this.tradesWritable = null;
+        return false;
+      });
+    return this.tradesWritable;
+  }
+
   async commitTick(t: TickCommit): Promise<void> {
+    const trades = t.marketTrades && t.marketTrades.length > 0 && (await this.canWriteTrades()) ? t.marketTrades : [];
     // One row per mint: a duplicate in one INSERT ... ON CONFLICT DO UPDATE aborts the whole tick.
     const prices = t.prices && t.prices.length > 0 && (await this.canWritePrices()) ? uniqueByMint(t.prices) : [];
     const c = await this.db.connect();
@@ -168,6 +183,22 @@ export class PgIntelStore implements IntelStore {
         await c.query(
           `UPDATE intel_tokens SET status = $2, price_sol = $3::numeric, market_cap_sol = $4::numeric, as_of = to_timestamp($5) WHERE mint = $1`,
           [u.mint, u.graduated ? "graduated" : "curve", u.priceSol, u.marketCapSol, asOf],
+        );
+      }
+      if (trades.length > 0) {
+        // Public trades of hot warm mints since the last tick; replays of a tx are ignored (UNIQUE signature, ix).
+        await c.query(
+          `INSERT INTO market_trades (mint, kind, venue, symbol, trader, unzeen, tags, token_amount, sol_amount, decimals, signature, ix, slot, ts)
+           SELECT m, k, v, sy, tr, u, COALESCE(string_to_array(NULLIF(tg, ''), ','), '{}'::text[]), ta, sa, d, sig, ix, sl, to_timestamp(ts / 1000.0)
+             FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::boolean[], $7::text[], $8::bigint[], $9::bigint[],
+                         $10::smallint[], $11::text[], $12::smallint[], $13::bigint[], $14::bigint[])
+                  AS x(m, k, v, sy, tr, u, tg, ta, sa, d, sig, ix, sl, ts)
+           ON CONFLICT (signature, ix) DO NOTHING`,
+          [
+            trades.map((x) => x.mint), trades.map((x) => x.kind), trades.map((x) => x.venue), trades.map((x) => x.symbol.slice(0, 16)), trades.map((x) => x.trader),
+            trades.map((x) => x.unzeen), trades.map((x) => x.tags.join(",")), trades.map((x) => x.tokenAmount.toString()), trades.map((x) => x.solAmount.toString()),
+            trades.map((x) => x.decimals), trades.map((x) => x.signature), trades.map((x) => x.ix), trades.map((x) => x.slot), trades.map((x) => x.ts),
+          ],
         );
       }
       if (prices.length > 0) {

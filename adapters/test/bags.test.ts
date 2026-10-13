@@ -325,3 +325,46 @@ describe("Bags create pins the mint to the job's vault (RELAYER v10 §2)", () =>
     expect(vaultSeen).not.toBe(wallet);
   });
 });
+
+// ---------------------------------------------------------------------------
+// audit A4: the Bags create's vault must also hold the SOL of the held first buy
+// ---------------------------------------------------------------------------
+
+import { rowToSpec, type JobRow } from "../src/relayer/postgres-queue";
+
+describe("A4: reserve for the held first buy", () => {
+  const row = (meta: unknown): JobRow => ({
+    id: "1", part: 0, op: "create", venue: "bags", mint: null, lamports_in: "0", token_amount: null, min_out: "0", meta, dest: null, gas_lamports: null,
+    network: "mainnet-beta", attempts: 0, status: "claimed", signature: null, last_valid_block_height: null, vault: null, sent_at_ms: null, not_before_ms: "0",
+  });
+  it("meta.reserve_lamports is parsed (number or string) and refused when malformed", () => {
+    expect(rowToSpec(row({ name: "N", symbol: "S", reserve_lamports: 250_000_000 }), "mainnet-beta")).toMatchObject({ kind: "create", reserveLamports: 250_000_000n });
+    expect(rowToSpec(row({ name: "N", symbol: "S", reserve_lamports: "250000000" }), "mainnet-beta")).toMatchObject({ reserveLamports: 250_000_000n });
+    expect(rowToSpec(row({ name: "N", symbol: "S" }), "mainnet-beta")).not.toHaveProperty("reserveLamports");
+    expect(() => rowToSpec(row({ name: "N", symbol: "S", reserve_lamports: -1 }), "mainnet-beta")).toThrow(/reserve_lamports/);
+    expect(() => rowToSpec(row({ name: "N", symbol: "S", reserve_lamports: "1e9" }), "mainnet-beta")).toThrow(/reserve_lamports/);
+  });
+  it("the create's vault request counts the reserve (+ buy headroom); without it, as before", () => {
+    const ex = new VenueTradeExecutor({} as TradeVenue, null);
+    const plain = ex.vaultRequest({ kind: "create", venue: "bags", meta: { name: "N", symbol: "S" }, lamportsIn: 0n, minOut: 0n });
+    const reserved = ex.vaultRequest({ kind: "create", venue: "bags", meta: { name: "N", symbol: "S" }, lamportsIn: 0n, minOut: 0n, reserveLamports: 250_000_000n });
+    expect(reserved.minSol - plain.minSol).toBe(250_000_000n + 5_000_000n);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// audit A10: bags:fund allocates from the relayer's creator counter
+// ---------------------------------------------------------------------------
+
+import { FileCreatorIndexCounter } from "../src/keys";
+import { relayerCreatorCounter } from "../src/relayer/runtime";
+import { PgCreatorIndexCounter } from "../src/relayer/postgres-vaults";
+
+describe("A10: one creator counter for the relayer and bags:fund", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "a10-"));
+  it("file by default; RELAYER_STATE=postgres -> the Postgres counter (and refuses without a DB)", () => {
+    expect(relayerCreatorCounter(dir, null, "mainnet-beta", {})).toBeInstanceOf(FileCreatorIndexCounter);
+    expect(() => relayerCreatorCounter(dir, null, "mainnet-beta", { RELAYER_STATE: "postgres" })).toThrow(/DATABASE_URL_RELAYER/);
+    expect(relayerCreatorCounter(dir, {} as never, "mainnet-beta", { RELAYER_STATE: "postgres" })).toBeInstanceOf(PgCreatorIndexCounter);
+  });
+});

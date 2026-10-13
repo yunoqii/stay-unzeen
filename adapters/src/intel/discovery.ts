@@ -37,7 +37,10 @@ export type DiscoveryVenue = "pumpfun" | "meteora-dbc";
 
 /** A create seen on chain (public). `mint` may be unknown until resolved (pump poll). */
 export interface CreateSeen {
-  venue: DiscoveryVenue;
+  /** LaunchLab creates feed the dev index only (not discovery candidates). */
+  venue: DiscoveryVenue | "raydium-launchlab";
+  /** Launcher (pump: CreateEvent.user; DBC / LaunchLab: the instruction's `creator`), for the dev index. */
+  creator?: string;
   signature: string;
   slot: number;
   /** unix ms (event timestamp / blockTime); null = unknown. */
@@ -165,6 +168,7 @@ export function pumpCreateFromLogs(logs: Logs): CreateSeen | null {
     mint: ev.mint.toBase58(),
     name: ev.name,
     symbol: ev.symbol,
+    creator: ev.user.toBase58(),
   };
 }
 
@@ -240,7 +244,9 @@ export function dbcCreatesFromNotification(msg: unknown): CreateSeen[] {
     const sy = args.params?.symbol ?? args.symbol;
     const pool = acc("pool");
     const config = acc("config");
+    const creator = acc("creator");
     out.push({
+      ...(creator && isKey(creator) ? { creator } : {}),
       venue: "meteora-dbc",
       signature: tx.signature,
       slot: tx.slot ?? m.params?.result?.context?.slot ?? 0,
@@ -250,6 +256,55 @@ export function dbcCreatesFromNotification(msg: unknown): CreateSeen[] {
       ...(typeof sy === "string" ? { symbol: sy.slice(0, 16) } : {}),
       ...(pool && isKey(pool) ? { pool } : {}),
       ...(config && isKey(config) ? { config } : {}),
+    });
+  }
+  return out;
+}
+
+/** Raydium LaunchLab pool creation (Helius catalog names). */
+export const LAUNCHLAB_CREATE_IX = ["initialize", "initialize_v2", "initialize_with_token_2022"] as const;
+export const LAUNCHLAB_PROGRAM = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj";
+
+export function launchLabStreamRequest(): unknown {
+  return {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "parsedTransactionSubscribe",
+    params: [
+      { programs: [LAUNCHLAB_PROGRAM], instructionNames: [...LAUNCHLAB_CREATE_IX], includeFailed: false, includeCpi: true },
+      { commitment: "confirmed", details: "matched" },
+    ],
+  };
+}
+
+/** A Parsed Streams notification -> LaunchLab creates (base_mint / creator / pool_state; mainnet sample 13.10). */
+export function launchLabCreatesFromNotification(msg: unknown): CreateSeen[] {
+  const m = msg as { method?: string; params?: { result?: { context?: { slot?: number }; value?: unknown } } };
+  if (m?.method !== "parsedTransactionNotification") return [];
+  const v = m.params?.result?.value as
+    | { transaction?: { signature?: string; slot?: number; blockTime?: number | null; status?: string }; instructions?: Array<{ programId?: string; instructionName?: string; decoded?: { accounts?: Array<{ name?: string; pubkey?: string }>; args?: unknown } }> }
+    | undefined;
+  const tx = v?.transaction;
+  if (!tx?.signature || (tx.status && tx.status !== "ok")) return [];
+  const out: CreateSeen[] = [];
+  for (const ix of v?.instructions ?? []) {
+    if (ix.programId !== LAUNCHLAB_PROGRAM) continue;
+    const name = (ix.instructionName ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!LAUNCHLAB_CREATE_IX.some((n) => n.replace(/_/g, "") === name)) continue;
+    const acc = (k: string) => ix.decoded?.accounts?.find((a) => a.name === k)?.pubkey;
+    const mint = acc("base_mint");
+    const creator = acc("creator");
+    if (!mint || !isKey(mint)) continue;
+    const p = (ix.decoded?.args ?? {}) as { base_mint_param?: { name?: unknown; symbol?: unknown } };
+    out.push({
+      venue: "raydium-launchlab",
+      signature: tx.signature,
+      slot: tx.slot ?? m.params?.result?.context?.slot ?? 0,
+      createdAt: tx.blockTime ? tx.blockTime * 1000 : null,
+      mint,
+      ...(creator && isKey(creator) ? { creator } : {}),
+      ...(typeof p.base_mint_param?.name === "string" ? { name: p.base_mint_param.name.slice(0, 64) } : {}),
+      ...(typeof p.base_mint_param?.symbol === "string" ? { symbol: p.base_mint_param.symbol.slice(0, 16) } : {}),
     });
   }
   return out;
@@ -267,7 +322,7 @@ type WsLike = {
  * closes the stream until the next hour. The URL carries the API key: never logged.
  */
 export class DbcStreamSource implements CreateSource {
-  readonly name = "dbc-stream";
+  readonly name: string = "dbc-stream";
   private buf: CreateSeen[] = [];
   private ws: WsLike | null = null;
   private stopped = false;
@@ -281,8 +336,18 @@ export class DbcStreamSource implements CreateSource {
 
   constructor(
     private readonly url: string,
-    private readonly o: { maxPerHour?: number; maxBuffer?: number; now?: () => number; connect?: (url: string) => WsLike } = {},
+    private readonly o: {
+      maxPerHour?: number;
+      maxBuffer?: number;
+      now?: () => number;
+      connect?: (url: string) => WsLike;
+      /** Another venue's creates over the same transport (default: DBC). */
+      request?: unknown;
+      parse?: (msg: unknown) => CreateSeen[];
+      name?: string;
+    } = {},
   ) {
+    if (o.name) (this as { name: string }).name = o.name;
     this.open();
   }
 
@@ -297,7 +362,7 @@ export class DbcStreamSource implements CreateSource {
     this.ws = ws;
     ws.addEventListener("open", () => {
       this.backoffMs = 5_000;
-      ws.send(JSON.stringify(dbcStreamRequest()));
+      ws.send(JSON.stringify(this.o.request ?? dbcStreamRequest()));
     });
     ws.addEventListener("message", (e) => this.onMessage(e.data));
     ws.addEventListener("close", () => {
@@ -319,7 +384,7 @@ export class DbcStreamSource implements CreateSource {
     } catch {
       return;
     }
-    const creates = dbcCreatesFromNotification(msg);
+    const creates = (this.o.parse ?? dbcCreatesFromNotification)(msg);
     if (creates.length === 0) return;
     const now = (this.o.now ?? Date.now)();
     if (now - this.hourStart >= 3_600_000) {
@@ -367,6 +432,8 @@ export interface DiscoveryOptions {
   windowMs?: number;
   /** Admission bucket size (INTEL_DISCOVERY_BURST, default 10). */
   burst?: number;
+  /** Every create drained this tick (all venues, before admission): the dev index (INTEL_FULL). */
+  onCreates?: (creates: readonly CreateSeen[]) => Promise<void> | void;
 }
 
 /** Counts only. */
@@ -437,9 +504,12 @@ export class Discovery {
 
       // 2. New creates from every source (a failing source does not stop the others).
       const fresh: CreateSeen[] = [];
+      const drained: CreateSeen[] = [];
       for (const s of this.o.sources) {
         try {
           for (const c of await s.drain()) {
+            drained.push(c);
+            if (c.venue === "raydium-launchlab") continue; // dev index only
             if (this.seen.has(c.signature) || (c.mint && (this.seen.has(c.mint) || this.active.has(c.mint)))) continue;
             if (c.createdAt !== null && c.createdAt < horizon) continue;
             fresh.push(c);
@@ -450,6 +520,7 @@ export class Discovery {
         }
       }
       r.seen = fresh.length;
+      if (this.o.onCreates && drained.length > 0) await Promise.resolve(this.o.onCreates(drained)).catch(() => r.errors++);
 
       // 3. Admission: token bucket (max / window), never above `max` active; newest first.
       this.refill(started);
@@ -476,7 +547,7 @@ export class Discovery {
         this.allowance -= 1;
         admitted.push({
           mint,
-          venue: full.venue,
+          venue: full.venue as DiscoveryVenue, // LaunchLab creates never reach admission
           createdAt: full.createdAt ?? asOf,
           name: clean(full.name),
           symbol: clean(full.symbol),

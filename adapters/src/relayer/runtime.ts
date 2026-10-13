@@ -238,15 +238,23 @@ export function defaultMediaDir(cfg: Pick<AdapterConfig, "cluster">, env: NodeJS
   return path.resolve(home.replace(/^~(?=\/|$)/, os.homedir()), cfg.cluster, "media");
 }
 
+/**
+ * The creator index counter of this deployment (one source for EVERY allocator: the relayer and
+ * scripts like bags:fund, audit A10): RELAYER_STATE=postgres -> the shared Postgres counter (floored
+ * by the file one), else the file counter (locked across processes).
+ */
+export function relayerCreatorCounter(keysDir: string, db: pg.Pool | null, network: SolanaNetwork, env: NodeJS.ProcessEnv = process.env): CreatorIndexCounter {
+  const file = new FileCreatorIndexCounter(path.join(keysDir, "creator-counter.json"));
+  if (env.RELAYER_STATE?.trim() !== "postgres") return file;
+  if (!db) throw new Error("RELAYER_STATE=postgres needs DATABASE_URL_RELAYER (the shared creator counter)");
+  return new PgCreatorIndexCounter(db, network, file.peek());
+}
+
 export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   const env = o.env ?? process.env;
   const pgState = env.RELAYER_STATE?.trim() === "postgres";
   const vaults = o.keys.vaults;
-  const counter =
-    o.creatorCounter ??
-    (pgState
-      ? new PgCreatorIndexCounter(o.db, o.network, new FileCreatorIndexCounter(path.join(o.cfg.keysDir, "creator-counter.json")).peek())
-      : new FileCreatorIndexCounter(path.join(o.cfg.keysDir, "creator-counter.json")));
+  const counter = o.creatorCounter ?? relayerCreatorCounter(o.cfg.keysDir, o.db, o.network, env);
   // Core's mint_vaults (0003) by default; RELAYER_MINT_VAULTS=file for a DB without it.
   const pinsInFile = env.RELAYER_MINT_VAULTS?.trim() === "file";
   const mintVaults =

@@ -17,6 +17,7 @@ import { PublicKey, type AccountInfo, type Connection } from "@solana/web3.js";
 import { priceAndCap } from "../pumpfun";
 import { cryptoRng, type Rng } from "../relayer/random";
 import type { FullIntel } from "./full";
+import { tagTrade, type TagContext, type TradeSource } from "./trades";
 import {
   METAPLEX_METADATA_PROGRAM_ID,
   curveProgress,
@@ -31,7 +32,7 @@ import {
 import { fetchOffchain, type OffchainDeps } from "./offchain";
 import { isMintAddress, type ChainReader } from "./reader";
 import { BATCH_SIZE, MAX_REAL_PER_BATCH, SubscriptionPlanner, assembleBatch, nextTickDelay, pickWarmDue, tickBoundary } from "./schedule";
-import type { CurveUpdate, IntelStore, OffchainInfo, PriceRow, TickCommit, TokenCard, TokenSafety } from "./types";
+import type { CurveUpdate, IntelStore, MarketTradeRow, OffchainInfo, PriceRow, TickCommit, TokenCard, TokenSafety } from "./types";
 
 /**
  * Intel indexer (pnpm intel:run), contract: docs/INTEL.md v1.
@@ -143,6 +144,17 @@ export interface IndexerOptions {
   watcher?: CurveWatcher | null;
   /** INTEL_FULL=1 only. */
   full?: FullIntel | null;
+  /**
+   * UNZEEN_INTEL_FULL_TRADES=1 only: the trade feed of hot warm mints (+ decoys) into
+   * `market_trades`. The mint list changes only here, on the tick (own SubscriptionPlanner).
+   */
+  trades?: {
+    source: TradeSource;
+    /** UNZEEN_WHALE_LAMPORTS (default 1 SOL). */
+    whaleLamports: bigint;
+    /** Buys within create slot .. + N are `sniper` (default 4, as the first-blocks window). */
+    sniperSlots: number;
+  } | null;
   /** Refresh the decoy pool of recent pump.fun mints every N ticks (and every tick while it is small). */
   decoyRefreshTicks?: number;
   /** Retry failed off-chain fetches (process memory) after this long. */
@@ -177,6 +189,8 @@ export interface TickReport {
   errors: number;
   /** Pinned mints priced on this tick. */
   priced: number;
+  /** market_trades rows of this tick (feed on). */
+  trades?: number;
   ms: number;
   nextInMs: number;
 }
@@ -214,6 +228,10 @@ export class IntelIndexer {
   private readonly offFailed = new Map<string, number>();
   private readonly firstBlocksDone = new Map<string, NonNullable<TokenSafety["firstBlocks"]>>();
   private readonly createUser = new Map<string, string>();
+  private readonly createSlot = new Map<string, number>();
+  /** mint -> symbol / decimals of its last snapshot (market_trades rows need them). */
+  private readonly cardOf = new Map<string, { symbol: string; decimals: number }>();
+  private readonly tradeSubs: SubscriptionPlanner;
   private global: Global | null = null;
   private dbcConfigState: PoolConfig | null = null;
   private ticks = 0;
@@ -222,6 +240,7 @@ export class IntelIndexer {
   constructor(private readonly o: IndexerOptions) {
     this.now = o.now ?? Date.now;
     this.subs = new SubscriptionPlanner(o.rng);
+    this.tradeSubs = new SubscriptionPlanner(o.rng);
   }
 
   /** One tick. Never throws; returns counts and the delay to the next tick. */
@@ -313,6 +332,15 @@ export class IntelIndexer {
         const fresh = new Set(commit.rows.map((r) => r.mint));
         commit.curveUpdates = [...this.pendingCurves.values()].filter((u) => !fresh.has(u.mint));
         this.pendingCurves.clear();
+      }
+      for (const c of commit.cards) this.cardOf.set(c.mint, { symbol: c.symbol, decimals: c.decimals });
+
+      // 3b. Trade feed (flag): drain what arrived since the last tick, then move the mint set.
+      if (this.o.trades) {
+        commit.marketTrades = this.tradeRows(pool);
+        report.trades = commit.marketTrades.length;
+        this.tradeSubs.tick(new Set(warm.filter((w) => w.hot).map((w) => w.mint)), this.recent.filter((m) => !warm.some((w) => w.mint === m)));
+        this.o.trades.source.setMints([...this.tradeSubs.current()]);
       }
     } catch {
       report.errors++;
@@ -629,7 +657,8 @@ export class IntelIndexer {
     if (off?.socials) row.socials = off.socials;
     if (off?.image) row.image = off.image;
 
-    if (this.o.full && w.curve) await this.fullTier(w.mint, w.key, w.facts.supply, vaults, row, w.unzeen);
+    // Any venue: first blocks come from the mint's own signatures (pump.fun, DBC, LaunchLab).
+    if (this.o.full) await this.fullTier(w.mint, w.key, w.facts.supply, vaults, row, w.unzeen);
 
     const pc =
       w.curve && onCurve
@@ -672,6 +701,7 @@ export class IntelIndexer {
       const r = await full.firstBlocks(mint, { supply, poolVaults: vaults, unzeenLaunch: unzeen }).catch(() => null);
       if (r) {
         this.firstBlocksDone.set(key, r.firstBlocks);
+        this.createSlot.set(key, r.createSlot);
         if (r.createUser) this.createUser.set(key, r.createUser);
       }
     }
@@ -690,6 +720,33 @@ export class IntelIndexer {
       const h = await full.devHistory(dev).catch(() => null);
       if (h) row.dev = h;
     }
+  }
+
+  /**
+   * Buffered trades -> market_trades rows. Decoy mints are dropped (never written); so is a trade of a
+   * mint without a snapshot yet (no symbol / decimals: only possible in its first seconds of warmth).
+   * Tags (INTEL.md): whale by SOL size; dev = the create signer, never on Unzeen launches (T1) nor on
+   * pool vault trades; sniper = a buy within the first-blocks window.
+   */
+  private tradeRows(pool: PoolSets): MarketTradeRow[] {
+    const t = this.o.trades!;
+    const ctx: TagContext = {
+      poolVaults: pool.vaults,
+      unzeenLaunches: pool.launches,
+      devOf: (m) => this.createUser.get(m),
+      createSlotOf: (m) => this.createSlot.get(m),
+      whaleLamports: t.whaleLamports,
+      sniperSlots: t.sniperSlots,
+    };
+    const out: MarketTradeRow[] = [];
+    for (const tr of t.source.drain()) {
+      if (this.tradeSubs.isDecoy(tr.mint)) continue;
+      const card = this.cardOf.get(tr.mint);
+      if (!card) continue;
+      const { unzeen, tags } = tagTrade(tr, ctx);
+      out.push({ ...tr, symbol: card.symbol, decimals: card.decimals, unzeen, tags });
+    }
+    return out;
   }
 
   private async applySubscriptions(hotMints: readonly string[], warmMints: ReadonlySet<string>): Promise<{ added: number; removed: number }> {
