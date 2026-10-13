@@ -20,8 +20,10 @@ import { TokenWithdrawer } from "../withdraw";
 import { jitoConfigFromEnv, type JitoConfig, type JitoTipCache } from "../jito";
 import { jitoFairBundler, type FairBundler } from "./fair-bundler";
 import { PoolSolInventoryWriter, VaultFunder, deriveRebalanceKeypair } from "../rebalance";
+import { quoteAssets } from "../pool-a";
+import { QuoteStockRunner, QuoteStocker, stockPolicy } from "./quote-stock";
 import { Relayer, type RelayerEvent } from "./engine";
-import { AttestExecutor, ConsolidateExecutor, FundVaultsExecutor, RpcChainProbe, VenueTradeExecutor, WithdrawExecutor, type JobExecutor } from "./executors";
+import { AttestExecutor, ConsolidateExecutor, FundQuoteExecutor, FundVaultsExecutor, RpcChainProbe, VenueTradeExecutor, WithdrawExecutor, type JobExecutor } from "./executors";
 import { LaunchCurveWriter, pumpLaunchCurve } from "./launch-curves";
 import { FileMintVaults, PgMintVaults, type MintVaults } from "./mint-vaults";
 import { PostgresJobQueue, type SolanaNetwork } from "./postgres-queue";
@@ -175,6 +177,8 @@ export interface RelayerRuntime {
   rebalanceAddress: PublicKey;
   /** RELAYER v7 `pool_sol_inventory` writer; run it only when `poolSolInventoryWritable`. */
   solInventory: PoolSolInventoryWriter;
+  /** Quote stock of every vault (non-SOL pairs), relayer-local schedule; run only with RELAYER_QUOTE_STOCK=1. */
+  quoteStock: QuoteStockRunner;
 }
 
 /**
@@ -256,6 +260,8 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     priorityMicroLamports: fees,
     pipeline,
     lookupTables,
+    // Non-SOL pump.fun pairs: pump's own quote set (devnet USDC 4zMMC9…, mainnet USDC; ZEC only with PUMP_QUOTE_ZEC=1).
+    quotes: quoteAssets(o.cfg.cluster, env, "pumpfun"),
   });
   const meteoraConfig = o.meteoraConfig !== undefined ? o.meteoraConfig : dbcConfigAddress(o.cfg.cluster, env);
   const meteora = meteoraConfig
@@ -270,6 +276,8 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
         priorityMicroLamports: fees,
         pipeline,
         lookupTables,
+        // Non-SOL pairs: quote configs + pinned pool A per network (src/pool-a.ts, env overridable).
+        quotes: quoteAssets(o.cfg.cluster, env),
       })
     : null;
   const trade: Partial<Record<"pumpfun" | "meteora-dbc" | "jupiter", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
@@ -306,6 +314,12 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   const vaultKeys = vaults.map((v) => v.publicKey);
   const funder = new VaultFunder({ connection: o.connection, key: rebalanceKey, vaults: vaultKeys, priorityMicroLamports: fees, pipeline });
   const solInventory = new PoolSolInventoryWriter(o.db, o.network, verifyReadConnection(o.cfg, o.connection, env, () => undefined), vaultKeys, rebalanceKey.publicKey);
+  // Non-SOL pairs: one stocker per quote with a pinned pool A (same CU price / tip as every pool tx).
+  const seen = new Set<string>();
+  const stockers = [...quoteAssets(o.cfg.cluster, env), ...quoteAssets(o.cfg.cluster, env, "pumpfun")]
+    .filter((a) => a.poolA && !seen.has(a.mint.toBase58()) && seen.add(a.mint.toBase58()))
+    .map((a) => new QuoteStocker({ connection: o.connection, asset: a, policy: stockPolicy(a, o.cfg.cluster, env), priorityMicroLamports: fees, pipeline }));
+  const quoteStock = new QuoteStockRunner({ stockers, pool, rng: cryptoRng, ...(o.log ? { log: o.log } : {}) });
   const relayer = new Relayer({
     queue,
     pool,
@@ -314,6 +328,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
       trade,
       fund: new FundVaultsExecutor(funder, rebalanceKey),
       consolidate: new ConsolidateExecutor(withdrawer, new RpcVaultInventory(o.connection)),
+      ...(stockers.length ? { quoteStock: new FundQuoteExecutor(stockers) } : {}),
       withdraw: new WithdrawExecutor(withdrawer, cryptoRng),
       attest: new AttestExecutor({ verify: attester, fair: fairAttester }),
     },
@@ -341,6 +356,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     jitoTips: fair?.tips ?? null,
     rebalanceAddress: rebalanceKey.publicKey,
     solInventory,
+    quoteStock,
   };
 }
 

@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   }
 
   const connection = makeConnection(cfg);
-  const { relayer, fees, pipeline, pool, attester, fairAttester, launchCurves, snapshotter, jitoTips, solInventory } = buildRelayer({
+  const { relayer, fees, pipeline, pool, attester, fairAttester, launchCurves, snapshotter, jitoTips, solInventory, quoteStock } = buildRelayer({
     cfg,
     connection,
     network,
@@ -83,6 +83,8 @@ async function main(): Promise<void> {
   const inventory = (await poolSolInventoryWritable(db))
     ? solInventory.run(ac.signal, (e) => warn(`pool_sol_inventory: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 160)}`))
     : (warn("pool_sol_inventory (core 0015) missing or not writable: core will not plan rebalances"), Promise.resolve());
+  // Non-SOL pairs: quote stock per vault on a random 45-90 min schedule, until core schedules fund_quote.
+  const stock = process.env.RELAYER_QUOTE_STOCK?.trim() === "1" ? quoteStock.run(ac.signal) : Promise.resolve();
   // Attestation key pays its own memo fees (never topped up from a vault).
   for (const [name, k] of [["Verify", attester], ["fair-launch", fairAttester]] as const) {
     const bal = await connection.getBalance(k.publicKey, "confirmed").catch(() => null);
@@ -104,6 +106,7 @@ async function main(): Promise<void> {
   );
   await sweep;
   await inventory;
+  await stock;
   await curves;
   await verify;
   fees.stop();

@@ -49,6 +49,7 @@ import { fixedPrice, type PriorityPrice } from "./fees";
 import { slip10DerivePath, type CreatorKeyring } from "./keys";
 import { formatUnits, toBN, toBig } from "./math";
 import type { CreateResult, PreparedCreate, PreparedTrade } from "./pumpfun";
+import { PoolA, poolASwapLegs, type PoolAState, type QuoteAsset } from "./pool-a";
 import { parseMint, validateMeta } from "./pumpfun";
 import type { TxPipeline } from "./sender";
 import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SendFailure, type SignedTx } from "./tx";
@@ -83,6 +84,16 @@ export const DBC_PROGRAM_ID: PublicKey = DYNAMIC_BONDING_CURVE_PROGRAM_ID;
  */
 const CU_CREATE = 300_000;
 const CU_TRADE = 150_000;
+/**
+ * Non-SOL pairs: ONE fixed limit per operation class, whether the quote comes
+ * from the vault's stock or from the in-tx swap leg (no CU fingerprint of the
+ * path; never fitted to a simulation). Leg measured on mainnet/devnet 13.10:
+ * DAMM v2 swap2 ExactOut 25-47k CU.
+ */
+export const CU_CREATE_QUOTE = 400_000;
+export const CU_TRADE_QUOTE = 250_000;
+/** Margin between the lamports of a buy and the quote it is converted to (pool A drift between quote and landing). */
+const QUOTE_LEG_MARGIN_BPS = 50n;
 /** Network fee headroom for one transaction, lamports. */
 const FEE_HEADROOM = 100_000n;
 /**
@@ -138,12 +149,21 @@ export const UNZEEN_DBC_CURVE = {
   creatorTradingFeePercentage: 50,
 } as const;
 
-export function unzeenDbcConfigParameters(): ConfigParameters {
+/**
+ * Quote-denominated curves (USDC / USD1): the SAME shape (start/graduation
+ * ratio 410.9 / 27.96 = 14.70) and the same fees and creator share as the SOL
+ * curve, so every launch has one creator fee rate whatever the pair:
+ * start 3 000, graduation 44 088 (quote units, ~USD); raised at graduation is
+ * far above Meteora's 750 USDC/USD1 keeper threshold.
+ */
+export const UNZEEN_DBC_CURVE_USD = { initialMarketCap: 3_000, migrationMarketCap: 44_088 } as const;
+
+export function unzeenDbcConfigParameters(quote: { decimals: number } | null = null): ConfigParameters {
   return buildCurveWithMarketCap({
     token: {
       tokenType: TokenType.Token2022,
       tokenBaseDecimal: UNZEEN_DBC_CURVE.tokenDecimals,
-      tokenQuoteDecimal: 9,
+      tokenQuoteDecimal: quote ? (quote.decimals as TokenDecimal) : 9,
       tokenAuthorityOption: TokenAuthorityOption.Immutable,
       totalTokenSupply: UNZEEN_DBC_CURVE.totalTokenSupply,
       leftover: 0,
@@ -172,8 +192,8 @@ export function unzeenDbcConfigParameters(): ConfigParameters {
     },
     lockedVesting: { totalLockedVestingAmount: 0, numberOfVestingPeriod: 0, cliffUnlockAmount: 0, totalVestingDuration: 0, cliffDurationFromMigrationTime: 0 },
     activationType: ActivationType.Slot,
-    initialMarketCap: UNZEEN_DBC_CURVE.initialMarketCapSol,
-    migrationMarketCap: UNZEEN_DBC_CURVE.migrationMarketCapSol,
+    initialMarketCap: quote ? UNZEEN_DBC_CURVE_USD.initialMarketCap : UNZEEN_DBC_CURVE.initialMarketCapSol,
+    migrationMarketCap: quote ? UNZEEN_DBC_CURVE_USD.migrationMarketCap : UNZEEN_DBC_CURVE.migrationMarketCapSol,
   });
 }
 
@@ -243,11 +263,27 @@ const Q128 = 1n << 128n;
  * lamports per base unit = sqrtPrice^2 / 2^128.
  */
 export function dbcPriceAndCap(sqrtPrice: BN | bigint, supply: bigint, decimals: number): { priceSol: string; marketCapSol: string } {
+  const r = dbcPriceAndCapQuote(sqrtPrice, supply, decimals, 9);
+  return { priceSol: r.price, marketCapSol: r.marketCap };
+}
+
+/** Same in quote units of a `quoteDecimals` quote (price: quote per 1 whole token, 18 digits). */
+export function dbcPriceAndCapQuote(sqrtPrice: BN | bigint, supply: bigint, decimals: number, quoteDecimals: number): { price: string; marketCap: string; capUnits: bigint; price18: bigint } {
   const s = typeof sqrtPrice === "bigint" ? sqrtPrice : toBig(sqrtPrice);
   const sq = s * s;
-  const price = (sq * 10n ** BigInt(decimals) * 10n ** 18n) / (Q128 * 1_000_000_000n);
-  const capLamports = (sq * supply) / Q128;
-  return { priceSol: formatUnits(price, 18), marketCapSol: formatUnits(capLamports, 9) };
+  const price18 = (sq * 10n ** BigInt(decimals) * 10n ** 18n) / (Q128 * 10n ** BigInt(quoteDecimals));
+  const capUnits = (sq * supply) / Q128;
+  return { price: formatUnits(price18, 18), marketCap: formatUnits(capUnits, quoteDecimals), capUnits, price18 };
+}
+
+/**
+ * Quote-pair price / cap in SOL: quote values converted at `lamportsPerWholeQuote`
+ * (pool A, quote -> SOL for 1 whole quote token).
+ */
+export function quoteToSolPriceAndCap(q: { capUnits: bigint; price18: bigint }, quoteDecimals: number, lamportsPerWholeQuote: bigint): { priceSol: string; marketCapSol: string } {
+  const capLamports = (q.capUnits * lamportsPerWholeQuote) / 10n ** BigInt(quoteDecimals);
+  const priceSol18 = (q.price18 * lamportsPerWholeQuote) / 1_000_000_000n;
+  return { priceSol: formatUnits(priceSol18, 18), marketCapSol: formatUnits(capLamports, 9) };
 }
 
 /** Tokens out for `lamportsIn` (fees included; partial fill near the threshold). */
@@ -386,6 +422,17 @@ export interface MeteoraDbcAdapterOptions {
   pipeline?: TxPipeline | null;
   /** Shared per-vault lookup tables (same instance as the pump.fun adapter). */
   lookupTables?: LookupTables;
+  /**
+   * Non-SOL pairs: quote assets with their own DBC config and pinned pool A
+   * (src/pool-a.ts). Only assets with BOTH are served; others are ignored.
+   */
+  quotes?: readonly QuoteAsset[];
+}
+
+interface QuoteRoute {
+  asset: QuoteAsset;
+  config: PublicKey;
+  poolA: PoolA;
 }
 
 interface MintInfo {
@@ -399,6 +446,9 @@ interface PoolView extends MintInfo {
   address: PublicKey;
   pool: VirtualPool;
   config: PoolConfig;
+  configAddress: PublicKey;
+  /** null = SOL pair. */
+  route: QuoteRoute | null;
 }
 
 export class MeteoraDbcAdapter implements LaunchpadAdapter {
@@ -413,7 +463,9 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
   private readonly priority: PriorityPrice;
   private readonly alts: LookupTables;
   private readonly pipeline: TxPipeline | null;
-  private cfg: { at: number; config: PoolConfig } | null = null;
+  private readonly cfgs = new Map<string, { at: number; config: PoolConfig }>();
+  /** Served quote routes (config + pool A) by symbol. */
+  readonly routes: ReadonlyMap<string, QuoteRoute>;
 
   constructor(o: MeteoraDbcAdapterOptions) {
     this.connection = o.connection;
@@ -427,11 +479,30 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     this.priority = typeof p === "number" ? fixedPrice(p) : p;
     this.pipeline = o.pipeline ?? null;
     this.alts = o.lookupTables ?? new LookupTables(o.connection, o.stateDir, this.priority, this.pipeline);
+    const routes = new Map<string, QuoteRoute>();
+    for (const a of o.quotes ?? []) {
+      if (a.dbcConfig && a.poolA) routes.set(a.symbol, { asset: a, config: a.dbcConfig, poolA: new PoolA(o.connection, a.poolA, a) });
+    }
+    this.routes = routes;
   }
 
-  /** Pool PDA of `mint` under Unzeen's config (SOL quote). */
+  /** Pool PDA of `mint` under Unzeen's SOL config. */
   poolAddress(mint: PublicKey): PublicKey {
     return deriveDbcPoolAddress(NATIVE_MINT, mint, this.configAddress);
+  }
+
+  /** Every pool PDA `mint` can have under Unzeen's configs (SOL first, then each quote). */
+  private poolCandidates(mint: PublicKey): { address: PublicKey; config: PublicKey; route: QuoteRoute | null }[] {
+    return [
+      { address: this.poolAddress(mint), config: this.configAddress, route: null },
+      ...[...this.routes.values()].map((r) => ({ address: deriveDbcPoolAddress(r.asset.mint, mint, r.config), config: r.config, route: r })),
+    ];
+  }
+
+  private route(symbol: string): QuoteRoute {
+    const r = this.routes.get(symbol.toUpperCase());
+    if (!r) throw new AdapterError("venue_unavailable", `no Meteora DBC config / pool A for quote ${symbol} on this network`);
+    return r;
   }
 
   // -------------------------------------------------------------------------
@@ -449,6 +520,16 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     const status = dbcStatus(v.pool.poolState, v.config);
     if (status === "graduated") throw new AdapterError("graduated", `${mint} has left the bonding curve; trade it on DAMM v2 / Jupiter`);
     const point = await this.currentPoint(v.config);
+    if (v.route) {
+      // Lamports in / out: converted on pool A locally (no third party).
+      const s = await v.route.poolA.load();
+      const amountOut =
+        side === "buy"
+          ? dbcQuoteBuy(v.pool, v.config, applyMargin(v.route.poolA.quoteForSol(s, amount)), point).out
+          : v.route.poolA.solForQuote(s, dbcQuoteSell(v.pool, v.config, amount, point));
+      const m = await this.marketOf(v, s);
+      return { venue: this.id, mint, side, amountIn: amount, amountOut, priceSol: m.priceSol, marketCapSol: m.marketCapSol, status, decimals: v.decimals, quoteMint: v.route.asset.mint.toBase58(), ...(m.priceQuote ? { priceQuote: m.priceQuote } : {}) };
+    }
     const amountOut = side === "buy" ? dbcQuoteBuy(v.pool, v.config, amount, point).out : dbcQuoteSell(v.pool, v.config, amount, point);
     return {
       venue: this.id,
@@ -462,10 +543,21 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     };
   }
 
+  /** SOL price / cap of a pool (quote pairs: converted on pool A). */
+  private async marketOf(v: PoolView, s?: PoolAState): Promise<{ priceSol: string; marketCapSol: string; priceQuote?: string }> {
+    if (!v.route) return dbcPriceAndCap(v.pool.poolState.sqrtPrice, v.supply, v.decimals);
+    const st = s ?? (await v.route.poolA.load());
+    const qd = v.route.asset.decimals;
+    const q = dbcPriceAndCapQuote(v.pool.poolState.sqrtPrice, v.supply, v.decimals, qd);
+    const perQuote = v.route.poolA.solForQuote(st, 10n ** BigInt(qd));
+    return { ...quoteToSolPriceAndCap(q, qd, perQuote), priceQuote: q.price };
+  }
+
   /** Public price / market cap / status (tokens table). */
   async market(mint: string): Promise<{ priceSol: string; marketCapSol: string; status: CurveStatus }> {
     const v = await this.loadPool(parseMint(mint));
-    return { ...dbcPriceAndCap(v.pool.poolState.sqrtPrice, v.supply, v.decimals), status: dbcStatus(v.pool.poolState, v.config) };
+    const m = await this.marketOf(v);
+    return { priceSol: m.priceSol, marketCapSol: m.marketCapSol, status: dbcStatus(v.pool.poolState, v.config) };
   }
 
   /** Curve progress for the indexer / UI. */
@@ -482,15 +574,17 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     return md?.symbol ?? null;
   }
 
-  /** Unzeen's config as stored on chain (cached briefly). */
-  async poolConfig(): Promise<PoolConfig> {
-    if (this.cfg && Date.now() - this.cfg.at < CONFIG_TTL_MS) return this.cfg.config;
-    const info = await this.rpc(() => this.connection.getAccountInfo(this.configAddress));
+  /** One of Unzeen's configs as stored on chain (cached briefly). Default: the SOL config. */
+  async poolConfig(address: PublicKey = this.configAddress): Promise<PoolConfig> {
+    const key = address.toBase58();
+    const c = this.cfgs.get(key);
+    if (c && Date.now() - c.at < CONFIG_TTL_MS) return c.config;
+    const info = await this.rpc(() => this.connection.getAccountInfo(address));
     if (!info || !info.owner.equals(DBC_PROGRAM_ID)) {
       throw new AdapterError("venue_unavailable", "Meteora DBC config account not found on this network");
     }
     const config = this.coder.accounts.decode("poolConfig", info.data) as PoolConfig;
-    this.cfg = { at: Date.now(), config };
+    this.cfgs.set(key, { at: Date.now(), config });
     return config;
   }
 
@@ -516,13 +610,29 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     if (initialBuyLamports < 0n) throw new AdapterError("bad_request", "initialBuyLamports must be >= 0");
     if (minOut < 0n) throw new AdapterError("bad_request", "minOut must be >= 0");
     const vault = opts.vault ?? this.defaultVault;
-    const config = await this.poolConfig();
-    if (!config.quoteMint.equals(NATIVE_MINT)) throw new AdapterError("venue_unavailable", "Meteora DBC config is not SOL-quoted");
-    await this.requireSol(vault.publicKey, initialBuyLamports + CREATE_RENT_HEADROOM + ALT_RENT_HEADROOM);
+    const route = opts.quote && opts.quote.toUpperCase() !== "SOL" ? this.route(opts.quote) : null;
+    const configAddress = route ? route.config : this.configAddress;
+    const config = await this.poolConfig(configAddress);
+    if (!config.quoteMint.equals(route ? route.asset.mint : NATIVE_MINT)) throw new AdapterError("venue_unavailable", "Meteora DBC config has another quote mint");
+
+    // Quote pair: the first buy is in quote units, converted from lamports on pool A.
+    let buyUnits = initialBuyLamports;
+    let leg: { s: PoolAState; units: bigint } | null = null;
+    let quoteSource: "stock" | "leg" | undefined;
+    if (route && initialBuyLamports > 0n) {
+      const s = await route.poolA.load();
+      buyUnits = applyMargin(route.poolA.quoteForSol(s, initialBuyLamports));
+      if (buyUnits <= 0n) throw new AdapterError("slippage", "first buy too small for the quote token");
+      const stock = await this.quoteStock(vault.publicKey, route);
+      quoteSource = stock >= buyUnits ? "stock" : "leg";
+      if (quoteSource === "leg") leg = { s, units: buyUnits };
+    }
+    const solNeed = route ? (leg ? initialBuyLamports : 0n) : initialBuyLamports;
+    await this.requireSol(vault.publicKey, solNeed + CREATE_RENT_HEADROOM + ALT_RENT_HEADROOM);
 
     let expected = 0n;
-    if (initialBuyLamports > 0n) {
-      const q = this.client.pool.getQuoteFromInputAmount({ config, swapBaseForQuote: false, amountIn: toBN(initialBuyLamports) });
+    if (buyUnits > 0n) {
+      const q = this.client.pool.getQuoteFromInputAmount({ config, swapBaseForQuote: false, amountIn: toBN(buyUnits) });
       expected = toBig(q.outputAmount);
       if (expected < minOut) throw new AdapterError("slippage", `first buy quote ${expected} < minOut ${minOut}`);
     }
@@ -537,16 +647,18 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     const build = (mint: PublicKey, payer: PublicKey, creator: PublicKey) =>
       this.sdk(async () => {
         const tx = await this.client.creator.createPoolWithFirstBuy({
-          createPoolParam: { name: meta.name, symbol: meta.symbol, uri: meta.uri, payer, poolCreator: creator, config: this.configAddress, baseMint: mint },
-          ...(initialBuyLamports > 0n
-            ? { firstBuyParam: { buyer: payer, buyAmount: toBN(initialBuyLamports), minimumAmountOut: toBN(minOut > 0n ? minOut : 1n), referralTokenAccount: null } }
+          createPoolParam: { name: meta.name, symbol: meta.symbol, uri: meta.uri, payer, poolCreator: creator, config: configAddress, baseMint: mint },
+          ...(buyUnits > 0n
+            ? { firstBuyParam: { buyer: payer, buyAmount: toBN(buyUnits), minimumAmountOut: toBN(minOut > 0n ? minOut : 1n), referralTokenAccount: null } }
             : {}),
         });
-        return tx.instructions;
+        // Fallback only (stock short): swap leg SOL -> exactly `buyUnits` quote, in THIS tx.
+        const pre = leg && route ? await route.poolA.buyQuoteExactOut(payer, leg.s, leg.units, initialBuyLamports) : [];
+        return [...pre, ...tx.instructions];
       });
     const ixs = await build(mintKp.publicKey, vault.publicKey, creatorPk);
     const table = await this.lookupTable(vault, ixs, build);
-    const signed = await this.sign(ixs, vault, CU_CREATE, [mintKp, creatorKp], [table]);
+    const signed = await this.sign(ixs, vault, route ? CU_CREATE_QUOTE : CU_CREATE, [mintKp, creatorKp], [table]);
     return {
       ...signed,
       kind: "create",
@@ -555,15 +667,25 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
       creator: creatorPk.toBase58(),
       creatorIndex,
       expectedOut: expected,
+      ...(route ? { quoteMint: route.asset.mint.toBase58(), quoteUnits: buyUnits, ...(quoteSource ? { quoteSource } : {}) } : {}),
     };
+  }
+
+  /** Quote units the vault holds (its ATA of the quote mint; 0 if none). */
+  private async quoteStock(vault: PublicKey, route: QuoteRoute): Promise<bigint> {
+    const ata = getAssociatedTokenAddressSync(route.asset.mint, vault, true, route.asset.tokenProgram);
+    const info = await this.rpc(() => this.connection.getAccountInfo(ata, "confirmed"));
+    return info ? unpackAccount(ata, info, route.asset.tokenProgram).amount : 0n;
   }
 
   /** Executed create: mint + creator from EvtInitializePool, first buy from EvtSwap. Null if unreadable yet. */
   async createResult(signature: string, vault: string): Promise<CreateResult | null> {
     const tx = await fetchTx(this.connection, signature, 10).catch(() => null);
     if (!tx) return null;
-    const init = dbcInitEvents(tx).find((e) => e.config.equals(this.configAddress));
+    const ours = [this.configAddress, ...[...this.routes.values()].map((r) => r.config)];
+    const init = dbcInitEvents(tx).find((e) => ours.some((c) => c.equals(e.config)));
     if (!init) return null;
+    const route = [...this.routes.values()].find((r) => r.config.equals(init.config)) ?? null;
     const mint = init.baseMint;
     const vaultPk = new PublicKey(vault);
     const [mi, md] = await Promise.all([
@@ -575,12 +697,21 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     let tokenAmount = 0n;
     let solAmount = 0n;
     let creatorFee: bigint | null = 0n;
+    let quote: { quoteMint: string; quoteAmount: bigint; quoteSource: "stock" | "leg" } | null = null;
     if (swap) {
       ({ tokenAmount, solAmount } = dbcSwapAmounts({ kind: "swap", e: swap }));
-      const pct = await this.poolConfig()
+      const pct = await this.poolConfig(init.config)
         .then((c) => Number(c.creatorTradingFeePercentage))
         .catch(() => null);
       creatorFee = pct === null ? null : dbcCreatorFee(toBig(swap.swapResult.tradingFee), pct);
+      if (route) {
+        // solAmount / creatorFee were quote units: book lamports.
+        const conv = await this.toLamports(tx, route, solAmount, "buy").catch(() => null);
+        if (!conv) return null;
+        quote = { quoteMint: route.asset.mint.toBase58(), quoteAmount: solAmount, quoteSource: conv.source };
+        if (creatorFee !== null) creatorFee = solAmount > 0n ? (conv.lamports * creatorFee) / solAmount : 0n;
+        solAmount = conv.lamports;
+      }
     } else {
       tokenAmount = tokenDelta(tx, vaultPk, mint);
       if (tokenAmount > 0n) return null; // a buy happened but its event is unreadable: never guess SOL
@@ -605,6 +736,7 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
       amountsKnown: true,
       fromEvent: swap !== undefined,
       creatorFee,
+      ...(quote ?? {}),
     };
   }
 
@@ -630,11 +762,23 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     const vault = opts.vault ?? this.defaultVault;
     const v = await this.loadPool(parseMint(mint));
     assertTradable(v, mint);
-    const expected = dbcQuoteBuy(v.pool, v.config, lamportsIn, await this.currentPoint(v.config)).out;
+    // Quote pair: lamports -> quote units on pool A (local), spent from the vault's stock,
+    // or (stock short) bought in THIS tx by an ExactOut leg capped at `lamportsIn`.
+    let units = lamportsIn;
+    let pre: TransactionInstruction[] = [];
+    let quoteSource: "stock" | "leg" | undefined;
+    if (v.route) {
+      const s = await v.route.poolA.load();
+      units = applyMargin(v.route.poolA.quoteForSol(s, lamportsIn));
+      if (units <= 0n) throw new AdapterError("slippage", "buy too small for the quote token");
+      quoteSource = (await this.quoteStock(vault.publicKey, v.route)) >= units ? "stock" : "leg";
+      if (quoteSource === "leg") pre = await v.route.poolA.buyQuoteExactOut(vault.publicKey, s, units, lamportsIn);
+    }
+    const expected = dbcQuoteBuy(v.pool, v.config, units, await this.currentPoint(v.config)).out;
     if (expected < minOut) throw new AdapterError("slippage", `quote ${expected} < minOut ${minOut}`);
     const ata = getAssociatedTokenAddressSync(v.mint, vault.publicKey, true, v.tokenProgram);
     const ataInfo = await this.rpc(() => this.connection.getAccountInfo(ata));
-    await this.requireSol(vault.publicKey, lamportsIn + (ataInfo ? 0n : BUY_RENT_HEADROOM));
+    await this.requireSol(vault.publicKey, (quoteSource === "stock" ? 0n : lamportsIn) + (ataInfo ? 0n : BUY_RENT_HEADROOM));
     const ixs = await this.sdk(async () =>
       (
         await this.client.pool.swap2({
@@ -643,13 +787,20 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
           swapBaseForQuote: false,
           referralTokenAccount: null,
           swapMode: SwapMode.PartialFill,
-          amountIn: toBN(lamportsIn),
+          amountIn: toBN(units),
           minimumAmountOut: toBN(minOut > 0n ? minOut : 1n),
         })
       ).instructions,
     );
-    const signed = await this.signTrade(ixs, vault);
-    return { ...signed, kind: "buy", mint, vault: vault.publicKey.toBase58(), expectedOut: expected };
+    const signed = await this.signTrade([...pre, ...ixs], vault, v.route ? CU_TRADE_QUOTE : CU_TRADE);
+    return {
+      ...signed,
+      kind: "buy",
+      mint,
+      vault: vault.publicKey.toBase58(),
+      expectedOut: expected,
+      ...(v.route ? { quoteMint: v.route.asset.mint.toBase58(), quoteUnits: units, ...(quoteSource ? { quoteSource } : {}) } : {}),
+    };
   }
 
   /** swap2 ExactIn base -> quote, min lamports out (net of fees). */
@@ -663,9 +814,18 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     const ataInfo = await this.rpc(() => this.connection.getAccountInfo(ata));
     const held = ataInfo ? unpackAccount(ata, ataInfo, v.tokenProgram).amount : 0n;
     if (held < amount) throw new AdapterError("insufficient_tokens", `vault holds ${held} < ${amount}`);
-    const expected = dbcQuoteSell(v.pool, v.config, amount, await this.currentPoint(v.config));
+    const outUnits = dbcQuoteSell(v.pool, v.config, amount, await this.currentPoint(v.config));
+    // Quote pair: the proceeds stay on the vault as quote STOCK (no swap back here; the
+    // scheduled stock job converts any excess). min_out in lamports -> quote units on pool A.
+    let minUnits = minLamports;
+    let expected = outUnits;
+    if (v.route) {
+      const s = await v.route.poolA.load();
+      expected = v.route.poolA.solForQuote(s, outUnits);
+      minUnits = minLamports > 0n ? v.route.poolA.quoteForSol(s, minLamports) : 0n;
+    }
     if (expected < minLamports) throw new AdapterError("slippage", `quote ${expected} < minLamports ${minLamports}`);
-    // temporary wSOL account for the proceeds (closed in the same tx)
+    // temporary wSOL account for the proceeds (closed in the same tx); quote pairs: the quote ATA
     await this.requireSol(vault.publicKey, 2_100_000n);
     const ixs = await this.sdk(async () =>
       (
@@ -676,12 +836,12 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
           referralTokenAccount: null,
           swapMode: SwapMode.ExactIn,
           amountIn: toBN(amount),
-          minimumAmountOut: toBN(minLamports),
+          minimumAmountOut: toBN(minUnits),
         })
       ).instructions,
     );
-    const signed = await this.signTrade(ixs, vault);
-    return { ...signed, kind: "sell", mint, vault: vault.publicKey.toBase58(), expectedOut: expected };
+    const signed = await this.signTrade(ixs, vault, v.route ? CU_TRADE_QUOTE : CU_TRADE);
+    return { ...signed, kind: "sell", mint, vault: vault.publicKey.toBase58(), expectedOut: expected, ...(v.route ? { quoteMint: v.route.asset.mint.toBase58() } : {}) };
   }
 
   async submit(p: SignedTx): Promise<{ signature: string; slot: number }> {
@@ -715,8 +875,35 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     const tx = await fetchTx(this.connection, signature, 10).catch(() => null);
     if (!tx) return null;
     const fee = BigInt(tx.meta?.fee ?? 0);
-    const pool = this.poolAddress(mi.mint);
-    const ev = dbcSwap2Events(tx).find((e) => e.pool.equals(pool));
+    const evs = dbcSwap2Events(tx);
+    const cand = this.poolCandidates(mi.mint).find((c) => evs.some((e) => e.pool.equals(c.address))) ?? { address: this.poolAddress(mi.mint), route: null };
+    const pool = cand.address;
+    const ev = evs.find((e) => e.pool.equals(pool));
+    if (cand.route) {
+      // Quote pair: event amounts are quote units; the ledger books lamports.
+      if (!ev) return null; // never guess from deltas: the quote stock moves too
+      const { tokenAmount, solAmount: units } = dbcSwapAmounts({ kind: "swap2", e: ev });
+      const conv = await this.toLamports(tx, cand.route, units, kind).catch(() => null);
+      if (!conv) return null;
+      return {
+        venue: this.id,
+        kind,
+        signature,
+        slot: tx.slot,
+        mint: mi.mint.toBase58(),
+        vault: vault.toBase58(),
+        tokenAmount,
+        solAmount: conv.lamports,
+        networkFee: fee,
+        blockTime: tx.blockTime ?? null,
+        decimals: mi.decimals,
+        amountsKnown: true,
+        fromEvent: true,
+        quoteMint: cand.route.asset.mint.toBase58(),
+        quoteAmount: units,
+        ...(kind === "buy" ? { quoteSource: conv.source } : {}),
+      };
+    }
     let tokenAmount: bigint;
     let solAmount: bigint;
     if (ev) {
@@ -750,17 +937,40 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     return mintInfo(mint, info);
   }
 
+  /** The mint's pool under one of Unzeen's configs (SOL or a served quote): one read for all candidates. */
   private async loadPool(mint: PublicKey): Promise<PoolView> {
-    const address = this.poolAddress(mint);
-    const [mintAcc, poolAcc] = await this.rpc(() => this.connection.getMultipleAccountsInfo([mint, address]));
+    const cands = this.poolCandidates(mint);
+    const accs = await this.rpc(() => this.connection.getMultipleAccountsInfo([mint, ...cands.map((c) => c.address)]));
+    const mintAcc = accs[0];
     if (!mintAcc) throw new AdapterError("not_found", `mint ${mint.toBase58()} does not exist`);
     const mi = mintInfo(mint, mintAcc);
-    if (!poolAcc || !poolAcc.owner.equals(DBC_PROGRAM_ID)) {
-      throw new AdapterError("not_found", `no Unzeen Meteora DBC pool for ${mint.toBase58()}`);
+    const i = cands.findIndex((_, k) => accs[k + 1]?.owner.equals(DBC_PROGRAM_ID));
+    const c = cands[i];
+    if (!c) throw new AdapterError("not_found", `no Unzeen Meteora DBC pool for ${mint.toBase58()}`);
+    const pool = this.coder.accounts.decode("virtualPool", accs[i + 1]!.data) as VirtualPool;
+    const config = await this.poolConfig(c.config);
+    return { ...mi, address: c.address, pool, config, configAddress: c.config, route: c.route };
+  }
+
+  /**
+   * Lamports to book for `units` quote of a quote-pair trade:
+   * - buy with an in-tx leg: the SOL the pool A leg actually took (EvtSwap2 input),
+   *   scaled to the units the curve used (a partial fill leaves quote dust to the pool);
+   * - buy from stock: what `units` cost on pool A now (ExactOut), i.e. the stock's replacement cost;
+   * - sell: what `units` fetch on pool A now (ExactIn quote -> SOL).
+   */
+  private async toLamports(tx: VersionedTransactionResponse, route: QuoteRoute, units: bigint, kind: "buy" | "sell"): Promise<{ lamports: bigint; source: "stock" | "leg" }> {
+    if (kind === "buy") {
+      const leg = poolASwapLegs(tx, route.poolA.address).find((l) => l.outputAmount > 0n);
+      if (leg) {
+        const lamports = leg.outputAmount > 0n ? (leg.inputAmount * units) / leg.outputAmount : leg.inputAmount;
+        return { lamports, source: "leg" };
+      }
+      const s = await route.poolA.load();
+      return { lamports: route.poolA.solForExactQuote(s, units), source: "stock" };
     }
-    const pool = this.coder.accounts.decode("virtualPool", poolAcc.data) as VirtualPool;
-    const config = await this.poolConfig();
-    return { ...mi, address, pool, config };
+    const s = await route.poolA.load();
+    return { lamports: route.poolA.solForQuote(s, units), source: "stock" };
   }
 
   private async currentPoint(config: PoolConfig): Promise<BN> {
@@ -790,15 +1000,15 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
   }
 
   /** Trades: legacy when they fit, else v0 with the vault's lookup table. */
-  private async signTrade(ixs: TransactionInstruction[], vault: Signer): Promise<SignedTx> {
+  private async signTrade(ixs: TransactionInstruction[], vault: Signer, cu: number = CU_TRADE): Promise<SignedTx> {
     try {
-      return await this.sign(ixs, vault, CU_TRADE);
+      return await this.sign(ixs, vault, cu);
     } catch (e) {
       if (!(e instanceof AdapterError) || e.stage !== "build") throw e;
       const table = await this.alts.ensure(vault, staticTradeAccounts(ixs)).catch((err) => {
         throw this.classify(err);
       });
-      return this.sign(ixs, vault, CU_TRADE, [], [table]);
+      return this.sign(ixs, vault, cu, [], [table]);
     }
   }
 
@@ -899,6 +1109,11 @@ function emptyResult(kind: "create" | "buy" | "sell", sent: { signature: string;
 }
 
 /** Base / quote vault PDAs of a DBC pool (indexer: excluded from holder stats). */
-export function dbcPoolVaults(pool: PublicKey, mint: PublicKey): { baseVault: PublicKey; quoteVault: PublicKey } {
-  return { baseVault: deriveDbcTokenVaultAddress(pool, mint), quoteVault: deriveDbcTokenVaultAddress(pool, NATIVE_MINT) };
+export function dbcPoolVaults(pool: PublicKey, mint: PublicKey, quoteMint: PublicKey = NATIVE_MINT): { baseVault: PublicKey; quoteVault: PublicKey } {
+  return { baseVault: deriveDbcTokenVaultAddress(pool, mint), quoteVault: deriveDbcTokenVaultAddress(pool, quoteMint) };
+}
+
+/** Lamports -> quote units with the leg margin (pool A drift between the quote and landing). */
+export function applyMargin(units: bigint): bigint {
+  return (units * (10_000n - QUOTE_LEG_MARGIN_BPS)) / 10_000n;
 }

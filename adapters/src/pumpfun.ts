@@ -27,6 +27,7 @@ import {
 import {
   Keypair,
   PublicKey,
+  type VersionedTransactionResponse,
   type AddressLookupTableAccount,
   type Connection,
   type Signer,
@@ -40,6 +41,7 @@ import { formatUnits, spotPriceSol, toBN, toBig } from "./math";
 import { fixedPrice, type PriorityPrice } from "./fees";
 import type { TxPipeline } from "./sender";
 import { quoteFairLegs, quoteFreshBuy, splitMinOut } from "./fair-bundle";
+import { PoolA, poolASwapLegs, type PoolAState, type QuoteAsset } from "./pool-a";
 import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SendFailure, type SenderTip, type SignedTx } from "./tx";
 import type {
   CreateOptions,
@@ -64,6 +66,24 @@ const CREATE_RENT_HEADROOM = 15_000_000n;
 const ALT_RENT_HEADROOM = 10_000_000n;
 /** Global / FeeConfig rarely change; cache them briefly. */
 const PARAMS_TTL_MS = 30_000;
+/**
+ * Non-SOL pairs: ONE fixed limit per class, stock or in-tx leg alike (no CU
+ * fingerprint of the path; the DAMM v2 leg is 25-47k CU).
+ */
+export const CU_CREATE_PUMP_QUOTE = 600_000;
+export const CU_TRADE_PUMP_QUOTE = 400_000;
+/** Lamports -> quote margin for pool A drift between quote and landing. */
+const PUMP_QUOTE_MARGIN_BPS = 50n;
+/**
+ * Creator fee rate set explicitly for QuoteControl quotes (pump lets 1-300 bps):
+ * the same 30 bps core already assumes for pump.fun launches (UNZEEN_LAUNCH_CREATOR_FEE_BPS_PUMP).
+ */
+export const PUMP_QUOTE_CREATOR_FEE_BPS = 30;
+
+interface PumpQuoteRoute {
+  asset: QuoteAsset;
+  poolA: PoolA;
+}
 
 const PUMP_ERRORS: readonly ProgramErrorInfo[] = (pumpIdl.errors as ReadonlyArray<{ code: number; name: string }>).map(
   (e) => ({ code: e.code, name: e.name }),
@@ -87,6 +107,8 @@ export interface PumpFunAdapterOptions {
    * pump.fun and Meteora never extend the same table from stale caches).
    */
   lookupTables?: LookupTables;
+  /** Non-SOL quotes this adapter serves (pump's own set, `quoteAssets(.., "pumpfun")`); only those with a pool A. */
+  quotes?: readonly QuoteAsset[];
 }
 
 interface MintInfo {
@@ -106,6 +128,10 @@ export interface PreparedTrade extends SignedTx {
   vault: string;
   /** Venue quote at preparation time (tokens for buy, lamports for sell). */
   expectedOut: bigint;
+  /** Non-SOL pair (DBC quote configs): quote mint, units spent (buy) and where they came from. */
+  quoteMint?: string;
+  quoteUnits?: bigint;
+  quoteSource?: "stock" | "leg";
 }
 
 /** A signed, not yet broadcast create (+ first buy). */
@@ -119,6 +145,9 @@ export interface PreparedCreate extends SignedTx {
   creatorIndex: number;
   /** Tokens the first buy is quoted to get (0 without first buy). */
   expectedOut: bigint;
+  quoteMint?: string;
+  quoteUnits?: bigint;
+  quoteSource?: "stock" | "leg";
 }
 
 /** Executed create, read from the landed transaction. */
@@ -167,6 +196,8 @@ export interface FairLegResult extends TxResult {
 interface CurveState extends MintInfo {
   bondingCurve: BondingCurve;
   curveBaseTokenBalance: bigint;
+  /** null = SOL curve. */
+  route: PumpQuoteRoute | null;
 }
 
 export class PumpFunAdapter implements LaunchpadAdapter {
@@ -180,6 +211,9 @@ export class PumpFunAdapter implements LaunchpadAdapter {
   private readonly alts: LookupTables;
   private readonly pipeline: TxPipeline | null;
   private params: { at: number; global: Global; feeConfig: FeeConfig } | null = null;
+  /** Served non-SOL quotes, by mint and by symbol. */
+  private readonly routesByMint = new Map<string, PumpQuoteRoute>();
+  private readonly routesBySymbol = new Map<string, PumpQuoteRoute>();
 
   constructor(o: PumpFunAdapterOptions) {
     this.connection = o.connection;
@@ -191,6 +225,20 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     this.priority = typeof p === "number" ? fixedPrice(p) : p;
     this.pipeline = o.pipeline ?? null;
     this.alts = o.lookupTables ?? new LookupTables(o.connection, o.stateDir, this.priority, this.pipeline);
+    for (const a of o.quotes ?? []) {
+      if (!a.poolA) continue;
+      const r = { asset: a, poolA: new PoolA(o.connection, a.poolA, a) };
+      this.routesByMint.set(a.mint.toBase58(), r);
+      this.routesBySymbol.set(a.symbol, r);
+    }
+  }
+
+  private routeOfQuote(quoteMint: PublicKey): PumpQuoteRoute | null {
+    const q = normalizeQuoteMint(quoteMint);
+    if (isLegacyQuoteMint(q)) return null;
+    const r = this.routesByMint.get(q.toBase58());
+    if (!r) throw new AdapterError("bad_request", "pump.fun curve quoted in a token this pool does not serve");
+    return r;
   }
 
   // -------------------------------------------------------------------------
@@ -211,6 +259,15 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     const status = curveStatus(state.bondingCurve);
     if (status === "graduated") {
       throw new AdapterError("graduated", `${mint} has left the bonding curve; trade it on PumpSwap / Jupiter`);
+    }
+    if (state.route) {
+      const s = await state.route.poolA.load();
+      const amountOut =
+        side === "buy"
+          ? quoteBuy(global, feeConfig, state.bondingCurve, state.curveBaseTokenBalance, pumpMargin(state.route.poolA.quoteForSol(s, amount)))
+          : state.route.poolA.solForQuote(s, quoteSell(global, feeConfig, state.bondingCurve, amount));
+      const m = this.marketOfRoute(state, s);
+      return { venue: this.id, mint, side, amountIn: amount, amountOut, priceSol: m.priceSol, marketCapSol: m.marketCapSol, status, decimals: state.decimals, quoteMint: state.route.asset.mint.toBase58(), priceQuote: m.priceQuote };
     }
     const amountOut =
       side === "buy"
@@ -259,9 +316,28 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     const { global, feeConfig } = await this.loadParams();
     if (!global.createV2Enabled) throw new AdapterError("venue_unavailable", "pump.fun create_v2 is disabled");
 
+    // Non-SOL pair: first buy in quote units (pool A, local), from the vault's stock or
+    // (stock short) bought by an ExactOut leg in THIS tx. Fair launch stays SOL only.
+    let route: PumpQuoteRoute | null = null;
+    if (opts.quote && opts.quote.toUpperCase() !== "SOL") {
+      if (opts.mintKeypair) throw new AdapterError("bad_request", "fair launch is SOL only");
+      route = this.routesBySymbol.get(opts.quote.toUpperCase()) ?? null;
+      if (!route) throw new AdapterError("venue_unavailable", `pump.fun quote ${opts.quote} is not served on this network`);
+    }
+    let units = initialBuyLamports;
+    let leg: PoolAState | null = null;
+    let quoteSource: "stock" | "leg" | undefined;
+    if (route && initialBuyLamports > 0n) {
+      const s = await route.poolA.load();
+      units = pumpMargin(route.poolA.quoteForSol(s, initialBuyLamports));
+      if (units <= 0n) throw new AdapterError("slippage", "first buy too small for the quote token");
+      quoteSource = (await this.quoteStock(vault.publicKey, route)) >= units ? "stock" : "leg";
+      if (quoteSource === "leg") leg = s;
+    }
+
     await this.requireSol(
       vault.publicKey,
-      initialBuyLamports + CREATE_RENT_HEADROOM + ACCUMULATOR_RENT_HEADROOM + ALT_RENT_HEADROOM,
+      (route && !leg ? 0n : initialBuyLamports) + CREATE_RENT_HEADROOM + ACCUMULATOR_RENT_HEADROOM + ALT_RENT_HEADROOM,
     );
 
     // Allocate only after the cheap checks: every allocated index is burnt (never reused).
@@ -273,13 +349,17 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     }
 
     const mintKp = opts.mintKeypair ?? Keypair.generate();
-    const build = (mint: PublicKey, user: PublicKey, creatorPk: PublicKey) =>
-      createIxs(global, feeConfig, meta, mint, user, creatorPk, initialBuyLamports);
+    const build = async (mint: PublicKey, user: PublicKey, creatorPk: PublicKey) => {
+      if (!route) return createIxs(global, feeConfig, meta, mint, user, creatorPk, initialBuyLamports);
+      const r = await createQuoteIxs(global, feeConfig, meta, mint, user, creatorPk, units, route.asset);
+      const pre = leg ? await route.poolA.buyQuoteExactOut(user, leg, units, initialBuyLamports) : [];
+      return { ixs: [...pre, ...r.ixs], tokens: r.tokens };
+    };
     const { ixs, tokens } = await build(mintKp.publicKey, vault.publicKey, creator);
     if (tokens < minOut) throw new AdapterError("slippage", `first buy quote ${tokens} < minOut ${minOut}`);
     // create_v2 + buy is ~1476 bytes as legacy (> 1232): needs a v0 tx + lookup table.
     const table = await this.lookupTable(vault, ixs, async (m, u, c) => (await build(m, u, c)).ixs, global);
-    const signed = await this.sign(ixs, vault, CU_CREATE, [mintKp], [table]);
+    const signed = await this.sign(ixs, vault, route ? CU_CREATE_PUMP_QUOTE : CU_CREATE, [mintKp], [table]);
     return {
       ...signed,
       kind: "create",
@@ -288,7 +368,42 @@ export class PumpFunAdapter implements LaunchpadAdapter {
       creator: creator.toBase58(),
       creatorIndex,
       expectedOut: tokens,
+      ...(route ? { quoteMint: route.asset.mint.toBase58(), quoteUnits: units, ...(quoteSource ? { quoteSource } : {}) } : {}),
     };
+  }
+
+  /** Quote units the vault holds (0 without an ATA). */
+  private async quoteStock(vault: PublicKey, route: PumpQuoteRoute): Promise<bigint> {
+    const ata = getAssociatedTokenAddressSync(route.asset.mint, vault, true, route.asset.tokenProgram);
+    const info = await this.rpc(() => this.connection.getAccountInfo(ata, "confirmed"));
+    return info ? unpackAccount(ata, info, route.asset.tokenProgram).amount : 0n;
+  }
+
+  /**
+   * Lamports to book for a quote-pair trade of `units` (same rules as the DBC adapter):
+   * buy with an in-tx leg -> the leg's SOL scaled to the units used; buy from stock ->
+   * pool A ExactOut cost now; sell -> pool A value now.
+   */
+  private async toLamports(tx: VersionedTransactionResponse, route: PumpQuoteRoute, units: bigint, kind: "buy" | "sell"): Promise<{ lamports: bigint; source: "stock" | "leg" }> {
+    if (kind === "buy") {
+      const leg = poolASwapLegs(tx, route.poolA.address).find((l) => l.outputAmount > 0n);
+      if (leg) return { lamports: (leg.inputAmount * units) / leg.outputAmount, source: "leg" };
+      const s = await route.poolA.load();
+      return { lamports: route.poolA.solForExactQuote(s, units), source: "stock" };
+    }
+    const s = await route.poolA.load();
+    return { lamports: route.poolA.solForQuote(s, units), source: "stock" };
+  }
+
+  /** SOL price / cap of a quote curve, converted at pool A's rate for 1 whole quote token. */
+  private marketOfRoute(st: CurveState, s: PoolAState): { priceSol: string; marketCapSol: string; priceQuote: string } {
+    const r = st.route!;
+    const qd = r.asset.decimals;
+    const q = priceAndCapIn(st.bondingCurve, st.decimals, qd);
+    const perQuote = r.poolA.solForQuote(s, 10n ** BigInt(qd));
+    const capLamports = (q.capUnits * perQuote) / 10n ** BigInt(qd);
+    const priceSol18 = (q.price18 * perQuote) / 1_000_000_000n;
+    return { priceSol: formatUnits(priceSol18, 18), marketCapSol: formatUnits(capLamports, 9), priceQuote: formatUnits(q.price18, 18) };
   }
 
   /**
@@ -437,10 +552,20 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     let tokenAmount = 0n;
     let solAmount = 0n;
     let creatorFee: bigint | null = 0n;
+    let quote: { quoteMint: string; quoteAmount: bigint; quoteSource: "stock" | "leg" } | null = null;
     if (ev) {
       tokenAmount = BigInt(ev.tokenAmount.toString(10));
       solAmount = tradeLamports(ev);
       creatorFee = creatorFeeOf(ev);
+      const route = this.routeOfEvent(ev);
+      if (route) {
+        const units = this.quoteUnitsMoved(tx, vaultPk, route, "buy");
+        const conv = await this.toLamports(tx, route, units, "buy").catch(() => null);
+        if (!conv) return null;
+        if (creatorFee !== null) creatorFee = units > 0n ? (conv.lamports * creatorFee) / units : 0n;
+        quote = { quoteMint: route.asset.mint.toBase58(), quoteAmount: units, quoteSource: conv.source };
+        solAmount = conv.lamports;
+      }
     } else {
       // No first buy, or the event did not decode: tokens from the vault's balance.
       tokenAmount = tokenDelta(tx, vaultPk, mint);
@@ -466,7 +591,28 @@ export class PumpFunAdapter implements LaunchpadAdapter {
       amountsKnown: true,
       fromEvent: ev !== undefined,
       creatorFee,
+      ...(quote ?? {}),
     };
+  }
+
+  /** Route of a TradeEvent's quote (null = SOL). */
+  private routeOfEvent(ev: { quoteMint?: PublicKey | null }): PumpQuoteRoute | null {
+    if (!ev.quoteMint) return null;
+    const q = normalizeQuoteMint(ev.quoteMint);
+    if (isLegacyQuoteMint(q)) return null;
+    return this.routesByMint.get(q.toBase58()) ?? null;
+  }
+
+  /**
+   * Quote units the curve took (buy) / paid (sell), from the vault's quote balance:
+   * buy = what an in-tx leg added minus the net change; sell = the net change.
+   */
+  private quoteUnitsMoved(tx: VersionedTransactionResponse, vault: PublicKey, route: PumpQuoteRoute, kind: "buy" | "sell"): bigint {
+    const d = tokenDelta(tx, vault, route.asset.mint);
+    if (kind === "sell") return d > 0n ? d : 0n;
+    const leg = poolASwapLegs(tx, route.poolA.address).find((l) => l.outputAmount > 0n);
+    const spent = (leg?.outputAmount ?? 0n) - d;
+    return spent > 0n ? spent : 0n;
   }
 
   async buy(mint: string, lamportsIn: bigint, minOut: bigint, opts: TradeOptions = {}): Promise<TxResult> {
@@ -493,13 +639,25 @@ export class PumpFunAdapter implements LaunchpadAdapter {
       this.loadParams(),
     ]);
     assertTradable(state.bondingCurve, mint);
+    const route = this.routeOfQuote(state.quoteMint);
 
-    const expected = quoteBuy(global, feeConfig, state.bondingCurve, toBig(state.curveBaseTokenBalance), lamportsIn);
+    // Non-SOL curve: lamports -> quote units on pool A; stock first, in-tx leg as fallback.
+    let units = lamportsIn;
+    let pre: TransactionInstruction[] = [];
+    let quoteSource: "stock" | "leg" | undefined;
+    if (route) {
+      const s = await route.poolA.load();
+      units = pumpMargin(route.poolA.quoteForSol(s, lamportsIn));
+      if (units <= 0n) throw new AdapterError("slippage", "buy too small for the quote token");
+      quoteSource = (await this.quoteStock(vault.publicKey, route)) >= units ? "stock" : "leg";
+      if (quoteSource === "leg") pre = await route.poolA.buyQuoteExactOut(vault.publicKey, s, units, lamportsIn);
+    }
+    const expected = quoteBuy(global, feeConfig, state.bondingCurve, toBig(state.curveBaseTokenBalance), units);
     if (expected < minOut) {
       throw new AdapterError("slippage", `quote ${expected} < minOut ${minOut}`);
     }
     const rent = state.associatedUserAccountInfo ? 0n : ACCUMULATOR_RENT_HEADROOM + (await this.ataRent());
-    await this.requireSol(vault.publicKey, lamportsIn + rent);
+    await this.requireSol(vault.publicKey, (quoteSource === "stock" ? 0n : lamportsIn) + rent);
 
     const ixs = await PUMP_SDK.buyExactQuoteInV3Instructions({
       bondingCurve: state.bondingCurve,
@@ -507,13 +665,20 @@ export class PumpFunAdapter implements LaunchpadAdapter {
       mint: mintPk,
       user: vault.publicKey,
       amount: toBN(minOut), // slippage 0 => min_tokens_out = max(minOut, 1)
-      quoteAmount: toBN(lamportsIn), // spendable_quote_in, fees included
+      quoteAmount: toBN(units), // spendable_quote_in, fees included (lamports, or quote units on a quote curve)
       slippage: 0,
       tokenProgram: mi.tokenProgram,
       quoteTokenProgram: state.quoteTokenProgram,
     });
-    const signed = await this.sign(ixs, vault, CU_TRADE);
-    return { ...signed, kind: "buy", mint, vault: vault.publicKey.toBase58(), expectedOut: expected };
+    const signed = await this.sign([...pre, ...ixs], vault, route ? CU_TRADE_PUMP_QUOTE : CU_TRADE);
+    return {
+      ...signed,
+      kind: "buy",
+      mint,
+      vault: vault.publicKey.toBase58(),
+      expectedOut: expected,
+      ...(route ? { quoteMint: route.asset.mint.toBase58(), quoteUnits: units, ...(quoteSource ? { quoteSource } : {}) } : {}),
+    };
   }
 
   /** Pre-checks (curve, vault holdings, quote vs minLamports) and signs a sell. Sends nothing. */
@@ -537,25 +702,35 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     assertTradable(state.bondingCurve, mint);
     const held = ataInfo ? unpackAccount(ata, ataInfo, mi.tokenProgram).amount : 0n;
     if (held < amount) throw new AdapterError("insufficient_tokens", `vault holds ${held} < ${amount}`);
+    const route = this.routeOfQuote(state.quoteMint);
 
-    const expected = quoteSell(global, feeConfig, state.bondingCurve, amount);
+    const outUnits = quoteSell(global, feeConfig, state.bondingCurve, amount);
+    // Non-SOL curve: proceeds stay as quote STOCK (the scheduled stock job sells excess);
+    // min lamports -> min quote units on pool A.
+    let expected = outUnits;
+    let minUnits = minLamports;
+    if (route) {
+      const s = await route.poolA.load();
+      expected = route.poolA.solForQuote(s, outUnits);
+      minUnits = minLamports > 0n ? route.poolA.quoteForSol(s, minLamports) : 0n;
+    }
     if (expected < minLamports) {
       throw new AdapterError("slippage", `quote ${expected} < minLamports ${minLamports}`);
     }
-    await this.requireSol(vault.publicKey, 0n);
+    await this.requireSol(vault.publicKey, route ? 2_100_000n : 0n);
 
     const ixs = await PUMP_SDK.sellV3Instructions({
       bondingCurve: state.bondingCurve,
       mint: mintPk,
       user: vault.publicKey,
       amount: toBN(amount),
-      quoteAmount: toBN(minLamports), // slippage 0 => min_sol_output = minLamports
+      quoteAmount: toBN(minUnits), // slippage 0 => min output = minUnits
       slippage: 0,
       tokenProgram: mi.tokenProgram,
       quoteTokenProgram: state.quoteTokenProgram,
     });
-    const signed = await this.sign(ixs, vault, CU_TRADE);
-    return { ...signed, kind: "sell", mint, vault: vault.publicKey.toBase58(), expectedOut: expected };
+    const signed = await this.sign(ixs, vault, route ? CU_TRADE_PUMP_QUOTE : CU_TRADE);
+    return { ...signed, kind: "sell", mint, vault: vault.publicKey.toBase58(), expectedOut: expected, ...(route ? { quoteMint: route.asset.mint.toBase58() } : {}) };
   }
 
   /**
@@ -627,11 +802,10 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     const [curveInfo, ataInfo] = await this.rpc(() => this.connection.getMultipleAccountsInfo([curvePda, curveAta]));
     if (!curveInfo) throw new AdapterError("not_found", `no pump.fun bonding curve for ${mint.toBase58()}`);
     const bondingCurve = PUMP_SDK.decodeBondingCurve(curveInfo);
-    if (!isLegacyQuoteMint(normalizeQuoteMint(bondingCurve.quoteMint))) {
-      throw new AdapterError("bad_request", "only SOL-quoted pump.fun curves are supported");
-    }
+    // SOL curves, or a quote this adapter serves (with a pool A); anything else is refused.
+    const route = this.routeOfQuote(bondingCurve.quoteMint);
     const curveBaseTokenBalance = ataInfo ? unpackAccount(curveAta, ataInfo, mi.tokenProgram).amount : 0n;
-    return { ...mi, bondingCurve, curveBaseTokenBalance };
+    return { ...mi, bondingCurve, curveBaseTokenBalance, route };
   }
 
   private ataRentCache: bigint | null = null;
@@ -744,6 +918,31 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     const ev = extractTradeEvents(tx, PUMP_PROGRAM_ID).find((e) => e.mint.equals(mi.mint) && e.user.equals(vault));
     let tokenAmount: bigint;
     let solAmount: bigint;
+    const route = ev ? this.routeOfEvent(ev) : null;
+    if (ev && route && kind !== "create") {
+      // Quote curve: units from the vault's quote balance (+ leg), booked in lamports.
+      const units = this.quoteUnitsMoved(tx, vault, route, kind);
+      const conv = await this.toLamports(tx, route, units, kind).catch(() => null);
+      if (!conv) return null;
+      return {
+        venue: this.id,
+        kind,
+        signature,
+        slot: tx.slot,
+        mint: mi.mint.toBase58(),
+        vault: vault.toBase58(),
+        tokenAmount: BigInt(ev.tokenAmount.toString(10)),
+        solAmount: conv.lamports,
+        networkFee: fee,
+        blockTime: tx.blockTime ?? null,
+        decimals: mi.decimals,
+        amountsKnown: true,
+        fromEvent: true,
+        quoteMint: route.asset.mint.toBase58(),
+        quoteAmount: units,
+        ...(kind === "buy" ? { quoteSource: conv.source } : {}),
+      };
+    }
     if (ev) {
       // Executed amounts straight from the program's TradeEvent.
       tokenAmount = BigInt(ev.tokenAmount.toString(10));
@@ -789,6 +988,10 @@ export class PumpFunAdapter implements LaunchpadAdapter {
   /** Public price / market cap / status of a mint right now (for the tokens table). */
   async market(mint: string): Promise<{ priceSol: string; marketCapSol: string; status: CurveStatus }> {
     const st = await this.loadCurve(parseMint(mint));
+    if (st.route) {
+      const m = this.marketOfRoute(st, await st.route.poolA.load());
+      return { priceSol: m.priceSol, marketCapSol: m.marketCapSol, status: curveStatus(st.bondingCurve) };
+    }
     return { ...priceAndCap(st.bondingCurve, st.decimals), status: curveStatus(st.bondingCurve) };
   }
 
@@ -857,6 +1060,45 @@ async function createIxs(
   // slippage 0: the first buy may cost at most exactly initialBuyLamports.
   const ixs = await PUMP_SDK.createV2AndBuyV2Instructions({ global, ...common, amount, quoteAmount, slippage: 0 });
   return { ixs, tokens: toBig(amount) };
+}
+
+/** create_v2 (+ first buy of `units` quote units) for a non-SOL quote mint. */
+async function createQuoteIxs(
+  global: Global,
+  feeConfig: FeeConfig,
+  meta: TokenMeta,
+  mint: PublicKey,
+  user: PublicKey,
+  creator: PublicKey,
+  units: bigint,
+  quote: Pick<QuoteAsset, "mint" | "tokenProgram">,
+): Promise<{ ixs: TransactionInstruction[]; tokens: bigint }> {
+  // One creator fee rate for every launch: quotes outside Global's whitelist (QuoteControl, e.g. ZEC)
+  // take an explicit rate at create; we set the schedule's own creator rate there.
+  const whitelisted = global.whitelistedQuoteMints?.some((m) => m.equals(quote.mint)) ?? false;
+  const creatorFeeBps = !whitelisted && global.creatorFeeConfigurable ? toBN(BigInt(PUMP_QUOTE_CREATOR_FEE_BPS)) : undefined;
+  const common = {
+    mint, name: meta.name, symbol: meta.symbol, uri: meta.uri, creator, user, mayhemMode: false, quoteMint: quote.mint, quoteTokenProgram: quote.tokenProgram,
+    ...(creatorFeeBps ? { creatorFeeBps } : {}),
+  };
+  if (units === 0n) return { ixs: [await PUMP_SDK.createV2Instruction(common)], tokens: 0n };
+  const amount = getBuyTokenAmountFromSolAmount({ global, feeConfig, mintSupply: null, bondingCurve: null, amount: toBN(units), quoteMint: quote.mint, ...(creatorFeeBps ? { creatorFeeBps } : {}) });
+  const ixs = await PUMP_SDK.createV2AndBuyV2Instructions({ global, ...common, amount, quoteAmount: toBN(units), slippage: 0 });
+  return { ixs, tokens: toBig(amount) };
+}
+
+/** Lamports -> quote units with the leg margin (pool A drift between quote and landing). */
+export function pumpMargin(units: bigint): bigint {
+  return (units * (10_000n - PUMP_QUOTE_MARGIN_BPS)) / 10_000n;
+}
+
+/** Spot price (quote per whole token, 18 digits) and cap (quote units) of a quote curve. */
+export function priceAndCapIn(curve: BondingCurve, decimals: number, quoteDecimals: number): { price18: bigint; capUnits: bigint } {
+  const vq = toBig(curve.virtualQuoteReserves);
+  const vt = toBig(curve.virtualTokenReserves);
+  const supply = toBig(curve.tokenTotalSupply);
+  if (vt === 0n) return { price18: 0n, capUnits: 0n };
+  return { price18: (vq * 10n ** BigInt(decimals) * 10n ** 18n) / (vt * 10n ** BigInt(quoteDecimals)), capUnits: (vq * supply) / vt };
 }
 
 export function curveStatus(curve: BondingCurve): CurveStatus {

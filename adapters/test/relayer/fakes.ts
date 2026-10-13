@@ -78,6 +78,7 @@ export class FakeExecutor implements JobExecutor {
     if (spec.kind === "withdraw" || spec.kind === "sell") return { minSol: 1n, mint: spec.mint, minTokens: spec.amount };
     if (spec.kind === "attest" || spec.kind === "fund_vaults") return { minSol: 0n };
     if (spec.kind === "consolidate") return { minSol: 1n, only: spec.from };
+    if (spec.kind === "fund_quote") return { minSol: 1n, only: spec.vault };
     return { minSol: spec.lamportsIn };
   }
 
@@ -145,6 +146,9 @@ export class FakeExecutor implements JobExecutor {
     }
     if (spec.kind === "fund_vaults") {
       return { kind: "fund_vaults", signature: a.signature, slot: 1, vault: a.vault, lamports: spec.lamports, networkFee: 5_000n, blockTime: 1 };
+    }
+    if (spec.kind === "fund_quote") {
+      return { kind: "fund_quote", signature: a.signature, slot: 1, vault: a.vault, quoteMint: "Q", quoteDelta: 5n, lamports: 9n, networkFee: 5_000n };
     }
     if (spec.kind === "consolidate") {
       return { kind: "consolidate", signature: a.signature, slot: 1, vault: a.vault, mint: spec.mint, to: spec.to, tokenAmount: 777n, networkFee: 5_000n };

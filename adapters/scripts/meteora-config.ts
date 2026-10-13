@@ -3,6 +3,8 @@
  *
  *   pnpm meteora:config            # dry run: prints parameters, validates them
  *   pnpm meteora:config --send     # creates the config account
+ *   pnpm meteora:config --quote USDC [--send]   # non-SOL pair: one config per quote mint
+ *     (same curve shape, fees and creator share in quote units: start 3 000, graduation 44 088)
  *
  * - curve / fees: `unzeenDbcConfigParameters()` (pump.fun-equivalent curve,
  *   1 % fee in SOL, partner share to the pool, 100 % LP locked after DAMM v2);
@@ -22,7 +24,8 @@ import { Keypair, LAMPORTS_PER_SOL, SystemProgram } from "@solana/web3.js";
 import { describeConfig, explorerAddressUrl, explorerTxUrl, loadConfig, makeConnection } from "../src/config";
 import { loadRepoEnv, redactSecrets } from "../src/env";
 import { formatUnits } from "../src/math";
-import { UNZEEN_DBC_CURVE, dbcConfigAddress, derivePartnerKeypair, unzeenDbcConfigParameters } from "../src/meteora";
+import { UNZEEN_DBC_CURVE, UNZEEN_DBC_CURVE_USD, dbcConfigAddress, derivePartnerKeypair, unzeenDbcConfigParameters } from "../src/meteora";
+import { quoteAssets } from "../src/pool-a";
 import { priorityFeeCacheFromConfig } from "../src/fees";
 import { FEE_ESTIMATE_PROGRAMS, openKeys } from "../src/relayer/runtime";
 import { txPipeline } from "../src/sender";
@@ -41,20 +44,27 @@ const sol = (l: bigint) => `${formatUnits(l, 9)} SOL`;
 
 async function main(): Promise<void> {
   console.log(describeConfig(cfg));
-  const params = unzeenDbcConfigParameters();
-  console.log(
+  const qi = process.argv.indexOf("--quote");
+  const sym = qi >= 0 ? process.argv[qi + 1]?.toUpperCase() : undefined;
+  const asset = sym ? quoteAssets(cfg.cluster).find((a) => a.symbol === sym) : undefined;
+  if (sym && !asset) throw new Error(`unknown quote ${sym} on ${cfg.cluster}`);
+  const quoteMint = asset ? asset.mint : NATIVE_MINT;
+  const params = unzeenDbcConfigParameters(asset ?? null);
+  if (asset) {
+    console.log(`quote ${asset.symbol} ${asset.mint.toBase58()} (${asset.decimals} decimals): start mcap ${UNZEEN_DBC_CURVE_USD.initialMarketCap}, graduation mcap ${UNZEEN_DBC_CURVE_USD.migrationMarketCap}, threshold ${formatUnits(BigInt(params.migrationQuoteThreshold.toString()), asset.decimals)} ${asset.symbol}`);
+  } else console.log(
     `curve: supply ${UNZEEN_DBC_CURVE.totalTokenSupply}, start mcap ${UNZEEN_DBC_CURVE.initialMarketCapSol} SOL, ` +
       `graduation at ${sol(BigInt(params.migrationQuoteThreshold.toString()))} raised (mcap ${UNZEEN_DBC_CURVE.migrationMarketCapSol} SOL), ` +
       `fee ${UNZEEN_DBC_CURVE.feeBps} bps (creator ${UNZEEN_DBC_CURVE.creatorTradingFeePercentage} % of the non-protocol part)`,
   );
-  const existing = dbcConfigAddress(cfg.cluster);
+  const existing = asset ? asset.dbcConfig : dbcConfigAddress(cfg.cluster);
   if (existing) console.log(`note: a config is already configured for ${cfg.cluster}: ${existing.toBase58()}`);
 
   const keys = await openKeys(cfg, process.env, (m) => console.log(`  WARN ${m}`));
   const partner = derivePartnerKeypair(keys.creatorSeed);
   console.log(`partner (fee claimer): ${partner.publicKey.toBase58()}`);
   // Throws with the reason when the SDK rejects the parameters.
-  validateConfigParameters({ ...params, leftoverReceiver: partner.publicKey, quoteMint: NATIVE_MINT } as Parameters<typeof validateConfigParameters>[0]);
+  validateConfigParameters({ ...params, leftoverReceiver: partner.publicKey, quoteMint } as Parameters<typeof validateConfigParameters>[0]);
   console.log("parameters: valid");
   if (!process.argv.includes("--send")) {
     console.log("dry run (add --send to create the config)");
@@ -86,7 +96,7 @@ async function main(): Promise<void> {
     config: configKp.publicKey,
     feeClaimer: partner.publicKey,
     leftoverReceiver: partner.publicKey,
-    quoteMint: NATIVE_MINT,
+    quoteMint,
     payer: partner.publicKey,
   });
   const signed = await signTx(conn, tx.instructions, partner, [configKp], prefix);
@@ -94,7 +104,7 @@ async function main(): Promise<void> {
   console.log(`config created: ${configKp.publicKey.toBase58()}`);
   console.log(`  tx      ${explorerTxUrl(signed.signature, cfg.cluster)}`);
   console.log(`  account ${explorerAddressUrl(configKp.publicKey.toBase58(), cfg.cluster)}`);
-  console.log(`set METEORA_DBC_CONFIG_DEVNET=${configKp.publicKey.toBase58()}`);
+  console.log(`set METEORA_DBC_CONFIG_DEVNET${asset ? `_${asset.symbol}` : ""}=${configKp.publicKey.toBase58()}`);
 }
 
 main()

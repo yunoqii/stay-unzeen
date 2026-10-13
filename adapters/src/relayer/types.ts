@@ -40,6 +40,8 @@ export interface CreateJobSpec {
   meta: { name: string; symbol: string; image?: string | null };
   /** First buy, lamports (venue fees included); 0 = create only. */
   lamportsIn: bigint;
+  /** Non-SOL pair (core `meta.quote`, e.g. "USDC"); absent = SOL. */
+  quote?: string;
   /** Minimum tokens of the first buy. */
   minOut: bigint;
 }
@@ -104,7 +106,18 @@ export interface ConsolidateJobSpec {
   to: string;
 }
 
-export type JobSpec = BuyJobSpec | SellJobSpec | CreateJobSpec | WithdrawJobSpec | FairCreateJobSpec | AttestJobSpec | FundVaultsJobSpec | ConsolidateJobSpec;
+/**
+ * PROPOSED `fund_quote`: keep vault `vault`'s stock of quote `quote` (symbol)
+ * within its policy by ONE pool-A swap (src/relayer/quote-stock.ts).
+ */
+export interface FundQuoteJobSpec {
+  kind: "fund_quote";
+  /** Quote MINT (base58); a symbol only when unique on the network. */
+  quote: string;
+  vault: string;
+}
+
+export type JobSpec = BuyJobSpec | SellJobSpec | CreateJobSpec | WithdrawJobSpec | FairCreateJobSpec | AttestJobSpec | FundVaultsJobSpec | ConsolidateJobSpec | FundQuoteJobSpec;
 export type JobKind = JobSpec["kind"];
 
 /**
@@ -190,6 +203,9 @@ export interface TradeExecution {
   symbol: string | null;
   /** Public market snapshot after the trade (tokens table); null if unreadable. */
   market: { priceSol: string; marketCapSol: string; status: "curve" | "graduated" } | null;
+  /** Non-SOL pair: quote mint and units moved (feed only; `solAmount` stays lamports). */
+  quoteMint?: string;
+  quoteAmount?: bigint;
 }
 
 export interface WithdrawExecution {
@@ -229,6 +245,9 @@ export interface CreateExecution {
   market: { priceSol: string; marketCapSol: string; status: "curve" | "graduated" } | null;
   /** RELAYER v6 `out_creator_fee` (0013): creator fee of this launch tx; null = unknown (core estimates). */
   creatorFee?: bigint | null;
+  /** Non-SOL pair: quote mint and units of the first buy (feed only). */
+  quoteMint?: string;
+  quoteAmount?: bigint;
   /**
    * Fair-launch v2 bundle: the other legs that landed (each a buy with its own
    * signature, one feed row each). `tokenAmount` / `solAmount` / `networkFee` /
@@ -281,8 +300,21 @@ export interface ConsolidateExecution {
   networkFee: bigint;
 }
 
+/** fund_quote: `signature` null = stock already within bounds (nothing sent). */
+export interface FundQuoteExecution {
+  kind: "fund_quote";
+  signature: string | null;
+  slot: number | null;
+  vault: string;
+  quoteMint: string;
+  /** +units bought / -units sold. */
+  quoteDelta: bigint;
+  lamports: bigint;
+  networkFee: bigint;
+}
+
 /** fair_create executes like create (same feed rows); `CreateExecution.mint` = pubkey of `mint_secret`. */
-export type Execution = TradeExecution | CreateExecution | WithdrawExecution | AttestExecution | FundExecution | ConsolidateExecution;
+export type Execution = TradeExecution | CreateExecution | WithdrawExecution | AttestExecution | FundExecution | ConsolidateExecution | FundQuoteExecution;
 
 export type JobResult =
   /** Done on chain; amounts are the executed ones. */

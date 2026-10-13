@@ -42,7 +42,7 @@ export interface PostgresJobQueueOptions {
 
 const OPS = ["buy", "sell", "create", "transfer"] as const;
 /** RELAYER v3 (core 0008): taken only when relayer_jobs has the v3 columns. */
-const OPS_V3 = [...OPS, "fair_create", "attest", "fund_vaults", "consolidate"] as const; // v7 ops: absent rows simply never match
+const OPS_V3 = [...OPS, "fair_create", "attest", "fund_vaults", "consolidate", "fund_quote"] as const; // v7 ops: absent rows simply never match
 
 /** Row of relayer_jobs as returned by `claim` (pg returns BIGINT as string). */
 export interface JobRow {
@@ -418,6 +418,30 @@ export class PostgresJobQueue implements JobQueue {
       if (res.rowCount !== 1) throw new LeaseLostError(job.id);
       return;
     }
+    if (e.kind === "fund_quote") {
+      // PROPOSED: out_token_amount = |quote units moved|, out_lamports = |lamports moved| (direction in error_message is not used).
+      const abs = (x: bigint) => (x < 0n ? -x : x);
+      if (e.signature === null) {
+        const res = await this.pool.query(
+          `UPDATE relayer_jobs SET status = 'confirmed', vault = $2, out_token_amount = 0, out_lamports = 0, network_fee = 0, updated_at = now()
+            WHERE id = $1 AND status IN ('claimed', 'sent') AND claimed_by = $3 AND settled_at IS NULL`,
+          [job.id, e.vault, job.leaseId],
+        ).catch(async (err: { code?: string }) => {
+          if (err.code !== "23514") throw err;
+          await this.reportResult(job, { status: "failed", code: "not_found", message: "stock within bounds" });
+          return { rowCount: 1 };
+        });
+        if (res.rowCount !== 1) throw new LeaseLostError(job.id);
+        return;
+      }
+      const res = await this.pool.query(
+        `UPDATE relayer_jobs SET status = 'confirmed', slot = $2, out_token_amount = $3, out_lamports = $4, network_fee = $5, updated_at = now()
+          WHERE id = $1 AND status = 'sent' AND signature = $6 AND claimed_by = $7 AND settled_at IS NULL`,
+        [job.id, e.slot, abs(e.quoteDelta).toString(), e.lamports.toString(), e.networkFee.toString(), e.signature, job.leaseId],
+      );
+      if (res.rowCount !== 1) throw new LeaseLostError(job.id);
+      return;
+    }
     if (e.kind === "consolidate") {
       if (e.signature !== null) {
         const res = await this.pool.query(
@@ -584,12 +608,16 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
         throw new Error(`job ${row.id}: meta.name / meta.symbol missing`);
       }
       if (m.image !== undefined && m.image !== null && typeof m.image !== "string") throw new Error(`job ${row.id}: bad meta.image`);
+      // Non-SOL pair (proposed contract): meta.quote = "USDC" | "USD1"; absent / "SOL" = SOL.
+      const q = (m as { quote?: unknown }).quote;
+      if (q !== undefined && q !== null && (typeof q !== "string" || !/^[A-Z0-9]{2,10}$/.test(q))) throw new Error(`job ${row.id}: bad meta.quote`);
       return {
         kind: "create",
         venue: venue(row),
         meta: { name: m.name, symbol: m.symbol, ...(typeof m.image === "string" ? { image: m.image } : {}) },
         lamportsIn: row.lamports_in === null ? 0n : big(row.lamports_in, "lamports_in"),
         minOut: row.min_out === null ? 0n : big(row.min_out, "min_out"),
+        ...(typeof q === "string" && q !== "SOL" ? { quote: q } : {}),
       };
     }
     case "fair_create": {
@@ -638,6 +666,13 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
       if (!row.dest || !isPubkey(row.dest)) throw new Error(`job ${row.id}: dest missing`);
       if (from === row.dest) throw new Error(`job ${row.id}: from = dest`);
       return { kind: "consolidate", mint, from, to: row.dest };
+    }
+    case "fund_quote": {
+      // PROPOSED op: meta = {"quote": "<quote mint>" (or a unique symbol), "vault": "<vault address>"}.
+      const m = row.meta as { quote?: unknown; vault?: unknown } | null | undefined;
+      if (!m || typeof m.quote !== "string" || !(/^[A-Z0-9]{2,10}$/.test(m.quote) || isPubkey(m.quote))) throw new Error(`job ${row.id}: meta.quote missing`);
+      if (typeof m.vault !== "string" || !isPubkey(m.vault)) throw new Error(`job ${row.id}: meta.vault must be a vault address`);
+      return { kind: "fund_quote", quote: m.quote, vault: m.vault };
     }
     case "transfer": {
       const mint = needMint();

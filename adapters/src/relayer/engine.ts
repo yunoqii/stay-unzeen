@@ -54,6 +54,8 @@ export interface Executors {
   fund?: JobExecutor;
   /** RELAYER v7 consolidate (leg vault -> mint's vault); absent = fail unsigned. */
   consolidate?: JobExecutor;
+  /** PROPOSED fund_quote (quote stock of one vault via pool A); absent = fail unsigned. */
+  quoteStock?: JobExecutor;
 }
 
 export interface RelayerOptions {
@@ -203,7 +205,7 @@ export class Relayer {
     if (spec.kind === "create") return { req: { ...req, load: await mv.load() }, pinFor: null };
     // attest / fund_vaults sign with their own key; consolidate is pinned to its leg vault
     // (`only: from` from the executor), NOT to the mint's vault (that is the recipient).
-    if (spec.kind === "attest" || spec.kind === "fund_vaults" || spec.kind === "consolidate") return { req, pinFor: null };
+    if (spec.kind === "attest" || spec.kind === "fund_vaults" || spec.kind === "consolidate" || spec.kind === "fund_quote") return { req, pinFor: null };
     if (spec.kind === "fair_create") {
       // The mint is fixed by core and identical on every attempt: a retry must
       // use the vault the first attempt pinned (D4), like a buy of a known mint.
@@ -227,6 +229,10 @@ export class Relayer {
     if (spec.kind === "consolidate") {
       if (!this.o.executors.consolidate) throw new AdapterError("venue_unavailable", "consolidation not configured");
       return this.o.executors.consolidate;
+    }
+    if (spec.kind === "fund_quote") {
+      if (!this.o.executors.quoteStock) throw new AdapterError("venue_unavailable", "quote stock not configured");
+      return this.o.executors.quoteStock;
     }
     if (spec.kind === "attest") {
       if (!this.o.executors.attest) throw new AdapterError("venue_unavailable", "no attestation key configured");

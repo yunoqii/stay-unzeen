@@ -11,6 +11,7 @@ import { DEFAULT_GAS_DROP, pickGasDrop, type GasDropRange, type Rng } from "./ra
 import type { Execution, JobSpec, SentAttempt } from "./types";
 import type { VaultInventory, VaultRequest } from "./vaults";
 import type { VaultFunder } from "../rebalance";
+import type { QuoteStocker } from "./quote-stock";
 
 /** Headroom on top of the traded lamports: ATA + accumulator rent + fees. */
 const BUY_SOL_HEADROOM = 5_000_000n;
@@ -132,7 +133,10 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
         if (!this.metadata) throw new AdapterError("venue_unavailable", "no metadata store configured");
         // Content-addressed: a retried job publishes to the same URIs.
         const { uri } = await this.metadata.publish(spec.meta);
-        return this.adapter.prepareCreate({ name: spec.meta.name, symbol: spec.meta.symbol, uri }, spec.lamportsIn, spec.minOut, { vault });
+        return this.adapter.prepareCreate({ name: spec.meta.name, symbol: spec.meta.symbol, uri }, spec.lamportsIn, spec.minOut, {
+          vault,
+          ...(spec.quote ? { quote: spec.quote } : {}),
+        });
       }
       case "fair_create": {
         if (!this.metadata) throw new AdapterError("venue_unavailable", "no metadata store configured");
@@ -178,10 +182,13 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
         imageUrl,
         market: await this.adapter.market(r.mint).catch(() => null),
         creatorFee: r.creatorFee ?? null,
+        ...(r.quoteMint && r.quoteAmount !== undefined ? { quoteMint: r.quoteMint, quoteAmount: r.quoteAmount } : {}),
       };
     }
     const r = await this.adapter.tradeResult(spec.kind, a.signature, a.vault, spec.mint);
     if (!r || !r.amountsKnown) return null;
+    // A quote-pair buy from stock is valued on pool A at read time: never book more than the job's lamports.
+    const solAmount = spec.kind === "buy" && r.quoteMint && r.solAmount > spec.lamportsIn ? spec.lamportsIn : r.solAmount;
     return {
       kind: spec.kind,
       signature: r.signature,
@@ -189,7 +196,8 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
       vault: r.vault,
       mint: r.mint,
       tokenAmount: r.tokenAmount,
-      solAmount: r.solAmount,
+      solAmount,
+      ...(r.quoteMint && r.quoteAmount !== undefined ? { quoteMint: r.quoteMint, quoteAmount: r.quoteAmount } : {}),
       networkFee: r.networkFee,
       decimals: r.decimals,
       fromEvent: r.fromEvent === true,
@@ -364,5 +372,49 @@ export class ConsolidateExecutor implements JobExecutor<Extract<JobSpec, { kind:
   }
   classify(err: unknown, logs: readonly string[] | null = null): AdapterError {
     return this.withdrawer.classify(err, logs);
+  }
+}
+
+/** PROPOSED `fund_quote`: one pool-A swap keeping `vault`'s quote stock within policy. */
+export class FundQuoteExecutor implements JobExecutor<Extract<JobSpec, { kind: "fund_quote" }>> {
+  /** By quote MINT: symbols are ambiguous (devnet USDC of pump.fun != DBC/LaunchLab's). */
+  private readonly by: Map<string, QuoteStocker>;
+  constructor(stockers: readonly QuoteStocker[]) {
+    this.by = new Map(stockers.map((s) => [s.asset.mint.toBase58(), s]));
+  }
+  private of(spec: Extract<JobSpec, { kind: "fund_quote" }>): QuoteStocker {
+    const s = this.by.get(spec.quote) ?? (() => {
+      const bySym = [...this.by.values()].filter((x) => x.asset.symbol === spec.quote);
+      return bySym.length === 1 ? bySym[0] : undefined;
+    })();
+    if (!s) throw new AdapterError("venue_unavailable", `no (unique) quote stock route for ${spec.quote}`);
+    return s;
+  }
+  vaultRequest(spec: Extract<JobSpec, { kind: "fund_quote" }>): VaultRequest {
+    return { minSol: FEE_SOL_HEADROOM, only: spec.vault };
+  }
+  async noop(spec: Extract<JobSpec, { kind: "fund_quote" }>, vault: Signer): Promise<Execution | null> {
+    const st = this.of(spec);
+    if (await st.action(vault.publicKey)) return null;
+    return { kind: "fund_quote", signature: null, slot: null, vault: spec.vault, quoteMint: st.asset.mint.toBase58(), quoteDelta: 0n, lamports: 0n, networkFee: 0n };
+  }
+  async prepare(spec: Extract<JobSpec, { kind: "fund_quote" }>, vault: Signer): Promise<SignedTx> {
+    const p = await this.of(spec).prepare(vault);
+    if (!p) throw new AdapterError("bad_request", "stock within bounds");
+    return p;
+  }
+  async submit(tx: SignedTx): Promise<void> {
+    const st = [...this.by.values()][0];
+    if (!st) throw new AdapterError("venue_unavailable", "no quote stock route");
+    await st.submit(tx); // sending does not depend on the quote
+  }
+  async result(spec: Extract<JobSpec, { kind: "fund_quote" }>, a: SentAttempt): Promise<Execution | null> {
+    const r = await this.of(spec).result(a.signature, a.vault);
+    if (!r) return null;
+    return { kind: "fund_quote", signature: r.signature, slot: r.slot, vault: r.vault, quoteMint: r.quoteMint, quoteDelta: r.quoteDelta, lamports: r.lamports, networkFee: r.networkFee };
+  }
+  classify(err: unknown, logs: readonly string[] | null = null): AdapterError {
+    const st = [...this.by.values()][0];
+    return st ? st.classify(err, logs) : err instanceof AdapterError ? err : new AdapterError("internal", String(err));
   }
 }

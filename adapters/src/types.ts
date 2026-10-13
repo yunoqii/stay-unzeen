@@ -49,6 +49,16 @@ export interface TxResult {
   /** create only: HD index the creator was derived from (to claim fees later). */
   creatorIndex?: number;
   decimals: number;
+  /**
+   * Non-SOL pair (lead 13.10): the pool's quote mint and the quote units the
+   * trade moved (feed / UI only). `solAmount` stays the LAMPORT value the
+   * ledger books: the SOL of the in-tx swap leg when there was one, else the
+   * quote valued on the pinned pool A at the time the result is read.
+   */
+  quoteMint?: string;
+  quoteAmount?: bigint;
+  /** How the quote was sourced on a buy: the vault's stock or the in-tx swap leg (fallback). */
+  quoteSource?: "stock" | "leg";
 }
 
 export interface Quote {
@@ -65,6 +75,9 @@ export interface Quote {
   marketCapSol: string;
   status: CurveStatus;
   decimals: number;
+  /** Non-SOL pair: quote mint and spot price in quote per 1 whole token (decimal string). */
+  quoteMint?: string;
+  priceQuote?: string;
 }
 
 /**
@@ -87,6 +100,8 @@ export interface CreateOptions extends TradeOptions {
    * a fresh one per call.
    */
   mintKeypair?: Keypair;
+  /** Non-SOL pair: quote symbol of the launch (e.g. "USDC"); default SOL. */
+  quote?: string;
 }
 
 /** docs/ARCHITECTURE.md "Адаптер", with an optional trailing options arg. */
