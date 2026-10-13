@@ -790,7 +790,7 @@ function isPubkey(s: string): boolean {
 }
 
 function venue(row: JobRow): VenueId {
-  if (row.venue === "pumpfun" || row.venue === "meteora-dbc" || row.venue === "jupiter" || row.venue === "raydium-launchlab" || row.venue === "memefun" || row.venue === "bags") return row.venue;
+  if (row.venue === "pumpfun" || row.venue === "meteora-dbc" || row.venue === "jupiter" || row.venue === "raydium-launchlab" || row.venue === "bags") return row.venue;
   throw new Error(`job ${row.id}: bad venue`);
 }
 

@@ -17,7 +17,8 @@ import {
 import { verifyDetached } from "./ed25519";
 import { AdapterError } from "./errors";
 import { slip10DerivePath, type CreatorKeyring } from "./keys";
-import { DBC_PROGRAM_ID, dbcInitEvents, type MeteoraDbcAdapter } from "./meteora";
+import { DBC_PROGRAM_ID, dbcCoder, dbcInitEvents, type MeteoraDbcAdapter } from "./meteora";
+import { dbcLaunchCurve, type LaunchCurve } from "./relayer/launch-curves";
 import { parseMetaplexMetadata } from "./intel/metrics";
 import type { JupiterAdapter } from "./jupiter";
 import type { CreateResult, PreparedCreate, PreparedTrade } from "./pumpfun";
@@ -61,6 +62,13 @@ export const BAGS_FEE_SHARE_V2 = new PublicKey("FEE2tBhCKAt7shrod19QttSVREUYPiyM
 /** API auth key and launch-wallet funder: own HD branches of the creator master seed (never vaults/creators). */
 export const BAGS_AUTH_PATH = [44, 501, 0x7ffffffd, 5] as const;
 export const BAGS_FUNDER_PATH = [44, 501, 0x7ffffffd, 6] as const;
+/**
+ * Bags' shared DBC config of current launches (mainnet 13.10, `ArBv9x…`): the curve written to
+ * `launch_curves` (venue bags) so core can bound the first buy. BAGS_CURVE_CONFIG overrides; a
+ * launch Bags puts under ANOTHER config is refused (core's min_out would be for the wrong curve).
+ */
+export const BAGS_CURVE_CONFIG = new PublicKey("ArBv9xEPQsqeKpKiGc6HqJmDT3hKzhLKQvjkHk8ZMbiQ");
+
 /** Default config type: 1 % pre-migration fee, 0.25 % after (docs: `a7c8e1f2…`); BAGS_CONFIG_TYPE overrides. */
 export const BAGS_DEFAULT_CONFIG_TYPE = "a7c8e1f2-3d4b-5a6c-9e0f-1b2c3d4e5f6a";
 
@@ -381,6 +389,8 @@ export interface BagsAdapterOptions {
   limits?: BagsCheckLimits;
   /** Max lamports a Bags tx may take from the launch wallet (simulated), default 0.04 SOL. */
   maxWalletSpend?: bigint;
+  /** The config whose curve is in launch_curves (default BAGS_CURVE_CONFIG). */
+  curveConfig?: PublicKey;
 }
 
 export class BagsAdapter {
@@ -413,6 +423,10 @@ export class BagsAdapter {
       bagsConfigType: this.o.configType ?? BAGS_DEFAULT_CONFIG_TYPE,
     });
     if (cfg.bundles?.length) throw new AdapterError("venue_unavailable", "bags: config needs a Jito bundle (not supported)");
+    const curveConfig = this.o.curveConfig ?? BAGS_CURVE_CONFIG;
+    if (cfg.meteoraConfigKey !== curveConfig.toBase58()) {
+      throw new AdapterError("venue_unavailable", "bags: launch config differs from the curve in launch_curves (set BAGS_CONFIG_TYPE / BAGS_CURVE_CONFIG)");
+    }
     // From here the wallet may spend: never hand it to another launch.
     this.o.wallets.markUsed(w.index);
     for (const t of cfg.transactions ?? []) {
@@ -559,3 +573,12 @@ function metadataPda(mint: PublicKey): PublicKey {
 }
 
 export type { VersionedTransactionResponse };
+
+/** launch_curves row of Bags: the shared config's curve (read-only RPC). */
+export async function bagsLaunchCurve(connection: Pick<Connection, "getAccountInfo">, config: PublicKey = BAGS_CURVE_CONFIG): Promise<LaunchCurve> {
+  const acc = await connection.getAccountInfo(config, "confirmed");
+  if (!acc || !acc.owner.equals(DBC_PROGRAM_ID)) throw new Error("bags curve config not found");
+  const c = dbcCoder().accounts.decode("poolConfig", acc.data) as Parameters<typeof dbcLaunchCurve>[1] & { quoteMint: PublicKey };
+  if (!c.quoteMint.equals(NATIVE_MINT)) throw new Error("bags curve config is not SOL-quoted");
+  return dbcLaunchCurve("bags", c);
+}

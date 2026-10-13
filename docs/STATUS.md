@@ -122,6 +122,6 @@
 - Публичный деплой до 28.10 собирать с `NEXT_PUBLIC_FAIR_LAUNCH_BUILD=0` и `UNZEEN_FAIR_LAUNCH=0` (кода fair-launch нет в бандле); 28.10 перед открытием репо — включить
 - Перед открытием: вынести внутренние доки (docs/analysis, docs/sessions, docs/STATUS.md, CLAUDE.md, .claude/, docs/screenshots/design-review) в приватный репо и добавить в .gitignore; переписать историю git без них (git filter-repo --path ... --invert-paths), сохранив даты author/committer; проверить даты в окне 28.09–28.10; force-push только после проверки и бэкапа приватного репо
 - Накопить TAZ на 3–5 demo-ключей судей
-- На VPS: сгенерировать mainnet-ключи пула (`pnpm keys:gen`, зашифрованы age, на зашифрованном томе), затем `pnpm bags:auth --register`, BAGS_API_KEY в .env, `pnpm bags:fund` (фондер — не с vault)
+- На VPS: сгенерировать mainnet-ключи пула (`pnpm keys:gen`, зашифрованы age, на зашифрованном томе), затем `pnpm bags:auth --register`, BAGS_API_KEY в .env, `pnpm bags:fund` (фондер — не с vault); с живым ключом проверить, что `BAGS_CONFIG_TYPE` ставит запуски под config `ArBv9x…` (иначе задать тип или `BAGS_CURVE_CONFIG`)
 - 28.10 в 20:00 UTC открыть репо, проверить в инкогнито, отправить форму; после отправки черновик не пересохранять
 - Копить TAZ заранее (фаусет 0.125/сутки) для demo-ключей

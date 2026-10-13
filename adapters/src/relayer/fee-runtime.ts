@@ -8,7 +8,6 @@ import {
   CreatorDirectory,
   DbcFeeVenue,
   LaunchLabFeeVenue,
-  MemeFunFeeVenue,
   PumpFeeVenue,
   RpcDbcPoolLister,
   StaticMintSource,
@@ -85,7 +84,7 @@ export async function buildFeeSweeper(o: FeeRuntimeOptions): Promise<{ sweeper: 
     ],
     (e) => o.log(`WARN mint source failed: ${redactSecrets(e instanceof Error ? e.message : String(e)).slice(0, 160)}`),
   );
-  const venues: FeeVenue[] = [new PumpFeeVenue(o.connection, creators, mints), new MemeFunFeeVenue(o.connection, creators, mints)];
+  const venues: FeeVenue[] = [new PumpFeeVenue(o.connection, creators, mints)];
   const partner = derivePartnerKeypair(o.keys.creatorSeed);
   // RELAYER v8 A8: every Unzeen DBC config (SOL + quote ones), fees in their quote.
   const dbcAssets = quoteAssets(o.cfg.cluster, env);

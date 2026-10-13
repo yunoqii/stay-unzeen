@@ -10,7 +10,7 @@ import type { SolanaNetwork } from "./postgres-queue";
  * 10 minutes. Public data only.
  */
 export interface LaunchCurve {
-  venue: "pumpfun" | "meteora-dbc";
+  venue: "pumpfun" | "meteora-dbc" | "bags";
   virtualSolLamports: bigint;
   virtualTokenReserves: bigint;
   realTokenReserves: bigint;
@@ -35,6 +35,53 @@ export function pumpLaunchCurve(g: Pick<Global, "initialVirtualSolReserves" | "i
     throw new Error("pump Global: inconsistent token reserves");
   }
   return c;
+}
+
+/** The parts of a Meteora DBC PoolConfig a launch curve needs (BN-like numbers). */
+export interface DbcCurveConfig {
+  sqrtStartPrice: { toString(): string };
+  curve: { sqrtPrice: { toString(): string }; liquidity: { toString(): string } }[];
+  swapBaseAmount: { toString(): string };
+  preMigrationTokenSupply: { toString(): string };
+  postMigrationTokenSupply: { toString(): string };
+}
+
+/** A curve segment worth modelling must hold at least this much quote (lamports). */
+const MIN_SEGMENT_QUOTE = 10_000_000n;
+
+/**
+ * Meteora DBC config (SOL quote) -> the constant-product curve core models a first buy with.
+ * DBC segment i spans sqrt prices [lower, curve[i].sqrtPrice) (Q64.64, lower = sqrtStartPrice for
+ * i = 0) at liquidity L; inside it the pool IS x*y = k with virtual quote = L * lower >> 128 and
+ * virtual base = L / lower (base units). Taken: the first segment holding >= 0.01 SOL (Bags'
+ * shared config ArBv9x… has a degenerate first segment, then one segment of ~10 SOL = the whole
+ * curve). real tokens = swapBaseAmount (sold on the curve), supply = pre-migration supply.
+ */
+export function dbcLaunchCurve(venue: "meteora-dbc" | "bags", c: DbcCurveConfig): LaunchCurve {
+  let lower = BigInt(c.sqrtStartPrice.toString());
+  for (const seg of c.curve) {
+    const upper = BigInt(seg.sqrtPrice.toString());
+    const L = BigInt(seg.liquidity.toString());
+    if (L === 0n || upper <= lower) break;
+    const quoteCap = (L * (upper - lower)) >> 128n;
+    if (quoteCap >= MIN_SEGMENT_QUOTE) {
+      const pre = BigInt(c.preMigrationTokenSupply.toString());
+      const out: LaunchCurve = {
+        venue,
+        virtualSolLamports: (L * lower) >> 128n,
+        virtualTokenReserves: L / lower,
+        realTokenReserves: BigInt(c.swapBaseAmount.toString()),
+        tokenTotalSupply: pre > 0n ? pre : BigInt(c.postMigrationTokenSupply.toString()),
+      };
+      for (const [k, v] of Object.entries(out)) {
+        if (typeof v === "bigint" && (v <= 0n || v > I64_MAX)) throw new Error(`dbc config: ${k} out of range`);
+      }
+      if (out.realTokenReserves > out.virtualTokenReserves || out.virtualTokenReserves > out.tokenTotalSupply * 2n) throw new Error("dbc config: inconsistent token reserves");
+      return out;
+    }
+    lower = upper;
+  }
+  throw new Error("dbc config: no curve segment with liquidity");
 }
 
 export const LAUNCH_CURVE_UPSERT = `

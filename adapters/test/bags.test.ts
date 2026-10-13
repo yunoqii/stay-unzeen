@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import bs58 from "bs58";
-import { AddressLookupTableAccount, ComputeBudgetProgram, Keypair, PublicKey, SystemProgram, TransactionInstruction, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
+import { AddressLookupTableAccount, ComputeBudgetProgram, Keypair, PublicKey, SystemProgram, TransactionInstruction, TransactionMessage, VersionedTransaction, type Signer } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import {
   BAGS_FEE_WALLET,
@@ -244,5 +244,84 @@ describe("Bags pools through the DBC adapter (pool by base mint)", () => {
     });
     await a.prepareBuy(POOL.mint, 1n, 1n);
     expect(jup).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RELAYER v10: launch_curves row (bags) and the vault pinned at create
+// ---------------------------------------------------------------------------
+
+import { dbcCoder } from "../src/meteora";
+import { bagsLaunchCurve, BAGS_CURVE_CONFIG } from "../src/bags";
+import { dbcLaunchCurve } from "../src/relayer/launch-curves";
+import { Relayer } from "../src/relayer/engine";
+import { VenueTradeExecutor, type TradeVenue } from "../src/relayer/executors";
+import { InMemoryJobQueue } from "../src/relayer/memory-queue";
+import { MemoryMintVaults } from "../src/relayer/mint-vaults";
+import { seededRng } from "../src/relayer/random";
+import { VaultPool } from "../src/relayer/vaults";
+import { FakeChain, FakeInventory, vaults as makeVaults } from "./relayer/fakes";
+
+describe("launch_curves row for Bags (shared config ArBv9x…, mainnet 13.10)", () => {
+  const cfg = dbcCoder().accounts.decode("poolConfig", Buffer.from(POOL.configData, "base64")) as Parameters<typeof dbcLaunchCurve>[1] & { migrationQuoteThreshold: { toString(): string }; migrationSqrtPrice: { toString(): string } };
+  it("constant product of the live segment; buying the migration threshold sells ~the curve's tokens", () => {
+    expect(POOL.config).toBe(BAGS_CURVE_CONFIG.toBase58());
+    const c = dbcLaunchCurve("bags", cfg);
+    expect(c).toMatchObject({ venue: "bags", realTokenReserves: 2_170_982_157_253n, tokenTotalSupply: 1_000_000_000_000_000n });
+    // independent check 1: x*y=k bought with the migration threshold (10 SOL) -> swapBaseAmount
+    const q = BigInt(cfg.migrationQuoteThreshold.toString());
+    const out = c.virtualTokenReserves - (c.virtualSolLamports * c.virtualTokenReserves) / (c.virtualSolLamports + q);
+    expect(Number(out) / Number(c.realTokenReserves)).toBeGreaterThan(0.99);
+    expect(Number(out) / Number(c.realTokenReserves)).toBeLessThan(1.01);
+    // independent check 2: the price after it = the config's migration price
+    const endPrice = Number(c.virtualSolLamports + q) / Number(c.virtualTokenReserves - out);
+    const mig = Number(BigInt(cfg.migrationSqrtPrice.toString())) / 2 ** 64;
+    expect(endPrice / (mig * mig)).toBeGreaterThan(0.98);
+    expect(endPrice / (mig * mig)).toBeLessThan(1.02);
+  });
+  it("read from chain (RPC fake); a non-DBC account is refused", async () => {
+    const rpc = new FakeRpc();
+    rpc.set(BAGS_CURVE_CONFIG, { owner: DBC_PROGRAM_ID.toBase58(), lamports: 1, data: POOL.configData });
+    expect((await bagsLaunchCurve(rpc.connection())).venue).toBe("bags");
+    await expect(bagsLaunchCurve(new FakeRpc().connection())).rejects.toThrow(/not found/);
+  });
+  it("a Bags launch under another config is refused before anything is signed", async () => {
+    const s = setup();
+    const a = new BagsAdapter({ ...(s.a as unknown as { o: ConstructorParameters<typeof BagsAdapter>[0] }).o, curveConfig: Keypair.generate().publicKey });
+    await expect(a.prepareCreate(META, 0n, 0n)).rejects.toThrow(/launch_curves/);
+    expect(s.store.unused()).toHaveLength(1);
+  });
+});
+
+describe("Bags create pins the mint to the job's vault (RELAYER v10 §2)", () => {
+  it("the engine pins out_mint -> leased vault (not the launch wallet); the later buy is held there", async () => {
+    const inv = new FakeInventory();
+    const vs = makeVaults(3, inv);
+    const mintVaults = new MemoryMintVaults();
+    const chain = new FakeChain();
+    const newMint = Keypair.generate().publicKey.toBase58();
+    const wallet = Keypair.generate().publicKey.toBase58();
+    let vaultSeen = "";
+    const venue = {
+      prepareCreate: async (_m: unknown, lamports: bigint, _min: bigint, opts: { vault?: Signer }) => {
+        expect(lamports).toBe(0n);
+        vaultSeen = opts.vault!.publicKey.toBase58();
+        return { signature: "sigB", raw: new Uint8Array([1]), blockhash: "b", lastValidBlockHeight: chain.height + 100, kind: "create", mint: newMint, vault: vaultSeen, creator: wallet, creatorIndex: 0, expectedOut: 0n };
+      },
+      submit: async () => undefined,
+      createResult: async () => ({ venue: "bags", kind: "create", signature: "sigB", slot: 1, mint: newMint, vault: vaultSeen, creator: wallet, name: "N", symbol: "S", uri: "u", tokenProgram: "T", tokenAmount: 0n, solAmount: 0n, networkFee: 5_000n, decimals: 6, amountsKnown: true, creatorFee: 0n }),
+      market: async () => ({ priceSol: "0", marketCapSol: "0", status: "curve" }),
+      tokenSymbol: async () => "S",
+      classify: (e: unknown) => (e instanceof AdapterError ? e : new AdapterError("internal", String(e))),
+    } as unknown as TradeVenue;
+    const ex = new VenueTradeExecutor(venue, { publish: async () => ({ uri: "https://m/x.json", imageUrl: null }) } as never);
+    const queue = new InMemoryJobQueue(seededRng(1));
+    const r = new Relayer({ queue, pool: new VaultPool(vs, inv, seededRng(1)), mintVaults, executors: { trade: { bags: ex }, withdraw: ex }, probe: chain });
+    const j = queue.enqueue({ kind: "create", venue: "bags", meta: { name: "N", symbol: "S" }, lamportsIn: 0n, minOut: 0n }, { notBefore: 0 });
+    await r.tick();
+    expect(queue.get(j.id)!.result).toMatchObject({ status: "executed", execution: { kind: "create", tokenAmount: 0n, solAmount: 0n, creatorFee: 0n, mint: newMint } });
+    expect(await mintVaults.get(newMint)).toBe(vaultSeen);
+    expect(vs.map((v) => v.publicKey.toBase58())).toContain(vaultSeen);
+    expect(vaultSeen).not.toBe(wallet);
   });
 });

@@ -5,7 +5,6 @@ import type { Pool } from "pg";
 import {
   DBC_FEE_CU,
   LL_FEE_CU,
-  MEME_FEE_CU,
   PUMP_FEE_CU,
   feeTxCost,
   sweepThreshold,
@@ -476,7 +475,7 @@ export class FeeSweeper {
 
   thresholdOf(t: FeeTarget, microLamports: number = this.o.price.microLamports()): bigint {
     const venue = this.venueOf(t);
-    const cu = venue.venue === "pumpfun" ? PUMP_FEE_CU : venue.venue === "raydium-launchlab" ? LL_FEE_CU : venue.venue === "memefun" ? MEME_FEE_CU : DBC_FEE_CU;
+    const cu = venue.venue === "pumpfun" ? PUMP_FEE_CU : venue.venue === "raydium-launchlab" ? LL_FEE_CU : DBC_FEE_CU;
     const cost = feeTxCost({ signatures: SIGNATURES_PER_FEE_TX, computeUnits: cu, microLamportsPerCu: microLamports, tipLamports: this.o.tipLamports });
     return sweepThreshold(cost, t.lockedRent, this.o.threshold);
   }

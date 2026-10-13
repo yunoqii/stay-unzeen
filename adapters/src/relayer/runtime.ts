@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { OnlinePumpSdk, PUMP_PROGRAM_ID } from "@pump-fun/pump-sdk";
 import { Attester, deriveAttestKeypair } from "../attest";
-import { Connection, type Keypair, type PublicKey } from "@solana/web3.js";
+import { Connection, PublicKey, type Keypair } from "@solana/web3.js";
 import pg from "pg";
 import type { AdapterConfig } from "../config";
 import { CreatorKeyring, CreatorPubkeyFile, FileCreatorIndexCounter, deriveCreatorKeypair, type CreatorIndexCounter } from "../keys";
@@ -14,7 +14,7 @@ import { metadataStoreFromEnv, type MetadataStore } from "../metadata";
 import { LookupTables } from "../alt";
 import { JUPITER_PROGRAM_ID, JupiterAdapter, JupiterClient, jupiterOptionsFromEnv } from "../jupiter";
 import { DBC_PROGRAM_ID, MeteoraDbcAdapter, dbcConfigAddress, dbcPoolByBaseMint, derivePartnerKeypair } from "../meteora";
-import { BagsAdapter, BagsApi, BagsWalletStore, deriveBagsFunderKeypair } from "../bags";
+import { BAGS_CURVE_CONFIG, BagsAdapter, BagsApi, BagsWalletStore, bagsLaunchCurve, deriveBagsFunderKeypair } from "../bags";
 import { PumpFunAdapter } from "../pumpfun";
 import { txPipeline, type TxPipeline } from "../sender";
 import { TokenWithdrawer } from "../withdraw";
@@ -23,12 +23,11 @@ import { jitoFairBundler, type FairBundler } from "./fair-bundler";
 import { PoolQuoteInventoryWriter, PoolSolInventoryWriter, VaultFunder, deriveRebalanceKeypair } from "../rebalance";
 import { quoteAssets } from "../pool-a";
 import { LAUNCHLAB_PROGRAM, LaunchLabAdapter, launchLabCluster } from "../launchlab";
-import { MemeFunAdapter } from "../memefun";
 import { getPdaPlatformId } from "@raydium-io/raydium-sdk-v2";
 import { QuoteStockRunner, QuoteStocker, StockDistributor, stockPolicy } from "./quote-stock";
 import { Relayer, type RelayerEvent } from "./engine";
 import { AttestExecutor, ConsolidateExecutor, FundQuoteExecutor, FundVaultsExecutor, RpcChainProbe, VenueTradeExecutor, WithdrawExecutor, type JobExecutor } from "./executors";
-import { LaunchCurveWriter, pumpLaunchCurve } from "./launch-curves";
+import { LaunchCurveWriter, pumpLaunchCurve, type LaunchCurve } from "./launch-curves";
 import { FileMintVaults, PgMintVaults, type MintVaults } from "./mint-vaults";
 import { PostgresJobQueue, type SolanaNetwork } from "./postgres-queue";
 import { JobsVaultUsage, PgAdvisoryVaultLock, PgCreatorIndexCounter, PgVaultUsage } from "./postgres-vaults";
@@ -292,7 +291,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
         quotes: quoteAssets(o.cfg.cluster, env),
       })
     : null;
-  const trade: Partial<Record<"pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "memefun" | "bags", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
+  const trade: Partial<Record<"pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "bags", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
   if (meteora) trade["meteora-dbc"] = new VenueTradeExecutor(meteora, metadata);
   // Raydium LaunchLab (stonk.fun, bonk.fun, Unzeen's own platform = PDA of the partner key).
   const llCluster = launchLabCluster(o.cfg.cluster);
@@ -313,13 +312,6 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
       })
     : null;
   if (launchlab) trade["raydium-launchlab"] = new VenueTradeExecutor(launchlab, metadata);
-  // meme.fun: SOL only, same program on mainnet and devnet (creates need IPFS metadata: PINATA_JWT).
-  if (o.cfg.cluster === "mainnet-beta" || o.cfg.cluster === "devnet") {
-    trade.memefun = new VenueTradeExecutor(
-      new MemeFunAdapter({ connection: o.connection, defaultVault: vaults[0]!, vaults, creators, stateDir: o.cfg.keysDir, priorityMicroLamports: fees, pipeline, lookupTables }),
-      metadata,
-    );
-  }
   // Jupiter: mainnet only (no devnet deployment). Elsewhere the venue has no executor,
   // so its jobs fail `venue_unavailable` before anything is signed.
   const jupiter = o.cfg.cluster === "mainnet-beta" ? buildJupiter(o.cfg.cluster, o.connection, fees, pipeline, env) : null;
@@ -348,6 +340,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
         dbc: dbcForBags,
         jupiter,
         metadataOf: fetchMetadataJson,
+        curveConfig: env.BAGS_CURVE_CONFIG?.trim() ? new PublicKey(env.BAGS_CURVE_CONFIG.trim()) : BAGS_CURVE_CONFIG,
         ...(env.BAGS_CONFIG_TYPE?.trim() ? { configType: env.BAGS_CONFIG_TYPE.trim() } : {}),
       }),
       metadata,
@@ -356,7 +349,19 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   const attester = new Attester(o.connection, deriveAttestKeypair(o.keys.creatorSeed, "verify"), fees, pipeline);
   const fairAttester = new Attester(o.connection, deriveAttestKeypair(o.keys.creatorSeed, "fair"), fees, pipeline);
   const online = new OnlinePumpSdk(o.connection);
-  const launchCurves = new LaunchCurveWriter(o.db, o.network, async () => [pumpLaunchCurve(await online.fetchGlobal())]);
+  // RELAYER v10: + the Bags curve (mainnet, shared Bags config, read-only); its failure never blocks pump's row.
+  const bagsCurveConfig = env.BAGS_CURVE_CONFIG?.trim() ? new PublicKey(env.BAGS_CURVE_CONFIG.trim()) : BAGS_CURVE_CONFIG;
+  const launchCurves = new LaunchCurveWriter(o.db, o.network, async () => {
+    const out: LaunchCurve[] = [pumpLaunchCurve(await online.fetchGlobal())];
+    if (o.cfg.cluster === "mainnet-beta") {
+      try {
+        out.push(await bagsLaunchCurve(o.connection, bagsCurveConfig));
+      } catch (e) {
+        o.warn(`launch_curves bags: ${e instanceof Error ? e.message.slice(0, 120) : "error"}`);
+      }
+    }
+    return out;
+  });
   const probe = new RpcChainProbe(o.connection, pipeline.broadcaster);
   const queue = new PostgresJobQueue({ pool: o.db, network: o.network, probe });
   const pool = new VaultPool(vaults, new RpcVaultInventory(o.connection), cryptoRng, {
