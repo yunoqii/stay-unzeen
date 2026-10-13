@@ -350,7 +350,8 @@ pub async fn warm_sync(st: &AppState) -> ApiResult<()> {
             AND NOT EXISTS (SELECT 1 FROM tokens t WHERE t.mint = s.mint)
             AND NOT (s.missing AND s.as_of >= now() - interval '1 hour');
          DELETE FROM intel_tokens i
-          WHERE NOT EXISTS (SELECT 1 FROM intel_warm w WHERE w.mint = i.mint);",
+          WHERE NOT EXISTS (SELECT 1 FROM intel_warm w WHERE w.mint = i.mint);
+         DELETE FROM intel_creates WHERE created_at < now() - interval '90 days';",
     )
     .await
     .map_err(db)?;

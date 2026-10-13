@@ -80,6 +80,8 @@ pub struct SnapshotRow {
     pub rate_buy: Option<u64>,
     /// v0.13 `quoteAssets` (NULL for snapshots built before 0019).
     pub quote_assets: Option<Value>,
+    /// v0.17: 2 = rootsDigest v2 (covers `quote_assets`); 1 for older snapshots.
+    pub digest_version: i16,
     /// (asset, decimals, granule, root, sum)
     pub trees: Vec<(String, i16, u64, Vec<u8>, String)>,
     /// (address, sig, lamports, tokens)
@@ -545,7 +547,41 @@ impl Ledger {
             zcash_height,
             zec_reserve_zat: zec_reserve,
         };
-        let digest = pv::roots_digest(&header, &roots);
+        // v0.17: quote assets of the pool, frozen with the snapshot AND covered by the digest
+        // (v2): only ZEC SPL counts toward ZEC (1:1, bridged); per-vault balances below
+        // dustBelow are ignored.
+        let mut quote_json = Vec::new();
+        let mut quote_facts = Vec::new();
+        for q in tx
+            .query(
+                "SELECT mint, quote, decimals, bridged FROM pool_quotes WHERE network = $1 ORDER BY mint",
+                &[&network],
+            )
+            .await?
+        {
+            let (mint, quote, dec, bridged): (String, String, i16, bool) = (q.get(0), q.get(1), q.get(2), q.get(3));
+            let counted = quote == "ZEC";
+            let dust: u64 = if counted { 100_000 } else { 10_000 };
+            let Some(mb) = bs58::decode(&mint)
+                .into_vec()
+                .ok()
+                .and_then(|v| <[u8; 32]>::try_from(v).ok())
+            else {
+                continue;
+            };
+            quote_facts.push(pv::QuoteAssetFact {
+                mint: mb,
+                decimals: dec.clamp(0, 18) as u8,
+                bridged,
+                counted,
+                dust_below: dust,
+            });
+            quote_json.push(serde_json::json!({
+                "mint": mint, "quote": quote, "decimals": dec, "bridged": bridged, "counted": counted,
+                "dustBelow": dust.to_string(),
+            }));
+        }
+        let digest = pv::roots_digest_v2(&header, &roots, &quote_facts);
         // Anchor + operator signature: the attestation key (relayer), memo = hex digest only.
         let job: i64 = tx
             .query_one(
@@ -561,15 +597,7 @@ impl Ledger {
             "UPDATE verify_snapshots SET status = 'built', freeze_until = now(), zcash_height = $2,
                     zec_reserve_zat = $3, leaves = $4, roots_digest = $5, committed_lamports = $6,
                     rate_lamports_per_zec_sell = $7, attest_job_id = $8, rate_lamports_per_zec_buy = $9,
-                    -- v0.13: quote assets of the pool, frozen with the snapshot. Only ZEC SPL counts
-                    -- toward ZEC (1:1, bridged); per-vault balances below dust_below are ignored.
-                    quote_assets = (SELECT COALESCE(jsonb_agg(jsonb_build_object(
-                                        'mint', q.mint, 'quote', q.quote, 'decimals', q.decimals,
-                                        'bridged', q.bridged, 'counted', q.quote = 'ZEC',
-                                        'dustBelow', (CASE WHEN q.quote = 'ZEC' THEN 100000 ELSE 10000 END)::text)
-                                        ORDER BY q.mint), '[]'::jsonb)
-                                    FROM pool_quotes q
-                                    WHERE q.network = (SELECT network FROM verify_snapshots WHERE id = $1))
+                    quote_assets = $10, digest_version = 2
              WHERE id = $1",
             &[
                 &id,
@@ -581,6 +609,7 @@ impl Ledger {
                 &rate,
                 &job,
                 &rate_buy,
+                &serde_json::Value::Array(quote_json),
             ],
         )
         .await?;
@@ -750,7 +779,7 @@ impl Ledger {
             .query_opt(
                 "SELECT id, chain_id, (extract(epoch FROM taken_at) * 1000)::bigint, roots_digest, anchor, operator,
                         leaves, solana_slot, zcash_height, zec_reserve_zat, committed_lamports,
-                        rate_lamports_per_zec_sell, rate_lamports_per_zec_buy, quote_assets
+                        rate_lamports_per_zec_sell, rate_lamports_per_zec_buy, quote_assets, digest_version
                  FROM verify_snapshots WHERE network = $1 AND status = 'built' AND ($2::int IS NULL OR id = $2)
                  ORDER BY id DESC LIMIT 1",
                 &[&network, &id],
@@ -793,6 +822,7 @@ impl Ledger {
             rate_sell: r.get::<_, Option<i64>>(11).map(to_u64),
             rate_buy: r.get::<_, Option<i64>>(12).map(to_u64),
             quote_assets: r.get(13),
+            digest_version: r.get(14),
             trees,
             vaults,
         }))

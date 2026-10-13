@@ -1,8 +1,15 @@
 # Unzeen — контракт core ↔ relayer
 
-Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql`, `0009_verify.sql`, `0010_creator_fees.sql`, `0011_orders.sql`, `0012_fair_review.sql`, `0013_creator_stats.sql`, `0014_verify_review.sql`, `0015_rebalance.sql`, `0017_fair_bundle.sql`, `0018_discovery.sql`, `0019_quotes.sql`, `0020_quote_fees.sql`, `0021_bracket_orders.sql`, `0022_bags_first_buy.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
+Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql`, `0009_verify.sql`, `0010_creator_fees.sql`, `0011_orders.sql`, `0012_fair_review.sql`, `0013_creator_stats.sql`, `0014_verify_review.sql`, `0015_rebalance.sql`, `0017_fair_bundle.sql`, `0018_discovery.sql`, `0019_quotes.sql`, `0020_quote_fees.sql`, `0021_bracket_orders.sql`, `0022_bags_first_buy.sql`, `0023_payout_review.sql`, `0024_intel_creates.sql`, `0025_verify_digest_v2.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
 
-Статус: **v10** (13.10; миграция `0022_bags_first_buy.sql`; API.md v0.16). Изменения против v9:
+Статус: **v11** (13.10; миграции 0023–0025; API.md v0.17). Изменения против v10:
+
+1. **Bags `create`: `meta.reserve_lamports`** (число) = `lamports_in` будущей первой покупки (`buy`, `part = 1`). Executor выбирает vault запуска с запасом SOL `≥ reserve_lamports + обычный запас create`: mint закрепляется за этим vault, и покупка пойдёт с него (аудит A4).
+2. **Bags `create` без строки `launch_curves (mainnet-beta, bags)`** core не ставит вовсе (`503` пользователю). Релейеру — держать строку кривой Bags актуальной при старте (adapters `launch-curves.ts`).
+3. **Суммы `transfer` и `sell`** больше не равны запрошенным пользователем (срез 0,5–2 % и 3 значащие цифры, аудит A1/A5/A6). Для релейера ничего не меняется: исполнять `token_amount` как есть.
+4. **Индекс запусков индексатора `intel_creates`** (0024): роль `unzeen_indexer` — `SELECT, INSERT, UPDATE (rug, rug_checked_at)`; ретеншн 90 дней (core). Права на колонки: проверка доступности через `has_table_privilege(..., 'UPDATE')` вернёт false — проверять `has_any_column_privilege` / `has_column_privilege(..., 'rug', 'UPDATE')`. Перезапустить `infra/indexer-role.sql`.
+
+Изменения v10 против v9:
 
 1. **Bags (`venue = 'bags'`, только `mainnet-beta`).** Core ставит задания `bags` только на mainnet. Площадка — только пары к SOL.
 2. **`create` на Bags: всегда `lamports_in = 0`.** Первая покупка пользователя — **отдельное задание** того же действия: `op = 'buy'`, `part = 1`, `venue = 'bags'`, `lamports_in` > 0, `min_out` (0 или от кривой Bags, если есть своя строка `launch_curves`). Core вставляет его со статусом **`held`**: релейер его не видит в выборке (берёт только `queued`) и не трогает. Когда `create` (`part = 0`) стал `confirmed` с `out_mint`, core (раз в 1 с) ставит покупке `mint = out_mint`, `status = 'queued'`, `not_before = max(not_before, now())` — дальше это обычный `buy`. Если `create` `failed` — core переводит покупку в `failed` с тем же `error_code`.

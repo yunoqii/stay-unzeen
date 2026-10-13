@@ -2,7 +2,19 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.16** (13.10; миграция `0022_bags_first_buy.sql`; RELAYER.md v10). Изменения против v0.15:
+Статус: **v0.17** (13.10; миграции `0023_payout_review.sql`, `0024_intel_creates.sql`, `0025_verify_digest_v2.sql`; RELAYER.md v11). Изменения против v0.16 (финальный аудит `docs/analysis/final-audit.md`, решения лида в STATUS.md):
+- **`withdraw_token` никогда не уходит точной суммой (A1).** Сервер срезает случайные 0,5–2 % от `amount`, делит остаток на части (smart: ±20 %) и **каждую часть** округляет вниз до 3 значащих цифр. Остаток остаётся в `holdings[].amount` (доступно). Сумма частей ≠ `amount`. UI: «≈ amount, the exact sum is rounded by the server so it never matches your buy». Если после среза получается 0 (пыль) или частей больше, чем единиц, → `400 bad_request`. Фактические части — в `ActionStatus.parts` (ниже) и `fill.tokenAmount`.
+- **Продажа, совпадающая с покупкой (A6).** Если `sell.amount` в пределах ±1 % от одной из публичных покупок этого ключа по этому mint за последние 48 ч, от их суммы или от всей позиции (`available + held`, «продать 100 %»), сервер применяет тот же срез 0,5–2 % и округление до 3 значащих цифр; `minZecOut` уменьшается пропорционально (та же минимальная цена). Остаток остаётся на балансе. Иначе сумма не меняется. Проверка `below_minimum` — по подписанному `minZecOut`. UI для кнопки «100 %»: показывать «≈».
+- **Ордера на продажу (A5):** при каждом срабатывании после перевзвода и при срабатывании на сумму, совпадающую с покупкой (правило A6), сумма снова срезается и округляется. `Order.amount` уменьшается до новой суммы, остаток hold возвращается на баланс. Две попытки одного ордера никогда не идут одной суммой.
+- **Bags без кривой (A4):** пока релейер не записал кривую Bags (`launch_curves`), `create` на Bags → `503 venue_unavailable` (вместо первой покупки без защиты цены).
+- **`ActionStatus.parts`** (`withdraw_token`, только владельцу, пока задания связаны с действием — до 24 ч после исполнения): `{ amount, notBefore, status }[]` для анимации.
+- **`launchRules.maxInitialBuyZecUnitsByVenue`**: максимум первой покупки `create` в паре к ZEC — единицы ZEC SPL (= зат) по площадкам с включённой ZEC-парой (`{}` на devnet).
+- **`GET /api/tokens/:mint/candles?quote=1`**: свечи в единицах пары (цена — quote за 1 целый токен, объём — базовые единицы quote). Для SOL-пар то же, что без параметра. `quote=0` / нет — как раньше (SOL, у ZEC-пар — по курсу на момент сделки). `volume` теперь строка без ограничения `i64`.
+- **`trades?filter=dev`** (при `features.fullTrades`): помимо тега индексатора — все сделки создателя этого mint из индекса запусков индексатора (в том числе до того, как создатель стал известен); у таких сделок в `tags` добавляется `"dev"`. На Unzeen-запусках и сделках vault — по-прежнему пусто (T1).
+- **Verify `digestVersion: 2`** (новые снимки): `rootsDigest` подписывает и `quoteAssets` (какие quote-mint засчитываются в покрытие ZEC и порог пыли). Формула и векторы — раздел Verify и `verify-vectors.json` → `snapshotV2`. Снимки без поля — v1 (как раньше).
+- **Выплаты ZEC на mainnet больше `UNZEEN_MAX_PAYOUT_ZAT` (по умолчанию 1 ZEC; A2)** ждут ручного одобрения оператора и **не задерживают остальные**. У действия статус `queued`, пока оператор не одобрит. UI: для `withdraw_zec` больше `1 ZEC` на mainnet — подпись «large withdrawals are reviewed by the operator».
+
+Изменения v0.16 против v0.15 (13.10; миграция `0022_bags_first_buy.sql`; RELAYER.md v10):
 - **Bags включён (`venue: "bags"`), только mainnet.** Площадка доступна, если `bags` есть в `UNZEEN_VENUES` и сеть — mainnet (на devnet любой запрос с `bags` → `503 venue_unavailable`, как у `jupiter`). Только пары к SOL (`quote` ≠ `"SOL"` → `400`). `buy`/`sell` — как на других площадках (кривая Meteora DBC под конфигом Bags, после выпуска — Jupiter).
 - **Первая покупка Bags не атомарна.** Транзакцию запуска строит Bags, первой покупки в ней нет. `initialBuyZec` исполняется отдельной сделкой с того же vault пула **после** подтверждения запуска: между ними кто-то может купить раньше (снайпер), и цена первой покупки будет хуже, чем на pump.fun/DBC/LaunchLab. Действие `create` остаётся одним (`id` тот же) и закрывается, когда закрыты обе сделки:
   - запуск и покупка прошли → `executed`, `fill.tokenAmount` = токены первой покупки (они под локом создателя, как обычно);
@@ -284,6 +296,7 @@ interface PoolInfo {
     maxInitialBuyLamports: string; // максимум первой покупки create в лампортах (после округления D10), из кривой площадки (pumpfun)
     maxInitialBuyLamportsByVenue: Record<string, string>; // v0.6: то же по каждой включённой площадке-лаунчпаду
                                    // (meteora-dbc: комиссия 1 % вместо ~1,25 % → кап сужен в 5/5,013 раза, пока у DBC нет своей строки кривой)
+    maxInitialBuyZecUnitsByVenue: Record<string, string>; // v0.17: ZEC-пары — единицы ZEC SPL (= зат), шаг 0.0001 ZEC; только площадки с включённой ZEC-парой
   };
   rate?: {                  // v0.4: из фонового кэша (обновление 30–60 с); нет поля → курса нет
     lamportsPerZec: string;     // mid
@@ -343,6 +356,11 @@ interface ActionStatus {
   solanaTx?: string;        // первая подтверждённая подпись; через 24 ч после исполнения связь удаляется (поле пропадает)
   error?: ErrorCode;        // при failed: slippage | graduated | pool_liquidity | venue_unavailable | not_found | bad_request | internal
   rate?: RateUsed;
+  parts?: {                 // v0.17: только withdraw_token, владельцу, пока задания связаны (≤ 24 ч после исполнения)
+    amount: string;         // базовые единицы части (после среза и округления, A1)
+    notBefore: number;      // unix мс (целые секунды): не раньше этого времени
+    status: "queued" | "sent" | "confirmed" | "failed";
+  }[];
   fill?: {                  // после исполнения, хранится 24–48 ч
     tokenAmount: string;    // получено (buy/create) / продано (sell) / отправлено (withdraw_token), базовые единицы
     solAmount?: string;     // лампорты сделки (нет у withdraw_token)
@@ -575,10 +593,10 @@ interface TokenTrade extends FeedEvent {
 - **buy:** SOL = `zecIn` × курс, срезка 0–1 % и округление вниз до 0.001 SOL; hold = ZEC-эквивалент этой SOL-суммы (≤ `zecIn`); неистраченные лампорты (если площадка взяла меньше) возвращаются в ZEC по курсу действия.
 - **minOut всех сделок (v0.10):** сервер округляет `minOut`/`minLamports` задания вниз до 3 значащих цифр (≤ 1 % мягче подписанного), чтобы по цепочке нельзя было восстановить точную опорную цену.
 - **Токен без цены пула (v0.10):** mint, которого нет в `GET /api/tokens`: `buy` с `minOut = "0"` и `sell` с `minZecOut = "0"` → `400 bad_request` (защита — только явный минимум пользователя). `venue: "jupiter"` на devnet → `503 venue_unavailable` до hold.
-- **sell:** держит `amount` токенов; выручка зачисляется в ZEC по курсу действия; непроданный остаток возвращается. Минимум: `minZecOut ≥ minActionZat` **или** оценка по текущей цене токена ≥ `minActionZat`, иначе `below_minimum`.
+- **sell:** держит `amount` токенов (v0.17 A6: при совпадении с покупкой — срезанную сумму, см. выше); выручка зачисляется в ZEC по курсу действия; непроданный остаток возвращается. Минимум: `minZecOut ≥ minActionZat` **или** оценка по текущей цене токена ≥ `minActionZat`, иначе `below_minimum`.
 - **create:** *(сейчас `503 venue_unavailable`, см. выше)* hold = `initialBuyZec` (округление как у buy, если есть, ≥ `minActionZat`) + комиссия запуска (`CREATE_FEE_ZAT`, по умолчанию 100 000 зат). `meta.name` 1–32 символа, `meta.symbol` 1–10 ASCII букв/цифр, `meta.image` — только `data:image/(png|jpeg|webp);base64,…` до 512 КиБ (тело запроса ≤ 1 МиБ). `venue: "jupiter"` → 400.
 - **withdraw_zec:** hold = `amount` + комиссия сети (`WITHDRAW_ZEC_FEE_ZAT`, 15 000 зат); выплата с задержкой 1–10 мин (`exec: "max"` — 10–60 мин), готовые выплаты объединяются в одну tx (до 5). `executed` после K подтверждений выплаты; если tx истекла не попав в блок — выплата переотправляется новой tx (двойной выплаты нет). Сумма выплаты ровно `amount`, комиссию сети платит пул из `WITHDRAW_ZEC_FEE_ZAT`.
-- **withdraw_token:** держит `amount` токенов; комиссия в ZEC = частей × (капля SOL получателю + рента ATA + fee) по курсу; без `smart` — `to` строка или массив из 1 адреса, задержка 30 с–5 мин (`exec: "max"` — 10–60 мин); со `smart` — длина `to` = `parts`, адреса разные, суммы частей неравные (±20 %), задержка каждой части до `maxDelayMin`.
+- **withdraw_token:** v0.17 (A1): держит сумму частей после среза 0,5–2 % и округления каждой части до 3 значащих цифр (не `amount`); комиссия в ZEC = частей × (капля SOL получателю + рента ATA + fee) по курсу; без `smart` — `to` строка или массив из 1 адреса, задержка 30 с–5 мин (`exec: "max"` — 10–60 мин); со `smart` — длина `to` = `parts`, адреса разные, суммы частей неравные (±20 %), задержка каждой части до `maxDelayMin`.
 - **claim** (v0.7): весь `claimable` (или одного `mint`) → `zecBalance` по `lamportsPerZecSell` (`floor`), сразу, без tx в сети. Сбор комиссий в сети делает пул глобально по своему расписанию, не по запросу (запрос claim ничего не делает в Solana, поэтому не связывает токены одного создателя).
 - **Creator fee самой launch-tx — пулу** (v0.9, решение владельца 12.10). Комиссия создателя площадки с первой покупки запуска (`create.initialBuyZec`; у fair-launch — покупка всех участников) в `claimable` не попадает: при settle запуска core записывает её размер — точный из события сделки (`relayer_jobs.out_creator_fee`, пишет релейер) или, пока релейер его не пишет, верхнюю оценку `ceil(лампорты покупки × bps / 10 000)` (pump.fun 30 б.п., meteora-dbc 40 б.п.; env `UNZEEN_LAUNCH_CREATOR_FEE_BPS_*`). Первые сборы этого mint уменьшаются на эту сумму, остаток — создателю. Ошибка оценки — только в пользу пула (≤ 0,3 % первой покупки).
 - Новое действие при `frozen` → `423 balance_frozen` для **любой** операции (в т. ч. без ZEC-hold).
@@ -770,7 +788,10 @@ node = SHA256("unzeen/verify/v1/node" ‖ L.hash ‖ u128(L.sum) ‖ R.hash ‖ 
 rootsDigest = SHA256("unzeen/verify/v1/snapshot" ‖ chainId[2] ‖ u32(snapshotId) ‖ u64(takenAtSec) ‖ u32(N)
                      ‖ u64(solanaSlot) ‖ u32(zcashHeight) ‖ u64(zecReserveZat) ‖ u32(число деревьев)
                      ‖ для каждого дерева по возрастанию asset: asset[32] ‖ root.hash[32] ‖ u128(root.sum))
-operator.sig = ed25519(ключ аттестаций, rootsDigest — 32 байта)     // покрывает и резерв ZEC
+rootsDigest v2 (v0.17, digestVersion = 2) = SHA256("unzeen/verify/v2/snapshot" ‖ те же поля, что v1
+                     ‖ u32(Q) ‖ для каждого quote-актива по возрастанию байтов mint: mint[32] ‖ u8(decimals) ‖ u8(bridged) ‖ u8(counted) ‖ u64(dustBelow))
+                     // нет quoteAssets в ответе → Q = 0
+operator.sig = ed25519(ключ аттестаций, rootsDigest — 32 байта)     // покрывает и резерв ZEC (v2 — и quoteAssets)
 vault.sig    = ed25519(ключ vault, utf8("unzeen/verify/v1/vault\n" + chainId + "\n" + snapshotId + "\n" + address))
 ```
 - Узел коммитит **обе** суммы детей (иначе можно занизить итог), значения `u64` — отрицательных листьев нет. `snapshotId` и новый `blind` в каждом снимке — листья разных снимков не связать.
@@ -782,12 +803,13 @@ type AssetId = "ZEC" | string;            // string = base58 mint. v0.10: дер
 interface VerifySnapshotSummary {
   id: number;
   takenAt: number;                        // unix мс, округлено вниз до минуты (= takenAtSec · 1000)
-  rootsDigest: string;                    // hex 32 байта
+  rootsDigest: string;                    // hex 32 байта (v1 или v2 — см. VerifySnapshot.digestVersion)
   anchor?: { solanaTx: string; slot: number; matches: boolean; blockTime: number | null };   // memo-tx подтверждена; matches — memo из tx == rootsDigest
 }
 
 interface VerifySnapshot extends VerifySnapshotSummary {
   chainId: string;                        // "0202" | "0101"
+  digestVersion?: 2;                      // v0.17: есть → rootsDigest v2 (с quoteAssets); нет → v1
   leaves: number;                         // N, одинаков для всех деревьев
   solanaSlot: number;                     // finalized-слот снимка vault
   zcashHeight: number;                    // высота, на которой оператор заявил резерв
@@ -943,7 +965,8 @@ Mint не base58-32 → `400`; mint не в публичном списке → 
 
 ## Свечи (OHLC)
 
-`GET /api/tokens/:mint/candles?tf=<tf>&from=<unix sec>&to=<unix sec>`
+`GET /api/tokens/:mint/candles?tf=<tf>&from=<unix sec>&to=<unix sec>&quote=<0|1>`
+- v0.17 `quote=1`: бары в единицах пары токена (цена — quote за 1 целый токен, `volume` — базовые единицы quote, учитываются сделки с известной `quoteAmount`). SOL-пары — как без параметра. Другое значение → `400`.
 - `tf`: `1m | 5m | 15m | 1h | 4h | 1d`; по умолчанию `5m`.
 - `from`/`to` необязательны; по умолчанию — последние 300 баров. Максимум 1000 баров за запрос.
 - Бары без сделок не отдаются (lightweight-charts рисует разрыв). Сортировка по `time` по возрастанию.

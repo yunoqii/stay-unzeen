@@ -13,7 +13,12 @@ use unzeen_ledger::{Ledger, MemoInput, NoteObs, NoteRefKey, Observed, Policy};
 use unzeen_protocol::{ChainId, SolanaCluster};
 use zcash_client_backend::data_api::WalletRead;
 
-use crate::{config::Common, deposits, memo::MemoView, sync, wallet};
+use crate::{
+    config::{Common, NetName},
+    deposits,
+    memo::MemoView,
+    sync, wallet,
+};
 
 fn env_u64(key: &str, default: u64) -> anyhow::Result<u64> {
     match std::env::var(key) {
@@ -191,6 +196,11 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
     };
     let mut last_rebalance_label: Vec<&'static str> = vec![""; 2];
     let mut client = None;
+    // A8: broadcasts (payouts, rebalance) over their own connection, ideally another operator.
+    let mut send_client = None;
+    if (payout_cfg.is_some() || rebalance_cfg.is_some()) && c.send_url().is_none() && c.network == NetName::Main {
+        warn!("LIGHTWALLETD_SEND_URL unset: payouts are broadcast through the scan lightwalletd (final audit A8)");
+    }
     let mut backoff = 5u64;
     loop {
         let started = std::time::Instant::now();
@@ -231,9 +241,14 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
             let sample_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
-            if let Some(pc) = &payout_cfg {
-                let cl = client.as_mut().expect("set above");
-                let p = crate::payout::run(c, pc, &mut db, cl, &ledger, rep.tip, policy.confirmations).await?;
+            if (payout_cfg.is_some() || rebalance_cfg.is_some()) && send_client.is_none() {
+                match c.connect_send().await {
+                    Ok(s) => send_client = Some(s),
+                    Err(e) => warn!(error = %format!("{e:#}"), "broadcast lightwalletd unavailable; payouts and rebalance wait"),
+                }
+            }
+            if let (Some(pc), Some(sc)) = (&payout_cfg, send_client.as_mut()) {
+                let p = crate::payout::run(c, pc, &mut db, sc, &ledger, rep.tip, policy.confirmations).await?;
                 if p.sent + p.confirmed + p.failed > 0 || p.requeued > 0 {
                     info!(
                         sent = p.sent,
@@ -246,9 +261,9 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
                 }
             }
             // Pool rebalance ZEC -> SOL (RELAYER v7). A failure here never stops scanning.
-            if let Some((cfgs, oc)) = &rebalance_cfg {
+            if let (Some((cfgs, oc)), true) = (&rebalance_cfg, send_client.is_some()) {
                 for (i, rc) in cfgs.iter().enumerate() {
-                    let cl = client.as_mut().expect("set above");
+                    let cl = send_client.as_mut().expect("checked above");
                     let mut w = crate::rebalance::LiveWallet {
                         common: c,
                         db: &mut db,
@@ -305,8 +320,9 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
                 tokio::time::sleep(Duration::from_secs(interval_secs.max(5))).await;
             }
             Err(e) => {
-                // Drop the connection: next pass reconnects (with fallbacks).
+                // Drop the connections: next pass reconnects (with fallbacks).
                 client = None;
+                send_client = None;
                 // Never log Postgres DETAIL (row values): LedgerError prints SQLSTATE only.
                 warn!(error = %unzeen_ledger::error_chain(e.as_ref()), retry_in_s = backoff, "scan pass failed");
                 if once {

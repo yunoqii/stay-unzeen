@@ -86,6 +86,13 @@ pub struct Common {
     #[arg(long, env = "LIGHTWALLETD_FALLBACK_URLS", value_delimiter = ',')]
     pub lightwalletd_fallbacks: Option<Vec<String>>,
 
+    /// Final audit A8: lightwalletd of ANOTHER operator used only to broadcast pool txs
+    /// (payouts, rebalance). The scan server then never sees which txs are the pool's, and
+    /// cannot pair a payout broadcast with the user's wallet fetching it. Unset: broadcasts go
+    /// through the scan servers (warned at `serve` start on mainnet). No fallback to them.
+    #[arg(long, env = "LIGHTWALLETD_SEND_URL")]
+    pub lightwalletd_send_url: Option<String>,
+
     /// Directory for wallet state (sqlite). Default: $UNZEEN_HOME/<network>/data.
     #[arg(long, env = "UNZEEN_DATA_DIR")]
     pub data_dir_override: Option<PathBuf>,
@@ -219,6 +226,33 @@ impl Common {
             }
         }
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no lightwalletd configured")))
+    }
+
+    /// A8: connection for broadcasts: `LIGHTWALLETD_SEND_URL` if set (never falls back to the
+    /// scan servers), else the scan servers.
+    pub async fn connect_send(&self) -> anyhow::Result<CompactTxStreamerClient<Channel>> {
+        match self.send_url() {
+            Some(url) => self.connect_one(&url).await,
+            None => self.connect().await,
+        }
+    }
+
+    pub fn send_url(&self) -> Option<String> {
+        self.lightwalletd_send_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Operator check of any lightwalletd (read-only `GetLightdInfo`).
+    pub async fn lightd_info(&self, url: &str) -> anyhow::Result<zcash_client_backend::proto::service::LightdInfo> {
+        let mut client = self.connect_raw(url).await?;
+        Ok(client
+            .get_lightd_info(zcash_client_backend::proto::service::Empty {})
+            .await
+            .context("GetLightdInfo")?
+            .into_inner())
     }
 
     async fn connect_one(&self, url: &str) -> anyhow::Result<CompactTxStreamerClient<Channel>> {

@@ -997,6 +997,38 @@ pub fn quantize_min_out(v: u64) -> u64 {
     v / p * p
 }
 
+/// A1/A5/A6 (final audit): a token amount that leaves the pool must not equal a public
+/// amount (a buy of the same vault). Shave `0.5 % + u·1.5 %` (`u` uniform in [0, 1)), then
+/// round down to 3 significant digits. Always ≤ `amount`; 0 only for dust.
+pub fn fuzz_token_amount(amount: u64, u: f64) -> u64 {
+    let shave = ((amount as f64) * (0.005 + 0.015 * u.clamp(0.0, 1.0))).ceil() as u64;
+    quantize_min_out(amount.saturating_sub(shave.max(1)))
+}
+
+/// [`fuzz_token_amount`] with a fresh random `u`.
+pub fn fuzz_token_amount_rand(amount: u64) -> u64 {
+    fuzz_token_amount(amount, (rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64)
+}
+
+/// A6: does selling `amount` of `mint` mirror a public buy of this key? True when it is within
+/// ±1 % of one of its buy credits still in the journal (≤ 48 h), of their sum, or of the
+/// whole current position (available + held: "sell 100 %" after older buys).
+pub async fn matches_public_buy<C: GenericClient>(c: &C, pk: &[u8], mint: &str, amount: u64) -> Result<bool> {
+    let a = i64::try_from(amount).map_err(|_| LedgerError::Range)?;
+    let near = "abs(x - $3::bigint)::numeric * 100 <= x";
+    let q = format!(
+        "SELECT EXISTS (SELECT 1 FROM (SELECT delta_available AS x FROM token_ops
+                                      WHERE anon_pubkey = $1 AND mint = $2 AND kind = 'buy_credit'
+                                        AND delta_available > 0) b WHERE {near})
+             OR EXISTS (SELECT 1 FROM (SELECT sum(delta_available)::bigint AS x FROM token_ops
+                                      WHERE anon_pubkey = $1 AND mint = $2 AND kind = 'buy_credit'
+                                        AND delta_available > 0) s WHERE x > 0 AND {near})
+             OR EXISTS (SELECT 1 FROM (SELECT available + held AS x FROM token_balances
+                                      WHERE anon_pubkey = $1 AND mint = $2) t WHERE x > 0 AND {near})"
+    );
+    Ok(c.query_one(&q, &[&pk, &mint, &a]).await?.get(0))
+}
+
 /// Now as unix ms, rounded down to the minute (`ActionStatus.executedAt`, API v0.5).
 pub fn minute_now_ms() -> u64 {
     let ms = std::time::SystemTime::now()
@@ -1077,5 +1109,72 @@ mod quantize_tests {
             let q = quantize_min_out(v);
             assert!(q <= v && v - q < v / 100 + 1, "{v} -> {q}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fuzz_tests {
+    use super::*;
+
+    #[test]
+    fn fuzzed_amounts_are_smaller_and_coarse() {
+        // 0.5 % at u = 0, 2 % at u → 1, then down to 3 significant digits.
+        assert_eq!(fuzz_token_amount(1_000_000_000_000, 0.0), 995_000_000_000);
+        assert_eq!(fuzz_token_amount(1_000_000_000_000, 1.0), 980_000_000_000);
+        assert_eq!(fuzz_token_amount(123_456_789, 0.5), 121_000_000);
+        for u in [0.0, 0.3, 0.99] {
+            for a in [1_000u64, 34_000_000_000_000, 987_654_321] {
+                let f = fuzz_token_amount(a, u);
+                assert!(f < a && f as f64 >= a as f64 * 0.97, "{a} {u} {f}");
+                assert_eq!(quantize_min_out(f), f);
+            }
+        }
+        assert_eq!(fuzz_token_amount(1, 0.0), 0, "dust");
+    }
+}
+
+impl Ledger {
+    /// A6 for the API: [`matches_public_buy`] on a pooled connection.
+    pub async fn sell_mirrors_buy(&self, pk: &[u8; 32], mint: &str, amount: u64) -> Result<bool> {
+        let c = self.pool.get().await?;
+        let pk_s: &[u8] = pk;
+        matches_public_buy(&c, pk_s, mint, amount).await
+    }
+}
+
+/// One part of a token withdrawal for its owner (API v0.17 `ActionStatus.parts`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WithdrawPart {
+    pub amount: u64,
+    /// Earliest execution (unix ms, whole seconds).
+    pub not_before_ms: u64,
+    /// `queued` | `sent` | `confirmed` | `failed`.
+    pub status: String,
+}
+
+impl Ledger {
+    /// Parts of the owner's `withdraw_token` action while its jobs are linked (≤ 24 h after
+    /// settlement): sizes, start times and state, for the owner's progress view only.
+    pub async fn withdraw_parts(&self, pk: &[u8; 32], id: &[u8; 16]) -> Result<Vec<WithdrawPart>> {
+        let (pk_s, id_s): (&[u8], &[u8]) = (pk, id);
+        let c = self.pool.get().await?;
+        let rows = c
+            .query(
+                "SELECT j.token_amount, (floor(extract(epoch FROM j.not_before)) * 1000)::bigint,
+                        CASE WHEN j.status IN ('held', 'queued', 'claimed') THEN 'queued' ELSE j.status END
+                 FROM relayer_jobs j JOIN actions a ON a.id = j.action_id
+                 WHERE a.id = $1 AND a.anon_pubkey = $2 AND a.kind = 'withdraw_token' AND j.op = 'transfer'
+                 ORDER BY j.part",
+                &[&id_s, &pk_s],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| WithdrawPart {
+                amount: to_u64(r.get::<_, Option<i64>>(0).unwrap_or(0)),
+                not_before_ms: to_u64(r.get(1)),
+                status: r.get(2),
+            })
+            .collect())
     }
 }

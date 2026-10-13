@@ -18,6 +18,7 @@ use unzeen_api::{
 };
 use unzeen_ledger::{
     Ledger, MemoInput, NoteObs, NoteRefKey, PgConfig, Policy,
+    actions::quantize_min_out,
     tokio_postgres::{self, NoTls},
 };
 use unzeen_protocol::{
@@ -328,7 +329,8 @@ async fn pool_info() {
                "venues":[{"venue":"pumpfun","trade":true,"create":true,"quotes":["SOL","USDC"],
                           "atomicFirstBuy":true,"creatorFees":true,"mainnetOnly":false}],
                "launchRules":{"lockSecs":86400,"capBps":500,"maxInitialBuyLamports":"1466000000",
-                              "maxInitialBuyLamportsByVenue":{"pumpfun":"1466000000"}},
+                              "maxInitialBuyLamportsByVenue":{"pumpfun":"1466000000"},
+                              "maxInitialBuyZecUnitsByVenue":{}},
                "fees":{"createFeeZat":"100000","withdrawZecFeeZat":"15000",
                        "withdrawTokenGasLamports":"2000000","withdrawTokenCostLamports":"2100000",
                        "nowFeeZat":"500"},
@@ -655,7 +657,54 @@ async fn withdrawals_and_create() {
             e.schema
         ))
         .await,
-        1000
+        e.one_i64(&format!(
+            "SELECT token_hold FROM {}.actions WHERE kind = 'withdraw_token'",
+            e.schema
+        ))
+        .await,
+        "the parts are the whole hold"
+    );
+    // A1: never the exact amount: shaved 0.5–2 %, each part at 3 significant digits, the rest
+    // stays available.
+    let parts: Vec<i64> = e
+        .admin
+        .query(
+            &format!(
+                "SELECT token_amount FROM {}.relayer_jobs WHERE op = 'transfer'",
+                e.schema
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let total: i64 = parts.iter().sum();
+    assert!((970..1000).contains(&total), "{parts:?}");
+    assert!(parts.iter().all(|p| quantize_min_out(*p as u64) as i64 == *p));
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT available FROM {}.token_balances WHERE mint = '{MINT2}'",
+            e.schema
+        ))
+        .await,
+        1000 - total
+    );
+    // v0.17: the owner sees the parts (sizes, start times, state).
+    let wid = r.body["id"].as_str().unwrap().to_string();
+    let st = e.signed(&me, "GET", &format!("/api/actions/{wid}"), "").await.body;
+    let ps = st["parts"].as_array().unwrap();
+    assert_eq!(ps.len(), 2);
+    assert_eq!(
+        ps.iter()
+            .map(|p| p["amount"].as_str().unwrap().parse::<i64>().unwrap())
+            .sum::<i64>(),
+        total
+    );
+    assert!(
+        ps.iter()
+            .all(|p| p["status"] == "queued" && p["notBefore"].as_u64().unwrap() > now_ms())
     );
     // fee = 2 parts * 4.1M lamports at 10 SOL/ZEC = 82_000 zat.
     assert_eq!(
@@ -2199,8 +2248,28 @@ mod verify_pl {
             zcash_height: 3_000_000,
             zec_reserve_zat: 126_000_000,
         };
-        let digest = pv::roots_digest(&header, &roots);
+        // v0.17: digest v2 also covers quoteAssets (absent = empty list).
+        assert_eq!(v["digestVersion"], 2);
+        let quotes: Vec<pv::QuoteAssetFact> = v["quoteAssets"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|q| pv::QuoteAssetFact {
+                mint: b58_32(q["mint"].as_str().unwrap()),
+                decimals: q["decimals"].as_u64().unwrap() as u8,
+                bridged: q["bridged"].as_bool().unwrap(),
+                counted: q["counted"].as_bool().unwrap(),
+                dust_below: q["dustBelow"].as_str().unwrap().parse().unwrap(),
+            })
+            .collect();
+        let digest = pv::roots_digest_v2(&header, &roots, &quotes);
         assert_eq!(v["rootsDigest"], hex::encode(digest));
+        assert_ne!(
+            hex::encode(pv::roots_digest(&header, &roots)),
+            hex::encode(digest),
+            "v1 and v2 never coincide"
+        );
 
         // Anchor: attest job with ONLY the digest hex; relayer confirms with an operator sig.
         let memo: String = e
@@ -3076,6 +3145,7 @@ mod orders_v08 {
         let o = e.wait_order(5, &ls, |o| o["status"] == "triggered").await;
         let aid1 = o["actionId"].as_str().unwrap().to_string();
         e.fail_job(&aid1, "slippage").await;
+        e.ledger.settle_ready(50).await.unwrap(); // DEBUGTMP
         let o = e.wait_order(5, &ls, |o| o["status"] == "open").await;
         assert_eq!((o["rearms"].as_i64(), o.get("actionId")), (Some(1), None));
         assert_eq!(
@@ -3100,14 +3170,26 @@ mod orders_v08 {
         let o = e.wait_order(5, &ls, |o| o["status"] == "triggered").await;
         let aid2 = o["actionId"].as_str().unwrap().to_string();
         assert_ne!(aid1, aid2);
+        // A5: the re-armed sell is a NEW amount (shaved 0.5–2 %, 3 significant digits), the
+        // rest of the hold is back on the balance.
+        let t2 = e
+            .one_i64(&format!(
+                "SELECT token_amount FROM {s}.relayer_jobs WHERE action_id = '\\x{aid2}'"
+            ))
+            .await;
+        assert!((490_000_000_000..500_000_000_000).contains(&t2), "{t2}");
+        assert_eq!(quantize_min_out(t2 as u64) as i64, t2);
+        assert_eq!(e.order(5, &ls).await["amount"], t2.to_string());
+        assert_eq!(e.tokens(5).await, (1_000_000_000_000 - t2, t2));
         e.sql(&format!(
-            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGR', out_token_amount = 500000000000,
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGR', out_token_amount = token_amount,
                     out_lamports = 500000000 WHERE action_id = '\\x{aid2}'"
         ))
         .await;
         let o = e.wait_order(5, &ls, |o| o["status"] == "filled").await;
         assert_eq!(o["rearms"], 1);
-        assert_eq!(e.tokens(5).await, (500_000_000_000, 0));
+        let base = 1_000_000_000_000 - t2;
+        assert_eq!(e.tokens(5).await, (base, 0));
 
         // Re-arms exhausted → failed (slippage), hold released.
         let r = post(5, with_rearm(create("limit_sell", 100_000_000_000, "0.000001"))).await;
@@ -3136,7 +3218,7 @@ mod orders_v08 {
             e.wait_order(5, &pl, |o| o["status"] == "failed").await["error"],
             "pool_liquidity"
         );
-        assert_eq!(e.tokens(5).await, (500_000_000_000, 0));
+        assert_eq!(e.tokens(5).await, (base, 0));
 
         // stop_loss + rearm: the server guard (tick gapped below trigger × (1 − 15 %)) re-arms
         // instead of failing; without rearm the same gap fails.
@@ -3153,7 +3235,7 @@ mod orders_v08 {
             e.wait_order(5, &sl0, |o| o["status"] == "failed").await["error"],
             "slippage"
         );
-        assert_eq!(e.tokens(5).await, (400_000_000_000, 100_000_000_000));
+        assert_eq!(e.tokens(5).await, (base - 100_000_000_000, 100_000_000_000));
 
         // limit_buy + rearm: amount becomes the actual hold (D10 remainder already back);
         // the balance never changes on re-arm; cancel returns everything.
@@ -3933,7 +4015,8 @@ async fn quote_pairs_zec_spl_and_usdc() {
     assert_eq!(bal(&e, 2).await, (2_000_000 - charged + refund, 0));
 
     // Sell in the ZEC pair: minZecOut → ZEC SPL units at 1 + 30 bps; proceeds credited 1:1 − spread.
-    let sell = json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":"1000","minZecOut":"100000"}).to_string();
+    // (600 of the 1000 bought: not a mirror of the buy, so no A6 shave here.)
+    let sell = json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":"600","minZecOut":"100000"}).to_string();
     let r = e.signed(&user(2), "POST", "/api/actions", &sell).await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
     let sid = r.body["id"].as_str().unwrap().to_string();
@@ -3944,12 +4027,46 @@ async fn quote_pairs_zec_spl_and_usdc() {
     );
     let before = bal(&e, 2).await.0;
     e.sql(&format!(
-        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'ZS1', out_token_amount = 1000, out_lamports = NULL,
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'ZS1', out_token_amount = 600, out_lamports = NULL,
                 out_quote_mint = '{ZEC_SPL}', out_quote_amount = 200600 WHERE op = 'sell'"
     ))
     .await;
     wait_executed(&e, 2, &sid).await;
     assert_eq!(bal(&e, 2).await.0 - before, 200_000);
+
+    // A6: selling the rest (400 = the whole position left, ±1 %) is shaved and rounded; a
+    // sell that mirrors nothing stays exact.
+    let sell = |a: &str| json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":a,"minZecOut":"100000"}).to_string();
+    let r = e.signed(&user(2), "POST", "/api/actions", &sell("400")).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let sid2 = r.body["id"].as_str().unwrap().to_string();
+    let t = e
+        .one_i64(&format!(
+            "SELECT token_amount FROM {s}.relayer_jobs WHERE action_id = '\\x{sid2}'"
+        ))
+        .await;
+    assert!((392..400).contains(&t), "{t}");
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'failed', error_code = 'slippage', error_message = 'x'
+         WHERE action_id = '\\x{sid2}'"
+    ))
+    .await;
+    let path = format!("/api/actions/{sid2}");
+    for _ in 0..60 {
+        if e.signed(&user(2), "GET", &path, "").await.body["status"] == "failed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let r = e.signed(&user(2), "POST", "/api/actions", &sell("250")).await;
+    let sid3 = r.body["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT token_amount FROM {s}.relayer_jobs WHERE action_id = '\\x{sid3}'"
+        ))
+        .await,
+        250
+    );
 
     // Orders: SOL pairs only.
     let ord = json!({"op":"order_create","venue":"pumpfun","mint":MINT,"kind":"limit_buy","triggerPriceSol":"0.00000001","amount":"200000"}).to_string();
@@ -4077,9 +4194,27 @@ async fn bags_first_buy_is_a_separate_held_job() {
         "bad_request"
     );
 
+    // A4: no Bags curve row from the relayer → refused (never a first buy with min_out 0).
+    let r = e.signed(&user(n), "POST", "/api/actions", &create("BAG0")).await;
+    assert_eq!(code(&r), "venue_unavailable", "{:?}", r.body);
+    assert_eq!(e.avail(n).await, (100_000_000, 0));
+    e.sql(&format!(
+        "INSERT INTO {s}.launch_curves (network, venue, virtual_sol_lamports, virtual_token_reserves,
+                                         real_token_reserves, token_total_supply)
+         VALUES ('mainnet-beta', 'bags', 30000000000, 1073000000000000, 793100000000000, 1000000000000000)"
+    ))
+    .await;
+
     // 1) Create + first buy, both confirmed.
     let r = e.signed(&user(n), "POST", "/api/actions", &create("BAGA")).await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    // The launch vault must also fund the first buy (RELAYER v10 meta.reserve_lamports);
+    // min_out bounds the first buy's price (75 % of the curve estimate).
+    assert_eq!(
+        e.one_i64(&job("BAGA", 0, "(meta->>'reserve_lamports')::bigint")).await,
+        e.one_i64(&job("BAGA", 1, "lamports_in")).await
+    );
+    assert!(e.one_i64(&job("BAGA", 1, "min_out")).await > 0);
     let a = r.body["id"].as_str().unwrap().to_string();
     let (avail0, held0) = e.avail(n).await;
     assert_eq!(avail0 + held0, 100_000_000);
@@ -4201,5 +4336,92 @@ async fn bags_first_buy_is_a_separate_held_job() {
         "{done:?}"
     );
     assert_eq!(e.avail(n).await, (avail1 - fee, 0));
+    e.drop_schema().await;
+}
+
+// ================================================================== API v0.17: full feed, candles in quote
+
+#[tokio::test]
+async fn full_feed_filters_and_quote_candles() {
+    let Some(e) = setup_with(|c| c.intel.full_trades = true).await else {
+        return;
+    };
+    let s = e.schema.clone();
+    let creator = "Dev1111111111111111111111111111111111111111";
+    // MINT: a foreign pump.fun token (not an Unzeen launch). MINT2: a devnet USDC pair.
+    e.sql(&format!(
+        "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals) VALUES ('{MINT}', 'pumpfun', 'F', 'F', 6);
+         INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, quote_mint)
+           VALUES ('{MINT2}', 'pumpfun', 'Q', 'Q', 6, '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
+         INSERT INTO {s}.intel_creates (network, mint, venue, creator, slot, created_at, signature)
+           VALUES ('devnet', '{MINT}', 'pumpfun', '{creator}', 1, now() - interval '1 hour', 'SIGC');
+         INSERT INTO {s}.market_trades (mint, kind, venue, symbol, trader, unzeen, tags, token_amount, sol_amount,
+                                        decimals, signature, ix, slot, ts) VALUES
+           ('{MINT}', 'buy', 'pumpfun', 'F', 'Whale111', FALSE, '{{whale}}', 1000000, 5000000000, 6, 'S1', 0, 1, now()),
+           ('{MINT}', 'buy', 'pumpfun', 'F', '{creator}', FALSE, '{{}}', 1000, 1000000, 6, 'S2', 0, 1, now()),
+           ('{MINT}', 'sell', 'pumpfun', 'F', 'Other111', FALSE, '{{dev}}', 1000, 1000000, 6, 'S3', 0, 1, now()),
+           ('{MINT}', 'buy', 'pumpfun', 'F', 'Vault111', TRUE, '{{}}', 1000, 1000000, 6, 'S4', 0, 1, now()),
+           ('{MINT}', 'buy', 'pumpfun', 'F', 'Small111', FALSE, '{{}}', 10, 10000, 6, 'S5', 0, 1, now());
+         INSERT INTO {s}.trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts,
+                                 quote_mint, quote_amount) VALUES
+           ('buy', 'pumpfun', '{MINT2}', 'Q', 2000000, 1000000000, 6, 'Q1', 1, now() - interval '30 seconds',
+            '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', 150000000),
+           ('sell', 'pumpfun', '{MINT2}', 'Q', 1000000, 600000000, 6, 'Q2', 1, now() - interval '20 seconds',
+            '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', 80000000);"
+    ))
+    .await;
+    let sigs = |v: &Value| -> Vec<String> {
+        let mut x: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["solanaTx"].as_str().unwrap().to_string())
+            .collect();
+        x.sort();
+        x
+    };
+    let w = e.get(&format!("/api/tokens/{MINT}/trades?filter=whales")).await;
+    assert_eq!(w.status, StatusCode::OK, "{:?}", w.body);
+    assert_eq!(sigs(&w.body), vec!["S1"]);
+    assert_eq!(w.body[0]["trader"], "Whale111");
+    let d = e.get(&format!("/api/tokens/{MINT}/trades?filter=dev")).await;
+    assert_eq!(
+        sigs(&d.body),
+        vec!["S2", "S3"],
+        "tagged + the creator's own trade, never the pool's"
+    );
+    let s2 = d
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["solanaTx"] == "S2")
+        .unwrap();
+    assert!(s2["tags"].as_array().unwrap().contains(&json!("dev")));
+    let all = e.get(&format!("/api/tokens/{MINT}/trades?filter=all")).await;
+    assert_eq!(all.body.as_array().unwrap().len(), 5);
+    let u = e.get(&format!("/api/tokens/{MINT}/trades?filter=unzeen")).await;
+    assert_eq!(sigs(&u.body), vec!["S4"]);
+    assert_eq!(u.body[0]["trader"], "unzeen");
+
+    // Candles: SOL by default, pair units with quote=1.
+    let sol = e.get(&format!("/api/tokens/{MINT2}/candles?tf=1h")).await;
+    assert_eq!(sol.status, StatusCode::OK, "{:?}", sol.body);
+    let bar = &sol.body[sol.body.as_array().unwrap().len() - 1];
+    assert_eq!(bar["volume"], "1600000000");
+    let q = e.get(&format!("/api/tokens/{MINT2}/candles?tf=1h&quote=1")).await;
+    let bar = &q.body[q.body.as_array().unwrap().len() - 1];
+    // 150 USDC / 2 tokens = 75; then 80 / 1 = 80.
+    assert_eq!((bar["open"].as_str(), bar["close"].as_str()), (Some("75"), Some("80")));
+    assert_eq!(bar["volume"], "230000000");
+    assert_eq!(
+        code(&e.get(&format!("/api/tokens/{MINT2}/candles?quote=x")).await),
+        "bad_request"
+    );
+    // A SOL pair with quote=1: same as SOL.
+    assert_eq!(
+        e.get(&format!("/api/tokens/{MINT}/candles?tf=1h&quote=1")).await.status,
+        StatusCode::OK
+    );
     e.drop_schema().await;
 }

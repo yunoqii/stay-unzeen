@@ -257,9 +257,9 @@ pub(crate) async fn rearm_on_slippage<C: GenericClient>(tx: &C, action_id: &[u8]
     }
     tx.execute(
         "UPDATE orders SET status = 'open', action_id = NULL, leg = NULL, sl_armed_tick = NULL,
-                rearms = rearms + 1, amount = CASE WHEN kind = 'limit_buy' THEN $2 ELSE amount END
+                rearms = rearms + 1, amount = CASE WHEN kind = 'limit_buy' THEN $2::bigint ELSE $3::bigint END
          WHERE id = $1",
-        &[&oid, &hold],
+        &[&oid, &hold, &thold],
     )
     .await?;
     Ok(true)
@@ -524,7 +524,7 @@ impl Ledger {
                         o.trigger_price_sol::text, COALESCE(t.decimals, 6::smallint), COALESCE(b.frozen, FALSE),
                         p.price_sol::text, (extract(epoch FROM now()) * 1000)::bigint - p.tick_at,
                         p.price_sol <= o.sl_price_sol, o.sl_price_sol::text, o.sl_slippage_bps,
-                        o.rearm AND o.rearms < $2 AND o.expires_at > now()
+                        o.rearm AND o.rearms < $2 AND o.expires_at > now(), o.rearms
                  FROM orders o JOIN intel_prices p ON p.mint = o.mint
                  LEFT JOIN tokens t ON t.mint = o.mint LEFT JOIN balances b ON b.anon_pubkey = o.anon_pubkey
                  WHERE o.id = $1 AND o.status = 'open' AND p.tick_at > COALESCE(o.last_tick, 0)
@@ -555,6 +555,7 @@ impl Ledger {
         let sl_trigger: Option<String> = r.get(19);
         let sl_slip = r.get::<_, Option<i32>>(20).unwrap_or(1_500).max(0) as u32;
         let can_rearm: bool = r.get(21);
+        let rearms: i16 = r.get(22);
         let set_tick = |armed_next: Option<i64>| {
             let id = id.clone();
             async move {
@@ -633,6 +634,31 @@ impl Ledger {
         let (hold, gain_mint, gain_est): (i64, Option<String>, Option<i64>) = (a.get(0), a.get(1), a.get(2));
         // E4: min_out from the PUBLIC tick price (like a manual trade from a public price),
         // never from the trigger; quantized at job insertion.
+        // A5 / A6 (final audit): a sell never repeats the amount of its failed attempt nor
+        // mirrors this key's public buy. After a re-arm, or when the amount matches a buy
+        // (±1 %), it is shaved 0.5–2 % and rounded to 3 significant digits; the remainder of
+        // the order's token hold goes back to `available` in this transaction.
+        let amount = if !buy && (rearms > 0 || crate::actions::matches_public_buy(tx, &pk, &mint, amount).await?) {
+            let a2 = crate::actions::fuzz_token_amount_rand(amount);
+            if a2 == 0 {
+                close_order(tx, &id, "failed", Some("below_minimum")).await?;
+                rep.failed += 1;
+                return Ok(());
+            }
+            let back = to_i64(amount - a2)?;
+            tx.execute(
+                "UPDATE token_balances SET held = held - $3, available = available + $3, updated_at = now()
+                 WHERE anon_pubkey = $1 AND mint = $2",
+                &[&pk, &mint, &back],
+            )
+            .await?;
+            token_journal(tx, &pk, &mint, "release", back, -back, &id).await?;
+            tx.execute("UPDATE orders SET amount = $2 WHERE id = $1", &[&id, &to_i64(a2)?])
+                .await?;
+            a2
+        } else {
+            amount
+        };
         let (lamports, zat, min_out) = if buy {
             let full = ((hold.max(0) as u128) * (rate.lamports_per_zec as u128) / ZAT_PER_ZEC) as u64;
             let shave = (rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64;

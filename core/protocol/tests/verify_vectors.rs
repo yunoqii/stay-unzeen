@@ -177,11 +177,35 @@ fn generate() -> Value {
     };
     let digest = verify::roots_digest(&header, &[(mint_b, mint_root), (verify::ZEC_ASSET, root)]);
     let op = SigningKey::from_bytes(&[9; 32]);
+    // API v0.17: v2 digest, same header and trees, plus the snapshot's quoteAssets.
+    let quotes_json = json!([
+        {"mint": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS", "quote": "ZEC", "decimals": 8,
+         "bridged": true, "counted": true, "dustBelow": "100000"},
+        {"mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", "quote": "USDC", "decimals": 6,
+         "bridged": false, "counted": false, "dustBelow": "10000"},
+    ]);
+    let quotes: Vec<verify::QuoteAssetFact> = quotes_json
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|q| verify::QuoteAssetFact {
+            mint: bs58::decode(q["mint"].as_str().unwrap())
+                .into_vec()
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            decimals: q["decimals"].as_u64().unwrap() as u8,
+            bridged: q["bridged"].as_bool().unwrap(),
+            counted: q["counted"].as_bool().unwrap(),
+            dust_below: q["dustBelow"].as_str().unwrap().parse().unwrap(),
+        })
+        .collect();
+    let digest_v2 = verify::roots_digest_v2(&header, &[(mint_b, mint_root), (verify::ZEC_ASSET, root)], &quotes);
     let vault = SigningKey::from_bytes(&[5; 32]);
     let vault_addr = bs58::encode(vault.verifying_key().to_bytes()).into_string();
     let msg = verify::vault_message("0202", snapshot_id, &vault_addr);
     json!({
-        "_comment": "Verify vectors (API.md v0.7; creatorSnapshot: v0.10). Integers big-endian. Signing keys are ed25519 seeds of repeated bytes (TEST ONLY).",
+        "_comment": "Verify vectors (API.md v0.7; creatorSnapshot: v0.10; snapshotV2: v0.17). Integers big-endian. Signing keys are ed25519 seeds of repeated bytes (TEST ONLY).",
         "chainId": "0202",
         "snapshotId": snapshot_id,
         "zecTree": {
@@ -212,6 +236,19 @@ fn generate() -> Value {
             "sig": bs58::encode(vault.sign(msg.as_bytes()).to_bytes()).into_string(),
         },
         "creatorSnapshot": creator_snapshot(),
+        "snapshotV2": {
+            "_comment": "API v0.17: digestVersion 2 = the `snapshot` above (same header and trees) under the v2 tag, then u32(Q) and per quote asset by ascending mint bytes: mint[32] u8(decimals) u8(bridged) u8(counted) u64(dustBelow).",
+            "digestVersion": 2,
+            "quoteAssets": quotes_json,
+            "rootsDigest": hex::encode(digest_v2),
+            "operatorSig": bs58::encode(op.sign(&digest_v2).to_bytes()).into_string(),
+            "quoteBytes": quotes.iter().map(|q| {
+                let mut b = q.mint.to_vec();
+                b.extend([q.decimals, u8::from(q.bridged), u8::from(q.counted)]);
+                b.extend(q.dust_below.to_be_bytes());
+                hex::encode(b)
+            }).collect::<Vec<_>>(),
+        },
     })
 }
 

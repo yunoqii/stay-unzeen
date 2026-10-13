@@ -263,6 +263,16 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
     for v in st.cfg.venues.iter().filter(|v| v.as_str() != "jupiter") {
         by_venue.insert(v.clone(), json!(max_initial_buy_for(&st, v).await?.to_string()));
     }
+    // v0.17: ZEC-pair creates, per venue with an enabled ZEC pair (ZEC SPL units = zat,
+    // stepped down to ZEC_UNITS_STEP like the check in `create`).
+    let mut zec_by_venue = serde_json::Map::new();
+    let zec_step = actions::ZEC_UNITS_STEP;
+    for v in st.cfg.venues.iter() {
+        if st.cfg.quotes.for_venue("ZEC", v).is_some() {
+            let m = max_initial_buy_zec_units(&st);
+            zec_by_venue.insert(v.clone(), json!((m - m % zec_step).to_string()));
+        }
+    }
     let mut r = Json(json!({
         "address": address,
         "network": st.cfg.network,
@@ -286,6 +296,7 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
             "capBps": st.cfg.launch.cap_bps,
             "maxInitialBuyLamports": max_initial_buy(&st).await?.to_string(),
             "maxInitialBuyLamportsByVenue": by_venue,
+            "maxInitialBuyZecUnitsByVenue": zec_by_venue,
         },
     }));
     r.0["venues"] = venues_block(&st);
@@ -449,6 +460,21 @@ pub async fn max_initial_buy_for(st: &AppState, venue: &str) -> ApiResult<u64> {
     Ok(x)
 }
 
+/// Max initial buy of a ZEC-pair `create` in ZEC SPL units (= zat) within the creator cap:
+/// ZEC curve of pump.fun / LaunchLab (same token reserves, ZEC virtual reserves). Not stepped.
+pub fn max_initial_buy_zec_units(st: &AppState) -> u64 {
+    let l = &st.cfg.launch;
+    if l.cap_bps == 0 {
+        return 0;
+    }
+    let curve = launch::Curve {
+        virtual_sol: st.cfg.quotes.zec_virtual_units,
+        virtual_tokens: l.virtual_token_reserves,
+    };
+    let cap = ((l.total_supply as u128) * (l.cap_bps as u128) / 10_000) as u64;
+    curve.max_lamports_within(cap)
+}
+
 /// `PoolInfo.launchRules.maxInitialBuyLamports` (pump.fun, the default launch venue).
 pub async fn max_initial_buy(st: &AppState) -> ApiResult<u64> {
     max_initial_buy_for(st, fair::VENUE).await
@@ -593,7 +619,7 @@ async fn submit_action(
     }
     let parsed: actions::SignedAction =
         serde_json::from_value(raw).map_err(|_| ApiError::bad_request("invalid action body"))?;
-    let new = actions::build(&st, parsed).await?;
+    let new = actions::build(&st, &a.pubkey, parsed).await?;
     let receipt = st.ledger.submit(&a.pubkey, &a.nonce, &request_hash, &new).await?;
     let mut v = json!({ "id": hex::encode(receipt.id), "status": receipt.status });
     if receipt.rate.is_some() {
@@ -620,7 +646,17 @@ async fn action_status(
         .action_view(&a.pubkey, &id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let out = action_json(&v);
+    let mut out = action_json(&v);
+    // v0.17: parts of a token withdrawal (sizes, start times, state), owner only. Five parts
+    // still fit the 1024-byte bucket.
+    let parts = st.ledger.withdraw_parts(&a.pubkey, &id).await?;
+    if !parts.is_empty() {
+        out["parts"] = parts
+            .iter()
+            .map(|p| json!({ "amount": p.amount.to_string(), "notBefore": p.not_before_ms, "status": p.status }))
+            .collect::<Vec<_>>()
+            .into();
+    }
     Ok(padded(out, 1024))
 }
 

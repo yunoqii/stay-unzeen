@@ -12,7 +12,9 @@
 //!    The txid is written to Postgres BEFORE broadcast.
 //!
 //! Mainnet: nothing is built unless `UNZEEN_ALLOW_MAINNET_SEND=1`, and a single payout above
-//! `UNZEEN_MAX_PAYOUT_ZAT` waits for manual review.
+//! `UNZEEN_MAX_PAYOUT_ZAT` (default 1 ZEC) waits for manual review: it is filtered out in SQL
+//! (final audit A2: it never blocks the queue) until `unzeen-scanner payout approve <id>`.
+//! Broadcasts go through `client` = the send connection (`LIGHTWALLETD_SEND_URL`, A8).
 //!
 //! Privacy: logs carry counters only (no txids, amounts or addresses).
 
@@ -38,11 +40,14 @@ use crate::{
 
 type Client = CompactTxStreamerClient<Channel>;
 
+/// A2: mainnet single-payout cap without operator approval, 1 ZEC.
+pub const DEFAULT_MAX_PAYOUT_ZAT: u64 = 100_000_000;
+
 #[derive(Clone, Copy, Debug)]
 pub struct PayoutCfg {
     /// Payouts per tx.
     pub max_batch: usize,
-    /// Mainnet: single payouts above this wait for manual review.
+    /// Mainnet: single payouts above this wait for manual review (default 1 ZEC).
     pub max_payout_zat: u64,
     /// Re-queue delay after an expired tx (seconds, uniform).
     pub requeue_min_secs: f64,
@@ -59,7 +64,7 @@ impl PayoutCfg {
         };
         Ok(Self {
             max_batch: get("UNZEEN_PAYOUT_BATCH", 5)?.clamp(1, 20) as usize,
-            max_payout_zat: get("UNZEEN_MAX_PAYOUT_ZAT", 5_000_000)?,
+            max_payout_zat: get("UNZEEN_MAX_PAYOUT_ZAT", DEFAULT_MAX_PAYOUT_ZAT)?,
             requeue_min_secs: get("ZEC_PAYOUT_DELAY_MIN_SECS", 60)? as f64,
             requeue_max_secs: get("ZEC_PAYOUT_DELAY_MAX_SECS", 600)? as f64,
         })
@@ -142,18 +147,26 @@ pub async fn run(
     if ledger.verify_frozen().await? {
         return Ok(st);
     }
-    let ready = ledger.ready_payouts(cfg.max_batch as i64).await?;
+    let main = c.network == NetName::Main;
+    if main {
+        let held = ledger.held_payouts(cfg.max_payout_zat).await?.len();
+        if held > 0 {
+            warn!(
+                held,
+                "ALERT: payouts above UNZEEN_MAX_PAYOUT_ZAT wait for `payout approve`"
+            );
+            st.waiting += held;
+        }
+    }
+    let ready = ledger
+        .ready_payouts(cfg.max_batch as i64, main.then_some(cfg.max_payout_zat))
+        .await?;
     if ready.is_empty() {
         return Ok(st);
     }
     let net = c.params();
     let mut batch: Vec<(PayoutRow, Payment)> = Vec::new();
     for p in ready {
-        if c.network == NetName::Main && p.amount_zat > cfg.max_payout_zat {
-            warn!("payout above UNZEEN_MAX_PAYOUT_ZAT waits for manual review");
-            st.waiting += 1;
-            continue;
-        }
         let payment = orchard_only(&p.to_ua, &net).and_then(|to| {
             Payment::new(to, Some(Zatoshis::from_u64(p.amount_zat)?), None, None, None, vec![])
                 .map_err(|e| anyhow!("{e:?}"))

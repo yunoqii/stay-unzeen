@@ -26,16 +26,27 @@ pub struct InflightPayout {
     pub ids: Vec<i64>,
 }
 
+/// A payout above the cap, waiting for the operator (`payout list-held`). No recipient.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldPayout {
+    pub id: i64,
+    pub amount_zat: u64,
+    pub queued_secs: i64,
+}
+
 impl Ledger {
-    /// Up to `limit` payouts whose delay has passed, oldest first.
-    pub async fn ready_payouts(&self, limit: i64) -> Result<Vec<PayoutRow>> {
+    /// Up to `limit` payouts whose delay has passed, oldest first. A2: with `cap`, payouts
+    /// above it are skipped IN SQL unless approved, so they never block the ones behind them.
+    pub async fn ready_payouts(&self, limit: i64, cap: Option<u64>) -> Result<Vec<PayoutRow>> {
         let c = self.pool.get().await?;
+        let cap = cap.map(|v| v.min(i64::MAX as u64) as i64);
         let rows = c
             .query(
                 "SELECT id, to_ua, amount_zat FROM zec_payouts
                  WHERE status = 'queued' AND not_before <= now() AND to_ua IS NOT NULL
+                   AND ($2::bigint IS NULL OR amount_zat <= $2 OR approved)
                  ORDER BY not_before LIMIT $1",
-                &[&limit],
+                &[&limit, &cap],
             )
             .await?;
         Ok(rows
@@ -179,4 +190,39 @@ pub(crate) async fn close_in<C: GenericClient>(tx: &C, id: &[u8], ok: bool, erro
         }
     }
     Ok(true)
+}
+
+impl Ledger {
+    /// A2: queued payouts above `cap` not yet approved (operator review), oldest first.
+    pub async fn held_payouts(&self, cap: u64) -> Result<Vec<HeldPayout>> {
+        let c = self.pool.get().await?;
+        let cap = cap.min(i64::MAX as u64) as i64;
+        let rows = c
+            .query(
+                "SELECT id, amount_zat, extract(epoch FROM now() - created_at)::bigint FROM zec_payouts
+                 WHERE status = 'queued' AND to_ua IS NOT NULL AND amount_zat > $1 AND NOT approved
+                 ORDER BY not_before",
+                &[&cap],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| HeldPayout {
+                id: r.get(0),
+                amount_zat: to_u64(r.get(1)),
+                queued_secs: r.get(2),
+            })
+            .collect())
+    }
+
+    /// A2: operator approval of one queued payout above the cap. `false` if no such queued payout.
+    pub async fn approve_payout(&self, id: i64) -> Result<bool> {
+        let c = self.pool.get().await?;
+        Ok(c.execute(
+            "UPDATE zec_payouts SET approved = TRUE, updated_at = now() WHERE id = $1 AND status = 'queued'",
+            &[&id],
+        )
+        .await?
+            == 1)
+    }
 }

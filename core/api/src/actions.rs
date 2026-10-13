@@ -3,7 +3,10 @@
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::json;
-use unzeen_ledger::{JobOp, NewAction, NewJob, NewPayout, RateUsed};
+use unzeen_ledger::{
+    JobOp, NewAction, NewJob, NewPayout, RateUsed,
+    actions::{fuzz_token_amount_rand, quantize_min_out},
+};
 use zcash_address::unified::{self, Container, Encoding};
 
 use crate::{
@@ -465,7 +468,7 @@ pub fn fuzzed_buy_step(
     Ok((zat, lamports, min_out))
 }
 
-pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
+pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<NewAction> {
     let exec = st.cfg.exec;
     let epoch = |mode: ExecMode| match mode {
         ExecMode::Now => 0.0,
@@ -600,6 +603,22 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             let mint = solana_address(&mint, "mint")?;
             let amount = positive(&amount, "amount")?;
             let min_zec_out = parse_amount(&min_zec_out, "minZecOut")?;
+            // A6: a sell that mirrors this key's public buy (±1 %) is shaved 0.5–2 % and
+            // rounded to 3 significant digits (the rest stays available); minZecOut shrinks in
+            // proportion (same minimum price). Other sells are left exact.
+            // The minimum-action check keeps the signed floor (the shave must not turn a valid
+            // sell into below_minimum).
+            let signed_floor = min_zec_out;
+            let (amount, min_zec_out) = if st.ledger.sell_mirrors_buy(pk, &mint, amount).await? {
+                let a2 = fuzz_token_amount_rand(amount);
+                if a2 == 0 {
+                    return Err(ApiError::below_minimum("sell amount too small"));
+                }
+                let m2 = ((min_zec_out as u128) * (a2 as u128)).div_ceil(amount as u128) as u64;
+                (a2, m2)
+            } else {
+                (amount, min_zec_out)
+            };
             let known = check_venue_status(st, &mint, &v).await?;
             if known.is_none() && min_zec_out == 0 {
                 return Err(ApiError::bad_request(
@@ -613,7 +632,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                     .as_ref()
                     .and_then(|t| estimate_zat_zec(t.price_quote.as_deref()?, t.decimals, amount, applied))
                     .unwrap_or(0);
-                if min_zec_out < min_action && est < min_action {
+                if signed_floor < min_action && est < min_action {
                     return Err(ApiError::below_minimum(
                         "sell value below PoolInfo.minActionZat (raise amount or minZecOut)",
                     ));
@@ -641,7 +660,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             let est = known
                 .and_then(|(p, d)| estimate_zat(&p, d, amount, applied))
                 .unwrap_or(0);
-            if min_zec_out < min_action && est < min_action {
+            if signed_floor < min_action && est < min_action {
                 return Err(ApiError::below_minimum(
                     "sell value below PoolInfo.minActionZat (raise amount or minZecOut)",
                 ));
@@ -709,6 +728,13 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             if !st.cfg.create_enabled {
                 return Err(ApiError::venue_unavailable("create is not available yet"));
             }
+            // A4 (final audit): without the relayer's Bags curve row (launch_curves) neither the
+            // creator cap nor the first buy's min_out can be computed: refuse, never min_out 0.
+            if v == "bags" && !crate::rules_curve(st, &v).await?.2 {
+                return Err(ApiError::venue_unavailable(
+                    "Bags launch curve not loaded yet, retry later",
+                ));
+            }
             let initial = match initial_buy_zec.as_deref() {
                 Some(s) => parse_amount(s, "initialBuyZec")?,
                 None => 0,
@@ -733,16 +759,7 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             if initial > 0 && st.cfg.launch.cap_bps > 0 {
                 let full = zat_to_lamports(initial, applied);
                 let max = match zec {
-                    // ZEC curve of pump.fun / LaunchLab: same token reserves, ZEC virtual reserves.
-                    Some(_) => {
-                        let l = &st.cfg.launch;
-                        let curve = crate::launch::Curve {
-                            virtual_sol: st.cfg.quotes.zec_virtual_units,
-                            virtual_tokens: l.virtual_token_reserves,
-                        };
-                        let cap = ((l.total_supply as u128) * (l.cap_bps as u128) / 10_000) as u64;
-                        curve.max_lamports_within(cap)
-                    }
+                    Some(_) => crate::max_initial_buy_zec_units(st),
                     None => crate::max_initial_buy_for(st, &v).await?,
                 };
                 let step = if zec.is_some() {
@@ -780,13 +797,11 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
                 // v0.16 (RELAYER v10): Bags' launch tx carries no first buy. The user's first
                 // buy is a second job, `held` until the create is confirmed, then bought on the
                 // pool through the vault pinned to the new mint. Not atomic: a sniper can buy
-                // in between; min_out (own Bags curve row only) bounds the price paid.
-                let (curve, _, own) = crate::rules_curve(st, &v).await?;
-                let min_out = if own {
-                    curve.tokens_out_initial(lamports) / 4 * 3
-                } else {
-                    0
-                };
+                // in between; min_out from the Bags curve bounds the price paid.
+                let (curve, _, _) = crate::rules_curve(st, &v).await?;
+                let min_out = curve.tokens_out_initial(lamports) / 4 * 3;
+                // RELAYER v10: the vault picked for the launch must also fund the first buy.
+                m["reserve_lamports"] = json!(lamports);
                 jobs.push(NewJob {
                     venue: Some(v.clone()),
                     lamports_in: Some(0),
@@ -877,7 +892,15 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             let f = st.cfg.fees;
             let cost = u64::from(parts) * (f.withdraw_token_gas_lamports + f.withdraw_token_cost_lamports);
             let min_delay = exec.withdraw_token_delay_min_secs.min(max_delay);
-            let jobs = split_amount(amount, parts)
+            // A1: always shaved 0.5–2 % and every part rounded down to 3 significant digits:
+            // no part (nor their sum) equals a public buy. The remainder stays available.
+            let total = fuzz_token_amount_rand(amount);
+            let split: Vec<u64> = split_amount(total, parts).into_iter().map(quantize_min_out).collect();
+            if total < u64::from(parts) || split.contains(&0) {
+                return Err(ApiError::bad_request("amount too small to withdraw"));
+            }
+            let amount: u64 = split.iter().sum();
+            let jobs = split
                 .into_iter()
                 .zip(dests)
                 .map(|(n, d)| NewJob {

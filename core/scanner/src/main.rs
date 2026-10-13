@@ -83,6 +83,17 @@ enum Cmd {
         #[arg(long, env = "UNZEEN_REBALANCE")]
         rebalance: bool,
     },
+    /// Operator: ZEC payouts above the mainnet cap (`UNZEEN_MAX_PAYOUT_ZAT`, final audit A2).
+    Payout {
+        #[command(subcommand)]
+        cmd: PayoutCmd,
+    },
+    /// Operator: read-only `GetLightdInfo` of a lightwalletd (e.g. a candidate for
+    /// `LIGHTWALLETD_SEND_URL`).
+    LwdInfo {
+        #[arg(long)]
+        url: String,
+    },
     /// Pool rebalance ZEC -> SOL via NEAR Intents 1Click (see docs/RELAYER.md v7).
     Rebalance {
         /// `sol` (ZEC → SOL) | `zec-spl` (ZEC → ZEC SPL stock of ZEC pairs, API v0.13).
@@ -173,6 +184,14 @@ enum Cmd {
     LedgerStats,
     /// Pool wallet balance: spendable / pending (K confirmations). Prints no addresses.
     WalletBalance,
+}
+
+#[derive(Subcommand)]
+enum PayoutCmd {
+    /// Queued payouts above the cap waiting for approval: id, amount, age. No recipients.
+    ListHeld,
+    /// Let one held payout go into the next payout tx.
+    Approve { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -299,6 +318,45 @@ async fn run() -> anyhow::Result<()> {
             rebalance,
         } => service::serve(c, interval, once, payouts, rebalance).await?,
         Cmd::Rebalance { cmd, target } => rebalance_cmd(c, cmd, &target).await?,
+        Cmd::Payout { cmd } => {
+            let url = std::env::var("DATABASE_URL").context("DATABASE_URL")?;
+            let ledger = unzeen_ledger::Ledger::connect(&url, service::policy_from_env(c)?).await?;
+            let cap = payout::PayoutCfg::from_env()?.max_payout_zat;
+            match cmd {
+                PayoutCmd::ListHeld => {
+                    let held = ledger.held_payouts(cap).await?;
+                    println!("cap: {} ZEC; held: {}", deposits::format_zec(cap), held.len());
+                    for h in held {
+                        println!(
+                            "{:>8}  {:>14} ZEC  queued ~{} h",
+                            h.id,
+                            deposits::format_zec(h.amount_zat),
+                            h.queued_secs / 3600
+                        );
+                    }
+                }
+                PayoutCmd::Approve { id } => {
+                    if ledger.approve_payout(id).await? {
+                        println!("payout {id} approved: it goes out with the next payout pass");
+                    } else {
+                        bail!("no queued payout {id}");
+                    }
+                }
+            }
+        }
+        Cmd::LwdInfo { url } => {
+            let i = c.lightd_info(&url).await?;
+            println!(
+                "chain: {}\nvendor: {}\nversion: {}\nheight: {}\nconsensus branch: {}\nsapling activation: {}\ntaddr support: {}",
+                i.chain_name,
+                i.vendor,
+                i.version,
+                i.block_height,
+                i.consensus_branch_id,
+                i.sapling_activation_height,
+                i.taddr_support
+            );
+        }
         Cmd::Sync { watch, all, json } => {
             dev_only(c, "sync")?;
             let db_path = c.wallet_db_path();

@@ -655,7 +655,7 @@ async fn zec_payouts_lifecycle() {
         .unwrap();
     assert_eq!(l.balance(&me).await.unwrap().unwrap().held_zat, 530_000);
 
-    let ready = l.ready_payouts(10).await.unwrap();
+    let ready = l.ready_payouts(10, None).await.unwrap();
     assert_eq!(ready.len(), 3);
     let ids: Vec<i64> = ready.iter().map(|p| p.id).collect();
     // Batch of the first two in one tx; written before broadcast.
@@ -663,14 +663,14 @@ async fn zec_payouts_lifecycle() {
     assert_eq!(l.mark_payouts_sent(&ids[..2], &tx1).await.unwrap(), 2);
     // Already sent rows cannot be marked again (all-or-nothing).
     assert_eq!(l.mark_payouts_sent(&ids[..3], &[0xBB; 32]).await.unwrap(), 0);
-    assert_eq!(l.ready_payouts(10).await.unwrap().len(), 1);
+    assert_eq!(l.ready_payouts(10, None).await.unwrap().len(), 1);
     let inflight = l.inflight_payouts().await.unwrap();
     assert_eq!(inflight.len(), 1);
     assert_eq!(inflight[0].ids, ids[..2].to_vec());
 
     // Expired unmined -> back to the queue (no double payout: new tx only after this).
     assert_eq!(l.requeue_payouts(&tx1, 0.0).await.unwrap(), 2);
-    assert_eq!(l.ready_payouts(10).await.unwrap().len(), 3);
+    assert_eq!(l.ready_payouts(10, None).await.unwrap().len(), 3);
     let tx2 = [0xCC; 32];
     assert_eq!(l.mark_payouts_sent(&ids[..2], &tx2).await.unwrap(), 2);
 
@@ -921,4 +921,40 @@ async fn zec_pair_settle_needs_amount_and_fees_in_zat() {
         1_200
     );
     db.drop_schema().await;
+}
+
+/// Final audit A2: payouts above the cap never block the queue; approval lets one through.
+#[tokio::test]
+async fn big_payouts_wait_without_blocking() {
+    let Some(db) = setup().await else { return };
+    let l = &db.ledger;
+    fund(l, 1, 0, 10_000_000).await;
+    let me = pk(1);
+    // Five big payouts at the head of the queue, then a small one.
+    for i in 0..5u8 {
+        l.submit(&me, &[10 + i; 16], &[10 + i; 32], &withdraw_zec(1_500_000, 15_000))
+            .await
+            .unwrap();
+    }
+    l.submit(&me, &[20; 16], &[20; 32], &withdraw_zec(200_000, 15_000))
+        .await
+        .unwrap();
+    let cap = Some(1_000_000);
+    let ready = l.ready_payouts(5, cap).await.unwrap();
+    assert_eq!(
+        ready.iter().map(|p| p.amount_zat).collect::<Vec<_>>(),
+        vec![200_000],
+        "the small payout is not stuck behind the big ones"
+    );
+    let held = l.held_payouts(1_000_000).await.unwrap();
+    assert_eq!(held.len(), 5);
+    assert!(held.iter().all(|h| h.amount_zat == 1_500_000));
+    assert!(l.approve_payout(held[0].id).await.unwrap());
+    assert!(!l.approve_payout(-1).await.unwrap());
+    let ready = l.ready_payouts(5, cap).await.unwrap();
+    assert_eq!(ready.len(), 2);
+    assert!(ready.iter().any(|p| p.id == held[0].id));
+    assert_eq!(l.held_payouts(1_000_000).await.unwrap().len(), 4);
+    // No cap (testnet): everything.
+    assert_eq!(l.ready_payouts(10, None).await.unwrap().len(), 6);
 }

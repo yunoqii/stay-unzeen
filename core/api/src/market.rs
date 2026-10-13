@@ -409,23 +409,37 @@ pub async fn trades(
     if filter == "dev" && launch {
         return Ok(public(json!([]), 60));
     }
+    // v0.17 dev: tagged by the indexer, or traded by the mint's creator from the dev index
+    // (`intel_creates`, 0024; index market_trades(mint, trader)) — also trades seen before
+    // the creator was known.
+    let creator: Option<String> = if filter == "dev" {
+        c.query_opt(
+            "SELECT creator FROM intel_creates WHERE network = $1 AND mint = $2",
+            &[&st.cfg.cluster, &mint],
+        )
+        .await
+        .map_err(db)?
+        .map(|r| r.get(0))
+    } else {
+        None
+    };
     let cond = match filter {
         "unzeen" => "AND unzeen",
         "whales" => "AND 'whale' = ANY (tags)",
-        "dev" => "AND 'dev' = ANY (tags) AND NOT unzeen",
+        "dev" => "AND NOT unzeen AND ('dev' = ANY (tags) OR trader = $4)",
         _ => "",
     };
-    let rows = c
-        .query(
-            &format!(
-                "SELECT id, kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature,
-                        (extract(epoch FROM ts) * 1000)::bigint, trader, unzeen, tags
-                 FROM market_trades WHERE mint = $1 AND id < $2 {cond} ORDER BY id DESC LIMIT $3"
-            ),
-            &[&mint, &before, &n],
-        )
-        .await
-        .map_err(db)?;
+    let sql = format!(
+        "SELECT id, kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature,
+                (extract(epoch FROM ts) * 1000)::bigint, trader, unzeen, tags
+         FROM market_trades WHERE mint = $1 AND id < $2 {cond} ORDER BY id DESC LIMIT $3"
+    );
+    let rows = if filter == "dev" {
+        c.query(&sql, &[&mint, &before, &n, &creator]).await
+    } else {
+        c.query(&sql, &[&mint, &before, &n]).await
+    }
+    .map_err(db)?;
     let out = rows
         .iter()
         .map(|r| {
@@ -436,6 +450,14 @@ pub async fn trades(
                 .into_iter()
                 .filter(|t| t != "dev" || !(unzeen || launch))
                 .collect();
+            let mut tags = tags;
+            if !unzeen
+                && !launch
+                && creator.as_deref() == Some(r.get::<_, &str>(10))
+                && !tags.iter().any(|t| t == "dev")
+            {
+                tags.push("dev".into());
+            }
             v["trader"] = if unzeen {
                 json!("unzeen")
             } else {
@@ -487,24 +509,58 @@ pub async fn candles(
     from = from.max(to - 1000 * tf); // at most 1000 bars
     let c = client(&st).await?;
     ensure_token(&c, &mint).await?;
+    // v0.17 `quote=1`: bars in the token's pair (price in quote per whole token, volume in quote
+    // base units). SOL pairs: the same as without it. `quote=0` / absent: SOL (v0.14 valuation).
+    let in_quote = match q.get("quote").map(String::as_str) {
+        None | Some("0") => false,
+        Some("1") => true,
+        Some(_) => return Err(ApiError::bad_request("quote: 0 | 1")),
+    };
+    let qdec: Option<u8> = if in_quote {
+        let qm: Option<String> = c
+            .query_opt("SELECT quote_mint FROM tokens WHERE mint = $1", &[&mint])
+            .await
+            .map_err(db)?
+            .and_then(|r| r.get(0));
+        match qm {
+            None => None,
+            Some(m) => Some(
+                crate::config::known_quotes(st.cfg.cluster == "mainnet-beta")
+                    .iter()
+                    .find(|k| k.mint == m)
+                    .map(|k| k.decimals)
+                    .ok_or_else(|| ApiError::bad_request("unknown quote pair"))?,
+            ),
+        }
+    } else {
+        None
+    };
+    let (amount, filter) = match qdec {
+        Some(d) => (
+            format!("quote_amount::numeric / power(10::numeric, {d})"),
+            "quote_amount IS NOT NULL AND quote_amount > 0",
+        ),
+        None => ("sol_amount::numeric / 1000000000".to_string(), "TRUE"),
+    };
+    let vol = if qdec.is_some() { "quote_amount" } else { "sol_amount" };
+    let sql = format!(
+        "SELECT b,
+                trim_scale(round(o, 18))::text, trim_scale(round(h, 18))::text,
+                trim_scale(round(l, 18))::text, trim_scale(round(cl, 18))::text, v::text
+         FROM (
+           SELECT (floor(extract(epoch FROM ts) / $2::float8) * $2::float8)::bigint AS b,
+                  (array_agg(p ORDER BY ts, id))[1] AS o, max(p) AS h, min(p) AS l,
+                  (array_agg(p ORDER BY ts DESC, id DESC))[1] AS cl, sum(vol)::numeric AS v
+           FROM (SELECT id, ts, {vol} AS vol,
+                        ({amount}) / (token_amount::numeric / power(10::numeric, decimals)) AS p
+                 FROM trades
+                 WHERE mint = $1 AND kind IN ('buy', 'sell') AND token_amount > 0 AND {filter}
+                   AND ts >= to_timestamp($3::float8) AND ts < to_timestamp($4::float8)) t
+           GROUP BY b) x
+         ORDER BY b"
+    );
     let rows = c
-        .query(
-            "SELECT b,
-                    trim_scale(round(o, 18))::text, trim_scale(round(h, 18))::text,
-                    trim_scale(round(l, 18))::text, trim_scale(round(cl, 18))::text, v
-             FROM (
-               SELECT (floor(extract(epoch FROM ts) / $2::float8) * $2::float8)::bigint AS b,
-                      (array_agg(p ORDER BY ts, id))[1] AS o, max(p) AS h, min(p) AS l,
-                      (array_agg(p ORDER BY ts DESC, id DESC))[1] AS cl, sum(sol_amount)::bigint AS v
-               FROM (SELECT id, ts, sol_amount,
-                            (sol_amount::numeric / 1000000000) / (token_amount::numeric / power(10::numeric, decimals)) AS p
-                     FROM trades
-                     WHERE mint = $1 AND kind IN ('buy', 'sell') AND token_amount > 0
-                       AND ts >= to_timestamp($3::float8) AND ts < to_timestamp($4::float8)) t
-               GROUP BY b) x
-             ORDER BY b",
-            &[&mint, &(tf as f64), &(from as f64), &(to as f64)],
-        )
+        .query(&sql, &[&mint, &(tf as f64), &(from as f64), &(to as f64)])
         .await
         .map_err(db)?;
     let out: Vec<Value> = rows
@@ -516,7 +572,7 @@ pub async fn candles(
                 "high": r.get::<_, String>(2),
                 "low": r.get::<_, String>(3),
                 "close": r.get::<_, String>(4),
-                "volume": r.get::<_, i64>(5).to_string(),
+                "volume": r.get::<_, String>(5),
             })
         })
         .collect();

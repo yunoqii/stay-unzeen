@@ -7,6 +7,9 @@
 //! rootsDigest = SHA256("unzeen/verify/v1/snapshot" ‖ chainId ‖ u32(id) ‖ u64(takenAtSec) ‖ u32(N)
 //!               ‖ u64(solanaSlot) ‖ u32(zcashHeight) ‖ u64(zecReserveZat) ‖ u32(trees)
 //!               ‖ per tree, ascending asset: asset ‖ root.hash ‖ u128(root.sum))
+//! rootsDigest v2 (API v0.17) = SHA256("unzeen/verify/v2/snapshot" ‖ the same fields as v1
+//!               ‖ u32(Q) ‖ per quote asset, ascending mint: mint[32] ‖ u8(decimals)
+//!               ‖ u8(bridged) ‖ u8(counted) ‖ u64(dustBelow))
 //! ```
 //! All integers big-endian. No randomness here: splitting/shuffling/blinds are the caller's.
 
@@ -17,6 +20,8 @@ pub type Hash = [u8; 32];
 pub const LEAF_TAG: &[u8] = b"unzeen/verify/v1/leaf";
 pub const NODE_TAG: &[u8] = b"unzeen/verify/v1/node";
 pub const SNAPSHOT_TAG: &[u8] = b"unzeen/verify/v1/snapshot";
+/// v2 digest (API v0.17): also commits to the snapshot's `quoteAssets`.
+pub const SNAPSHOT_TAG_V2: &[u8] = b"unzeen/verify/v2/snapshot";
 /// `asset` of ZEC.
 pub const ZEC_ASSET: [u8; 32] = [0; 32];
 /// Minimum tree size.
@@ -121,12 +126,44 @@ pub struct SnapshotHeader {
     pub zec_reserve_zat: u64,
 }
 
-/// `rootsDigest` over the header and the `(asset, root)` list (sorted here by asset).
+/// One `quoteAssets` entry as committed by the v2 digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuoteAssetFact {
+    pub mint: [u8; 32],
+    pub decimals: u8,
+    pub bridged: bool,
+    /// Counted toward the ZEC coverage (ZEC SPL only).
+    pub counted: bool,
+    /// Per-vault balances below this are ignored (base units).
+    pub dust_below: u64,
+}
+
+/// `rootsDigest` (v1) over the header and the `(asset, root)` list (sorted here by asset).
+/// Snapshots built before API v0.17.
 pub fn roots_digest(h: &SnapshotHeader, roots: &[([u8; 32], Node)]) -> Hash {
+    digest_with(SNAPSHOT_TAG, h, roots).finalize().into()
+}
+
+/// `rootsDigest` v2: v1 fields under the v2 tag, then the quote assets (sorted here by mint).
+/// The operator signature then covers which quote mints count toward ZEC and their dust.
+pub fn roots_digest_v2(h: &SnapshotHeader, roots: &[([u8; 32], Node)], quotes: &[QuoteAssetFact]) -> Hash {
+    let mut d = digest_with(SNAPSHOT_TAG_V2, h, roots);
+    let mut q: Vec<&QuoteAssetFact> = quotes.iter().collect();
+    q.sort_by(|a, b| a.mint.cmp(&b.mint));
+    d.update((q.len() as u32).to_be_bytes());
+    for a in q {
+        d.update(a.mint);
+        d.update([a.decimals, u8::from(a.bridged), u8::from(a.counted)]);
+        d.update(a.dust_below.to_be_bytes());
+    }
+    d.finalize().into()
+}
+
+fn digest_with(tag: &[u8], h: &SnapshotHeader, roots: &[([u8; 32], Node)]) -> Sha256 {
     let mut sorted: Vec<&([u8; 32], Node)> = roots.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
     let mut d = Sha256::new();
-    d.update(SNAPSHOT_TAG);
+    d.update(tag);
     d.update(h.chain);
     d.update(h.snapshot_id.to_be_bytes());
     d.update(h.taken_at_sec.to_be_bytes());
@@ -140,7 +177,7 @@ pub fn roots_digest(h: &SnapshotHeader, roots: &[([u8; 32], Node)]) -> Hash {
         d.update(root.hash);
         d.update(root.sum.to_be_bytes());
     }
-    d.finalize().into()
+    d
 }
 
 /// Message each vault signs for a snapshot (ownership proof, no transaction needed).

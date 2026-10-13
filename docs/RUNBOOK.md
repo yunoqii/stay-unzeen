@@ -119,6 +119,18 @@ unset RPW IPW
 ```
 Пароль задаётся только при **создании** роли; если роль уже есть с другим паролем — `ALTER ROLE unzeen_relayer PASSWORD '…'` вручную.
 
+### 1.4a Выплаты ZEC больше капа и отдельный lightwalletd для отправки (аудит A2/A8)
+- **Кап mainnet:** `UNZEEN_MAX_PAYOUT_ZAT` (по умолчанию 100000000 = 1 ZEC). Выплата больше капа не задерживает очередь, в логах сканера `ALERT: payouts above UNZEEN_MAX_PAYOUT_ZAT wait for `payout approve`` (только число). Разбор:
+  ```bash
+  ./core/target/release/unzeen-scanner payout list-held     # id, сумма, возраст; получателей нет
+  ./core/target/release/unzeen-scanner payout approve <id>  # уходит со следующим проходом выплат
+  ```
+  Нужен `DATABASE_URL` (как у сканера). Отклонить нельзя: при подозрении — не одобрять и разбираться (у пользователя `queued`).
+- **`LIGHTWALLETD_SEND_URL`** (mainnet): выплаты и ребаланс вещаются через lightwalletd **другого оператора**, сканирование остаётся на zec.rocks. Тогда zec.rocks не видит, какие tx — пула, и не может связать отправку выплаты с IP кошелька, который её потом скачивает. Проверено 13.10 (`unzeen-scanner lwd-info --url …`, только `GetLightdInfo`): `https://lwdv3.zecwallet.co:443` (Hetzner, ECC LightWalletD v0.5.3) и `https://zcash.mysideoftheweb.com:9067` (домашний оператор, v0.5.4). Оба отдали `chain: main`, ту же высоту и ветку консенсуса `37a5165b`, что zec.rocks (Fly.io). Если сервер отправки недоступен, выплаты ждут: на zec.rocks отправка не переключается.
+  ```bash
+  UNZEEN_NETWORK=main ./core/target/release/unzeen-scanner lwd-info --url https://lwdv3.zecwallet.co:443
+  ```
+
 ### 1.5 Терминал 2 — сканер (депозиты + выплаты ZEC)
 ```bash
 cd $R

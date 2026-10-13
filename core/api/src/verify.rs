@@ -64,6 +64,10 @@ pub fn snapshot_json(s: &SnapshotRow) -> Value {
         .collect::<Vec<_>>()
         .into();
     v["committedLamports"] = json!(s.committed_lamports.to_string());
+    // v0.17: absent = 1. With 2 the digest covers quoteAssets (absent list = empty).
+    if s.digest_version >= 2 {
+        v["digestVersion"] = json!(s.digest_version);
+    }
     if let Some(q) = &s.quote_assets
         && q.as_array().is_some_and(|a| !a.is_empty())
     {

@@ -34,7 +34,7 @@ pub use actions::{
 pub use chat::{ChatMsgMeta, ChatPost, ChatQuery, ChatRequest, NonceCtx};
 pub use deadpool_postgres;
 pub use decide::{MemoInput, NoteObs, Outcome, Policy, Stage, evaluate};
-pub use payouts::{InflightPayout, PayoutRow};
+pub use payouts::{HeldPayout, InflightPayout, PayoutRow};
 pub use quotes::PoolQuote;
 pub use rebalance::{FundOutcome, History as RebalanceHistory, Inventory, LiveRebalance, RebalanceView};
 pub use tokio_postgres;
