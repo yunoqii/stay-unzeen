@@ -40,6 +40,7 @@
 - —
 
 ## Решения
+- 13.10 (владелец): meme.fun не делаем (адаптер в коде, но площадка выключена; код удалить при следующей задаче adapters)
 - 13.10 (владелец): логотип A «crescent», X — avatar-1 + banner-1 (banner-2 запасной); все эффекты motion-v2 (M1–M10) внедряем; подготовку деплоя пока не начинаем
 - 13.10 (владелец): пары к ZEC SPL (`A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS`) на pump.fun/LaunchLab — да, ZEC SPL учитывается в Verify отдельным активом с пометкой «bridged», риск моста — в README; platform config LaunchLab называется «Unzeen» сразу; тестовые запуски в UI bonk.fun/stonk.fun — при mainnet-прогоне; Bags — да, после LaunchLab (ключ подписью отдельного ключа пула)
 - 13.10 (лид, по launchpads-a.md): quote-токены — запас на каждом vault, пополнение пачками (своп-нога в той же tx — только fallback); единая ставка creator fee для всех запусков; LaunchLab-адаптер покрывает stonk.fun и bonk.fun (ID платформ захардкожены); Anoncoin/Surge — только торговля через Jupiter; Bags — с оговоркой, после LaunchLab
