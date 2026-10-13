@@ -23,6 +23,8 @@ export const ponsV2CurveAbi = parseAbi([
   "function feeBps() view returns (uint256)",
   "function creatorTaxBps() view returns (uint256)",
   "function graduationThreshold() view returns (uint256)",
+  "function protocolFeeShareBps() view returns (uint16)",
+  "function buybackQuoteBalance() view returns (uint256)",
   "function graduated() view returns (bool)",
   "function quoteFeeBalance() view returns (uint256)",
   "function creatorTaxBalance() view returns (uint256)",

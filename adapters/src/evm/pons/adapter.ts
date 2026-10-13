@@ -1,8 +1,10 @@
 import {
   encodeFunctionData,
+  formatUnits,
   getAddress,
   keccak256,
   maxUint256,
+  parseAbi,
   parseEventLogs,
   type Abi,
   type Address,
@@ -27,7 +29,22 @@ import { ponsV2CurveAbi } from "./abi/curve";
 import { ponsV2LaunchFactoryAbi } from "./abi/factory.generated";
 import { ponsV2FeeEscrowAbi } from "./abi/fee-escrow.generated";
 import { ponsV2LaunchAndBuyAbi } from "./abi/launch-and-buy.generated";
+import { LifiClient } from "../lifi";
+import { ponsV2MemeHookAbi } from "./abi/meme-hook.generated";
+import { permit2Abi } from "./abi/permit2.generated";
 import { ponsV2TokenAbi } from "./abi/token";
+import { universalRouterAbi } from "./abi/universal-router.generated";
+import {
+  encodeV4ExactInSingle,
+  poolIdOf,
+  ponsPoolKey,
+  quoteV4ExactIn,
+  UNISWAP_V4_4663,
+  V4_EVENTS_ABI,
+  v4PoolExists,
+  type PoolKey,
+  type UniswapV4Deployment,
+} from "./v4";
 import { NATIVE_QUOTE, PONS_V2_MAINNET, type PonsDeployment } from "./addresses";
 import {
   freshCurveState,
@@ -40,6 +57,11 @@ import {
   type CurveState,
 } from "./math";
 
+/** LI.FI Diamond completion event (same-chain swap). */
+export const LIFI_EVENTS_ABI = parseAbi([
+  "event LiFiGenericSwapCompleted(bytes32 indexed transactionId, string integrator, string referrer, address receiver, address fromAssetId, address toAssetId, uint256 fromAmount, uint256 toAmount)",
+]);
+
 /** All Pons ABIs merged: decodes any revert the adapter can hit. */
 export const PONS_ERROR_ABI = [
   ...ponsV2CurveAbi,
@@ -47,6 +69,10 @@ export const PONS_ERROR_ABI = [
   ...ponsV2LaunchFactoryAbi,
   ...ponsV2LaunchAndBuyAbi,
   ...ponsV2FeeEscrowAbi,
+  ...ponsV2MemeHookAbi,
+  ...universalRouterAbi,
+  ...permit2Abi,
+  ...V4_EVENTS_ABI,
 ].filter((x) => x.type === "error") as Abi;
 
 /** GraduationPhase enum of ILaunchpadV2.sol. */
@@ -61,6 +87,8 @@ export interface LaunchInfo {
   graduationThreshold: bigint;
   creatorTaxBps: number;
   phase: number;
+  poolFee: number;
+  tickSpacing: number;
 }
 
 export interface FactoryTerms {
@@ -80,6 +108,15 @@ export interface PonsAdapterOptions {
   /** Default vault when a call does not pass one. */
   vault: LocalAccount;
   deployment?: PonsDeployment;
+  /** Uniswap v4 contracts for graduated tokens. Default: Robinhood Chain mainnet. */
+  uniswap?: UniswapV4Deployment;
+  /**
+   * Fallback for graduated tokens whose v4 pool cannot be used (not seeded /
+   * not initialized): LI.FI, which only ever sees the vault address. Default off.
+   */
+  lifi?: LifiClient | null;
+  /** Deadline of v4 swaps, seconds from now. Default 300. */
+  swapDeadlineSec?: number;
   /** ETH left on a creator for gas (launch tx + later fee claims). Default 0.002 ETH. */
   creatorGasReserveWei?: bigint;
   /** Funding granularity: funder -> creator transfers are multiples of this. Default 0.01 ETH. */
@@ -108,6 +145,9 @@ const MAX_TOTAL_FEE_BPS = 2_000n;
 export class PonsAdapter implements EvmLaunchpadAdapter {
   readonly id = "pons" as const;
   readonly deployment: PonsDeployment;
+  readonly uniswap: UniswapV4Deployment;
+  private readonly swapDeadlineSec: number;
+  private readonly lifi: LifiClient | null;
   private readonly ex: EvmExecutor;
   private readonly keyring: EvmKeyring;
   private readonly defaultVault: LocalAccount;
@@ -123,6 +163,9 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     this.keyring = o.keyring;
     this.defaultVault = o.vault;
     this.deployment = o.deployment ?? PONS_V2_MAINNET;
+    this.uniswap = o.uniswap ?? UNISWAP_V4_4663;
+    this.swapDeadlineSec = o.swapDeadlineSec ?? 300;
+    this.lifi = o.lifi ?? null;
     this.creatorGasReserveWei = o.creatorGasReserveWei ?? 2_000_000_000_000_000n;
     this.fundStepWei = o.fundStepWei ?? 10_000_000_000_000_000n;
     this.maxSnipeWaitSec = o.maxSnipeWaitSec ?? 65;
@@ -178,6 +221,8 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
       graduationThreshold: bigint;
       creatorTaxBps: number;
       phase: number;
+      poolFee: number;
+      tickSpacing: number;
       exists: boolean;
     };
     if (!r.exists) throw new AdapterError("not_found", "not a Pons V2 token");
@@ -192,6 +237,8 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
       graduationThreshold: r.graduationThreshold,
       creatorTaxBps: Number(r.creatorTaxBps),
       phase: Number(r.phase),
+      poolFee: Number(r.poolFee),
+      tickSpacing: Number(r.tickSpacing),
     };
   }
 
@@ -293,7 +340,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
   async quote(token: Address, side: "buy" | "sell", amount: bigint, opts: { recipient?: Address } = {}): Promise<EvmQuote> {
     if (amount <= 0n) throw new AdapterError("bad_request", "amount must be > 0");
     const info = await this.launchInfo(token);
-    if (info.phase !== PHASE.NotGraduated) throw new AdapterError("graduated", "token graduated to Uniswap v4");
+    if (info.phase !== PHASE.NotGraduated) return this.quoteV4(info, side, amount);
     const { state, blockNumber, timestamp } = await this.curveState(info.curve);
     let sb = 0n;
     if (side === "buy" && snipeTaxBps(state, false, timestamp) > 0n) {
@@ -308,7 +355,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     }
     const s = spot(state);
     const status: CurveStatus = state.graduated || readyToGraduate(state) ? "graduated" : "curve";
-    const base = { venue: this.id, token: info.token, side, amountIn: amount, snipeTaxBps: sb, priceEth: s.price, marketCapEth: s.marketCap, status, decimals: 18, blockNumber };
+    const base = { venue: this.id, token: info.token, side, amountIn: amount, snipeTaxBps: sb, priceEth: s.price, marketCapEth: s.marketCap, status, decimals: 18, blockNumber, route: "curve" as const };
     if (side === "buy") {
       const q = quoteBuy(state, amount, sb);
       return { ...base, amountOut: q.tokensOut, spent: q.spent, refund: q.refund };
@@ -457,8 +504,8 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     this.requireSend();
     await this.verifyDeployment();
     const info = await this.launchInfo(token);
-    if (info.phase !== PHASE.NotGraduated) throw new AdapterError("graduated", "token graduated to Uniswap v4");
     const vault = opts.vault ?? this.defaultVault;
+    if (info.phase !== PHASE.NotGraduated) return this.tradeV4(info, "buy", weiIn, minOut, vault, opts);
 
     await this.waitSnipeTax(info.curve, vault.address, opts.snipeTax ?? "wait");
     const { state } = await this.curveState(info.curve);
@@ -494,8 +541,8 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     this.requireSend();
     await this.verifyDeployment();
     const info = await this.launchInfo(token);
-    if (info.phase !== PHASE.NotGraduated) throw new AdapterError("graduated", "token graduated to Uniswap v4");
     const vault = opts.vault ?? this.defaultVault;
+    if (info.phase !== PHASE.NotGraduated) return this.tradeV4(info, "sell", amount, minWei, vault, opts);
     const bal = await this.ex.read.readContract({ address: info.token, abi: ponsV2TokenAbi, functionName: "balanceOf", args: [vault.address] });
     if (bal < amount) throw new AdapterError("insufficient_tokens", "vault does not hold enough tokens");
 
@@ -606,8 +653,194 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
       networkFee: sent.networkFee,
       sideTxs,
       decimals: 18,
+      route: "curve",
       amountsKnown: true,
       fromEvent: true,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Graduated tokens: Uniswap v4 (the pool the Pons factory seeded)
+  // -------------------------------------------------------------------------
+
+  poolKey(info: LaunchInfo): PoolKey {
+    return ponsPoolKey(info.token, info.poolFee, info.tickSpacing, this.deployment.memeHook);
+  }
+
+  /** Graduated -> its v4 pool key, after checking the pool is live. Swept = seeding pending. */
+  private async liveV4Pool(info: LaunchInfo): Promise<PoolKey> {
+    if (info.phase === PHASE.Rescued) throw new AdapterError("graduated", "graduation was rescued: no v4 pool for this token");
+    if (info.phase === PHASE.Swept) throw new AdapterError("venue_unavailable", "graduation in progress: v4 pool not seeded yet");
+    const key = this.poolKey(info);
+    if (!(await v4PoolExists(this.ex.read, this.uniswap.stateView, poolIdOf(key)))) {
+      throw new AdapterError("venue_unavailable", "v4 pool of the graduated token is not initialized");
+    }
+    return key;
+  }
+
+  private async quoteV4(info: LaunchInfo, side: "buy" | "sell", amount: bigint): Promise<EvmQuote> {
+    const key = await this.liveV4Pool(info);
+    const blockNumber = await this.ex.read.getBlockNumber({ cacheTime: 0 });
+    const out = await quoteV4ExactIn(this.ex.read, this.uniswap.quoter, key, side === "buy", amount, blockNumber);
+    // Spot from a tiny probe would cost another eth_call; price = executed average here.
+    const priceWeiPerToken = side === "buy" ? (out > 0n ? (amount * 10n ** 18n) / out : 0n) : (out * 10n ** 18n) / amount;
+    const supply = await this.ex.read.readContract({ address: info.token, abi: ponsV2TokenAbi, functionName: "totalSupply", blockNumber });
+    return {
+      venue: this.id,
+      token: info.token,
+      side,
+      amountIn: amount,
+      amountOut: out,
+      snipeTaxBps: 0n,
+      priceEth: formatUnits(priceWeiPerToken, 18),
+      marketCapEth: formatUnits((priceWeiPerToken * supply) / 10n ** 18n, 18),
+      status: "graduated",
+      decimals: 18,
+      blockNumber,
+      route: "uniswap-v4",
+    };
+  }
+
+  /** Permissionless phase 2 of graduation: seed the v4 pool (any account; we use the vault). */
+  async seedGraduatedPool(token: Address, from: LocalAccount = this.defaultVault): Promise<SentEvmTx> {
+    this.requireSend();
+    return this.ex.send(from, {
+      to: this.deployment.factory,
+      data: encodeFunctionData({ abi: ponsV2LaunchFactoryAbi, functionName: "createGraduatedPool", args: [getAddress(token)] }),
+    });
+  }
+
+  private async tradeV4(
+    info0: LaunchInfo,
+    side: "buy" | "sell",
+    amountIn: bigint,
+    minOut: bigint,
+    vault: LocalAccount,
+    opts: EvmTradeOptions,
+  ): Promise<EvmTxResult> {
+    let info = info0;
+    const sideTxs: EvmSideTx[] = [];
+    if (info.phase === PHASE.Swept && opts.seedPool) {
+      await this.seedGraduatedPool(info.token, vault);
+      info = await this.launchInfo(info.token);
+    }
+    let key: PoolKey;
+    try {
+      key = await this.liveV4Pool(info);
+    } catch (e) {
+      if (this.lifi && e instanceof AdapterError && e.code === "venue_unavailable") return this.tradeLifi(info, side, amountIn, minOut, vault);
+      throw e;
+    }
+    if (side === "sell") {
+      const bal = await this.ex.read.readContract({ address: info.token, abi: ponsV2TokenAbi, functionName: "balanceOf", args: [vault.address] });
+      if (bal < amountIn) throw new AdapterError("insufficient_tokens", "vault does not hold enough tokens");
+      sideTxs.push(...(await this.ensurePermit2(vault, info.token, amountIn)));
+    }
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + this.swapDeadlineSec);
+    const sent = await this.ex.send(vault, {
+      to: this.uniswap.universalRouter,
+      data: encodeV4ExactInSingle({ key, zeroForOne: side === "buy", amountIn, minOut, deadline }),
+      value: side === "buy" ? amountIn : 0n,
+    });
+    const logs = sent.receipt.logs;
+    const id = poolIdOf(key);
+    const swap = parseEventLogs({ abi: V4_EVENTS_ABI, logs, eventName: "Swap" }).find(
+      (l) => getAddress(l.address) === this.uniswap.poolManager && l.args.id === id,
+    );
+    if (!swap) throw new AdapterError("internal", "v4 swap landed but Swap not found", { signature: sent.hash });
+    const skim = parseEventLogs({ abi: V4_EVENTS_ABI, logs, eventName: "HookFeeCollected" }).find(
+      (l) => getAddress(l.address) === this.deployment.memeHook && l.args.poolId === id,
+    );
+    const fee = skim?.args.feeAmount ?? 0n;
+    const tax = skim?.args.taxAmount ?? 0n;
+    let tokenAmount: bigint;
+    let quoteAmount: bigint;
+    if (side === "buy") {
+      // Tokens that actually reached the vault (after the hook's skim).
+      tokenAmount = parseEventLogs({ abi: ponsV2TokenAbi, logs, eventName: "Transfer" })
+        .filter((l) => getAddress(l.address) === info.token && getAddress(l.args.to) === getAddress(vault.address))
+        .reduce((a, l) => a + l.args.value, 0n);
+      quoteAmount = amountIn;
+    } else {
+      tokenAmount = amountIn;
+      quoteAmount = swap.args.amount0 - fee - tax; // ETH to the swapper minus the skim
+    }
+    if (side === "buy" && opts.approveAfterBuy !== false) {
+      sideTxs.push(...(await this.ensurePermit2(vault, info.token, maxUint256 >> 1n).catch(() => [])));
+    }
+    return {
+      ...(await this.baseResult(side, sent, info.token, info.curve, vault.address, sideTxs)),
+      route: "uniswap-v4",
+      tokenAmount,
+      quoteAmount,
+      venueFee: fee,
+      creatorTax: tax,
+      snipeTax: 0n,
+      refund: 0n,
+      ...(side === "buy" ? { feeInToken: true } : {}),
+    };
+  }
+
+  /** LI.FI fallback: exact-amount approval to the pinned Diamond, then its validated calldata. */
+  private async tradeLifi(info: LaunchInfo, side: "buy" | "sell", amountIn: bigint, minOut: bigint, vault: LocalAccount): Promise<EvmTxResult> {
+    const lifi = this.lifi!;
+    const fromToken = side === "buy" ? NATIVE_QUOTE : info.token;
+    const toToken = side === "buy" ? info.token : NATIVE_QUOTE;
+    if (side === "sell") {
+      const bal = await this.ex.read.readContract({ address: info.token, abi: ponsV2TokenAbi, functionName: "balanceOf", args: [vault.address] });
+      if (bal < amountIn) throw new AdapterError("insufficient_tokens", "vault does not hold enough tokens");
+    }
+    const route = await lifi.quote({ fromToken, toToken, fromAmount: amountIn, vault: vault.address, minOut });
+    const sideTxs: EvmSideTx[] = [];
+    if (side === "sell") {
+      const cur = await this.ex.read.readContract({ address: info.token, abi: ponsV2TokenAbi, functionName: "allowance", args: [vault.address, route.approvalAddress] });
+      if (cur < amountIn) {
+        const ap = await this.ex.send(vault, {
+          to: info.token,
+          data: encodeFunctionData({ abi: ponsV2TokenAbi, functionName: "approve", args: [route.approvalAddress, amountIn] }),
+        });
+        sideTxs.push({ kind: "approve", hash: ap.hash, networkFee: ap.networkFee });
+      }
+    }
+    const sent = await this.ex.send(vault, { to: route.to, data: route.data, value: route.value });
+    const done = parseEventLogs({ abi: LIFI_EVENTS_ABI, logs: sent.receipt.logs, eventName: "LiFiGenericSwapCompleted" }).find(
+      (l) => getAddress(l.address) === route.to && getAddress(l.args.receiver) === getAddress(vault.address),
+    );
+    return {
+      ...(await this.baseResult(side, sent, info.token, info.curve, vault.address, sideTxs)),
+      route: "lifi",
+      tokenAmount: side === "buy" ? (done?.args.toAmount ?? 0n) : amountIn,
+      quoteAmount: side === "buy" ? amountIn : (done?.args.toAmount ?? 0n),
+      venueFee: 0n,
+      creatorTax: 0n,
+      snipeTax: 0n,
+      refund: 0n,
+      amountsKnown: done !== undefined,
+      fromEvent: done !== undefined,
+    };
+  }
+
+  /** ERC-20 -> Permit2 (max) and Permit2 -> Universal Router (max amount, max expiry), only when missing. */
+  async ensurePermit2(vault: LocalAccount, token: Address, atLeast: bigint): Promise<EvmSideTx[]> {
+    const out: EvmSideTx[] = [];
+    const a = await this.ensureAllowance(vault, token, this.uniswap.permit2, atLeast);
+    if (a) out.push(a);
+    const [amount, expiration] = await this.ex.read.readContract({
+      address: this.uniswap.permit2,
+      abi: permit2Abi,
+      functionName: "allowance",
+      args: [vault.address, token, this.uniswap.universalRouter],
+    });
+    const MAX160 = (1n << 160n) - 1n;
+    const MAX48 = (1n << 48n) - 1n;
+    const now = Math.floor(Date.now() / 1000);
+    if (amount < (atLeast > MAX160 ? MAX160 : atLeast) || Number(expiration) < now + 86_400) {
+      const sent = await this.ex.send(vault, {
+        to: this.uniswap.permit2,
+        data: encodeFunctionData({ abi: permit2Abi, functionName: "approve", args: [token, this.uniswap.universalRouter, MAX160, Number(MAX48)] }),
+      });
+      out.push({ kind: "approve", hash: sent.hash, networkFee: sent.networkFee });
+    }
+    return out;
   }
 }

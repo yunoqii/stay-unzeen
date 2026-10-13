@@ -27,7 +27,7 @@ describe.skipIf(!DB || !fs.existsSync(path.resolve(__dirname, "../../core/migrat
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: DB, max: 1 });
     await admin.query(`CREATE SCHEMA ${schema}`);
-    for (const t of ["token_safety", "intel_tokens", "intel_warm", "intel_requests", "intel_subscriptions", "intel_meta", "tokens"]) {
+    for (const t of ["token_safety", "intel_tokens", "intel_warm", "intel_requests", "intel_subscriptions", "intel_meta", "tokens", "market_trades"]) {
       await admin.query(`CREATE TABLE ${schema}.${t} (LIKE public.${t} INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES)`);
     }
     const c = await admin.connect();
@@ -83,5 +83,19 @@ describe.skipIf(!DB || !fs.existsSync(path.resolve(__dirname, "../../core/migrat
     const r = (await pool.query(`SELECT price_sol::text, tick_at::text FROM intel_prices WHERE mint = $1`, [M])).rows;
     expect(r).toEqual([{ price_sol: "0.2", tick_at: "5000" }]);
     expect((await pool.query(`SELECT value FROM intel_meta WHERE key = 'last_tick_at'`)).rows[0].value).toBe("5000");
+  });
+
+  it("market_trades: NUMERIC (core 0026) amounts above i64 round-trip exactly", async () => {
+    const store = new PgIntelStore(pool, "devnet");
+    const M = "So11111111111111111111111111111111111111112";
+    const big = 10n ** 27n + 7n; // 18-decimal supply scale: > i64 / u64
+    await store.commitTick({
+      ...commit(7000, undefined),
+      marketTrades: [
+        { mint: M, kind: "buy", venue: "pumpfun", symbol: "BIG", decimals: 6, trader: "T1", unzeen: false, tags: ["whale"], tokenAmount: big, solAmount: 2n ** 64n, signature: "sig-numeric", ix: 0, slot: 1, ts: 7000 },
+      ],
+    });
+    const r = (await pool.query(`SELECT token_amount::text, sol_amount::text FROM market_trades WHERE signature = 'sig-numeric'`)).rows;
+    expect(r).toEqual([{ token_amount: big.toString(), sol_amount: (2n ** 64n).toString() }]);
   });
 });

@@ -17,6 +17,10 @@ const CONTRACTS = [
   { name: "PonsV2LaunchFactory", constName: "ponsV2LaunchFactoryAbi", file: "factory", address: "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e" },
   { name: "PonsV2LaunchAndBuy", constName: "ponsV2LaunchAndBuyAbi", file: "launch-and-buy", address: "0xe33e9e479df8802cb0866d5d05258bec4cf62948" },
   { name: "PonsV2FeeEscrow", constName: "ponsV2FeeEscrowAbi", file: "fee-escrow", address: "0xd3afeb2a57f70ef218aa82451c51b2fb0416ac9e" },
+  { name: "PonsV2MemeHook", constName: "ponsV2MemeHookAbi", file: "meme-hook", address: "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044" },
+  { name: "UniversalRouter", constName: "universalRouterAbi", file: "universal-router", address: "0x8876789976decbfcbbbe364623c63652db8c0904" },
+  { name: "V4Quoter", constName: "v4QuoterAbi", file: "v4-quoter", address: "0x8dc178efb8111bb0973dd9d722ebeff267c98f94" },
+  { name: "Permit2", constName: "permit2Abi", file: "permit2", address: "0x000000000022d473030f116ddee9f6b43ac78ba3" },
 ] as const;
 
 const OUT = path.resolve(__dirname, "../src/evm/pons/abi");

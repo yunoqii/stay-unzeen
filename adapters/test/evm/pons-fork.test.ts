@@ -19,6 +19,10 @@ import { ponsV2CurveAbi } from "../../src/evm/pons/abi/curve";
 import { ponsV2TokenAbi } from "../../src/evm/pons/abi/token";
 import { PonsAdapter, PONS_ERROR_ABI } from "../../src/evm/pons/adapter";
 import { freshCurveState, quoteBuy } from "../../src/evm/pons/math";
+import { PonsFeeSweeper, reconcileCreator } from "../../src/evm/pons/creator";
+import { EvmWithdrawer, roundDownSig } from "../../src/evm/withdraw";
+import { LifiClient } from "../../src/evm/lifi";
+import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import { MemoryCreatorIndexCounter } from "../../src/keys";
 
 loadRepoEnv();
@@ -35,6 +39,8 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
   const port = 18600 + Math.floor(Math.random() * 300);
   const url = `http://127.0.0.1:${port}`;
   let token: `0x${string}`;
+  let startBlock: bigint;
+  const PONS_HOOK = "0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044" as const;
   let curve: `0x${string}`;
 
   beforeAll(async () => {
@@ -48,6 +54,7 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
         await new Promise((r) => setTimeout(r, 200));
       }
     }
+    startBlock = await client.getBlockNumber();
     fees = new EvmFeeCache(200_000_000n, async () => (await client.getBlock()).baseFeePerGas ?? 0n);
     await fees.refresh();
     ex = new EvmExecutor({ read: client, chainId: 4663, fees, allowSend: true, errorAbi: PONS_ERROR_ABI, pollingIntervalMs: 50 });
@@ -165,8 +172,123 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
     expect(res.refund).toBe(q.refund);
     expect(res.tokenAmount).toBe(q.amountOut);
     expect(await adapter.status(token)).toBe("graduated");
-    const e = await adapter.buy(token, parseEther("0.01"), 1n).catch((x) => x);
-    expect(e.code).toBe("graduated");
-    expect(e.apiCode).toBe("graduated");
+  }, 120_000);
+
+  it("graduated: v4 pool pending -> venue_unavailable; seeded -> sell and buy through Uniswap v4", async () => {
+    let info = await adapter.launchInfo(token);
+    if (info.phase === 1) {
+      const e = await adapter.buy(token, parseEther("0.01"), 1n).catch((x) => x);
+      expect(e.code).toBe("venue_unavailable");
+      await adapter.seedGraduatedPool(token, kr.vault(1));
+      info = await adapter.launchInfo(token);
+    }
+    expect(info.phase).toBe(2); // PoolCreated
+    const vault = kr.vault(0).address;
+    const held = await client.readContract({ address: token, abi: ponsV2TokenAbi, functionName: "balanceOf", args: [vault] });
+    const amount = held / 3n;
+    const qs = await adapter.quote(token, "sell", amount);
+    expect(qs.route).toBe("uniswap-v4");
+    const ethBefore = await client.getBalance({ address: vault });
+    const s = await adapter.sell(token, amount, qs.amountOut);
+    expect(s.route).toBe("uniswap-v4");
+    expect(s.quoteAmount).toBe(qs.amountOut);
+    expect(s.tokenAmount).toBe(amount);
+    expect(s.sideTxs.length).toBeGreaterThan(0); // Permit2 approvals before the first v4 sell
+    const ethAfter = await client.getBalance({ address: vault });
+    const fees = s.networkFee + s.sideTxs.reduce((a, t) => a + t.networkFee, 0n);
+    expect(ethAfter - ethBefore + fees).toBe(s.quoteAmount); // event-derived ETH == balance delta
+    // second sell: no approvals any more
+    const s2 = await adapter.sell(token, amount / 2n, 1n);
+    expect(s2.sideTxs).toEqual([]);
+    const qb = await adapter.quote(token, "buy", parseEther("0.05"));
+    const b = await adapter.buy(token, parseEther("0.05"), qb.amountOut);
+    expect(b.route).toBe("uniswap-v4");
+    expect(b.tokenAmount).toBe(qb.amountOut);
+    expect(b.feeInToken).toBe(true);
+    const e2 = await adapter.sell(token, amount / 4n, 10n ** 30n).catch((x) => x);
+    expect(e2.code).toBe("slippage");
+  }, 180_000);
+
+  it("withdraw: funder gas drop + vault ERC-20 transfer to a fresh address, rounded parts, no double drop", async () => {
+    const w = new EvmWithdrawer({ executor: ex, funder: kr.funder(), isPoolAddress: (a) => a === getAddress(kr.vault(1).address) });
+    const to = privateKeyToAccount(generatePrivateKey()).address;
+    const held = await client.readContract({ address: token, abi: ponsV2TokenAbi, functionName: "balanceOf", args: [kr.vault(0).address] });
+    const part = roundDownSig(held / 10n, 3);
+    const r1 = await w.withdrawToken({ vault: kr.vault(0), token, to, amount: part });
+    expect(r1.received).toBe(part);
+    expect(r1.drop?.value).toBe(w.gasDropWei);
+    const dropTx = await client.getTransaction({ hash: r1.drop!.hash });
+    expect(getAddress(dropTx.from)).toBe(getAddress(kr.funder().address)); // never the vault
+    expect(await client.getBalance({ address: to })).toBe(w.gasDropWei);
+    const r2 = await w.withdrawToken({ vault: kr.vault(0), token, to, amount: part });
+    expect(r2.drop).toBeNull();
+    expect((await w.withdrawToken({ vault: kr.vault(0), token, to, amount: part + 1n }).catch((e) => e)).code).toBe("bad_request");
+    expect((await w.withdrawToken({ vault: kr.vault(0), token, to: PONS_HOOK, amount: part }).catch((e) => e)).code).toBe("bad_request");
+    expect((await w.withdrawToken({ vault: kr.vault(0), token, to: kr.vault(1).address, amount: part }).catch((e) => e)).code).toBe("bad_request");
+    const e = await w.withdrawEth({ vault: kr.vault(0), to, amount: parseEther("0.0123") });
+    expect(e.received).toBe(parseEther("0.0123"));
+  }, 120_000);
+
+  it("fee sweep: graduated launch (escrow) and a curve launch (sweepFees -> claim -> vault)", async () => {
+    let i = 0;
+    const sweeper = new PonsFeeSweeper({ adapter, executor: ex, keyring: kr, pickVault: () => kr.vault(i++ % 2), minCollectWei: 1n, sleep: async () => undefined });
+    const t0 = await sweeper.inspect({ creatorIndex: 0, token });
+    expect(t0.escrow > 0n).toBe(true); // graduation swept the curve fees into the escrow
+    const vb = async () => (await client.getBalance({ address: kr.vault(0).address })) + (await client.getBalance({ address: kr.vault(1).address }));
+    const v0 = await vb();
+    const o0 = await sweeper.sweepOne(t0);
+    expect(o0.steps.map((s) => s.kind)).toContain("claim");
+    expect(o0.collected > 0n).toBe(true);
+    expect(o0.collected % 100_000_000_000_000n).toBe(0n);
+    expect((await vb()) - v0).toBe(o0.collected); // vaults only received here
+    // A second, still-curve launch with some volume.
+    const c = await adapter.create({ name: "Fees", symbol: "FEES" }, parseEther("0.02"), { creatorTaxBps: 300 });
+    const b = await adapter.buy(c.token, parseEther("0.3"), 1n, { vault: kr.vault(1) });
+    await adapter.sell(c.token, b.tokenAmount / 2n, 1n, { vault: kr.vault(1) });
+    const t1 = await sweeper.inspect({ creatorIndex: c.creatorIndex!, token: c.token });
+    expect(t1.curvePending > 0n).toBe(true);
+    const res = await sweeper.runOnce([{ creatorIndex: c.creatorIndex!, token: c.token }]);
+    expect(res.failed).toBe(0);
+    const kinds = res.outcomes[0]!.steps.map((s) => s.kind);
+    expect(kinds).toEqual(["curve_sweep", "claim", "to_vault"]);
+    for (const st of res.outcomes[0]!.steps) {
+      const tx = await client.getTransaction({ hash: st.hash });
+      expect(getAddress(tx.from)).toBe(c.creator); // H7: only the creator signs
+    }
+    const after = await sweeper.inspect({ creatorIndex: c.creatorIndex!, token: c.token });
+    expect(after.curvePending).toBe(0n);
+    expect(after.escrow).toBe(0n);
+  }, 180_000);
+
+  it("reconcile: launched / unused / stuck creator refunded to the funder", async () => {
+    const fromBlock = startBlock;
+    const l = await reconcileCreator({ adapter, executor: ex, keyring: kr }, 0, { fromBlock });
+    expect(l.status).toBe("launched");
+    if (l.status === "launched") expect(l.token).toBe(token);
+    const u = await reconcileCreator({ adapter, executor: ex, keyring: kr }, 50, { fromBlock });
+    expect(u.status).toBe("unused");
+    // Stuck: funded, sent a tx, no launch.
+    const stuck = kr.account("creator", 51);
+    await ex.transfer(kr.funder(), stuck.address, parseEther("0.01"));
+    await ex.transfer(stuck, stuck.address, 0n);
+    const fBefore = await client.getBalance({ address: kr.funder().address });
+    const r = await reconcileCreator({ adapter, executor: ex, keyring: kr }, 51, { fromBlock });
+    expect(r.status).toBe("refunded");
+    if (r.status === "refunded") {
+      const tx = await client.getTransaction({ hash: r.hash });
+      expect(getAddress(tx.to!)).toBe(getAddress(kr.funder().address));
+      expect((await client.getBalance({ address: kr.funder().address })) - fBefore).toBe(r.value);
+    }
+    expect((await reconcileCreator({ adapter, executor: ex, keyring: kr }, 51, { fromBlock })).status).toBe("empty");
+  }, 120_000);
+
+  it.skipIf(process.env.HOOD_FORK_LIFI !== "1")("LI.FI fallback route executes on the fork (only the vault address is sent)", async () => {
+    const lifiAdapter = new PonsAdapter({ executor: ex, keyring: kr, vault: kr.vault(1), lifi: new LifiClient() });
+    const live = process.env.HOOD_FORK_LIFI_TOKEN ?? "0xcd70E319F13D4611F2e5f5D603C52724bCea3300";
+    const info = await lifiAdapter.launchInfo(live as `0x${string}`);
+    const r = await (lifiAdapter as unknown as { tradeLifi: (...a: unknown[]) => Promise<{ route: string; tokenAmount: bigint; amountsKnown: boolean }> }).tradeLifi(info, "buy", parseEther("0.001"), 1n, kr.vault(1));
+    expect(r.route).toBe("lifi");
+    expect(r.amountsKnown).toBe(true);
+    expect(r.tokenAmount > 0n).toBe(true);
   }, 120_000);
 });

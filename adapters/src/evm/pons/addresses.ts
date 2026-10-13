@@ -16,8 +16,6 @@ export const PONS_V2_MAINNET = {
   feeEscrow: "0xd3AFEB2a57f70eF218Aa82451c51B2fb0416Ac9e" as Address,
   launchDeployer: "0x3711ceA4feaDE896C913C68F01Eda97Cb06D1A42" as Address,
   memeHook: "0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044" as Address,
-  /** Uniswap v4 Universal Router (graduated tokens trade there; via LI.FI later). */
-  universalRouter: "0x8876789976DeCBFcBBBe364623C63652Db8c0904" as Address,
   /** Launch config used for every Unzeen launch (only config on chain today). */
   launchConfigId: 0n,
   codeHash: {
@@ -32,6 +30,8 @@ export type PonsDeployment = {
   factory: Address;
   launchAndBuy: Address;
   feeEscrow: Address;
+  /** Uniswap v4 hook of graduated pools (part of the pool key). */
+  memeHook: Address;
   launchConfigId: bigint;
   codeHash: { factory: Hex; launchAndBuy: Hex; feeEscrow: Hex };
 };

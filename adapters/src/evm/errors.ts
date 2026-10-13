@@ -44,6 +44,20 @@ export const PONS_ERROR_BY_NAME: Readonly<Record<string, AdapterErrorCode>> = {
   InvalidTokenParams: "bad_request",
   ExemptionListTooLong: "bad_request",
   WrongGraduationPhase: "graduated",
+  // Uniswap v4 / Universal Router / Permit2 (graduated tokens)
+  V4TooLittleReceived: "slippage",
+  V4TooMuchRequested: "slippage",
+  V4TooLittleReceivedPerHopSingle: "slippage",
+  DeadlinePassed: "venue_unavailable",
+  TransactionDeadlinePassed: "venue_unavailable",
+  AllowanceExpired: "internal",
+  InsufficientAllowance: "internal",
+  // FeeEscrow
+  NoBalance: "not_found",
+  // MemeHook
+  UnknownPool: "not_found",
+  NotFeeSweepOperator: "bad_request",
+  InternalSwapRequiresOperator: "bad_request",
 };
 
 export function revertName(err: unknown, abi?: Abi): { name: string; args?: readonly unknown[] } | null {

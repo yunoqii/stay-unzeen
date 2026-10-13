@@ -165,8 +165,11 @@ describe("pons adapter: unknown token and graduated phase (mock RPC)", () => {
     return createPublicClient({
       chain: hoodMainnet,
       transport: custom({
-        async request({ method }) {
-          if (method === "eth_call") return encodeFunctionResult({ abi: ponsV2LaunchFactoryAbi, functionName: "getLaunchedToken", result });
+        async request({ method, params }) {
+          const to = ((params as [{ to?: string }])?.[0]?.to ?? "").toLowerCase();
+          if (method === "eth_call" && to === PONS_V2_MAINNET.factory.toLowerCase())
+            return encodeFunctionResult({ abi: ponsV2LaunchFactoryAbi, functionName: "getLaunchedToken", result });
+          if (method === "eth_call") return `0x${"00".repeat(128)}`; // StateView.getSlot0: pool not initialized
           throw new Error(`unexpected ${method}`);
         },
       }),
@@ -179,11 +182,15 @@ describe("pons adapter: unknown token and graduated phase (mock RPC)", () => {
     expect(e.apiCode).toBe("not_found");
   });
 
-  it("graduated phase -> status graduated, quote 409 graduated", async () => {
+  it("graduated: status graduated; v4 pool missing -> 503; rescued (no pool) -> 409 graduated; seeding -> 503", async () => {
     const a = readOnlyAdapter(mockFactory(true, 2));
     expect(await a.status("0x00000000000000000000000000000000000000aa")).toBe("graduated");
     const e = await a.quote("0x00000000000000000000000000000000000000aa", "buy", 1n).catch((x) => x);
-    expect(e.apiCode).toBe("graduated");
+    expect(e.apiCode).toBe("venue_unavailable");
+    const r = await readOnlyAdapter(mockFactory(true, 3)).quote("0x00000000000000000000000000000000000000aa", "sell", 1n).catch((x) => x);
+    expect(r.apiCode).toBe("graduated");
+    const s = await readOnlyAdapter(mockFactory(true, 1)).quote("0x00000000000000000000000000000000000000aa", "sell", 1n).catch((x) => x);
+    expect(s.message).toMatch(/graduation in progress/);
   });
 
   it("bad address -> bad_request", async () => {

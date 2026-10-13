@@ -190,7 +190,7 @@ export class PgIntelStore implements IntelStore {
         await c.query(
           `INSERT INTO market_trades (mint, kind, venue, symbol, trader, unzeen, tags, token_amount, sol_amount, decimals, signature, ix, slot, ts)
            SELECT m, k, v, sy, tr, u, COALESCE(string_to_array(NULLIF(tg, ''), ','), '{}'::text[]), ta, sa, d, sig, ix, sl, to_timestamp(ts / 1000.0)
-             FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::boolean[], $7::text[], $8::bigint[], $9::bigint[],
+             FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::boolean[], $7::text[], $8::numeric[], $9::numeric[],
                          $10::smallint[], $11::text[], $12::smallint[], $13::bigint[], $14::bigint[])
                   AS x(m, k, v, sy, tr, u, tg, ta, sa, d, sig, ix, sl, ts)
            ON CONFLICT (signature, ix) DO NOTHING`,

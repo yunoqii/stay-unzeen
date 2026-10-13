@@ -63,9 +63,17 @@ export interface EvmTxResult {
   /** Funding / approve transactions done for this operation. */
   sideTxs: EvmSideTx[];
   decimals: number;
-  /** Amounts come from the curve's own events (CurveBuy / CurveSell / Launched). */
-  amountsKnown: true;
-  fromEvent: true;
+  /** Where it traded: the Pons curve, or the graduated Uniswap v4 pool. */
+  route: "curve" | "uniswap-v4" | "lifi";
+  /**
+   * uniswap-v4 buys: the hook skims its fee + creator tax from the OUTPUT, so
+   * `venueFee` / `creatorTax` are TOKEN base units (else wei).
+   */
+  feeInToken?: boolean;
+  /** Amounts come from on-chain events (curve events, v4 Swap / hook skim / ERC-20 Transfer). */
+  /** False only for a LI.FI fallback whose completion event was not found: re-read the receipt before crediting. */
+  amountsKnown: boolean;
+  fromEvent: boolean;
   /** create only: Pons launch fee paid by the creator (wei), on top of `quoteAmount`. */
   launchFee?: bigint;
   /** create only: fresh creator address (deployer + creatorFeeRecipient) and its HD index. */
@@ -91,6 +99,7 @@ export interface EvmQuote {
   marketCapEth: string;
   status: CurveStatus;
   decimals: number;
+  route: "curve" | "uniswap-v4" | "lifi";
   /** Block the state was read at. */
   blockNumber: bigint;
 }
@@ -103,6 +112,12 @@ export interface EvmTradeOptions {
    * launch, up to 99%): "wait" (default) until it is 0, "fail" -> venue_unavailable.
    */
   snipeTax?: "wait" | "fail";
+  /**
+   * Graduated token whose v4 pool is not seeded yet (phase Swept): call the
+   * permissionless `createGraduatedPool` first (vault pays gas). Default false
+   * -> venue_unavailable "graduation in progress".
+   */
+  seedPool?: boolean;
   /** buy/create: approve the curve right after the buy (not right before a sell). Default true. */
   approveAfterBuy?: boolean;
 }
