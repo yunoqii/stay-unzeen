@@ -46,6 +46,18 @@ enum Cmd {
         #[arg(long)]
         allow_mainnet: bool,
     },
+    /// Create K_chat (32 random bytes, hex, 0600) for UNZEEN_CHAT_KEY_FILE. One per network; keep
+    /// it outside the database, the repo and backups. Rotating it renames every chat nickname.
+    ChatKeygen {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Operator chat moderation (API v0.12). Never deanonymizes: acts on message ids and
+    /// (nick, mint) pairs only.
+    Chat {
+        #[command(subcommand)]
+        cmd: ChatCmd,
+    },
     /// DEV: sign a request with an anon key file (hex secret, from `unzeen-scanner anon-key`)
     /// and print the response. Refused on mainnet unless UNZEEN_DEV_PRINT=1.
     DevRequest {
@@ -64,6 +76,26 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ChatCmd {
+    /// Remove one message (`operator`) on the next boundary.
+    Hide { id: String },
+    /// Mute a nickname in one token chat for N hours (`403 chat_muted`).
+    Mute {
+        #[arg(long)]
+        mint: String,
+        #[arg(long)]
+        nick: String,
+        #[arg(long, default_value_t = 24.0)]
+        hours: f64,
+    },
+    /// Remove every message of a token chat on the next boundary.
+    Purge {
+        #[arg(long)]
+        mint: String,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     tokio::runtime::Builder::new_multi_thread()
@@ -79,9 +111,15 @@ async fn run() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    // Needs no configuration (and must work before UNZEEN_CHAT_KEY_FILE exists).
+    if let Some(Cmd::ChatKeygen { out }) = &cli.cmd {
+        return chat_keygen(out);
+    }
     let cfg = Config::from_env()?;
     match cli.cmd.unwrap_or(Cmd::Serve) {
         Cmd::Serve => serve(cfg).await,
+        Cmd::ChatKeygen { out } => chat_keygen(&out),
+        Cmd::Chat { cmd } => chat_cmd(&cfg, cmd).await,
         Cmd::VerifySnapshot { allow_mainnet } => verify_snapshot(&cfg, allow_mainnet).await,
         Cmd::StatsSnapshot {
             include_today,
@@ -125,6 +163,59 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    Ok(())
+}
+
+fn chat_keygen(out: &PathBuf) -> anyhow::Result<()> {
+    use std::io::Write;
+    let k: [u8; 32] = rand::random();
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o
+        .open(out)
+        .with_context(|| format!("creating {} (must not exist)", out.display()))?;
+    writeln!(
+        f,
+        "# unzeen K_chat (chat nicknames). Keep outside the DB, the repo and backups."
+    )?;
+    writeln!(f, "{}", hex::encode(k))?;
+    println!(
+        "K_chat written to {} (0600); set UNZEEN_CHAT_KEY_FILE to this path",
+        out.display()
+    );
+    Ok(())
+}
+
+async fn chat_cmd(cfg: &Config, cmd: ChatCmd) -> anyhow::Result<()> {
+    let ledger = connect_checked(cfg).await?;
+    match cmd {
+        ChatCmd::Hide { id } => {
+            let id: [u8; 16] = hex::decode(&id)
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .ok_or_else(|| anyhow!("id: 32 hex"))?;
+            if !ledger.chat_operator_remove(&id).await.map_err(|e| anyhow!("{e}"))? {
+                bail!("no such message (or already removed)");
+            }
+            println!("removal queued for the next boundary");
+        }
+        ChatCmd::Mute { mint, nick, hours } => {
+            ledger
+                .chat_mute(&mint, &nick, hours)
+                .await
+                .map_err(|e| anyhow!("{e}"))?;
+            println!("muted for {hours} h");
+        }
+        ChatCmd::Purge { mint } => {
+            let n = ledger.chat_purge(&mint).await.map_err(|e| anyhow!("{e}"))?;
+            println!("{n} message(s) queued for removal");
+        }
+    }
     Ok(())
 }
 

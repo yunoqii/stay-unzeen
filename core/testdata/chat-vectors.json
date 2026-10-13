@@ -1,0 +1,285 @@
+{
+  "alphabet": "0123456789abcdefghjkmnpqrstvwxyz",
+  "body": {
+    "anonSecretHex": "0101010101010101010101010101010101010101010101010101010101010101",
+    "body": "{\"mint\":\"US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx\",\"op\":\"chat\",\"text\":\"gm frens\",\"pad\":\"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   \"}",
+    "bodyBytes": 1024,
+    "chainId": "0202",
+    "headers": {
+      "x-unzeen-nonce": "09090909090909090909090909090909",
+      "x-unzeen-pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "x-unzeen-sig": "3MK3Ldn7jepFHD2T3hcBzeh8nU9DcGJUC9GwRfXrkUgLHi4vR5wDuaymBqT7EqwRpUTTtFadg5BbW6AXU4gY34y9",
+      "x-unzeen-ts": "1800000000000"
+    },
+    "path": "/api/actions"
+  },
+  "kChat": "4242424242424242424242424242424242424242424242424242424242424242",
+  "nick": [
+    {
+      "anonPubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "chainId": "0202",
+      "creator": "51segw4x",
+      "member": "529s9zw8",
+      "mint": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+    },
+    {
+      "anonPubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "chainId": "0202",
+      "creator": "f6ka9kny",
+      "member": "0w3tw4yz",
+      "mint": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf"
+    },
+    {
+      "anonPubkey": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+      "chainId": "0101",
+      "creator": "psv8mkym",
+      "member": "s8yxgahf",
+      "mint": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+    },
+    {
+      "anonPubkey": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+      "chainId": "0101",
+      "creator": "aymvkegr",
+      "member": "b2k5y1t0",
+      "mint": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf"
+    }
+  ],
+  "reportTag": {
+    "anonPubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+    "msgId": "abababababababababababababababab",
+    "tag": "60102fc66ab3b2ec50872ba451273fb18abdc61b0823b6e32d78e3f4f1298314"
+  },
+  "text": [
+    {
+      "jsonBytes": 10,
+      "note": "plain",
+      "problem": null,
+      "text": "gm frens",
+      "valid": true
+    },
+    {
+      "jsonBytes": 58,
+      "note": "address is fine",
+      "problem": null,
+      "text": "ser, CA pls: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+      "valid": true
+    },
+    {
+      "jsonBytes": 28,
+      "note": "3 newlines",
+      "problem": null,
+      "text": "line1\nline2\nline3\nline4",
+      "valid": true
+    },
+    {
+      "jsonBytes": 27,
+      "note": "ZWJ emoji + VS16",
+      "problem": null,
+      "text": "👨‍👩‍👧 ❤️",
+      "valid": true
+    },
+    {
+      "jsonBytes": 4,
+      "note": "precomposed NFC",
+      "problem": null,
+      "text": "é",
+      "valid": true
+    },
+    {
+      "jsonBytes": 7,
+      "note": "2 combining marks",
+      "problem": null,
+      "text": "x̀́",
+      "valid": true
+    },
+    {
+      "jsonBytes": 282,
+      "note": "280 chars",
+      "problem": null,
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": true
+    },
+    {
+      "jsonBytes": 800,
+      "note": "266 × 3 bytes + quotes = 800 JSON bytes",
+      "problem": null,
+      "text": "€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€",
+      "valid": true
+    },
+    {
+      "jsonBytes": 2,
+      "note": "empty",
+      "problem": "empty",
+      "text": "",
+      "valid": false
+    },
+    {
+      "jsonBytes": 5,
+      "note": "decomposed",
+      "problem": "not_nfc",
+      "text": "é",
+      "valid": false
+    },
+    {
+      "jsonBytes": 283,
+      "note": "281 chars",
+      "problem": "too_long",
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "jsonBytes": 803,
+      "note": "803 JSON bytes",
+      "problem": "too_many_bytes",
+      "text": "€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€",
+      "valid": false
+    },
+    {
+      "jsonBytes": 842,
+      "note": "JSON escapes count (\\u0001 = 6 bytes), checked before chars",
+      "problem": "too_many_bytes",
+      "text": "\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001\u0001",
+      "valid": false
+    },
+    {
+      "jsonBytes": 5,
+      "note": "leading space",
+      "problem": "edge_space",
+      "text": " gm",
+      "valid": false
+    },
+    {
+      "jsonBytes": 6,
+      "note": "trailing NBSP",
+      "problem": "edge_space",
+      "text": "gm ",
+      "valid": false
+    },
+    {
+      "jsonBytes": 6,
+      "note": "trailing newline",
+      "problem": "edge_space",
+      "text": "gm\n",
+      "valid": false
+    },
+    {
+      "jsonBytes": 7,
+      "note": "leading BOM is JS \\s",
+      "problem": "edge_space",
+      "text": "﻿gm",
+      "valid": false
+    },
+    {
+      "jsonBytes": 15,
+      "note": "4 newlines",
+      "problem": "newlines",
+      "text": "a\nb\nc\nd\ne",
+      "valid": false
+    },
+    {
+      "jsonBytes": 10,
+      "note": "triple newline",
+      "problem": "newlines",
+      "text": "a\n\n\nb",
+      "valid": false
+    },
+    {
+      "jsonBytes": 6,
+      "note": "tab",
+      "problem": "forbidden_char",
+      "text": "a\tb",
+      "valid": false
+    },
+    {
+      "jsonBytes": 6,
+      "note": "CR",
+      "problem": "forbidden_char",
+      "text": "a\rb",
+      "valid": false
+    },
+    {
+      "jsonBytes": 6,
+      "note": "NEL (not JS \\s)",
+      "problem": "forbidden_char",
+      "text": "ab",
+      "valid": false
+    },
+    {
+      "jsonBytes": 11,
+      "note": "RLO",
+      "problem": "forbidden_char",
+      "text": "abc‮def",
+      "valid": false
+    },
+    {
+      "jsonBytes": 7,
+      "note": "ZWSP",
+      "problem": "forbidden_char",
+      "text": "a​b",
+      "valid": false
+    },
+    {
+      "jsonBytes": 7,
+      "note": "LINE SEPARATOR",
+      "problem": "forbidden_char",
+      "text": "a b",
+      "valid": false
+    },
+    {
+      "jsonBytes": 7,
+      "note": "private use",
+      "problem": "forbidden_char",
+      "text": "ab",
+      "valid": false
+    },
+    {
+      "jsonBytes": 8,
+      "note": "tag char",
+      "problem": "forbidden_char",
+      "text": "a󠁁b",
+      "valid": false
+    },
+    {
+      "jsonBytes": 7,
+      "note": "noncharacter",
+      "problem": "forbidden_char",
+      "text": "a﷐b",
+      "valid": false
+    },
+    {
+      "jsonBytes": 8,
+      "note": "plane noncharacter",
+      "problem": "forbidden_char",
+      "text": "a🿾b",
+      "valid": false
+    },
+    {
+      "jsonBytes": 9,
+      "note": "3 combining marks",
+      "problem": "zalgo",
+      "text": "x̀́̂",
+      "valid": false
+    },
+    {
+      "jsonBytes": 86,
+      "note": "12 BIP-39 words",
+      "problem": "seed_phrase",
+      "text": "abandon ability able about above absent absorb abstract absurd abuse access accident",
+      "valid": false
+    },
+    {
+      "jsonBytes": 86,
+      "note": "case and punctuation",
+      "problem": "seed_phrase",
+      "text": "ABANDON,ABILITY,ABLE,ABOUT,ABOVE,ABSENT,ABSORB,ABSTRACT,ABSURD,ABUSE,ACCESS,ACCIDENT",
+      "valid": false
+    },
+    {
+      "jsonBytes": 77,
+      "note": "11 words",
+      "problem": null,
+      "text": "abandon ability able about above absent absorb abstract absurd abuse access",
+      "valid": true
+    }
+  ]
+}

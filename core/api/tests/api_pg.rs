@@ -108,6 +108,7 @@ fn config(url: &str) -> Config {
             full_trades: false,
             queue_max: 256,
             whale_lamports: 1_000_000_000,
+            discovery: false,
         },
         fair: FairConfig {
             enabled: false,
@@ -129,6 +130,12 @@ fn config(url: &str) -> Config {
         stats: unzeen_api::config::StatsConfig {
             daily: false,
             params: unzeen_ledger::stats::StatsParams::default(),
+        },
+        chat: unzeen_api::config::ChatConfig {
+            enabled: false,
+            noop: false,
+            min_account_zat: 100_000,
+            key: None,
         },
     }
 }
@@ -683,6 +690,24 @@ async fn market_endpoints_and_ws() {
     let t = e.get("/api/tokens").await.body;
     assert_eq!(t[0]["priceSol"], "0.000000028");
     assert_eq!(t[0]["marketCapSol"], "28.5");
+    // v0.12 list fields (public: the pool's own feed + the indexer snapshot).
+    assert_eq!(t[0]["unzeenLaunch"], true);
+    assert_eq!(t[0]["volume24hSol"], "3.5");
+    assert_eq!(t[0]["unzeenTrades24h"], 3);
+    assert!(t[0].get("curveProgressPct").is_none(), "no indexer snapshot yet");
+    e.sql(&format!(
+        "INSERT INTO {s}.token_safety (mint, as_of, data)
+           VALUES ('{MINT}', date_trunc('minute', now()), '{{\"market\": {{\"curveProgressPct\": \"41.2\"}}}}')",
+        s = e.schema
+    ))
+    .await;
+    assert_eq!(e.get("/api/tokens").await.body[0]["curveProgressPct"], "41.2");
+    // Discovery flag off: like an unknown path; no features.discovery.
+    assert_eq!(
+        e.get("/api/tokens?source=discovery").await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(e.get("/api/tokens?source=x").await.status, StatusCode::BAD_REQUEST);
     let one = e.get(&format!("/api/tokens/{MINT}")).await.body;
     assert_eq!(one["trades"].as_array().unwrap().len(), 4);
     assert_eq!(one["trades"][0]["solanaTx"], "S3");
@@ -1699,11 +1724,12 @@ mod fair {
             .await,
             2
         );
-        // A failed consolidation is settled and re-queued (try 2); confirmed ones are settled.
+        // A failed consolidation is settled and re-queued (try 2); confirmed ones are settled (an
+        // empty leg vault: confirmed with 0 and no tx/signature, allowed for consolidate by 0018).
         e.sql(&format!(
             "UPDATE {s}.relayer_jobs SET status = 'failed', error_code = 'internal'
               WHERE op = 'consolidate' AND meta->>'from' = 'VaultB';
-             UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGC', out_token_amount = 5
+             UPDATE {s}.relayer_jobs SET status = 'confirmed', out_token_amount = 0
               WHERE op = 'consolidate' AND meta->>'from' = 'VaultC';"
         ))
         .await;
@@ -3036,5 +3062,292 @@ async fn jupiter_devnet_and_explicit_min_out() {
         code(&e.signed(&user(11), "POST", "/api/actions", &sell0).await),
         "bad_request"
     );
+    e.drop_schema().await;
+}
+
+#[tokio::test]
+async fn discovery_list_behind_flag() {
+    let Some(e) = setup_with(|c| c.intel.discovery = true).await else {
+        return;
+    };
+    e.ledger.set_pool_meta("network", "test").await.unwrap();
+    e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+    assert_eq!(e.get("/api/pool").await.body["features"]["discovery"], true);
+    assert_eq!(e.get("/api/tokens?source=discovery").await.body, json!([]));
+    e.sql(&format!(
+        "INSERT INTO {s}.intel_discovery (network, mint, venue, created_at, name, symbol, status, price_sol,
+                                          market_cap_sol, progress_pct, as_of, pool, config) VALUES
+           ('devnet', '{MINT}', 'pumpfun', to_timestamp(1800000000), 'Fresh', 'FRSH', 'curve', 0.00000003, 30,
+            12.50, to_timestamp(1800000060), 'PoolSecretish', 'Cfg'),
+           ('mainnet-beta', 'Other1111111111111111111111111111111111111', 'pumpfun', to_timestamp(1800000000),
+            NULL, NULL, 'curve', 0, 0, NULL, to_timestamp(1800000060), NULL, NULL)",
+        s = e.schema
+    ))
+    .await;
+    let r = e.get("/api/tokens?source=discovery").await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.headers["cache-control"], "public, max-age=60");
+    let d = r.body.as_array().unwrap();
+    assert_eq!(d.len(), 1, "only this network");
+    assert_eq!(d[0]["symbol"], "FRSH");
+    assert_eq!(d[0]["curveProgressPct"], "12.5");
+    assert_eq!(d[0]["asOf"], 1_800_000_060_000u64);
+    assert_eq!(d[0]["unzeenLaunch"], false);
+    assert_eq!(d[0]["decimals"], 6);
+    assert!(d[0].get("pool").is_none() && d[0].get("config").is_none());
+    // Discovery never leaks into the pool list.
+    assert_eq!(e.get("/api/tokens").await.body, json!([]));
+    e.drop_schema().await;
+}
+
+/// A chat_* / noop body padded to exactly 1024 bytes (`pad` last), like web/lib/pad.ts.
+fn chat_body(v: Value) -> String {
+    let head = v.to_string();
+    let base = format!("{},\"pad\":\"\"}}", &head[..head.len() - 1]);
+    format!(
+        "{},\"pad\":\"{}\"}}",
+        &head[..head.len() - 1],
+        " ".repeat(1024 - base.len())
+    )
+}
+
+#[tokio::test]
+async fn chat_flow() {
+    let Some(e) = setup_with(|c| {
+        c.chat.enabled = true;
+        c.chat.noop = true;
+        c.chat.key = Some(unzeen_api::config::ChatKey([0x42; 32]));
+        c.chat.min_account_zat = 100_000;
+    })
+    .await
+    else {
+        return;
+    };
+    e.ledger.set_pool_meta("network", "test").await.unwrap();
+    e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+    let s = e.schema.clone();
+    let pool = e.get("/api/pool").await.body;
+    assert_eq!(pool["features"]["chat"], true);
+    assert_eq!(pool["features"]["noop"], true);
+    assert_eq!(pool["chat"]["bodyBytes"], 1024);
+    assert_eq!(pool["chat"]["minAccountZat"], "100000");
+    e.sql(&format!(
+        "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol)
+           VALUES ('{MINT}', 'pumpfun', 'PEPE', 'Pepe', 6, 0.000000028, 28.5);"
+    ))
+    .await;
+    let post =
+        |text: &str, badge: bool| chat_body(json!({"op":"chat","mint":MINT,"text":text,"showCreatorBadge":badge}));
+    let act = |sk: &SigningKey, b: String| {
+        let sk = sk.clone();
+        let e = &e;
+        async move { e.signed(&sk, "POST", "/api/actions", &b).await }
+    };
+
+    // Not eligible (no balance): 403 without amounts, padded like a success.
+    let r = act(&user(1), post("gm", false)).await;
+    assert_eq!((r.status, code(&r)), (StatusCode::FORBIDDEN, "chat_not_eligible"));
+    assert_eq!(r.raw_len, 1024);
+    e.fund(1, 0, 1_000_000).await;
+    e.fund(2, 1, 1_000_000).await;
+    e.fund(3, 2, 1_000_000).await;
+    e.fund(4, 3, 1_000_000).await;
+    // Wrong size, bad text, unknown mint.
+    let r = act(&user(1), json!({"op":"chat","mint":MINT,"text":"gm"}).to_string()).await;
+    assert_eq!((r.status, code(&r)), (StatusCode::BAD_REQUEST, "bad_request"));
+    let r = act(&user(1), post(" gm", false)).await;
+    assert_eq!(code(&r), "chat_text_invalid");
+    assert_eq!(r.body["error"]["details"], "edge_space");
+    let other = MINT2;
+    let r = act(&user(1), chat_body(json!({"op":"chat","mint":other,"text":"gm"}))).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    // Badge without creator rights.
+    let r = act(&user(1), post("gm", true)).await;
+    assert_eq!(code(&r), "not_creator");
+
+    // Post; same nonce + body → same answer; nick = HMAC vector formula.
+    let body = post("gm frens", false);
+    let h = e.sign(&user(1), "POST", "/api/actions", &body);
+    let r1 = e.raw("POST", "/api/actions", &body, Some(&h)).await;
+    assert_eq!(r1.status, StatusCode::OK, "{:?}", r1.body);
+    assert_eq!(r1.raw_len, 1024);
+    let r2 = e.raw("POST", "/api/actions", &body, Some(&h)).await;
+    assert_eq!(
+        (r1.body["id"].clone(), r1.body["nick"].clone()),
+        (r2.body["id"].clone(), r2.body["nick"].clone())
+    );
+    let mint_b: [u8; 32] = bs58::decode(MINT).into_vec().unwrap().try_into().unwrap();
+    let nick1 = unzeen_protocol::chat::nick(&[0x42; 32], CHAIN, &mint_b, &user(1).verifying_key().to_bytes(), false);
+    assert_eq!(r1.body["nick"], nick1);
+    let id1 = r1.body["id"].as_str().unwrap().to_string();
+    // Rate limit: 10 s between ops of one key.
+    let r = act(&user(1), post("again", false)).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
+    // Nothing in actions / Portfolio; no key in chat tables.
+    assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.actions")).await, 0);
+    let pf = e.signed(&user(1), "GET", "/api/portfolio", "").await.body;
+    assert_eq!(pf["actions"].as_array().unwrap().len(), 0);
+
+    // Not visible before the boundary; visible after.
+    assert_eq!(
+        e.get(&format!("/api/tokens/{MINT}/chat")).await.body["messages"],
+        json!([])
+    );
+    e.ledger.chat_publish().await.unwrap();
+    let page = e.get(&format!("/api/tokens/{MINT}/chat")).await;
+    assert_eq!(page.headers["cache-control"], "public, max-age=5");
+    assert_eq!(page.raw_len % 4096, 0);
+    let m = &page.body["messages"][0];
+    assert_eq!(
+        (m["id"].as_str().unwrap(), m["text"].as_str().unwrap()),
+        (id1.as_str(), "gm frens")
+    );
+    assert_eq!(m["isCreator"], false);
+    let cur = page.body["cursor"].as_str().unwrap().to_string();
+
+    // Creator of the mint: badge = separate nick; hide user 2's message (text stays, flag set).
+    e.sql(&format!(
+        "INSERT INTO {s}.creator_tokens (mint, anon_pubkey) VALUES ('{MINT}', '\\x{}')",
+        hex::encode(user(3).verifying_key().to_bytes())
+    ))
+    .await;
+    let rc = act(&user(3), post("dev here", true)).await;
+    assert_eq!(rc.status, StatusCode::OK);
+    assert_ne!(
+        rc.body["nick"],
+        unzeen_protocol::chat::nick(&[0x42; 32], CHAIN, &mint_b, &user(3).verifying_key().to_bytes(), false)
+    );
+    let r2m = act(&user(2), post("fud", false)).await;
+    let id2 = r2m.body["id"].as_str().unwrap().to_string();
+    e.ledger.chat_publish().await.unwrap();
+    // Hide: only the creator; others → 403.
+    let r = act(&user(4), chat_body(json!({"op":"chat_hide","id":id2}))).await;
+    assert_eq!(code(&r), "not_creator");
+    // user 3 posted < 10 s ago: the creator hides after the per-key interval.
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    let r = act(&user(3), chat_body(json!({"op":"chat_hide","id":id2}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    e.ledger.chat_publish().await.unwrap();
+    let after = e.get(&format!("/api/tokens/{MINT}/chat?after={cur}")).await.body;
+    let hidden = after["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == id2.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (hidden["hiddenByCreator"].clone(), hidden["text"].clone()),
+        (json!(true), json!("fud"))
+    );
+    assert_eq!(
+        after["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["id"] == id2.as_str())
+            .count(),
+        1
+    );
+
+    // Delete: not the author → 404; author → tombstone, text gone.
+    let r = act(&user(4), chat_body(json!({"op":"chat_delete","id":id1}))).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    let r = act(&user(1), chat_body(json!({"op":"chat_delete","id":id1}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let cur2 = e.get(&format!("/api/tokens/{MINT}/chat")).await.body["cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    e.ledger.chat_publish().await.unwrap();
+    let after = e.get(&format!("/api/tokens/{MINT}/chat?after={cur2}")).await.body;
+    assert_eq!(after["removed"], json!([{"id": id1, "reason": "deleted"}]));
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.chat_messages WHERE text IS NOT NULL AND status = 'removed'"
+        ))
+        .await,
+        0
+    );
+
+    // Reports: own report = no effect; 3 distinct reporters → removed (reports).
+    let rr = |sk: SigningKey| act(&sk, chat_body(json!({"op":"chat_report","id":id2,"reason":"spam"})));
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    assert_eq!(rr(user(2)).await.status, StatusCode::OK); // own
+    assert_eq!(rr(user(1)).await.status, StatusCode::OK);
+    assert_eq!(rr(user(4)).await.status, StatusCode::OK);
+    e.ledger.chat_publish().await.unwrap();
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.chat_messages WHERE status = 'removed' AND removed_reason = 'reports'"
+        ))
+        .await,
+        0,
+        "2 reporters < 3"
+    );
+    assert_eq!(rr(user(3)).await.status, StatusCode::OK);
+    e.ledger.chat_publish().await.unwrap();
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.chat_messages WHERE removed_reason = 'reports'"
+        ))
+        .await,
+        1
+    );
+
+    // Mute (operator) → 403 chat_muted.
+    e.ledger.chat_mute(MINT, &nick1, 1.0).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    assert_eq!(code(&act(&user(1), post("hi", false)).await), "chat_muted");
+
+    // noop: 1024 in, 1024 out, nothing stored but the nonce.
+    let r = act(&user(4), chat_body(json!({"op":"noop"}))).await;
+    assert_eq!((r.status, r.raw_len), (StatusCode::OK, 1024));
+    assert_eq!(r.body["status"], "queued");
+    // Mint not listed → empty page; malformed cursor → 400.
+    assert_eq!(e.get(&format!("/api/tokens/{other}/chat")).await.body["cursor"], "0");
+    assert_eq!(
+        e.get(&format!("/api/tokens/{MINT}/chat?after=x")).await.status,
+        StatusCode::BAD_REQUEST
+    );
+    // No anon key anywhere in chat tables (only nicks); api_nonces rows expire.
+    let pk1 = hex::encode(user(1).verifying_key().to_bytes());
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.chat_messages WHERE position(decode('{pk1}', 'hex') IN convert_to(coalesce(text,'') || nick, 'UTF8')) > 0"
+        ))
+        .await,
+        0
+    );
+    e.drop_schema().await;
+}
+
+#[tokio::test]
+async fn chat_hidden_when_disabled() {
+    let Some(e) = setup().await else { return };
+    e.ledger.set_pool_meta("network", "test").await.unwrap();
+    e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+    let pool = e.get("/api/pool").await.body;
+    assert!(pool["features"].get("chat").is_none() && pool.get("chat").is_none());
+    assert!(pool["features"].get("noop").is_none());
+    assert_eq!(
+        e.get(&format!("/api/tokens/{MINT}/chat")).await.status,
+        StatusCode::NOT_FOUND
+    );
+    e.fund(1, 0, 1_000_000).await;
+    let r = e
+        .signed(
+            &user(1),
+            "POST",
+            "/api/actions",
+            &chat_body(json!({"op":"chat","mint":MINT,"text":"gm"})),
+        )
+        .await;
+    assert_eq!((r.status, code(&r)), (StatusCode::BAD_REQUEST, "bad_request"));
+    let r = e
+        .signed(&user(1), "POST", "/api/actions", &chat_body(json!({"op":"noop"})))
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
     e.drop_schema().await;
 }

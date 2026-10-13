@@ -42,6 +42,47 @@ pub struct Config {
     pub verify: VerifyConfig,
     /// Daily public stats (API v0.9).
     pub stats: StatsConfig,
+    /// Token chat and cover traffic (API v0.12).
+    pub chat: ChatConfig,
+}
+
+/// K_chat: 32 bytes per network, outside the database (UNZEEN_CHAT_KEY_FILE). Never printed.
+#[derive(Clone)]
+pub struct ChatKey(pub [u8; 32]);
+
+impl std::fmt::Debug for ChatKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChatKey(<redacted>)")
+    }
+}
+
+/// Chat (API.md v0.12, docs/analysis/chat.md).
+#[derive(Clone, Debug)]
+pub struct ChatConfig {
+    /// UNZEEN_CHAT=1. Off: no `features.chat`, chat ops answer like unknown ops, GET → 404.
+    pub enabled: bool,
+    /// UNZEEN_NOOP=1: `op:"noop"` accepted (R8), `features.noop`.
+    pub noop: bool,
+    /// UNZEEN_CHAT_MIN_ACCOUNT_ZAT (default 0.05 ZEC mainnet, 0.001 devnet).
+    pub min_account_zat: u64,
+    /// Present iff `enabled`.
+    pub key: Option<ChatKey>,
+}
+
+/// Reads the hex K_chat file (64 hex chars, comments with '#' allowed).
+pub fn load_chat_key(path: &std::path::Path) -> anyhow::Result<ChatKey> {
+    let s = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let hexs: String = s
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let b: [u8; 32] = hex::decode(&hexs)
+        .ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| anyhow!("UNZEEN_CHAT_KEY_FILE must hold 32 bytes hex"))?;
+    Ok(ChatKey(b))
 }
 
 /// `GET /api/stats` (API.md v0.9, H6).
@@ -184,6 +225,9 @@ pub struct IntelConfig {
     pub queue_max: i64,
     /// `whale` tag threshold, lamports (UNZEEN_WHALE_LAMPORTS).
     pub whale_lamports: i64,
+    /// Discovery list of /tokens (UNZEEN_DISCOVERY=1, API v0.12). Off: no `features.discovery`,
+    /// `GET /api/tokens?source=discovery` answers like an unknown path.
+    pub discovery: bool,
 }
 
 #[derive(Clone)]
@@ -473,6 +517,7 @@ impl Config {
                 full_trades: var("UNZEEN_INTEL_FULL_TRADES").as_deref() == Some("1"),
                 queue_max: num::<i64>("UNZEEN_INTEL_QUEUE_MAX", 256)?.clamp(1, 100_000),
                 whale_lamports: num::<i64>("UNZEEN_WHALE_LAMPORTS", 1_000_000_000)?.max(1),
+                discovery: var("UNZEEN_DISCOVERY").as_deref() == Some("1"),
             },
             fair,
             verify: VerifyConfig {
@@ -496,6 +541,25 @@ impl Config {
                     zec_round_zat: num::<u64>("UNZEEN_STATS_ZEC_ROUND_ZAT", 100_000_000)?.max(1_000_000),
                     ..unzeen_ledger::stats::StatsParams::default()
                 },
+            },
+            chat: {
+                let enabled = var("UNZEEN_CHAT").as_deref() == Some("1");
+                let key = if enabled {
+                    let p = var("UNZEEN_CHAT_KEY_FILE")
+                        .ok_or_else(|| anyhow!("UNZEEN_CHAT=1 needs UNZEEN_CHAT_KEY_FILE (unzeen-api chat-keygen)"))?;
+                    Some(load_chat_key(std::path::Path::new(&p))?)
+                } else {
+                    None
+                };
+                ChatConfig {
+                    enabled,
+                    noop: var("UNZEEN_NOOP").as_deref() == Some("1"),
+                    min_account_zat: num::<u64>(
+                        "UNZEEN_CHAT_MIN_ACCOUNT_ZAT",
+                        if mainnet { 5_000_000 } else { 100_000 },
+                    )?,
+                    key,
+                }
             },
         };
         Ok(cfg)

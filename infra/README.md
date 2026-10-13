@@ -62,6 +62,11 @@ curl -s localhost:8080/api/pool
   --body '{"op":"buy","venue":"pumpfun","mint":"<mint>","zecIn":"200000","minOut":"1"}'
 ```
 
+Token chat (API v0.12, `UNZEEN_CHAT=1`): create K_chat once per network with
+`./target/release/unzeen-api chat-keygen --out /etc/unzeen/<net>-chat.key` (0600, outside the repo,
+the database and backups) and set `UNZEEN_CHAT_KEY_FILE`. Moderation never deanonymizes:
+`unzeen-api chat hide <id>` | `chat mute --mint <mint> --nick <nick> --hours 24` | `chat purge --mint <mint>`.
+
 Reverse proxy (H9): TLS on this host, `access_log off;` (or a format without `$remote_addr`
 and `$request_uri`), no CDN proxy, one origin per network with the API at the root
 (no path prefix: the signed request-target must reach the server unchanged), WS upgrade for

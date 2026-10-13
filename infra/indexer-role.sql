@@ -38,3 +38,7 @@ GRANT USAGE ON SEQUENCE market_trades_id_seq TO unzeen_indexer;
 
 -- Public market data and the public vault list: read-only.
 GRANT SELECT ON tokens, trades, mint_vaults, relayer_vault_usage TO unzeen_indexer;
+
+-- Discovery (0018, API v0.12): fresh launchpad tokens found on the indexer's own tick.
+-- Public data only; the API reads it for GET /api/tokens?source=discovery.
+GRANT SELECT, INSERT, UPDATE, DELETE ON intel_discovery TO unzeen_indexer;

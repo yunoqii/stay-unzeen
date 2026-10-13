@@ -14,6 +14,8 @@ pub struct ApiError {
     pub code: &'static str,
     pub message: String,
     pub retry_after: Option<u64>,
+    /// `error.details` (API.md «Ошибки»): a stable machine code, never user data.
+    pub details: Option<&'static str>,
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
@@ -25,6 +27,7 @@ impl ApiError {
             code,
             message: message.into(),
             retry_after: None,
+            details: None,
         }
     }
 
@@ -110,6 +113,8 @@ impl From<LedgerError> for ApiError {
             ),
             LedgerError::OrderNotOpen => Self::new(StatusCode::CONFLICT, "order_not_open", "the order is not open"),
             LedgerError::OrdersFull => Self::venue_unavailable("orders are not available right now"),
+            LedgerError::ChatMuted => Self::new(StatusCode::FORBIDDEN, "chat_muted", "muted in this chat"),
+            LedgerError::ChatFull => Self::rate_limited(30),
             LedgerError::AlreadyBid => Self::new(
                 StatusCode::CONFLICT,
                 "already_bid",
@@ -126,7 +131,10 @@ impl From<LedgerError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = json!({ "error": { "code": self.code, "message": self.message } });
+        let mut body = json!({ "error": { "code": self.code, "message": self.message } });
+        if let Some(d) = self.details {
+            body["error"]["details"] = json!(d);
+        }
         let mut res = (self.status, Json(body)).into_response();
         res.headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

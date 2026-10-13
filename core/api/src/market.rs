@@ -114,16 +114,109 @@ pub async fn feed(State(st): State<AppState>, Query(q): Query<HashMap<String, St
     Ok(public(Value::Array(rows.iter().map(trade_json).collect()), 2))
 }
 
-pub async fn tokens(State(st): State<AppState>) -> ApiResult<Response> {
+/// Lamports → decimal SOL string without trailing zeros ("1.5", "0", "0.000000001").
+pub fn lamports_sol(l: i64) -> String {
+    let l = l.max(0) as u64;
+    let (w, f) = (l / 1_000_000_000, l % 1_000_000_000);
+    if f == 0 {
+        return w.to_string();
+    }
+    let frac = format!("{f:09}");
+    format!("{w}.{}", frac.trim_end_matches('0'))
+}
+
+/// v0.12 list fields of /tokens (filters and sorting in the browser): every value is public
+/// (the pool's own trades in the feed, the indexer's tick snapshot).
+fn list_fields(v: &mut Value, unzeen_launch: bool, vol24: i64, trades24: i64, progress: Option<String>) {
+    v["unzeenLaunch"] = json!(unzeen_launch);
+    v["volume24hSol"] = json!(lamports_sol(vol24));
+    v["unzeenTrades24h"] = json!(trades24.max(0));
+    if let Some(p) = progress {
+        v["curveProgressPct"] = json!(p);
+    }
+}
+
+/// `GET /api/tokens` (pool tokens) or, v0.12 with UNZEEN_DISCOVERY=1, `?source=discovery`.
+pub async fn tokens(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> ApiResult<Response> {
+    match q.get("source").map(String::as_str) {
+        None | Some("pool") => {}
+        Some("discovery") if st.cfg.intel.discovery => return discovery(&st).await,
+        // Flag off: exactly like an unknown path.
+        Some("discovery") => return Err(ApiError::not_found()),
+        Some(_) => return Err(ApiError::bad_request("source: pool | discovery")),
+    }
     let c = client(&st).await?;
     let rows = c
         .query(
-            &format!("SELECT {TOKEN_COLS} FROM tokens ORDER BY created_at DESC LIMIT 200"),
+            "SELECT t.mint, t.symbol, t.name, t.image, t.venue, t.status, t.decimals,
+                    trim_scale(t.price_sol)::text, trim_scale(t.market_cap_sol)::text,
+                    (extract(epoch FROM t.created_at) * 1000)::bigint,
+                    EXISTS (SELECT 1 FROM trades c WHERE c.mint = t.mint AND c.kind = 'create'),
+                    COALESCE(a.vol, 0)::bigint, COALESCE(a.n, 0)::bigint,
+                    CASE WHEN t.status = 'curve' THEN s.data->'market'->>'curveProgressPct' END
+             FROM tokens t
+             LEFT JOIN LATERAL (SELECT sum(x.sol_amount) AS vol, count(*) AS n FROM trades x
+                                WHERE x.mint = t.mint AND x.kind IN ('buy', 'sell')
+                                  AND x.ts > now() - interval '24 hours') a ON true
+             LEFT JOIN token_safety s ON s.mint = t.mint AND NOT s.missing
+             ORDER BY t.created_at DESC LIMIT 200",
             &[],
         )
         .await
         .map_err(db)?;
-    Ok(public(Value::Array(rows.iter().map(token_json).collect()), 5))
+    let list = rows
+        .iter()
+        .map(|r| {
+            let mut v = token_json(r);
+            list_fields(&mut v, r.get(10), r.get(11), r.get(12), r.get(13));
+            v
+        })
+        .collect();
+    Ok(public(Value::Array(list), 5))
+}
+
+/// v0.12 Discovery: fresh launchpad tokens from the indexer tick. One list for everyone
+/// (no parameters), `pool`/`config` never served, cache 60 s.
+async fn discovery(st: &AppState) -> ApiResult<Response> {
+    let c = client(st).await?;
+    let rows = c
+        .query(
+            "SELECT d.mint, COALESCE(d.symbol, ''), COALESCE(d.name, ''), d.venue, d.status,
+                    COALESCE(it.decimals, 6::smallint), trim_scale(d.price_sol)::text,
+                    trim_scale(d.market_cap_sol)::text, (extract(epoch FROM d.created_at) * 1000)::bigint,
+                    CASE WHEN d.status = 'curve' THEN trim_scale(d.progress_pct)::text END,
+                    (extract(epoch FROM d.as_of) * 1000)::bigint,
+                    EXISTS (SELECT 1 FROM trades c WHERE c.mint = d.mint AND c.kind = 'create')
+             FROM intel_discovery d LEFT JOIN intel_tokens it ON it.mint = d.mint
+             WHERE d.network = $1
+             ORDER BY d.created_at DESC, d.mint LIMIT 200",
+            &[&st.cfg.cluster],
+        )
+        .await
+        .map_err(db)?;
+    let list = rows
+        .iter()
+        .map(|r| {
+            let mut v = json!({
+                "mint": r.get::<_, String>(0),
+                "symbol": r.get::<_, String>(1),
+                "name": r.get::<_, String>(2),
+                "venue": r.get::<_, String>(3),
+                "status": r.get::<_, String>(4),
+                "decimals": r.get::<_, i16>(5),
+                "priceSol": r.get::<_, String>(6),
+                "marketCapSol": r.get::<_, String>(7),
+                "createdAt": r.get::<_, i64>(8),
+                "asOf": r.get::<_, i64>(10),
+            });
+            v["unzeenLaunch"] = json!(r.get::<_, bool>(11));
+            if let Some(p) = r.get::<_, Option<String>>(9) {
+                v["curveProgressPct"] = json!(p);
+            }
+            v
+        })
+        .collect();
+    Ok(public(Value::Array(list), 60))
 }
 
 /// `Token & { trades }`. v0.5: a mint the pool never traded comes from the indexer snapshot

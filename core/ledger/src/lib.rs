@@ -10,6 +10,7 @@
 //! Privacy: nothing here logs keys, amounts or refs. Callers must not either.
 
 pub mod actions;
+pub mod chat;
 pub mod creator;
 pub mod creator_fees;
 pub mod decide;
@@ -29,6 +30,7 @@ use tokio_postgres::NoTls;
 pub use actions::{
     ActionBrief, ActionView, DepositRow, JanitorReport, JobOp, NewAction, NewJob, NewPayout, RateUsed, TokenHolding,
 };
+pub use chat::{ChatMsgMeta, ChatPost, ChatQuery, ChatRequest, NonceCtx};
 pub use deadpool_postgres;
 pub use decide::{MemoInput, NoteObs, Outcome, Policy, Stage, evaluate};
 pub use payouts::{InflightPayout, PayoutRow};
@@ -80,6 +82,12 @@ pub enum LedgerError {
     /// Orders: the pool-wide open order limit (API 503 venue_unavailable).
     #[error("orders full")]
     OrdersFull,
+    /// Chat: (nick, mint) muted by the operator (API 403 chat_muted).
+    #[error("chat muted")]
+    ChatMuted,
+    /// Chat: too many pending messages for this mint / the pool (API 429).
+    #[error("chat batch full")]
+    ChatFull,
 }
 
 /// SQLSTATE of a Postgres error, or a coarse kind for client-side errors. Safe to log.
@@ -129,6 +137,8 @@ impl LedgerError {
             LedgerError::OrderLimit => "order_limit",
             LedgerError::OrderNotOpen => "order_not_open",
             LedgerError::OrdersFull => "orders_full",
+            LedgerError::ChatMuted => "chat_muted",
+            LedgerError::ChatFull => "chat_full",
         }
     }
 }

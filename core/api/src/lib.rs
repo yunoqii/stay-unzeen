@@ -9,6 +9,7 @@
 
 pub mod actions;
 pub mod auth;
+pub mod chat;
 pub mod config;
 pub mod creator;
 pub mod creator_fees;
@@ -63,6 +64,8 @@ pub struct Inner {
     pub drand: fair::Drand,
     /// `GET /api/verify/proof`: 10/min per key.
     pub verify_limit: Limiter,
+    /// Chat ops per key (API v0.12): 1/10 s, 20/h, 100/day.
+    pub chat_limit: chat::ChatLimiter,
 }
 
 impl std::ops::Deref for AppState {
@@ -84,6 +87,7 @@ impl AppState {
             epochs: actions::Epochs::new(&cfg.exec),
             drand: fair::Drand::new(cfg.fair.drand_urls.clone()),
             verify_limit: Limiter::new(10.0 / 60.0, 10.0),
+            chat_limit: chat::ChatLimiter::default(),
             feed_tx,
             ledger: ledger.with_creator_rules(cfg.launch.rules()),
             cfg,
@@ -106,6 +110,7 @@ pub fn router(st: AppState) -> Router {
         .route("/api/tokens/{mint}/trades", get(market::trades))
         .route("/api/tokens/{mint}/candles", get(market::candles))
         .route("/api/tokens/{mint}/safety", get(intel::safety))
+        .route("/api/tokens/{mint}/chat", get(chat::page))
         .route("/api/verify", get(verify::latest))
         .route("/api/verify/snapshots", get(verify::history))
         .route("/api/verify/proof", get(verify::proof))
@@ -283,6 +288,17 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
             "maxInitialBuyLamportsByVenue": by_venue,
         },
     }));
+    if st.cfg.intel.discovery {
+        r.0["features"]["discovery"] = json!(true);
+    }
+    // v0.12: absent keys = disabled.
+    if st.cfg.chat.enabled {
+        r.0["features"]["chat"] = json!(true);
+        r.0["chat"] = chat::pool_block(&st);
+    }
+    if st.cfg.chat.noop {
+        r.0["features"]["noop"] = json!(true);
+    }
     // Flag off: no "fair" anywhere in the public PoolInfo (absent key = disabled).
     if let Some(fl) = fair::pool_block(&st).await? {
         r.0["features"]["fairLaunch"] = json!(true);
@@ -480,6 +496,15 @@ async fn submit_action(
         return Err(ApiError::bad_request("pad: string up to 8192 bytes"));
     }
     let request_hash: [u8; 32] = Sha256::digest(&body).into();
+    if chat::is_chat_op(&raw) {
+        let n = unzeen_ledger::NonceCtx {
+            pk: a.pubkey,
+            nonce: a.nonce,
+            request_hash,
+            ts_ms: a.ts_ms,
+        };
+        return Ok(chat::submit(&st, raw, body.len(), n).await);
+    }
     if raw.get("op").and_then(Value::as_str) == Some("claim") {
         let v = creator_fees::claim(&st, raw, &a.pubkey, &a.nonce, &request_hash).await?;
         return Ok(padded(v, 1024));
@@ -593,6 +618,10 @@ pub fn spawn_background(st: &AppState) {
     tokio::spawn(creator_fees::credit_loop(st.clone()));
     tokio::spawn(stats::scheduler_loop(st.clone()));
     tokio::spawn(orders::evaluator_loop(st.clone()));
+    if st.cfg.chat.enabled {
+        tokio::spawn(chat::publisher_loop(st.clone()));
+        tokio::spawn(chat::janitor_loop(st.clone()));
+    }
     // D14: ZEC/SOL quote on a timer, never on demand.
     tokio::spawn(st.rate.clone().refresh_loop());
 }

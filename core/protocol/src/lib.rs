@@ -10,6 +10,7 @@
 
 pub mod anon_key;
 pub mod api_auth;
+pub mod chat;
 pub mod memo;
 pub mod verify;
 

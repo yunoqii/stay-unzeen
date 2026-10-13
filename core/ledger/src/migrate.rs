@@ -55,11 +55,18 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0015_rebalance",
         include_str!("../../migrations/0015_rebalance.sql"),
     ),
-    // 16: reserved for the chat spec (0016_*). Versions are checked one by one, a gap is fine.
+    // 16 lands after 17/18 on databases that already ran those: versions are checked one by
+    // one and 0016 does not depend on 0017/0018.
+    (16, "0016_chat", include_str!("../../migrations/0016_chat.sql")),
     (
         17,
         "0017_fair_bundle",
         include_str!("../../migrations/0017_fair_bundle.sql"),
+    ),
+    (
+        18,
+        "0018_discovery",
+        include_str!("../../migrations/0018_discovery.sql"),
     ),
 ];
 

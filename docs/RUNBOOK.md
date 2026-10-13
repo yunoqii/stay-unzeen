@@ -1,6 +1,6 @@
 # Unzeen — ранбук сквозного прогона (внутренний)
 
-Для человека, который поднимает стенд впервые. Сверено с кодом 13.10.2026 (`core/scanner/src/main.rs`, `core/api/src/{main,config,lib}.rs`, `adapters/scripts/*.ts`, `adapters/src/{config,env,relayer/runtime}.ts`, `web/{next.config.ts,lib/network.ts,lib/media.ts}`, `infra/*`). Где для прогона чего-то не хватает в коде, стоит пометка **GAP:**.
+Для человека, который поднимает стенд впервые. Сверено с кодом 13.10.2026, обновлено после коммита core 8fa54c0 (`core/scanner/src/main.rs`, `core/api/src/{main,config,lib}.rs`, `adapters/scripts/*.ts`, `adapters/src/{config,env,relayer/runtime}.ts`, `web/{next.config.ts,lib/network.ts,lib/media.ts}`, `infra/*`). Где для прогона чего-то не хватает в коде, стоит пометка **GAP:**.
 
 Правило для всего документа: значения секретов (пароли, RPC-URL с ключами, сиды, anon-ключи) в терминал не печатать, на экран не выводить, в чат не вставлять.
 
@@ -65,10 +65,9 @@ Web: свой файл `web/.env.local` (см. 1.10).
 ```bash
 cd ~/Desktop/stay-unzeen/adapters
 pnpm keys:gen 3            # существующие vault-0..2 не перезаписываются, печатает адреса + ссылки на explorer
-# GAP: нет команды, печатающей публичные ключи аттестаций (relayer только предупреждает "balance < 0.001 SOL").
-# Обход (проверен 13.10, печатает только pubkey):
-pnpm exec tsx -e 'const {loadRepoEnv}=require("./src/env");loadRepoEnv();const {loadConfig}=require("./src/config");const {openKeys}=require("./src/relayer/runtime");const {deriveAttestKeypair}=require("./src/attest");openKeys(loadConfig(),process.env,console.error).then(k=>{for(const p of ["verify","fair"])console.log(p,deriveAttestKeypair(k.creatorSeed,p).publicKey.toBase58())})'
+pnpm keys:attest           # публичные ключи аттестаций verify / fair + их баланс SOL (секреты не печатаются; GAP закрыт)
 ```
+Ключи аттестаций пополнять только из внешнего кошелька/фаусета, **никогда с vault** (RELAYER v5).
 Ключ `verify` = `operator.pubkey` снимков Verify → его же положить в `NEXT_PUBLIC_ATTESTATION_PUBKEY_DEVNET`. Ключ `fair` нигде публично не показывать до 28.10.
 
 ---
@@ -83,7 +82,7 @@ cd $R/core && cargo build --release        # unzeen-scanner + unzeen-api; миг
 cd $R/adapters && pnpm install
 cd $R/web && pnpm install
 ```
-Сейчас в `core/target/release` лежит устаревший `unzeen-scanner` (нет `sign-request`) и нет `unzeen-api` — пересобрать обязательно.
+Release-бинари `unzeen-scanner` и `unzeen-api` пересобраны 13.10 (миграции до 0017, `rebalance`, `wallet-balance`, `--include-today`, `--allow-mainnet`). После любого `git pull` в `core/` — снова `cargo build --release` (миграции вшиваются при сборке).
 
 ### 1.2 Терминал 1 — Postgres
 ```bash
@@ -100,7 +99,10 @@ cd $R
 docker compose -f infra/docker-compose.yml --env-file .env exec -T postgres \
   psql -U unzeen -d unzeen -c 'SELECT version, name FROM schema_migrations ORDER BY 1'
 ```
-Ожидается 1…14. **`core/migrations/0015_rebalance.sql` (не закоммичен) в список `MIGRATIONS` не включён** и не применится — руками не накатывать. GAP: авторебаланс ZEC→SOL (NEAR Intents, `serve --rebalance` из комментария 0015) в коде отсутствует; SOL на vault пополняем вручную.
+Ожидается 1…15 и 17 (`0015_rebalance`, `0017_fair_bundle`; номер 16 зарезервирован за чатом — пропуск нормален). Руками ничего не накатывать.
+**После первого старта новых бинарей (миграции 0015/0017) обязательно перезапустить `infra/relayer-role.sql` (1.4)** — иначе у релейера нет прав на `bundle_legs` и `pool_sol_inventory`.
+
+**Защита от смешения сетей (GAP закрыт):** сканер пишет в `pool_meta` `network`, `solana_cluster`, `pool_ua`. `unzeen-scanner serve`, `unzeen-api serve`, ручные `verify-snapshot`/`stats-snapshot` и `rebalance` **отказываются стартовать** на БД другой сети («refusing to start: this database belongs to …»); сканер — и на БД другого кошелька пула (`UNZEEN_ALLOW_POOL_UA_CHANGE=1` только после осознанного re-init). Для mainnet — отдельная БД (раздел 4.1).
 
 ### 1.4 Роли relayer / indexer (после миграций; повторять после каждой новой миграции)
 Пароли берутся из `DATABASE_URL_RELAYER` / `DATABASE_URL_INDEXER` в `.env` и не печатаются:
@@ -123,6 +125,18 @@ cd $R
 ./core/target/release/unzeen-scanner address            # UA пула testnet (utest1…)
 ./core/target/release/unzeen-scanner serve --payouts    # или UNZEEN_PAYOUTS=1
 ```
+Баланс кошелька пула (spendable / pending, без адресов, можно и на mainnet): `./core/target/release/unzeen-scanner wallet-balance` (GAP закрыт).
+
+**Авторебаланс ZEC→SOL (NEAR Intents 1Click, RELAYER v7)** — флаг `--rebalance` (или `UNZEEN_REBALANCE=1`). На testnet/devnet всегда **dry-run**: по расписанию журналируется котировка с mainnet-параметрами, ничего не отправляется. Живые отправки — только main + mainnet-beta + `UNZEEN_ALLOW_MAINNET_REBALANCE=1` + `UNZEEN_REBALANCE_SOL_ADDRESS` + `UNZEEN_REBALANCE_REFUND_TADDR` (раздел 4). Триггер требует снимок SOL от релейера (`pool_sol_inventory`, релейер v7); пока его нет — `rebalance check` покажет `no inventory`, SOL на vault пополняем вручную.
+```bash
+B=./core/target/release/unzeen-scanner
+$B rebalance quote        # read-only dry-котировка лота (mainnet-параметры) + сверка с ценой /v0/tokens
+$B rebalance check        # инвентарь SOL, свободный SOL, порог, кулдаун, решение триггера
+$B rebalance status       # журнал ребалансов (данных пользователей там нет)
+$B rebalance plan [--force] [--now]   # оператор: запланировать вручную (исполняет serve --rebalance)
+$B rebalance close <id> --status failed|done|refunded   # закрыть запись в attention
+```
+
 Ожидается: строки `scan pass` каждые ~20 с (tip, scanned, cover_txs, notes, changes) — без txid и memo. `--payouts` нужен для сценария Withdraw ZEC; без `UNZEEN_SEED_KEY_FILE` упадёт на старте («payouts need the pool seed key»). Сканер же публикует UA пула в `pool_meta` (без этого `GET /api/pool` = 503 «pool address not published yet»).
 
 ### 1.6 Терминал 3 — API
@@ -207,7 +221,7 @@ docker compose -f infra/docker-compose.yml --env-file .env exec -T postgres psql
 ### A. Ядро: ключ → Top up → Buy → лента → Sell → Withdraw
 1. **Ключ.** `/key` → создать (BIP-39, пароль, подтверждение слов). Ключ хранится в `localStorage` этого origin и сети.
 2. **Top up.** `/pay` → сумма (≥ `minDepositZat`, 0.001 TAZ). На экране QR ZIP-321 и строки Pool address / Amount / **Memo** с кнопками копирования. Memo живёт 24 ч.
-   - **Оплата с dev-кошелька** (UI по умолчанию предлагает 0.1, а CLI-`send` ограничен **0.05 ZEC** — поставить ≤ 0.05):
+   - **Оплата с dev-кошелька** (CLI-`send` на testnet ограничен **0.5 TAZ**, на mainnet — 0.05 ZEC; дефолтные 0.1 из UI проходят):
      ```bash
      cd $R
      export UNZEEN_DATA_DIR=~/.unzeen/dev-user/data UNZEEN_KEYS_DIR=~/.unzeen/dev-user/keys
@@ -268,7 +282,7 @@ docker compose -f infra/docker-compose.yml --env-file .env exec -T postgres psql
 ### E. Verify
 Нужны одновременно: API, сканер (пишет резерв ZEC после начала заморозки), релейер (балансы vault на finalized-слоте + подпись `attest`), пополненный ключ **verify**.
 ```bash
-cd $R && ./core/target/release/unzeen-api verify-snapshot     # devnet only; печатает "snapshot #N requested"
+cd $R && ./core/target/release/unzeen-api verify-snapshot     # печатает "snapshot #N requested"; на mainnet нужен --allow-mainnet
 ```
 Заморозка ≤ 120 с: релейер не берёт торговые задания, сканер не шлёт выплаты. Затем:
 ```bash
@@ -286,14 +300,15 @@ curl -s 127.0.0.1:8080/api/verify | head -c 800; echo
    Ожидается: `collected pumpfun/… <mint>: N lamports` + ссылки explorer (devnet печатает их), запись в `creator_fee_sweeps`.
 3. API на ближайшей границе эпохи зачисляет сбор (`creator fee sweeps processed credited=…` в логе API). `/creator` → `claimable` по токену.
 4. **Claim** → `claimable` переходит в `zecBalance` мгновенно, без tx в сети.
-   - Сервер отказывает `422 below_minimum`, если `claimable` в ZEC < `MIN_ACTION_ZAT` (0.001 ZEC ≈ 0.0115 SOL при курсе 11.5). При комиссии создателя pump.fun ≤ 0.3 % это **≥ ~4 SOL объёма**. Для прогона: временно `MIN_ACTION_ZAT=10000` в `.env` и перезапуск API (и сканера — он читает ту же policy) **или** понизить `DEVNET_ZEC_SOL_RATE`. GAP: на devnet с реальными параметрами claim практически недостижим.
+   - Сервер отказывает `422 below_minimum`, если `claimable` в ZEC < `MIN_CLAIM_ZAT` (API v0.11 `PoolInfo.minClaimZat`; по умолчанию 10 000 зат = 0.0001 ZEC ≈ 0.00115 SOL при курсе 11.5, не больше `MIN_ACTION_ZAT`). При комиссии создателя pump.fun ≤ 0.3 % это ~0.4 SOL объёма. Ещё ниже — `MIN_CLAIM_ZAT=1000` в `.env` и перезапуск API. GAP закрыт (отдельный порог).
 
 ### G. Stats
 ```bash
-cd $R && ./core/target/release/unzeen-api stats-snapshot     # devnet only
+cd $R && ./core/target/release/unzeen-api stats-snapshot --include-today   # срез 00:00 UTC завтра: сегодняшний прогон виден
+# без --include-today срез 00:00 UTC сегодня; на mainnet — только с --allow-mainnet
 curl -s 127.0.0.1:8080/api/stats; echo
 ```
-Ожидается `stats snapshot for <date> stored`, `/stats` показывает числа или `"<5"`. **Срез данных — 00:00 UTC сегодняшнего дня**: сегодняшние сделки в снимок не попадут, увидеть их можно только завтра. GAP: на devnet нет способа снять статистику, включающую сегодняшний прогон.
+Ожидается `stats snapshot for <date> stored (cut-off 00:00 UTC tomorrow (today included))`, `/stats` показывает числа или `"<5"` (k-анонимность и округление те же). Без флага срез — 00:00 UTC сегодня (GAP закрыт).
 
 ---
 
@@ -324,7 +339,8 @@ curl -s 127.0.0.1:8080/api/stats; echo
 | `GET /api/pool` 500, в логе API «pool_meta network differs» | в эту БД писал сканер другой сети | раздельные БД на сеть (раздел 4) |
 | Ордер не срабатывает | не запущен `intel:run` / тик старше 180 с / mint не pump.fun или graduated | 1.8 |
 | `423 creator_locked` | продажа/вывод токенов первой покупки создателя в течение лока | ожидаемо; на прогон `UNZEEN_CREATOR_LOCK_SECS=300` |
-| `send` на dev-user: «amount must be in 1..=5000000» | лимит CLI 0.05 ZEC | меньшая сумма |
+| `send`: «amount must be in 1..=50000000» (testnet) / «1..=5000000» (mainnet) | лимит CLI 0.5 TAZ / 0.05 ZEC | меньшая сумма |
+| сканер/API: «refusing to start: this database belongs to …» | БД другой сети | раздельные БД (4.1, `infra/pg-mainnet.sh`) |
 
 ---
 
@@ -336,9 +352,12 @@ curl -s 127.0.0.1:8080/api/stats; echo
 `balances`, `deposits`, `actions`, `pool_meta` (UA пула!) **не разделены по сети**. Mainnet-сканер в devnet-БД перезапишет `pool_ua` и зачислит реальные ZEC в тот же реестр. Поднять второй экземпляр Postgres отдельным compose-проектом (свой том, свой порт):
 ```bash
 cd $R
-POSTGRES_PORT=55433 docker compose -p unzeen-main -f infra/docker-compose.yml --env-file .env up -d postgres
+infra/pg-mainnet.sh up       # отдельный compose-проект unzeen-main, свой том, 127.0.0.1:55433 (POSTGRES_PORT_MAINNET)
+# первый старт mainnet-сканера/API применит миграции, затем:
+infra/pg-mainnet.sh roles    # relayer-role.sql + indexer-role.sql на mainnet-инстанс (пароли из .env, не печатаются)
+infra/pg-mainnet.sh psql     # psql владельца в mainnet-БД
 ```
-и в mainnet-терминалах `DATABASE_URL`, `DATABASE_URL_RELAYER`, `DATABASE_URL_INDEXER` на порт 55433 (роли — 1.4 с `-p unzeen-main`). GAP: в репо это нигде не описано и не автоматизировано.
+и в mainnet-терминалах `DATABASE_URL`, `DATABASE_URL_RELAYER`, `DATABASE_URL_INDEXER` на порт 55433. Описано в `infra/README.md`; core сам откажется стартовать на БД другой сети (GAP закрыт).
 
 ### 4.2 Флаги (в окружении mainnet-терминалов, поверх `.env`)
 | Флаг | Процесс | Зачем |
@@ -356,7 +375,7 @@ POSTGRES_PORT=55433 docker compose -p unzeen-main -f infra/docker-compose.yml --
 Web: `NEXT_PUBLIC_API_URL_MAINNET=http://127.0.0.1:8081`, `NEXT_PUBLIC_ATTESTATION_PUBKEY_MAINNET=<verify pubkey mainnet>`, перезапуск `pnpm dev`.
 
 ### 4.3 Лимиты сумм
-- Депозит с ZODL: 0.02–0.05 ZEC. CLI `send` и так режет на 0.05. Выплаты больше `UNZEEN_MAX_PAYOUT_ZAT` (0.05) встают на ручной просмотр.
+- Депозит с ZODL: 0.02–0.05 ZEC. CLI `send` на mainnet режет на 0.05. Выплаты больше `UNZEEN_MAX_PAYOUT_ZAT` (0.05) встают на ручной просмотр.
 - Buy 0.002–0.005 ZEC (≈ 0.02–0.06 SOL). Vault: суммарно ~0.3 SOL (бюджет STATUS). Каждая tx платит tip Helius Sender 5000 лампортов.
 - Launch на mainnet: кап первой покупки по mainnet-кривой (30 SOL) больше devnet, но держать initial buy минимальным. Fair-launch на mainnet не делать (номиналы от 0.05 ZEC).
 - Пополнение vault — из источника, не связанного с личностью владельца (не биржевой вывод на имя владельца): адреса vault публичны в Verify.
@@ -368,7 +387,8 @@ Web: `NEXT_PUBLIC_API_URL_MAINNET=http://127.0.0.1:8081`, `NEXT_PUBLIC_ATTESTATI
 4. Роли (1.4 на mainnet-БД), API на 8081, relayer, intel.
 5. Сценарий A целиком (Top up с ZODL по QR → Buy Now и Delayed → лента → Sell → Withdraw токенов → Withdraw ZEC в ZODL).
 6. Launch pump.fun — **только если** `UNZEEN_METADATA_BASE_URL` указывает на публичный HTTPS-домен или задан `PINATA_JWT`: URI метаданных пишется в цепочку навсегда, `http://127.0.0.1…` сломает токен на pump.fun. GAP: для локального mainnet-прогона публичного медиа-хоста нет.
-7. Verify на mainnet вручную нельзя (`verify-snapshot` devnet-only, снимок только в 00:00 UTC) → на видео Verify показывать на devnet или после ночного снимка. То же для Stats. GAP.
+7. Verify/Stats на mainnet вручную — только явным флагом оператора: `unzeen-api verify-snapshot --allow-mainnet` (заморозка торговли ≤ 120 с), `unzeen-api stats-snapshot --include-today --allow-mainnet` (GAP закрыт).
+7a. Авторебаланс на mainnet (по желанию, с одобрения лида): `UNZEEN_ALLOW_MAINNET_REBALANCE=1`, `UNZEEN_REBALANCE_SOL_ADDRESS=<rebalance-адрес релейера, не vault>`, `UNZEEN_REBALANCE_REFUND_TADDR=<t1… пула>`, `UNZEEN_REBALANCE_LOT_ZAT` ≤ `UNZEEN_REBALANCE_MAX_LOT_ZAT` (пыль на прогоне, минимум 1Click 132 000 зат), затем `scanner serve --rebalance` и `rebalance plan --force --now` для ручного запуска. Проверить сначала `rebalance quote`. Refund от 1Click приходит на t-адрес — шилдить вручную.
 8. После съёмки: остановить API mainnet (или `UNZEEN_ALLOW_MAINNET_ACTIONS=0`), выплатить остатки, `unset` всех `ALLOW_MAINNET_*`.
 
 ### 4.5 Что НЕ показывать на экране
@@ -381,18 +401,18 @@ Web: `NEXT_PUBLIC_API_URL_MAINNET=http://127.0.0.1:8081`, `NEXT_PUBLIC_ATTESTATI
 ---
 
 ## GAP — сводка
-1. Нет команды, печатающей публичные ключи аттестаций verify/fair (обход — tsx-однострочник в 0.4).
-2. Ledger не разделён по сети (`balances`, `pool_meta` и др.): mainnet требует отдельный Postgres; в инфраструктуре и доках это не описано.
-3. `0015_rebalance.sql` не подключён к `MIGRATIONS`, `serve --rebalance` не существует → авторебаланс NEAR Intents не запускается, SOL на vault вручную.
-4. `stats-snapshot` режет данные по 00:00 UTC сегодня → сегодняшний прогон в Stats не виден.
-5. На mainnet нет ручного `verify-snapshot` / `stats-snapshot` → Verify/Stats на mainnet-видео только после 00:00 UTC.
+1. ~~Нет команды, печатающей публичные ключи аттестаций~~ — **закрыт**: `pnpm keys:attest`.
+2. ~~Ledger не разделён по сети~~ — **закрыт частично**: таблицы общие, но core отказывается стартовать на БД другой сети/кошелька; отдельная mainnet-БД — `infra/pg-mainnet.sh`, `infra/README.md`.
+3. ~~Авторебаланс не существует~~ — **закрыт в core**: `serve --rebalance`, `rebalance quote|check|status|plan|close` (dry-run вне mainnet). Остаток: релейер v7 (`pool_sol_inventory`, `fund_vaults`, `consolidate`).
+4. ~~Сегодняшний прогон не виден в Stats~~ — **закрыт**: `stats-snapshot --include-today`.
+5. ~~Нет ручных снимков на mainnet~~ — **закрыт**: `--allow-mainnet`.
 6. `media:serve` (8787) бесполезен для фронта: картинки разрешены только с origin API; базу метаданных нужно ставить на API `/media`.
 7. Mainnet launch с локальной базой метаданных запишет `127.0.0.1` в URI on-chain навсегда; нужен публичный домен или Pinata.
 8. Meteora DBC на mainnet недоступна: `meteora:config` только devnet, `METEORA_DBC_CONFIG_MAINNET` пуст.
-9. Claim на devnet практически недостижим при `MIN_ACTION_ZAT=100000` и курсе 11.5 (нужно ≥ ~4 SOL объёма) — только понижением порога/курса на время прогона.
+9. ~~Claim недостижим~~ — **закрыт**: отдельный `MIN_CLAIM_ZAT` (10 000 по умолчанию, `PoolInfo.minClaimZat`).
 10. Нет скрипта торговли произвольным mint с внешнего кошелька → цену для ордеров двигаем только действиями второго ключа.
-11. Нет CLI-команды «спендабл-баланс кошелька» (dev-user / пул): `deposits` показывает только входящие ноты.
-12. Устаревший release-бинарь сканера (нет `sign-request`), release `unzeen-api` не собран — пересобрать.
-13. CLI `send` ограничен 0.05 ZEC, а Top up по умолчанию предлагает 0.1.
+11. ~~Нет «спендабл-баланса»~~ — **закрыт**: `unzeen-scanner wallet-balance` (для dev-user — с `UNZEEN_DATA_DIR`/`UNZEEN_KEYS_DIR` dev-user).
+12. ~~Устаревшие release-бинари~~ — **закрыт**: пересобраны 13.10 (после `git pull` — снова `cargo build --release`).
+13. ~~`send` 0.05 против Top up 0.1~~ — **закрыт**: на testnet потолок 0.5 TAZ (mainnet 0.05).
 14. Один ключ на origin в web: несколько участников fair-launch — только через разные origin/профили браузера.
 15. В текущем `.env` нет `API_CORS_ORIGINS`, `UNZEEN_VENUES`, `UNZEEN_CREATE_ENABLED`, `DEVNET_ZEC_SOL_RATE`, `UNZEEN_METADATA_BASE_URL`, `FEE_SWEEP_STORE` — без них сценарии B, D, F и любые запросы из браузера не работают.

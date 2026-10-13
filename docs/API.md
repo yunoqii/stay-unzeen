@@ -2,7 +2,12 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.11** (13.10, RUNBOOK GAP; миграция `0015_rebalance.sql` — внутренняя, на API не влияет). Изменения против v0.10:
+Статус: **v0.12** (13.10; миграции `0018_discovery.sql`, `0016_chat.sql`). Изменения против v0.11:
+- **`GET /api/tokens` — поля для фильтров `/tokens`** (сортировка и фильтры — в браузере, запрос одинаковый у всех): `unzeenLaunch` (токен запущен через Unzeen: в публичной ленте есть событие `create` пула — `create`/`fl_create`), `volume24hSol` (объём сделок **пула** по mint за 24 ч, buy+sell, десятичная строка SOL), `unzeenTrades24h` (число этих сделок), `curveProgressPct?` (только на кривой и при наличии снимка индексатора, как `TokenSafety.market`). Список по-прежнему только из токенов пула.
+- **Discovery** (`UNZEEN_DISCOVERY=1`, по умолчанию выкл.): `PoolInfo.features.discovery: true` и `GET /api/tokens?source=discovery` → `DiscoveryToken[]` — свежие токены площадок из тика индексатора, **один список для всех** (без параметров, кроме `source`), публичный, `Cache-Control: public, max-age=60`, ≤ 200, новые первыми. Флаг выключен: ключа `features.discovery` нет, `?source=discovery` → `404 not_found` (как неизвестный путь). Другое значение `source` → `400`. Discovery-mint в обычный `GET /api/tokens` не попадают.
+- **Анонимный чат токена** — раздел «Чат (v0.12)» ниже.
+
+Изменения v0.11 против v0.10 (13.10, RUNBOOK GAP; миграция `0015_rebalance.sql` — внутренняя, на API не влияет):
 - **`PoolInfo.minClaimZat`** (новое поле, строка зат): минимум для `claim` — отдельный порог (env `MIN_CLAIM_ZAT`, по умолчанию 10 000 = 0.0001 ZEC, не больше `minActionZat`). `claim` меньше него → `422 below_minimum`. Кнопку «Claim» активировать при `claimableLamports` ≥ эквивалента `minClaimZat` по `lamportsPerZecSell` (раньше — `minActionZat`).
 - **Stats:** операторская команда `unzeen-api stats-snapshot --include-today` снимает статистику со срезом 00:00 UTC **завтра** (сегодняшняя активность видна; k-анонимность и округление те же). Ручные `verify-snapshot` / `stats-snapshot` на mainnet — только с `--allow-mainnet`. Контракт ответов не меняется.
 - Авторебаланс пула ZEC → SOL (NEAR Intents 1Click, `docs/RELAYER.md` v7) публичных полей не добавляет.
@@ -94,7 +99,8 @@
 | Метод | Путь | Ответ |
 |---|---|---|
 | GET | `/api/feed?limit=50` | `FeedEvent[]` |
-| GET | `/api/tokens` | `Token[]` |
+| GET | `/api/tokens` | `TokenListItem[]` (v0.12: `Token` + поля фильтров) |
+| GET | `/api/tokens?source=discovery` | `DiscoveryToken[]` (v0.12, только при `features.discovery`; иначе `404`) |
 | GET | `/api/tokens/:mint` | `Token & { trades: FeedEvent[] }` — последние **50** сделок по mint, новые первыми. Неизвестный mint → `202 PendingResponse` + очередь (v0.5) |
 | GET | `/api/tokens/:mint/trades?before=<id>&limit=50` | `FeedEvent[]` — пагинация истории, `limit` ≤ 200 |
 | GET | `/api/tokens/:mint/trades?filter=all\|unzeen\|whales\|dev&before=<id>&limit=50` | `TokenTrade[]` (v0.5). `whales`/`dev` без полной ленты → `400 feature_disabled` |
@@ -154,6 +160,26 @@ interface Token {
   createdAt: number;     // unix ms
 }
 
+// v0.12: элемент GET /api/tokens
+interface TokenListItem extends Token {
+  unzeenLaunch: boolean;      // запущен через Unzeen (публичное событие create пула)
+  volume24hSol: string;       // объём сделок пула по mint за 24 ч (buy+sell), десятичная строка SOL
+  unzeenTrades24h: number;    // число сделок пула по mint за 24 ч
+  curveProgressPct?: string;  // только status = "curve" и при наличии снимка индексатора
+}
+
+// v0.12: элемент GET /api/tokens?source=discovery (снимок индексатора; без pool/config)
+interface DiscoveryToken {
+  mint: string; symbol: string; name: string;   // symbol/name могут быть "" (метаданные ещё не прочитаны)
+  venue: "pumpfun" | "meteora-dbc"; status: "curve" | "graduated";
+  decimals: number;           // из снимка индексатора, иначе 6
+  priceSol: string; marketCapSol: string;
+  createdAt: number;          // unix мс создания токена на площадке
+  curveProgressPct?: string;  // только на кривой
+  unzeenLaunch: boolean;      // запущен через Unzeen
+  asOf: number;               // unix мс тика индексатора, к которому относятся числа
+}
+
 interface Candle {
   time: number;          // unix СЕКУНДЫ (UTCTimestamp lightweight-charts), начало бара
   open: string; high: string; low: string; close: string;  // десятичные SOL за 1 целый токен
@@ -178,9 +204,13 @@ interface PoolInfo {
   createEnabled: boolean;   // v0.4: false → POST create вернёт 503 venue_unavailable
   features: {               // v0.5: что включено на сервере (не build-time флаг фронта)
     fullTrades: boolean;    // полная лента сделок по mint (чужие сделки, теги whale/dev/sniper); false → filter whales|dev = 400
+    discovery?: true;       // v0.12: есть GET /api/tokens?source=discovery (нет ключа = выключено)
+    chat?: true;            // v0.12: чат токена (нет ключа = выключен; вкладку не показывать)
+    noop?: true;            // v0.12: сервер принимает op "noop" (покрывающий трафик, R8)
     fairLaunch?: true;      // v0.6/v0.7: есть только при включённом fair-launch; нет ключа → выключено (UI не показывать)
   };
   fairLaunch?: FairLaunchParams;  // v0.6: только при features.fairLaunch = true
+  chat?: ChatParams;        // v0.12: только при features.chat = true
   orders: {                 // v0.8: приватные ордера
     kinds: ("limit_buy" | "limit_sell" | "take_profit" | "stop_loss")[];
     venues: "pumpfun"[];
@@ -284,7 +314,12 @@ type SignedAction = (
       ttlSecs?: number;            // 3600..PoolInfo.orders.maxTtlSecs; по умолчанию 86400; expiresAt округляется ВВЕРХ до часа
       exec?: "delayed" | "max" }   // "now" → 400
   | { op: "order_cancel"; orderId: string }                                       // только из open
-  | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean }
+  // v0.12 чат и noop: тело РОВНО 1024 байта, ответ паддится до 1024; см. «Чат (v0.12)». В Portfolio.actions не попадают.
+  | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean; slow?: boolean }
+  | { op: "chat_delete"; id: string }
+  | { op: "chat_hide"; id: string }                                  // только создатель mint сообщения
+  | { op: "chat_report"; id: string; reason: "spam" | "scam" | "abuse" }
+  | { op: "noop" }                                                  // покрывающий трафик (features.noop)
 );
 
 interface Order {                 // v0.8: только в Portfolio.orders (владельцу)
@@ -300,9 +335,31 @@ interface Order {                 // v0.8: только в Portfolio.orders (в�
   error?: ErrorCode;              // failed: graduated | slippage | below_minimum | creator_cap | ...
 }
 
+// v0.12, см. «Чат (v0.12)»
 interface ChatMessage {
-  id: string; mint: string; nick: string;   // nick = hex(sha256("unzeen/chat/v1" ‖ pubkey ‖ mint))[:8]; pubkey/подпись НИКОГДА не отдаются
-  text: string; isCreator: boolean; ts: number;
+  id: string;               // 32 hex, 128 бит случайных
+  mint: string;
+  nick: string;             // 8 символов Crockford base32 (lower), HMAC(K_chat, …); pubkey/подпись НИКОГДА не отдаются
+  isCreator: boolean;       // ник создателя (отдельный от его обычного ника в этом чате)
+  text: string;             // как подписан автором (сервер не переписывает)
+  ts: number;               // unix мс — граница эпохи публикации (не время запроса)
+  seq: string;              // порядок событий (десятичная строка); внутри пачки порядок случайный
+  hiddenByCreator?: true;   // скрыто создателем токена: текст остаётся, читатель раскрывает по клику
+}
+interface ChatPage {
+  messages: ChatMessage[];
+  removed: { id: string; reason: "deleted" | "reports" | "operator" }[];  // надгробия ≤ 24 ч (текста нет)
+  cursor: string;           // передать в after=
+  more: boolean;
+  pad: string;              // пробелы до кратного 4096 байт
+}
+interface ChatParams {      // PoolInfo.chat, только при features.chat
+  minAccountZat: string;    // допуск: ZEC available+held + токены по цене тика ≥ порога
+  maxChars: 280; maxJsonBytes: 800; bodyBytes: 1024;
+  rate: { minIntervalSecs: 10; perHour: 20; perDay: 100 };   // на ключ, все chat_* вместе
+  reportHideThreshold: 3;
+  slowDelaySecs: { min: 120; max: 300 };
+  retentionDays: 30;
 }
 
 // v0.9: GET /api/creator (подписанный). Только владельцу ключа; публично ничего из этого нет (T1).
@@ -440,7 +497,6 @@ interface TokenTrade extends FeedEvent {
 - **withdraw_token:** держит `amount` токенов; комиссия в ZEC = частей × (капля SOL получателю + рента ATA + fee) по курсу; без `smart` — `to` строка или массив из 1 адреса, задержка 30 с–5 мин (`exec: "max"` — 10–60 мин); со `smart` — длина `to` = `parts`, адреса разные, суммы частей неравные (±20 %), задержка каждой части до `maxDelayMin`.
 - **claim** (v0.7): весь `claimable` (или одного `mint`) → `zecBalance` по `lamportsPerZecSell` (`floor`), сразу, без tx в сети. Сбор комиссий в сети делает пул глобально по своему расписанию, не по запросу (запрос claim ничего не делает в Solana, поэтому не связывает токены одного создателя).
 - **Creator fee самой launch-tx — пулу** (v0.9, решение владельца 12.10). Комиссия создателя площадки с первой покупки запуска (`create.initialBuyZec`; у fair-launch — покупка всех участников) в `claimable` не попадает: при settle запуска core записывает её размер — точный из события сделки (`relayer_jobs.out_creator_fee`, пишет релейер) или, пока релейер его не пишет, верхнюю оценку `ceil(лампорты покупки × bps / 10 000)` (pump.fun 30 б.п., meteora-dbc 40 б.п.; env `UNZEEN_LAUNCH_CREATOR_FEE_BPS_*`). Первые сборы этого mint уменьшаются на эту сумму, остаток — создателю. Ошибка оценки — только в пользу пула (≤ 0,3 % первой покупки).
-- **Пока не поддерживаются** (→ `400 bad_request "op not supported yet"`): `chat`.
 - Новое действие при `frozen` → `423 balance_frozen` для **любой** операции (в т. ч. без ZEC-hold).
 - `withdraw_token` **всегда**: капля SOL на газ на каждый адрес получателя, случайная задержка, отправка с vault, где пул держит этот mint (общий инвентарь пула: все vault публичны и видны в Verify, «другой vault» приватности не добавлял — D4), каждая часть — отдельной tx. `smart` добавляет только разбиение на N адресов. Если сумма вывода совпадает с недавней покупкой, фронт предупреждает.
 - `withdraw_zec`: выплата shielded ZEC, с задержкой/батчингом; пул не хранит outgoing viewing data (OVK discard).
@@ -736,11 +792,41 @@ interface VerifyProof {                   // GET /api/verify/proof (подпис
 - **Ничего о создателях** (T1): ни комиссий, ни claim, ни числа запусков на ключ.
 - **UI:** строки `"<5"` показывать как «<5» / «fewer than 5»; подпись «Updated daily at 00:00 UTC» с датой из `asOf`; `404` → «Stats appear after the first daily snapshot».
 
-## Дополнительные эндпоинты
-| Метод | Путь | Ответ |
-|---|---|---|
-| GET | `/api/tokens/:mint/chat?before=` | `ChatMessage[]` |
-| WS | `/ws/chat/:mint` | поток `ChatMessage` |
+## Чат (v0.12)
+
+Спека и аудит: `docs/analysis/chat.md`; решения лида R1–R6, R8 (STATUS.md 13.10). Флаг `UNZEEN_CHAT=1` (по умолчанию выкл.): `PoolInfo.features.chat: true` + `PoolInfo.chat: ChatParams`. Флаг выкл.: ключей нет, `chat*`-операции → `400 bad_request` (как неизвестная операция), `GET …/chat` → `404`. Покрывающий трафик: `UNZEEN_NOOP=1` → `features.noop: true`, иначе `noop` → 400. WS для чата **нет** (`/ws/chat/:mint` удалён).
+
+**Ник (R1).** `nick = b32(HMAC-SHA256(K_chat, "unzeen/chat/nick/v1" ‖ chainId[2] ‖ mint[32] ‖ anonPubkey[32] ‖ flag))[0..8]`, `flag` = `0x00` обычный ник, `0x01` ник создателя (R2); `b32` — Crockford base32 нижним регистром (`0123456789abcdefghjkmnpqrstvwxyz`), MSB first; `mint[32]` — base58-декод; `chainId[2]` — байты `PoolInfo.chainId`. `K_chat` — 32 байта на сеть, вне БД и вне `.env` (файл `UNZEEN_CHAT_KEY_FILE`, 0600). Свой ник клиент узнаёт только из квитанции `chat`. Векторы: `core/testdata/chat-vectors.json`.
+
+**Отправка** — подписанный `POST /api/actions`, тело **ровно 1024 байта** (иначе `400 bad_request`), ответ и ошибки паддятся до 1024. Повтор того же nonce с тем же телом в течение 120 с → исходный ответ; другое тело → `409 replay`. Ни одна chat-операция не создаёт действие, hold или запись журнала и не видна в `Portfolio.actions`.
+
+| op | Ответ | Проверки | Ошибки |
+|---|---|---|---|
+| `chat` | `{ id, status: "queued", nick }` (`nick` — обычный или создателя по флагу) | mint есть в публичном `GET /api/tokens`; текст по правилам ниже; не `frozen`; допуск; лимиты; не замьючен; при `showCreatorBadge` — ключ создателя mint (Unzeen-запуск) | `400 bad_request`, `400 chat_text_invalid` (`details`: код правила), `404 not_found` (mint не в списке), `423 balance_frozen`, `403 chat_not_eligible`, `403 chat_muted`, `403 not_creator`, `429 rate_limited` (в т. ч. > 50 в очереди на mint / > 2000 на пул) |
+| `chat_delete` | `{ id, status: "queued" }` | ник ключа (обычный или создателя — по `isCreator` сообщения) = ник сообщения; сообщение не удалено | `404 not_found`, `429` |
+| `chat_hide` | `{ id, status: "queued" }` | ключ — создатель mint сообщения | `403 not_creator`, `404`, `429` |
+| `chat_report` | `{ id, status: "executed" }` | допуск; своё сообщение или повтор → тот же ответ без эффекта | `403 chat_not_eligible`, `404`, `429` |
+| `noop` | `{ id, status: "queued" }` (`id` случайный, ничего не хранится) | только тело 1024 и подпись/nonce | `400` |
+
+**Допуск (R5):** `available + held` ZEC + Σ токенов ключа × последняя цена тика индексатора (`intel_prices`) по курсу sell ≥ `chat.minAccountZat` (env `UNZEEN_CHAT_MIN_ACCOUNT_ZAT`; по умолчанию mainnet 5 000 000 = 0.05 ZEC, devnet 100 000). Токены без цены = 0; нет курса — считаются только ZEC. `403 chat_not_eligible` не содержит сумм.
+
+**Публикация (R3).** Сообщения, удаления, скрытия применяются **на границах эпох Delayed** (те же 30–60 с, что у сделок), порядок `seq` внутри пачки случайный. `slow: true` (R6) — публикация не раньше чем через 120–300 с. Удаление/скрытие — на следующей границе (отправленное, но ещё не опубликованное сообщение после удаления не появится вовсе). Скрытое создателем остаётся в ленте с `hiddenByCreator: true` и текстом (UI: плашка «Hidden by creator», раскрыть по клику) и приходит в `after=` повторно с новым `seq`. ≥ 3 репорта от разных допущенных ключей → удаление `reports`. Оператор: удаление `operator`, мьют (ник, mint) на N часов → `403 chat_muted`.
+
+**Чтение (R4)** — публично, без подписи, одинаково для всех, `Cache-Control: public, max-age=5`, паддинг до кратного 4096:
+
+| GET | Ответ |
+|---|---|
+| `/api/tokens/:mint/chat?limit=50` | `ChatPage`: последние опубликованные, новые первыми, `limit` 1..100; `cursor` = максимальный `seq` событий mint |
+| `/api/tokens/:mint/chat?before=<seq>&limit=50` | `ChatPage`: опубликованные старше `seq`, новые первыми |
+| `/api/tokens/:mint/chat?after=<cursor>` | `ChatPage`: все события после курсора по возрастанию `seq` (опубликованные/скрытые → `messages`, удалённые → `removed`), ≤ 100, `more` |
+
+Mint не base58-32 → `400`; mint не в публичном списке → `200 { messages: [], removed: [], cursor: "0", more: false }` (без очереди индексатора). Курсор — десятичная строка ≤ 19 цифр, иначе `400`. Опрос клиента — фиксированные 10–15 с с джиттером, пока открыта страница токена.
+
+**Текст** (сервер проверяет, не переписывает; `details` = код как в `web/lib/chat/text.ts`), по порядку: `empty`; `not_nfc` (не NFC); `too_long` (> 280 скалярных значений); `too_many_bytes` (`JSON.stringify(text)` > 800 байт UTF-8); `edge_space` (пробельный символ JS `\s` в начале/конце); `newlines` (> 3 `\n` или `\n\n\n`); `forbidden_char` (C0/C1 кроме `\n`, bidi, невидимые, U+2028/2029, U+FFF9–FFFC, private use, теги, нехарактеры — точные диапазоны в chat.md §7.1); `zalgo` (> 2 подряд комбинирующих из U+0300–036F, 1AB0–1AFF, 1DC0–1DFF, 20D0–20FF, FE20–FE2F); `seed_phrase` (≥ 12 слов английского списка BIP-39, регистр не важен, разделители — всё, что не буква).
+
+**Хранение:** опубликованные — 30 дней и ≤ 1000 на mint; надгробия — 24 ч (текст стирается при удалении); репорты — 7 дней; в chat-таблицах нет anon-ключа, подписи, nonce и времени приёма.
+
+Новые коды ошибок: `chat_text_invalid` (400), `chat_not_eligible` (403), `chat_muted` (403), `not_creator` (403).
 
 `/api/creator` и `/api/stats` реализованы в v0.9 и перенесены в основную таблицу REST.
 
@@ -826,6 +912,10 @@ type ErrorCode =
   | "order_limit"          // 422 (v0.8): > 10 открытых ордеров на ключ или > 4 на ключ и mint
   | "order_not_open"       // 409 (v0.8): order_cancel не из open (уже сработал / закрыт)
   | "order_unsupported_mint" // 422 (v0.8): mint не торговался пулом, не pumpfun или graduated
+  | "chat_text_invalid"    // 400 (v0.12): текст чата нарушает правила; details = код правила
+  | "chat_not_eligible"    // 403 (v0.12): стоимость аккаунта ниже PoolInfo.chat.minAccountZat (без сумм)
+  | "chat_muted"           // 403 (v0.12): ник замьючен оператором в этом чате
+  | "not_creator"          // 403 (v0.12): showCreatorBadge / chat_hide не от создателя mint
   | "internal";            // 500
 ```
 404 отдаётся и для mint, который сервис не отслеживает (даже если токен существует на Solana); исключения v0.5 — `GET /api/tokens/:mint` и `/safety`, они отвечают `202` и ставят mint в очередь индексатора. `message` — для разработчика, текст UI фронт берёт по `code`.
