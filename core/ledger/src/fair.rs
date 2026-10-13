@@ -254,6 +254,50 @@ pub fn judge_bids(inp: &RevealInputs, beacon: &VerifiedBeacon) -> Judged {
     }
 }
 
+/// Total tries of one leg's consolidation (first job + re-queues).
+pub const CONSOLIDATE_MAX_TRIES: u64 = 6;
+
+/// Distinct leg vaults of `bundle_legs` (`[{"sig","vault"}]`) other than vault A.
+pub fn leg_vaults(bundle_legs: Option<&Value>, vault_a: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in bundle_legs.and_then(Value::as_array).into_iter().flatten() {
+        if let Some(v) = l.get("vault").and_then(Value::as_str)
+            && v != vault_a
+            && !v.is_empty()
+            && !out.iter().any(|x| x == v)
+        {
+            out.push(v.to_string());
+        }
+    }
+    out
+}
+
+/// Internal job: move all `mint` tokens from leg vault `from` to vault A (`dest`).
+async fn insert_consolidate<C: GenericClient>(
+    tx: &C,
+    network: &str,
+    mint: &str,
+    from: &str,
+    dest: &str,
+    try_no: u64,
+    delay_secs: f64,
+) -> Result<i64> {
+    Ok(tx
+        .query_one(
+            "INSERT INTO relayer_jobs (op, mint, dest, meta, network, exec_mode, not_before)
+             VALUES ('consolidate', $1, $2, $3, $4, 'delayed', now() + make_interval(secs => $5)) RETURNING id",
+            &[
+                &mint,
+                &dest,
+                &json!({ "from": from, "try": try_no }),
+                &network,
+                &delay_secs,
+            ],
+        )
+        .await?
+        .get(0))
+}
+
 fn id16(v: Vec<u8>) -> [u8; 16] {
     v.try_into().unwrap_or([0; 16])
 }
@@ -1125,6 +1169,50 @@ impl Ledger {
         })
     }
 
+    /// Settle final `consolidate` jobs (fair-launch v2): confirmed → settled; failed → settled
+    /// and re-queued after 10 min, at most [`CONSOLIDATE_MAX_TRIES`] tries in total. Returns
+    /// (settled, given up) — a non-zero second value needs the operator (tokens stay on the
+    /// leg vault; the position is still covered in Verify, only D4 is violated).
+    pub async fn settle_consolidations(&self) -> Result<(usize, usize)> {
+        let mut c = self.pool.get().await?;
+        let tx = c.transaction().await?;
+        let rows = tx
+            .query(
+                "SELECT id, status, network, mint, dest, meta FROM relayer_jobs
+                 WHERE op = 'consolidate' AND status IN ('confirmed', 'failed') AND settled_at IS NULL
+                 ORDER BY id LIMIT 50 FOR UPDATE SKIP LOCKED",
+                &[],
+            )
+            .await?;
+        let (mut settled, mut gave_up) = (0, 0);
+        let mut ids = Vec::new();
+        for r in &rows {
+            ids.push(r.get::<_, i64>(0));
+            settled += 1;
+            if r.get::<_, String>(1) == "failed" {
+                let meta: Option<Value> = r.get(5);
+                let from = meta.as_ref().and_then(|m| m.get("from")).and_then(Value::as_str);
+                let tries = meta
+                    .as_ref()
+                    .and_then(|m| m.get("try"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1);
+                let (network, mint, dest): (String, Option<String>, Option<String>) = (r.get(2), r.get(3), r.get(4));
+                match (from, mint, dest) {
+                    (Some(from), Some(mint), Some(dest)) if tries < CONSOLIDATE_MAX_TRIES => {
+                        insert_consolidate(&tx, &network, &mint, from, &dest, tries + 1, 600.0).await?;
+                    }
+                    _ => gave_up += 1,
+                }
+            }
+        }
+        if !ids.is_empty() {
+            mark_settled(&tx, &ids).await?;
+        }
+        tx.commit().await?;
+        Ok((settled, gave_up))
+    }
+
     /// Settle final `fair_create` and `attest` jobs. Returns how many launches changed.
     pub async fn fl_settle_ready(&self) -> Result<usize> {
         let mut n = 0;
@@ -1138,7 +1226,7 @@ impl Ledger {
                     "SELECT l.id, l.creator_pubkey, l.create_action_id, l.rate_lamports_per_zec, l.total_e,
                             l.oversubscribed, l.valid_bids,
                             j.id, j.status, j.out_mint, j.out_token_amount, j.out_lamports, j.signature, j.error_code,
-                            j.venue, j.out_creator_fee
+                            j.venue, j.out_creator_fee, j.vault, j.bundle_legs, j.network
                      FROM fl_launches l JOIN relayer_jobs j ON j.id = l.job_id
                      WHERE l.status = 'executing' AND j.status IN ('confirmed', 'failed') AND j.settled_at IS NULL
                      LIMIT 1 FOR UPDATE OF l SKIP LOCKED",
@@ -1159,9 +1247,21 @@ impl Ledger {
                 finish_unsuccessful(&tx, &lid, "failed", Some(failure), "released").await?;
             } else {
                 self.fl_settle_confirmed(&tx, &r).await?;
+                // v2 (RELAYER v7): tokens bought by the other bundle legs move to vault A.
+                let mint: Option<String> = r.get(9);
+                let vault_a: Option<String> = r.get(16);
+                let network: String = r.get(18);
+                if let (Some(mint), Some(a)) = (mint, vault_a) {
+                    for from in leg_vaults(r.get::<_, Option<Value>>(17).as_ref(), &a) {
+                        insert_consolidate(&tx, &network, &mint, &from, &a, 1, 0.0).await?;
+                    }
+                }
             }
-            tx.execute("UPDATE relayer_jobs SET mint_secret = NULL WHERE id = $1", &[&jid])
-                .await?;
+            tx.execute(
+                "UPDATE relayer_jobs SET mint_secret = NULL, bundle_legs = NULL WHERE id = $1",
+                &[&jid],
+            )
+            .await?;
             mark_settled(&tx, &[jid]).await?;
             tx.commit().await?;
             n += 1;
@@ -1358,6 +1458,15 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leg_vaults_skip_vault_a_and_duplicates() {
+        let legs =
+            json!([{"sig": "1", "vault": "B"}, {"sig": "2", "vault": "A"}, {"sig": "3", "vault": "B"}, {"sig": "4"}]);
+        assert_eq!(leg_vaults(Some(&legs), "A"), vec!["B".to_string()]);
+        assert!(leg_vaults(None, "A").is_empty());
+        assert!(leg_vaults(Some(&json!({"vault": "B"})), "A").is_empty());
+    }
 
     #[test]
     fn price_formatting() {

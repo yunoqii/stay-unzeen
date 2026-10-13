@@ -128,7 +128,7 @@ pub async fn apply_wallet_notes(
     Ok(counts)
 }
 
-pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool) -> anyhow::Result<()> {
+pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, rebalance: bool) -> anyhow::Result<()> {
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required for serve")?;
     let policy = policy_from_env(c)?;
     let ledger = Ledger::connect(&database_url, policy)
@@ -138,7 +138,21 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool) ->
     let key = note_ref_key(c, &db)?;
     // Public facts for `GET /api/pool` (the API server has no wallet access).
     let ua = wallet::show(c)?.ua_orchard;
+    let cluster = crate::rebalance::cluster_str(policy.chain.solana);
+    if let Err(msg) = ledger.check_pool_network(c.network.as_str(), cluster).await? {
+        anyhow::bail!("refusing to start: {msg}");
+    }
+    if let Some(old) = ledger.pool_meta("pool_ua").await?
+        && old != ua
+        && std::env::var("UNZEEN_ALLOW_POOL_UA_CHANGE").as_deref() != Ok("1")
+    {
+        anyhow::bail!(
+            "refusing to start: this database is bound to another pool wallet (pool_ua differs). \
+             Use a separate Postgres per wallet, or UNZEEN_ALLOW_POOL_UA_CHANGE=1 after a deliberate re-init"
+        );
+    }
     ledger.set_pool_meta("network", c.network.as_str()).await?;
+    ledger.set_pool_meta("solana_cluster", cluster).await?;
     ledger.set_pool_meta("pool_ua", &ua).await?;
     info!(
         network = c.network.as_str(),
@@ -155,6 +169,21 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool) ->
     } else {
         None
     };
+    let rebalance_cfg = if rebalance {
+        let cfg = crate::rebalance::RebalanceCfg::from_env(c, policy.chain.solana)?;
+        match cfg.dry_reason() {
+            Some(reason) => info!(reason, "rebalance enabled in DRY-RUN mode (quotes only, nothing sent)"),
+            None => {
+                // Live mainnet sends need the seed: fail at start, not at the first rebalance.
+                drop(crate::seed::load_phrase(c).context("live rebalance needs the pool seed key")?);
+                warn!("rebalance enabled in LIVE mode: real ZEC is sent to 1Click");
+            }
+        }
+        Some((cfg, crate::oneclick::HttpOneClick::from_env()?))
+    } else {
+        None
+    };
+    let mut last_rebalance_label = "";
     let mut client = None;
     let mut backoff = 5u64;
     loop {
@@ -208,6 +237,29 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool) ->
                         waiting = p.waiting,
                         "payouts"
                     );
+                }
+            }
+            // Pool rebalance ZEC -> SOL (RELAYER v7). A failure here never stops scanning.
+            if let Some((rc, oc)) = &rebalance_cfg {
+                let cl = client.as_mut().expect("set above");
+                let mut w = crate::rebalance::LiveWallet {
+                    common: c,
+                    db: &mut db,
+                    client: cl,
+                };
+                let ch = crate::rebalance::Chain {
+                    tip: rep.tip,
+                    confirmations: policy.confirmations,
+                    now_unix: now_unix(),
+                };
+                match crate::rebalance::step(rc, &ledger, oc, &mut w, ch).await {
+                    Ok(label) => {
+                        if label != last_rebalance_label {
+                            info!(step = label, "rebalance");
+                            last_rebalance_label = label;
+                        }
+                    }
+                    Err(e) => warn!(error = %unzeen_ledger::error_chain(e.as_ref()), "rebalance step failed"),
                 }
             }
             // Verify (API v0.10): reserve of the pool wallet at this tip, attested by the operator

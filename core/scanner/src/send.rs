@@ -42,8 +42,10 @@ use crate::{
     wallet::{Db, OsRng},
 };
 
-/// Upper bound on a single send from this CLI (0.05 ZEC), whatever the network.
+/// Upper bound on a single send from this CLI: 0.05 ZEC on mainnet.
 pub const MAX_SEND_ZAT: u64 = 5_000_000;
+/// Testnet (TAZ has no value): 0.5 TAZ, enough for the default 0.1 Top up of the web.
+pub const MAX_SEND_ZAT_TESTNET: u64 = 50_000_000;
 
 pub async fn send(
     common: &Common,
@@ -53,8 +55,12 @@ pub async fn send(
     memo: Option<&str>,
 ) -> anyhow::Result<String> {
     mainnet_gate(common)?;
-    if amount_zat == 0 || amount_zat > MAX_SEND_ZAT {
-        bail!("amount must be in 1..={MAX_SEND_ZAT} zat");
+    let max = match common.network {
+        NetName::Main => MAX_SEND_ZAT,
+        NetName::Test => MAX_SEND_ZAT_TESTNET,
+    };
+    if amount_zat == 0 || amount_zat > max {
+        bail!("amount must be in 1..={max} zat");
     }
     let recipient = ZcashAddress::from_str(to).map_err(|e| anyhow!("bad recipient address: {e}"))?;
     let memo = memo

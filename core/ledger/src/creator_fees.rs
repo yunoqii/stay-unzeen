@@ -133,7 +133,8 @@ impl Ledger {
     }
 
     /// `claim {mint?}`: claimable lamports (of one mint or all) → ZEC at `rate` (lamports per
-    /// ZEC, sell side). Ledger only. Below `min_action_zat` → BelowMinimum (nothing changes).
+    /// ZEC, sell side). Ledger only. Below `CreatorRules::min_claim_zat` → BelowMinimum (nothing
+    /// changes).
     pub async fn claim(
         &self,
         pk: &[u8; 32],
@@ -163,7 +164,7 @@ impl Ledger {
             .await?;
         let lamports: u64 = rows.iter().map(|r| to_u64(r.get(1))).sum();
         let zat = ((lamports as u128) * ZAT_PER_ZEC / (rate.lamports_per_zec.max(1) as u128)) as u64;
-        if rows.is_empty() || zat < self.policy.min_action_zat {
+        if rows.is_empty() || zat < self.rules.min_claim_zat.max(1) {
             return Err(LedgerError::BelowMinimum);
         }
         for r in &rows {

@@ -264,6 +264,7 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
         "chainId": p.chain.to_hex(),
         "minDepositZat": p.min_deposit_zat.to_string(),
         "minActionZat": p.min_action_zat.to_string(),
+        "minClaimZat": st.cfg.launch.min_claim_zat.to_string(),
         "confirmations": p.confirmations,
         "fees": {
             "createFeeZat": st.cfg.fees.create_fee_zat.to_string(),
@@ -539,6 +540,15 @@ pub fn spawn_background(st: &AppState) {
             tick.tick().await;
             if let Err(e) = s.ledger.settle_ready(50).await {
                 tracing::warn!(error = %e, "settlement pass failed");
+            }
+            // Fair-launch v2: internal `consolidate` jobs (RELAYER v7).
+            match s.ledger.settle_consolidations().await {
+                Ok((_, 0)) => {}
+                Ok((_, n)) => tracing::warn!(
+                    jobs = n,
+                    "ALERT: token consolidation to the mint's vault gave up; operator needed"
+                ),
+                Err(e) => tracing::warn!(error = %e, "consolidation settlement failed"),
             }
         }
     });

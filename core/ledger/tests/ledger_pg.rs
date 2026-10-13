@@ -832,3 +832,16 @@ async fn public_source_flag_is_stored() {
     );
     db.drop_schema().await;
 }
+
+#[tokio::test]
+async fn database_is_bound_to_one_network() {
+    let Some(db) = setup().await else { return };
+    let l = &db.ledger;
+    assert_eq!(l.check_pool_network("test", "devnet").await.unwrap(), Ok(()));
+    l.set_pool_meta("network", "test").await.unwrap();
+    l.set_pool_meta("solana_cluster", "devnet").await.unwrap();
+    assert_eq!(l.check_pool_network("test", "devnet").await.unwrap(), Ok(()));
+    assert!(l.check_pool_network("main", "mainnet-beta").await.unwrap().is_err());
+    assert!(l.check_pool_network("test", "mainnet-beta").await.unwrap().is_err());
+    db.drop_schema().await;
+}

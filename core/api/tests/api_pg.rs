@@ -102,6 +102,7 @@ fn config(url: &str) -> Config {
             curve_from_env: false,
             launch_fee_bps_pumpfun: 30,
             launch_fee_bps_dbc: 40,
+            min_claim_zat: 100_000,
         },
         intel: IntelConfig {
             full_trades: false,
@@ -307,7 +308,7 @@ async fn pool_info() {
     assert_eq!(
         b,
         json!({"address":"utest1example","network":"test","chainId":"0202",
-               "minDepositZat":"100000","minActionZat":"100000","confirmations":3,
+               "minDepositZat":"100000","minActionZat":"100000","minClaimZat":"100000","confirmations":3,
                "createEnabled":true,
                "orders": unzeen_api::orders::pool_block(),
                "features":{"fullTrades":false},
@@ -1571,12 +1572,17 @@ mod fair {
         assert_eq!(plan.effective[0], creator_max * max_total / (creator_max + 300_000_000));
         assert!(lamports_in <= plan.total && plan.total - lamports_in <= plan.total / 100 + alloc::LAMPORTS_STEP);
 
-        // Relayer: both jobs confirmed.
-        let spent = lamports_in - 1_000;
+        // Relayer: both jobs confirmed. Fair-launch v2 (RELAYER v7): a Jito bundle of 3 legs,
+        // signature/vault of leg 0, sums over the legs, PARTIAL fill (S < lamports_in, T below
+        // min_out) is accepted and shared pro rata; the unspent part of every hold is released.
+        let spent = lamports_in * 8 / 10;
         let t = alloc::curve_tokens_out(VS, VT, spent) * 99 / 100;
+        assert!(t < job.get::<_, i64>(1) as u64, "below min_out");
         e.sql(&format!(
             "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGFAIR', out_mint = '{mint}',
-                    out_token_amount = {t}, out_lamports = {spent} WHERE op = 'fair_create';
+                    out_token_amount = {t}, out_lamports = {spent}, vault = 'VaultA',
+                    bundle_legs = '[{{\"sig\":\"L1\",\"vault\":\"VaultB\"}},{{\"sig\":\"L2\",\"vault\":\"VaultC\"}}]'
+              WHERE op = 'fair_create';
              UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGATTEST', slot = 77,
                     vault = 'AttestKey111', out_memo = '{root}', out_block_time = 1692806300
               WHERE op = 'attest' AND meta->>'purpose' = 'fair';"
@@ -1670,10 +1676,57 @@ mod fair {
         );
         assert_eq!(
             e.one_i64(&format!(
-                "SELECT count(*) FROM {s}.relayer_jobs WHERE settled_at IS NULL"
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE settled_at IS NULL AND op <> 'consolidate'"
             ))
             .await,
             0
+        );
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE bundle_legs IS NOT NULL"
+            ))
+            .await,
+            0,
+            "bundle_legs erased at settle"
+        );
+        // Consolidation: one internal job per other leg vault → vault A, no action link.
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'consolidate' AND mint = '{mint}' AND dest = 'VaultA'
+                   AND meta->>'from' IN ('VaultB', 'VaultC') AND action_id IS NULL AND status = 'queued'
+                   AND exec_mode = 'delayed'"
+            ))
+            .await,
+            2
+        );
+        // A failed consolidation is settled and re-queued (try 2); confirmed ones are settled.
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'failed', error_code = 'internal'
+              WHERE op = 'consolidate' AND meta->>'from' = 'VaultB';
+             UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGC', out_token_amount = 5
+              WHERE op = 'consolidate' AND meta->>'from' = 'VaultC';"
+        ))
+        .await;
+        let mut requeued = 0;
+        for _ in 0..50 {
+            requeued = e
+                .one_i64(&format!(
+                    "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'consolidate' AND status = 'queued'
+                       AND meta->>'from' = 'VaultB' AND (meta->>'try')::int = 2"
+                ))
+                .await;
+            if requeued == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(requeued, 1);
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'consolidate' AND settled_at IS NOT NULL"
+            ))
+            .await,
+            2
         );
         // Creator lock applies to the fair allocation.
         let sell = json!({"op":"sell","venue":"pumpfun","mint":mint,"amount":"1","minZecOut":"100000"}).to_string();

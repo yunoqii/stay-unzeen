@@ -15,6 +15,7 @@ path = "src/main.rs"
 # API breaks between -pre releases: bump deliberately, never via `cargo update`.
 [dependencies]
 anyhow = "1"
+bs58 = "0.5"
 bip0039 = { version = "0.14", features = ["std"] }
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
@@ -22,6 +23,7 @@ futures-util = "0.3"
 hex = "0.4"
 orchard = { version = "0.16", default-features = false }
 prost = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rand = "0.10"
 rusqlite = "0.37"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

@@ -1,7 +1,9 @@
 //! unzeen-api — HTTP/WS API server (docs/API.md).
 //!
 //!   unzeen-api serve                      run the server (API_BIND, default 127.0.0.1:8080)
-//!   unzeen-api stats-snapshot             devnet: build today's public stats snapshot
+//!   unzeen-api stats-snapshot             build today's public stats snapshot now
+//!                                         (mainnet only with --allow-mainnet)
+//!   unzeen-api verify-snapshot            request a Verify snapshot now (mainnet: --allow-mainnet)
 //!   unzeen-api dev-request --anon-key F   DEV: send a signed request and print the response
 //!
 //! `.env` is loaded from the current directory or its parents (repo root).
@@ -27,12 +29,23 @@ struct Cli {
 enum Cmd {
     /// Run the API server.
     Serve,
-    /// Request a Verify snapshot now (devnet only; mainnet runs daily at 00:00 UTC). The running
-    /// API server performs it (freeze, relayer vault snapshot, trees, anchor).
-    VerifySnapshot,
-    /// Build today's public stats snapshot now (devnet only; mainnet runs daily at 00:00 UTC).
-    /// Data cut-off is 00:00 UTC today, so a re-run the same day gives the same numbers.
-    StatsSnapshot,
+    /// Request a Verify snapshot now (mainnet runs daily at 00:00 UTC). The running API server
+    /// performs it (freeze ≤ 120 s, relayer vault snapshot, trees, anchor).
+    VerifySnapshot {
+        /// Operator opt-in for mainnet (e.g. for the demo video): trading freezes up to 120 s.
+        #[arg(long)]
+        allow_mainnet: bool,
+    },
+    /// Build today's public stats snapshot now (mainnet runs daily at 00:00 UTC).
+    /// Default cut-off is 00:00 UTC today (a re-run the same day gives the same numbers).
+    StatsSnapshot {
+        /// Cut-off at 00:00 UTC tomorrow: today's activity is included (demo).
+        #[arg(long)]
+        include_today: bool,
+        /// Operator opt-in for mainnet.
+        #[arg(long)]
+        allow_mainnet: bool,
+    },
     /// DEV: sign a request with an anon key file (hex secret, from `unzeen-scanner anon-key`)
     /// and print the response. Refused on mainnet unless UNZEEN_DEV_PRINT=1.
     DevRequest {
@@ -69,8 +82,11 @@ async fn run() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     match cli.cmd.unwrap_or(Cmd::Serve) {
         Cmd::Serve => serve(cfg).await,
-        Cmd::VerifySnapshot => verify_snapshot(&cfg).await,
-        Cmd::StatsSnapshot => stats_snapshot(&cfg).await,
+        Cmd::VerifySnapshot { allow_mainnet } => verify_snapshot(&cfg, allow_mainnet).await,
+        Cmd::StatsSnapshot {
+            include_today,
+            allow_mainnet,
+        } => stats_snapshot(&cfg, include_today, allow_mainnet).await,
         Cmd::DevRequest {
             anon_key,
             method,
@@ -82,9 +98,8 @@ async fn run() -> anyhow::Result<()> {
 }
 
 async fn serve(cfg: Config) -> anyhow::Result<()> {
-    let ledger = Ledger::connect(&cfg.database_url, cfg.policy)
-        .await
-        .map_err(|e| anyhow!("connecting to Postgres: {e}"))?;
+    // RUNBOOK GAP: one database per network (the ledger is not split by network).
+    let ledger = connect_checked(&cfg).await?;
     if !cfg.actions_enabled {
         tracing::warn!(
             "mainnet-beta: POST /api/actions disabled (set UNZEEN_ALLOW_MAINNET_ACTIONS=1 with lead approval)"
@@ -113,13 +128,38 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn verify_snapshot(cfg: &Config) -> anyhow::Result<()> {
-    if cfg.cluster != "devnet" {
-        bail!("manual Verify snapshots are devnet-only (mainnet: daily at 00:00 UTC)");
-    }
+/// Ledger of this network; refuses a database bound to another network.
+async fn connect_checked(cfg: &Config) -> anyhow::Result<Ledger> {
     let ledger = Ledger::connect(&cfg.database_url, cfg.policy)
         .await
         .map_err(|e| anyhow!("connecting to Postgres: {e}"))?;
+    if let Err(msg) = ledger
+        .check_pool_network(cfg.network, cfg.cluster)
+        .await
+        .map_err(|e| anyhow!("{e}"))?
+    {
+        bail!("refusing to run: {msg}");
+    }
+    Ok(ledger)
+}
+
+/// Manual snapshots on mainnet need the operator's explicit flag.
+fn manual_gate(cfg: &Config, allow_mainnet: bool, what: &str) -> anyhow::Result<()> {
+    if cfg.cluster != "devnet" {
+        if !allow_mainnet {
+            bail!(
+                "manual {what} on {} needs --allow-mainnet (otherwise daily at 00:00 UTC)",
+                cfg.cluster
+            );
+        }
+        tracing::warn!(cluster = cfg.cluster, "manual {what} on mainnet (operator flag)");
+    }
+    Ok(())
+}
+
+async fn verify_snapshot(cfg: &Config, allow_mainnet: bool) -> anyhow::Result<()> {
+    manual_gate(cfg, allow_mainnet, "Verify snapshot")?;
+    let ledger = connect_checked(cfg).await?;
     match ledger
         .verify_request(cfg.cluster, &cfg.policy.chain.to_hex(), "manual", cfg.verify.timing)
         .await
@@ -131,18 +171,19 @@ async fn verify_snapshot(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn stats_snapshot(cfg: &Config) -> anyhow::Result<()> {
-    if cfg.cluster != "devnet" {
-        bail!("manual stats snapshots are devnet-only (mainnet: daily at 00:00 UTC)");
-    }
-    let ledger = Ledger::connect(&cfg.database_url, cfg.policy)
-        .await
-        .map_err(|e| anyhow!("connecting to Postgres: {e}"))?;
+async fn stats_snapshot(cfg: &Config, include_today: bool, allow_mainnet: bool) -> anyhow::Result<()> {
+    manual_gate(cfg, allow_mainnet, "stats snapshot")?;
+    let ledger = connect_checked(cfg).await?;
     let day = ledger
-        .stats_snapshot(cfg.cluster, &cfg.stats.params)
+        .stats_snapshot_with(cfg.cluster, &cfg.stats.params, include_today)
         .await
         .map_err(|e| anyhow!("{e}"))?;
-    println!("stats snapshot for {day} stored (cut-off 00:00 UTC); GET /api/stats serves it");
+    let cut = if include_today {
+        "00:00 UTC tomorrow (today included)"
+    } else {
+        "00:00 UTC"
+    };
+    println!("stats snapshot for {day} stored (cut-off {cut}); GET /api/stats serves it");
     Ok(())
 }
 

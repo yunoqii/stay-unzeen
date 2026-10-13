@@ -822,6 +822,32 @@ impl Ledger {
             .map(|r| r.get(0)))
     }
 
+    /// RUNBOOK GAP: the ledger is NOT split by network. Refuse to run against a database that
+    /// already belongs to another Zcash network / Solana cluster (e.g. a mainnet scanner on the
+    /// devnet DB would overwrite `pool_ua` and credit real ZEC into the devnet ledger).
+    /// `Err(msg)` = mismatch; values are public (network names), the UA is not printed.
+    pub async fn check_pool_network(
+        &self,
+        zcash_network: &str,
+        solana_cluster: &str,
+    ) -> Result<std::result::Result<(), String>> {
+        if let Some(n) = self.pool_meta("network").await?
+            && n != zcash_network
+        {
+            return Ok(Err(format!(
+                "this database belongs to Zcash network {n:?}, not {zcash_network:?}; use a separate Postgres per network (infra/README.md)"
+            )));
+        }
+        if let Some(cl) = self.pool_meta("solana_cluster").await?
+            && cl != solana_cluster
+        {
+            return Ok(Err(format!(
+                "this database belongs to Solana cluster {cl:?}, not {solana_cluster:?}; use a separate Postgres per network (infra/README.md)"
+            )));
+        }
+        Ok(Ok(()))
+    }
+
     pub async fn set_pool_meta(&self, key: &str, value: &str) -> Result<()> {
         let c = self.pool.get().await?;
         c.execute(

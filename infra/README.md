@@ -28,6 +28,27 @@ docker compose -f infra/docker-compose.yml --env-file .env up -d postgres
 - Docker logs are rotated (`json-file`, 10 MB x 3). Postgres runs with `log_error_verbosity=terse`, no statement/connection logging: row values from constraint errors (DETAIL) and client IPs never reach the container log.
 - Relayer role (least privilege, cannot read `action_id`, balances, deposits): `infra/relayer-role.sql` (idempotent; re-run after new migrations), contract in `docs/RELAYER.md`. The relayer gets `DATABASE_URL_RELAYER`, never the owner's `DATABASE_URL`.
 
+## Separate database per network (mainnet)
+
+The ledger is **not split by network** (`balances`, `deposits`, `actions`, `pool_meta`, …).
+Devnet/testnet and mainnet must use **two Postgres instances**. A second compose project gets its
+own container and volume (`unzeen-main_pg-data`) from the same file:
+
+```bash
+infra/pg-mainnet.sh up          # = POSTGRES_PORT=55433 docker compose -p unzeen-main ... up -d postgres
+infra/pg-mainnet.sh psql        # owner psql into the mainnet instance (no secrets printed)
+infra/pg-mainnet.sh roles       # apply relayer-role.sql + indexer-role.sql to the mainnet instance
+```
+
+- Port: `POSTGRES_PORT_MAINNET` (default 55433), same user/password/db name as `.env`.
+- In every mainnet terminal set `DATABASE_URL`, `DATABASE_URL_RELAYER`, `DATABASE_URL_INDEXER`
+  to port 55433 (on top of `.env`), plus `UNZEEN_NETWORK=main`, `UNZEEN_SOLANA_CLUSTER=mainnet-beta`.
+- Guard (core): `unzeen-scanner serve` writes `pool_meta.network`, `pool_meta.solana_cluster` and
+  `pool_meta.pool_ua`. The scanner, `unzeen-api serve`, and the manual `verify-snapshot` /
+  `stats-snapshot` / `rebalance` commands **refuse to start** on a database that belongs to another
+  Zcash network or Solana cluster; the scanner also refuses a different pool wallet (UA) unless
+  `UNZEEN_ALLOW_POOL_UA_CHANGE=1`.
+
 ## API server (core/api)
 
 ```bash
@@ -61,11 +82,17 @@ $B serve                      # service: sync + credit deposits into Postgres (n
 $B serve --payouts            # + withdraw_zec executor (needs UNZEEN_SEED_KEY_FILE; mainnet also UNZEEN_ALLOW_MAINNET_SEND=1). Use the release build: proving takes ~80 s in debug
 $B probe --blocks 100         # read-only H1 traffic probe (no wallet): fetches all shielded txs of the last N blocks
 $B ledger-stats               # deposit counts by status
+$B wallet-balance             # pool wallet: spendable / pending (K confirmations), no addresses
+$B serve --rebalance          # + automatic ZEC->SOL rebalance via NEAR Intents 1Click (RELAYER.md v7);
+                              #   dry-run (quotes only) unless mainnet + UNZEEN_ALLOW_MAINNET_REBALANCE=1
+$B rebalance quote            # read-only dry 1Click quote of the lot (mainnet params) + price check
+$B rebalance check | status   # trigger evaluation / journal
+$B rebalance plan [--force] [--now] | close <id> --status failed|done|refunded   # operator
 $B probe                      # read-only health check of the lightwalletd
 
 # dev only (print deposit data; refused on mainnet unless UNZEEN_DEV_PRINT=1)
 $B sync [--watch 20] | deposits | inspect-tx <txid>
 $B anon-key --out /tmp/anon.key && $B memo-deposit --anon-key /tmp/anon.key
 $B balance <anon_pubkey_b58>
-$B send --to <ua> --amount-zat 1000000 --memo '<unz1:...>'   # mainnet gated
+$B send --to <ua> --amount-zat 1000000 --memo '<unz1:...>'   # mainnet gated; max 0.5 TAZ testnet / 0.05 ZEC mainnet
 ```

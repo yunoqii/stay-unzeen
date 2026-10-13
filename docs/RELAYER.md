@@ -1,8 +1,25 @@
 # Unzeen — контракт core ↔ relayer
 
-Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql`, `0009_verify.sql`, `0010_creator_fees.sql`, `0011_orders.sql`, `0012_fair_review.sql`, `0013_creator_stats.sql`, `0014_verify_review.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
+Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql`, `0009_verify.sql`, `0010_creator_fees.sql`, `0011_orders.sql`, `0012_fair_review.sql`, `0013_creator_stats.sql`, `0014_verify_review.sql`, `0015_rebalance.sql`, `0017_fair_bundle.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
 
-Статус: **v6** (13.10; миграции `0013_creator_stats.sql`, `0014_verify_review.sql`; API.md v0.9/v0.10, review-day8). Изменения против v5:
+Статус: **v7** (13.10; миграции `0015_rebalance.sql`, `0017_fair_bundle.sql` (0016 зарезервирован за чатом); API.md v0.11). Изменения против v6:
+
+**A. Авторебаланс пула ZEC → SOL (NEAR Intents 1Click, `0015`).** Core (сканер `serve --rebalance`) сам меняет фиксированный лот ZEC на SOL, когда свободного SOL у пула мало. Релейер делает две вещи:
+1. **Снимок SOL пула → `pool_sol_inventory`** раз в ~5 мин (и при старте): `INSERT ... ON CONFLICT (network) DO UPDATE SET vault_lamports, vault_count, rebalance_lamports, slot, updated_at = now()`. `vault_lamports` = Σ лампортов **всех торговых vault** сети, `vault_count` = их число, `rebalance_lamports` = баланс rebalance-адреса, `slot` — слот чтения (`confirmed`, провайдер чтения, `getMultipleAccounts`). Без строки или старше 15 мин core ребаланс не планирует. Права: SELECT/INSERT/UPDATE `pool_sol_inventory`.
+2. **Новая op `fund_vaults`** (ставит core, `action_id = NULL`, `exec_mode = 'delayed'`, `meta = {"purpose":"rebalance"}`): одна tx с **rebalance-адреса** пула, `lamports_in` лампортов разнести по vault (System transfer; по умолчанию — доливать самые бедные vault до среднего, остаток поровну; без пользовательских данных — делить не по заданиям). Подпись до broadcast (шаг 2), `vault` = rebalance-адрес, `confirmed`: `slot`, `out_lamports` = сколько реально ушло (≤ `lamports_in`), `network_fee`. На rebalance-адресе не хватает SOL → `failed` / `pool_liquidity`. В `trades` ничего. Core закрывает задание сам (`settled_at`), упавшее переставляет через 10 мин (всего до 5 попыток), потом `attention` и алерт оператору. Заморозка Verify действует (как на `transfer`).
+   **Rebalance-адрес**: отдельный ключ пула (предложение: `m/44'/501'/2147483645'/4'` из creator master seed сети, как ключи аттестаций), **не vault, не creator, не ключ аттестаций**; его pubkey оператор кладёт в `UNZEEN_REBALANCE_SOL_ADDRESS` сканера. Core отказывается, если адрес совпал с vault. С rebalance-адреса **нельзя** пополнять ключи аттестаций (он публично связан и с 1Click, и с vault). Адрес входит в список адресов снимка Verify (как все ключи пула, v4 п. 2).
+   **Что публично:** на Zcash — unshield фиксированного лота из Ironwood на t-адрес депозита 1Click (сумма и время видны; сумма — константа из env, время — порог запаса SOL + случайная задержка 10–60 мин, не депозиты/действия); у 1Click/в его explorer — связь «t-адрес депозита → rebalance-адрес на Solana»; на Solana — переводы rebalance → vault. Всё это уровень пула (vault и так публичны через Verify); anon-ключей, депозитов и сделок пользователей ни одна из этих записей не касается. Core тратит только «свой» ZEC пула: `spendable ≥ Σ балансов пользователей + лот + запас`, иначе ребаланс не делается.
+
+**B. Fair-launch v2: Jito-бандл на несколько vault (`0017`, только mainnet).**
+1. **`fair_create` как бандл:** нога 0 = create + первая покупка с vault A (за ним закрепляется mint, D4), ноги 1..4 = покупки с других vault, всё одним Jito-бандлом. **Jito/tip — только в бандлах fair-launch**; все остальные tx пула (в т. ч. `now`) — без Jito, единый CU price. На devnet Jito нет → одна tx (кап по vault A, как v3).
+2. **`relayer_jobs.bundle_legs JSONB`** = `[{"sig","vault"}]` ног **1..4** (не нога 0). Писать при `sent` (до отправки бандла, вместе с подписью ноги 0) и ещё раз при `confirmed` — ровно те ноги, что легли в цепочку (в т. ч. найденные заново после рестарта). Core обнуляет при settle (вместе с `mint_secret`). Права: SELECT, UPDATE (`bundle_legs`).
+3. **`confirmed` для `fair_create`:** `signature`, `slot`, `vault` — от ноги 0; `out_token_amount`, `out_lamports`, `network_fee`, `out_creator_fee` — **суммы по всем легшим ногам**. **Частичное исполнение принимается**: `out_lamports < lamports_in` и `out_token_amount < min_out` — не ошибка (часть ног не легла / кап по vault). Core делит токены и потраченное пропорционально эффективным суммам (T·e_i/E, S·e_i/E), неиспользованная часть hold каждого участника возвращается.
+4. **Лента:** `create` + `buy` ноги 0 (подпись ноги 0) и отдельный `buy` на каждую ногу 1..4 со своей подписью, слотом и `blockTime` (как в цепочке).
+5. **Новая op `consolidate`** (вместо повторов в памяти релейера): при settle подтверждённого `fair_create` core ставит по одному заданию на каждый vault из `bundle_legs`, отличный от vault A: `op='consolidate'`, `mint`, `dest` = vault A, `meta = {"from": <vault ноги>, "try": n}`, `exec_mode='delayed'`, `action_id = NULL`. Релейер: перевести **весь** баланс `mint` с `meta.from` на `dest` (ATA получателя создать при необходимости, платит `from`), подпись до broadcast, `vault` = `meta.from`, `confirmed` с `out_token_amount` = переведено (0, если пусто — тоже `confirmed`). В `trades` ничего, `mint_vaults` не меняется (mint уже за A). Заморозка Verify — как для `transfer`. Core закрывает задания сам; `failed` → новое задание через 10 мин, всего до 6 попыток, затем алерт оператору (позиция всё равно учтена в Verify — токены на vault пула).
+
+**C. Права роли** (`infra/relayer-role.sql`, перезапустить): + SELECT/UPDATE `relayer_jobs.bundle_legs`; + SELECT/INSERT/UPDATE `pool_sol_inventory`. Список op в claim-запросе релейера: + `fund_vaults`, `consolidate` (оба — полоса пачек, `exec_mode = 'delayed'`).
+
+Изменения v6 против v5:
 1. **`out_creator_fee` (0013).** Для `create` и `fair_create` в `confirmed` записывать `out_creator_fee` = комиссия создателя, начисленная **этой** launch-tx (pump.fun: `TradeEvent.creatorFee` покупки запуска; DBC: доля создателя в комиссии свопа). Это деньги создателя/участников запуска, по решению владельца они остаются пулу: core вычитает их из первых сборов mint. Нет колонки или поле `NULL` → core берёт верхнюю оценку (`UNZEEN_LAUNCH_CREATOR_FEE_BPS_*`: pump.fun 30 б.п., DBC 40 б.п. от `out_lamports`). Права: SELECT/UPDATE `out_creator_fee`.
 2. **Verify: `min_slot` (0014, review E2).** При переходе снимка в `collecting` core пишет `verify_snapshots.min_slot` = максимальный `slot` подтверждённых и уже учтённых реестром заданий сети (NULL — таких нет). Релейер читает балансы vault на `finalized` с `minContextSlot = min_slot` (все куски `getMultipleAccounts`) и повторяет попытки, пока finalized не догонит (обычно ≤ 15 с, заморозка 120 с). Ответ со слотом < `min_slot` не записывать. Права: SELECT `verify_snapshots.min_slot`.
 3. **Полоса `attest` и заморозка.** `attest` (оба назначения) берётся в **своей полосе**, первым, независимо от `exec_mode`, и **вне заморозки Verify** (заморозка останавливает только торговые задания и `transfer`). `attest` без `blockTime` в `confirmed` не переводится: tx перечитывается позже (`out_block_time` обязателен — от него зависят `beforeRound` fair-launch и `anchor.blockTime` Verify).
@@ -85,7 +102,7 @@
 | `id` | core | bigserial, id задания для логов релейера |
 | `action_id` | core | bytea(16) или NULL. Релейеру не нужен, не логировать |
 | `part` | core | номер части (`transfer` при умном выводе: 0..N-1), иначе 0 |
-| `op` | core | `buy` \| `sell` \| `create` \| `transfer` \| `fair_create` (v3) \| `attest` (v3) |
+| `op` | core | `buy` \| `sell` \| `create` \| `transfer` \| `fair_create` (v3) \| `attest` (v3) \| `fund_vaults` (v7) \| `consolidate` (v7) |
 | `venue` | core | `pumpfun` \| `meteora-dbc` \| `jupiter` (NULL для `transfer`) |
 | `mint` | core | base58 mint (NULL для `create`) |
 | `lamports_in` | core | `buy`: лампорты на покупку; `create`: первая покупка (0 = без покупки) |
@@ -107,6 +124,7 @@
 | `out_memo` | relayer | v3, `attest`: data memo из подтверждённой tx |
 | `out_sig` | relayer | v4, `attest`: base58 ed25519 ключа аттестаций над `hex_decode(meta.memo)` |
 | `out_block_time` | relayer | v5, `attest`: blockTime подтверждённой tx, unix секунды |
+| `bundle_legs` | relayer | v7, `fair_create`: `[{"sig","vault"}]` ног 1..4 бандла; NULL после settle |
 | `settled_at` | core | реестр закрыт; после этого релейер строку не трогает |
 
 ### Операции и что вернуть в `confirmed`
@@ -119,6 +137,9 @@
 | `transfer` | `mint, token_amount, dest, gas_lamports` | токенов отправлено (= `token_amount`) | 0 | с vault этого mint (`mint_vaults`) вместе с каплей SOL `gas_lamports`; отдельная tx на каждую часть |
 | `fair_create` (v3) | `venue, meta, lamports_in, min_out, mint_secret` | токенов куплено | лампортов на покупку | `out_mint` = pubkey `mint_secret`; creator — свежий адрес пула; одна v0-tx + ALT |
 | `attest` (v3) | `meta.memo` | — | — | `vault` = ключ аттестаций, `out_memo` из подтверждённой tx, `slot` |
+| `fair_create` бандл (v7) | как v3 | Σ по ногам | Σ по ногам | `signature`/`slot`/`vault` ноги 0, `bundle_legs`; частичное исполнение допустимо |
+| `fund_vaults` (v7) | `lamports_in` | — | реально разнесено | с rebalance-адреса на vault, `vault` = rebalance-адрес |
+| `consolidate` (v7) | `mint, dest, meta.from` | токенов переведено | — | весь баланс `mint` с `meta.from` на `dest` (vault A), `vault` = `meta.from` |
 
 Если `out_lamports` при `buy` меньше `lamports_in`, core вернёт пользователю разницу в ZEC по курсу задания. При `sell` недопроданный остаток токенов возвращается на баланс пользователя.
 

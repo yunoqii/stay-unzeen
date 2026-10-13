@@ -4,7 +4,8 @@
 //!   serve        sync + feed every incoming note into the Postgres ledger (no deposit data
 //!                in stdout/logs)
 //! Operator:
-//!   init, address, send, probe, seed-keygen, seed-encrypt, ledger-stats
+//!   init, address, send, probe, seed-keygen, seed-encrypt, ledger-stats,
+//!   rebalance (quote | check | status | plan | close)
 //! Dev only (print deposit data / anon keys; refused on mainnet unless UNZEEN_DEV_PRINT=1):
 //!   sync, deposits, inspect-tx, anon-key, memo-deposit, balance
 //!
@@ -16,7 +17,9 @@ mod config;
 mod cover;
 mod deposits;
 mod memo;
+mod oneclick;
 mod payout;
+mod rebalance;
 mod seed;
 mod send;
 mod service;
@@ -75,6 +78,15 @@ enum Cmd {
         /// Also execute `withdraw_zec` payouts (needs the seed key; mainnet gated).
         #[arg(long, env = "UNZEEN_PAYOUTS")]
         payouts: bool,
+        /// Also run the automatic pool rebalance ZEC -> SOL via 1Click (dry-run unless mainnet
+        /// and UNZEEN_ALLOW_MAINNET_REBALANCE=1).
+        #[arg(long, env = "UNZEEN_REBALANCE")]
+        rebalance: bool,
+    },
+    /// Pool rebalance ZEC -> SOL via NEAR Intents 1Click (see docs/RELAYER.md v7).
+    Rebalance {
+        #[command(subcommand)]
+        cmd: RebalanceCmd,
     },
     /// DEV: sync and print incoming notes (with memos).
     Sync {
@@ -91,7 +103,7 @@ enum Cmd {
     Send {
         #[arg(long)]
         to: String,
-        /// Amount in zatoshis (max 5_000_000 = 0.05 ZEC).
+        /// Amount in zatoshis (max 50_000_000 = 0.5 TAZ on testnet, 5_000_000 = 0.05 ZEC on mainnet).
         #[arg(long)]
         amount_zat: u64,
         /// Text memo (ZIP-302 UTF-8, <= 512 bytes).
@@ -156,6 +168,36 @@ enum Cmd {
     Balance { pubkey: String },
     /// Deposit counts by status (no identifying data).
     LedgerStats,
+    /// Pool wallet balance: spendable / pending (K confirmations). Prints no addresses.
+    WalletBalance,
+}
+
+#[derive(Subcommand)]
+enum RebalanceCmd {
+    /// Dry 1Click quote of the configured lot with mainnet parameters (read-only, no deposit
+    /// address is created) + reference price check.
+    Quote,
+    /// Evaluate the trigger now (SOL inventory, committed SOL, guards). Read-only.
+    Check,
+    /// Journal of rebalances (no user data exists there).
+    Status {
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
+    /// Operator: plan a rebalance (executed by `serve --rebalance`). `--force` skips the SOL
+    /// trigger; the random delay applies unless `--now`.
+    Plan {
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        now: bool,
+    },
+    /// Operator: close a rebalance in `attention` (or a `planned` one) as failed | done | refunded.
+    Close {
+        id: i64,
+        #[arg(long)]
+        status: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -251,7 +293,9 @@ async fn run() -> anyhow::Result<()> {
             interval,
             once,
             payouts,
-        } => service::serve(c, interval, once, payouts).await?,
+            rebalance,
+        } => service::serve(c, interval, once, payouts, rebalance).await?,
+        Cmd::Rebalance { cmd } => rebalance_cmd(c, cmd).await?,
         Cmd::Sync { watch, all, json } => {
             dev_only(c, "sync")?;
             let db_path = c.wallet_db_path();
@@ -469,11 +513,192 @@ async fn run() -> anyhow::Result<()> {
                 ),
             }
         }
+        Cmd::WalletBalance => {
+            use zcash_client_backend::data_api::{WalletRead, wallet::ConfirmationsPolicy};
+            let db = wallet::open_db(c)?;
+            let k = service::policy_from_env(c)?.confirmations.max(1);
+            let conf = ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::new(k).expect("max(1)"));
+            match db
+                .get_wallet_summary(conf)
+                .map_err(|e| anyhow!("wallet summary: {e}"))?
+            {
+                None => println!("wallet not synced yet (run `serve --once` or `sync`)"),
+                Some(s) => {
+                    let (mut spend, mut change, mut pending, mut total) = (0u64, 0u64, 0u64, 0u64);
+                    for b in s.account_balances().values() {
+                        spend += u64::from(b.spendable_value());
+                        change += u64::from(b.change_pending_confirmation());
+                        pending += u64::from(b.value_pending_spendability());
+                        total += u64::from(b.total());
+                    }
+                    println!("network:            {}", c.network.as_str());
+                    println!("synced to height:   {}", u32::from(s.chain_tip_height()));
+                    println!("confirmations (K):  {k}");
+                    println!("spendable:          {} ZEC", deposits::format_zec(spend));
+                    println!("change pending:     {} ZEC", deposits::format_zec(change));
+                    println!("pending (received): {} ZEC", deposits::format_zec(pending));
+                    println!("total:              {} ZEC", deposits::format_zec(total));
+                }
+            }
+        }
         Cmd::LedgerStats => {
             let url = std::env::var("DATABASE_URL").context("DATABASE_URL")?;
             let ledger = unzeen_ledger::Ledger::connect(&url, service::policy_from_env(c)?).await?;
             for (status, n) in ledger.deposit_stats().await? {
                 println!("{status:>15} {n}");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd) -> anyhow::Result<()> {
+    use rebalance::{RebalanceCfg, Trigger};
+    let policy = service::policy_from_env(c)?;
+    let cfg = RebalanceCfg::from_env(c, policy.chain.solana)?;
+    let ledger = || async {
+        let url = std::env::var("DATABASE_URL").context("DATABASE_URL")?;
+        let l = unzeen_ledger::Ledger::connect(&url, policy).await?;
+        if let Err(msg) = l.check_pool_network(c.network.as_str(), cfg.network).await? {
+            bail!("refusing to run: {msg}");
+        }
+        anyhow::Ok(l)
+    };
+    let zec = |z: u64| deposits::format_zec(z);
+    let sol = |l: u64| format!("{}.{:09}", l / 1_000_000_000, l % 1_000_000_000);
+    match cmd {
+        RebalanceCmd::Quote => {
+            let oc = oneclick::HttpOneClick::from_env()?;
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let (q, expected) = rebalance::dry_quote(&cfg, &oc, now).await?;
+            println!(
+                "mode:           {}",
+                cfg.dry_reason()
+                    .map_or("LIVE (mainnet sends allowed)".into(), |r| format!("dry-run: {r}"))
+            );
+            println!(
+                "jwt:            {}",
+                if oc.has_jwt() { "set" } else { "not set (+0.25% fee)" }
+            );
+            println!("lot:            {} ZEC", zec(q.amount_in));
+            println!("amountOut:      {} SOL", sol(q.amount_out));
+            println!("minAmountOut:   {} SOL", sol(q.min_amount_out));
+            println!(
+                "timeEstimate:   {} s",
+                q.time_estimate_secs.map_or("-".into(), |t| t.to_string())
+            );
+            match expected {
+                Some(e) => {
+                    let dev = (q.min_amount_out as f64 / e as f64 - 1.0) * 10_000.0;
+                    let ok = oneclick::price_ok(q.min_amount_out, e, cfg.max_deviation_bps);
+                    println!("reference:      {} SOL (1Click /v0/tokens)", sol(e));
+                    println!(
+                        "min vs ref:     {dev:+.0} bps (limit -{} bps) {}",
+                        cfg.max_deviation_bps,
+                        if ok { "OK" } else { "REFUSED" }
+                    );
+                }
+                None => println!("reference:      unavailable (a live rebalance would be refused)"),
+            }
+        }
+        RebalanceCmd::Check => {
+            let l = ledger().await?;
+            let inv = l.sol_inventory(cfg.network).await?;
+            let committed = l.committed_sol(cfg.network).await?;
+            let hist = l.rebalance_history(cfg.network).await?;
+            println!("network:        {} / zcash {}", cfg.network, c.network.as_str());
+            println!(
+                "mode:           {}",
+                cfg.dry_reason().map_or("LIVE".into(), |r| format!("dry-run: {r}"))
+            );
+            match &inv {
+                Some(i) => {
+                    println!(
+                        "vaults:         {} SOL in {} vaults (age {} s)",
+                        sol(i.vault_lamports),
+                        i.vault_count,
+                        i.age_secs
+                    );
+                    println!("rebalance addr: {} SOL undistributed", sol(i.rebalance_lamports));
+                    println!(
+                        "free:           {} SOL (threshold {})",
+                        sol(rebalance::free_lamports(&cfg, i, committed)),
+                        sol(cfg.min_free_lamports)
+                    );
+                }
+                None => println!("inventory:      none (relayer v7 writes pool_sol_inventory)"),
+            }
+            println!("committed:      {} SOL (queued jobs)", sol(committed));
+            println!(
+                "last 24 h:      {} of {} allowed; since last: {}",
+                hist.last_24h,
+                cfg.max_per_day,
+                hist.since_last_secs.map_or("-".into(), |s| format!("{s} s"))
+            );
+            let live = l.live_rebalance(cfg.network).await?;
+            println!(
+                "live:           {}",
+                live.map_or("none".into(), |r| format!("#{} {}", r.id, r.status))
+            );
+            let t = rebalance::evaluate(&cfg, inv.as_ref(), committed, Some(&hist));
+            println!(
+                "trigger:        {}",
+                match t {
+                    Trigger::Need { .. } => "NEED (a rebalance would be planned)",
+                    Trigger::Enough { .. } => "enough SOL",
+                    Trigger::NoInventory => "no inventory",
+                    Trigger::StaleInventory => "inventory stale",
+                    Trigger::DailyCap => "daily cap reached",
+                    Trigger::Cooldown => "cooldown",
+                }
+            );
+        }
+        RebalanceCmd::Status { limit } => {
+            let l = ledger().await?;
+            for r in l.list_rebalances(cfg.network, limit.clamp(1, 500)).await? {
+                println!(
+                    "#{:<5} {:<12} {} lot={} ZEC quote={} got={} 1click={} err={} created={} finished={}",
+                    r.id,
+                    r.status,
+                    if r.dry_run { "dry " } else { "live" },
+                    zec(r.lot_zat),
+                    r.amount_out_quote.map_or("-".into(), sol),
+                    r.amount_out.map_or("-".into(), sol),
+                    r.oc_status.as_deref().unwrap_or("-"),
+                    r.error_code.as_deref().unwrap_or("-"),
+                    r.created_unix,
+                    r.finished_unix.map_or("-".into(), |t| t.to_string()),
+                );
+            }
+        }
+        RebalanceCmd::Plan { force, now } => {
+            let l = ledger().await?;
+            if !force {
+                let t = rebalance::current_trigger(&cfg, &l, true).await?;
+                if !matches!(t, Trigger::Need { .. }) {
+                    bail!("trigger says no ({t:?}); use --force to plan anyway");
+                }
+            }
+            let delay = if now {
+                0.0
+            } else {
+                cfg.delay_min_secs + (cfg.delay_max_secs - cfg.delay_min_secs) * rand::random::<f64>()
+            };
+            let dry = cfg.dry_reason().is_some();
+            match l.plan_rebalance(cfg.network, cfg.lot_zat, delay, dry, force).await? {
+                Some(id) => println!(
+                    "planned #{id} ({}), due in {delay:.0} s; executed by `serve --rebalance`",
+                    if dry { "dry-run" } else { "LIVE" }
+                ),
+                None => bail!("a rebalance is already live on {}", cfg.network),
+            }
+        }
+        RebalanceCmd::Close { id, status } => {
+            let l = ledger().await?;
+            if l.close_rebalance(id, &status).await? {
+                println!("#{id} closed as {status}");
+            } else {
+                bail!("#{id} is not in attention/planned");
             }
         }
     }

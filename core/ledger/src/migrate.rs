@@ -50,6 +50,17 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0014_verify_review",
         include_str!("../../migrations/0014_verify_review.sql"),
     ),
+    (
+        15,
+        "0015_rebalance",
+        include_str!("../../migrations/0015_rebalance.sql"),
+    ),
+    // 16: reserved for the chat spec (0016_*). Versions are checked one by one, a gap is fine.
+    (
+        17,
+        "0017_fair_bundle",
+        include_str!("../../migrations/0017_fair_bundle.sql"),
+    ),
 ];
 
 /// Arbitrary constant for `pg_advisory_xact_lock` so concurrent starters serialize.

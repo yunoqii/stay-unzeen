@@ -46,7 +46,7 @@ pub async fn claim(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], h
         .await
         .map_err(|e| match e {
             unzeen_ledger::LedgerError::BelowMinimum => {
-                ApiError::below_minimum("nothing to claim, or less than PoolInfo.minActionZat")
+                ApiError::below_minimum("nothing to claim, or less than PoolInfo.minClaimZat")
             }
             e => e.into(),
         })?;

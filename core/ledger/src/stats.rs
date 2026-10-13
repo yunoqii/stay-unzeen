@@ -94,6 +94,13 @@ struct VenueAgg {
 impl Ledger {
     /// Compute and store today's snapshot (cut-off 00:00 UTC today). Returns the UTC day.
     pub async fn stats_snapshot(&self, network: &str, p: &StatsParams) -> Result<String> {
+        self.stats_snapshot_with(network, p, false).await
+    }
+
+    /// Like [`Self::stats_snapshot`]; `include_today` moves the cut-off to 00:00 UTC TOMORROW
+    /// (operator command for demos: today's trades become visible). The row is still today's;
+    /// k-anonymity and rounding apply as usual.
+    pub async fn stats_snapshot_with(&self, network: &str, p: &StatsParams, include_today: bool) -> Result<String> {
         let mut c = self.pool.get().await?;
         let tx = c.transaction().await?;
         // One snapshot computation at a time per network.
@@ -106,7 +113,12 @@ impl Ledger {
             .query_one("SELECT (now() AT TIME ZONE 'UTC')::date::text", &[])
             .await?
             .get(0);
-        let data = compute(&tx, network, &day, p).await?;
+        let cut: String = if include_today {
+            tx.query_one("SELECT ($1::text::date + 1)::text", &[&day]).await?.get(0)
+        } else {
+            day.clone()
+        };
+        let data = compute(&tx, network, &day, &cut, p).await?;
         let (zec_zat, zec_deposits) = (to_i64(data.1.0)?, to_i64(data.1.1)?);
         tx.execute(
             "INSERT INTO stats_snapshots (network, day, data, zec_zat, zec_deposits)
@@ -149,7 +161,14 @@ impl Ledger {
 }
 
 /// `(PlatformStats without asOf, (published zat, deposit count))`.
-async fn compute<C: GenericClient>(tx: &C, network: &str, day: &str, p: &StatsParams) -> Result<(Value, (u64, u64))> {
+/// `day` = the snapshot's UTC day (row key); `cut` = data cut-off day (00:00 UTC).
+async fn compute<C: GenericClient>(
+    tx: &C,
+    network: &str,
+    day: &str,
+    cut: &str,
+    p: &StatsParams,
+) -> Result<(Value, (u64, u64))> {
     const CUT: &str = "($1::text::date::timestamp AT TIME ZONE 'UTC')";
     let k = p.k;
     // Public pool trades (already on Solana), up to the cut-off.
@@ -162,7 +181,7 @@ async fn compute<C: GenericClient>(tx: &C, network: &str, day: &str, p: &StatsPa
                         count(*) FILTER (WHERE kind = 'create')
                  FROM trades WHERE ts < {CUT} GROUP BY venue"
             ),
-            &[&day],
+            &[&cut],
         )
         .await?;
     let mut by: Map<String, Value> = Map::new();
@@ -202,7 +221,7 @@ async fn compute<C: GenericClient>(tx: &C, network: &str, day: &str, p: &StatsPa
                 "SELECT count(*), COALESCE(sum(credited_zat), 0)::bigint FROM deposits
                  WHERE status = 'credited' AND NOT reorged AND created_at < {CUT}"
             ),
-            &[&day],
+            &[&cut],
         )
         .await?;
     let (dep_n, dep_zat) = (to_u64(d.get(0)), to_u64(d.get(1)));
@@ -230,7 +249,7 @@ async fn compute<C: GenericClient>(tx: &C, network: &str, day: &str, p: &StatsPa
                  JOIN tokens t ON t.mint = x.mint
                  ORDER BY x.vol DESC, t.mint LIMIT $4"
             ),
-            &[&day, &p.top_window_days, &to_i64(k)?, &p.top_n],
+            &[&cut, &p.top_window_days, &to_i64(k)?, &p.top_n],
         )
         .await?;
     let top: Vec<Value> = top

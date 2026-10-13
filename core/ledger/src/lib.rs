@@ -17,6 +17,7 @@ pub mod fair;
 mod migrate;
 pub mod orders;
 pub mod payouts;
+pub mod rebalance;
 pub mod stats;
 pub mod verify;
 
@@ -31,6 +32,7 @@ pub use actions::{
 pub use deadpool_postgres;
 pub use decide::{MemoInput, NoteObs, Outcome, Policy, Stage, evaluate};
 pub use payouts::{InflightPayout, PayoutRow};
+pub use rebalance::{FundOutcome, History as RebalanceHistory, Inventory, LiveRebalance, RebalanceView};
 pub use tokio_postgres;
 pub use tokio_postgres::Config as PgConfig;
 
@@ -213,6 +215,9 @@ pub struct CreatorRules {
     /// (fees included), used when the relayer did not report the exact fee (API v0.9).
     pub launch_fee_bps_pumpfun: u32,
     pub launch_fee_bps_dbc: u32,
+    /// Smallest `claim` (ZEC equivalent of the claimable lamports), zat. Separate from
+    /// `min_action_zat` so small creator fees stay claimable (API v0.11 `minClaimZat`).
+    pub min_claim_zat: u64,
 }
 
 impl Default for CreatorRules {
@@ -223,6 +228,7 @@ impl Default for CreatorRules {
             cap_tokens: 50_000_000_000_000,
             launch_fee_bps_pumpfun: 30,
             launch_fee_bps_dbc: 40,
+            min_claim_zat: 10_000,
         }
     }
 }

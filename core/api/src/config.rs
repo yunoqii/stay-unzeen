@@ -148,6 +148,9 @@ pub struct LaunchConfig {
     /// UNZEEN_LAUNCH_CREATOR_FEE_BPS_DBC (40).
     pub launch_fee_bps_pumpfun: u32,
     pub launch_fee_bps_dbc: u32,
+    /// MIN_CLAIM_ZAT: smallest claim, zat (default 10 000 = 0.0001 ZEC, never above
+    /// MIN_ACTION_ZAT).
+    pub min_claim_zat: u64,
 }
 
 impl LaunchConfig {
@@ -161,6 +164,7 @@ impl LaunchConfig {
             cap_tokens: self.cap_tokens(),
             launch_fee_bps_pumpfun: self.launch_fee_bps_pumpfun,
             launch_fee_bps_dbc: self.launch_fee_bps_dbc,
+            min_claim_zat: self.min_claim_zat,
         }
     }
 
@@ -352,6 +356,7 @@ impl Config {
             curve_from_env: var("UNZEEN_LAUNCH_VIRTUAL_SOL_LAMPORTS").is_some(),
             launch_fee_bps_pumpfun: num::<u32>("UNZEEN_LAUNCH_CREATOR_FEE_BPS_PUMPFUN", 30)?.min(10_000),
             launch_fee_bps_dbc: num::<u32>("UNZEEN_LAUNCH_CREATOR_FEE_BPS_DBC", 40)?.min(10_000),
+            min_claim_zat: num::<u64>("MIN_CLAIM_ZAT", 10_000)?.clamp(1, policy.min_action_zat.max(1)),
         };
         let mainnet = solana == SolanaCluster::MainnetBeta;
         let fair = FairConfig {
