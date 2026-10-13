@@ -106,6 +106,23 @@ export interface SentAttempt {
    * is published without waiting for the anchor.
    */
   outSig?: string;
+  /**
+   * Fair-launch v2: this attempt is a Jito bundle. `signature` / `rawTx` /
+   * `vault` are leg 0 (create + first buy); `legs` are the other buys, signed
+   * with the SAME blockhash (so leg 0 expired => every leg expired). Recorded
+   * before the bundle is sent. Postgres keeps them only with the proposed
+   * `relayer_jobs.bundle_legs` column; without it they are rediscovered on
+   * chain after the blockhash expired (FairBundler.discoverLegs).
+   */
+  bundle?: { legs: BundleLeg[] };
+}
+
+/** A non-create leg of a fair-launch bundle (public data once sent). */
+export interface BundleLeg {
+  signature: string;
+  vault: string;
+  /** base64 wire bytes (memory queue only), to resend the bundle. */
+  rawTx?: string;
 }
 
 export interface Job {
@@ -192,6 +209,13 @@ export interface CreateExecution {
   market: { priceSol: string; marketCapSol: string; status: "curve" | "graduated" } | null;
   /** RELAYER v6 `out_creator_fee` (0013): creator fee of this launch tx; null = unknown (core estimates). */
   creatorFee?: bigint | null;
+  /**
+   * Fair-launch v2 bundle: the other legs that landed (each a buy with its own
+   * signature, one feed row each). `tokenAmount` / `solAmount` / `networkFee` /
+   * `creatorFee` above are then the TOTALS of the launch (leg 0 + these), as
+   * core settles one launch per job; `signature`/`slot`/`vault` stay leg 0's.
+   */
+  legs?: TradeExecution[];
 }
 
 /** attest: memo read back from the confirmed tx (`out_memo`); `vault` = attestation key. */

@@ -67,6 +67,20 @@ export interface JobRow {
   not_before_ms: string;
   /** v3 fair_create: 64-byte mint keypair. Never logged. */
   mint_secret?: Buffer | null;
+  /** Fair-launch v2 (proposed 0015): [{sig, vault}] of the non-create bundle legs. */
+  bundle_legs?: unknown;
+}
+
+/** bundle_legs JSON -> SentAttempt.bundle; malformed / NULL -> none (legs are then rediscovered on chain). */
+export function bundleOf(v: unknown): { bundle?: { legs: { signature: string; vault: string }[] } } {
+  if (!Array.isArray(v) || v.length === 0 || v.length > 4) return {};
+  const legs: { signature: string; vault: string }[] = [];
+  for (const x of v) {
+    const o = x as { sig?: unknown; vault?: unknown } | null;
+    if (!o || typeof o.sig !== "string" || typeof o.vault !== "string") return {};
+    legs.push({ signature: o.sig, vault: o.vault });
+  }
+  return { bundle: { legs } };
 }
 
 export class PostgresJobQueue implements JobQueue {
@@ -79,6 +93,7 @@ export class PostgresJobQueue implements JobQueue {
   private v4Schema: Promise<boolean> | null = null;
   private blockTimeCol: Promise<{ name: string; ts: boolean } | null> | null = null;
   private creatorFeeCol: Promise<boolean> | null = null;
+  private bundleLegsCol: Promise<boolean> | null = null;
 
   constructor(o: PostgresJobQueueOptions) {
     this.pool = o.pool;
@@ -189,6 +204,30 @@ export class PostgresJobQueue implements JobQueue {
     return this.creatorFeeCol;
   }
 
+  /**
+   * Fair-launch v2 (proposed core 0015): relayer_jobs.bundle_legs JSONB, readable
+   * and writable for this role. Without it bundle legs are not stored; the engine
+   * rediscovers them on chain after the blockhash expired. Cached.
+   */
+  private hasBundleLegs(): Promise<boolean> {
+    if (!this.bundleLegsCol) {
+      this.bundleLegsCol = this.pool
+        .query<{ ok: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = current_schema() AND table_name = 'relayer_jobs'
+                             AND column_name = 'bundle_legs')
+                  AND has_column_privilege(current_user, 'relayer_jobs', 'bundle_legs', 'SELECT')
+                  AND has_column_privilege(current_user, 'relayer_jobs', 'bundle_legs', 'UPDATE') AS ok`,
+        )
+        .then((r) => r.rows[0]?.ok === true)
+        .catch((e) => {
+          this.bundleLegsCol = null;
+          throw e;
+        });
+    }
+    return this.bundleLegsCol;
+  }
+
   async claim(opts: { workerId: string; now: number; leaseMs: number; lane?: Lane }): Promise<ClaimedJob | null> {
     this.leaseMs = opts.leaseMs;
     const leaseId = `${opts.workerId}:${randomBytes(6).toString("hex")}`;
@@ -218,6 +257,7 @@ export class PostgresJobQueue implements JobQueue {
           ? `(op <> 'attest'), `
           : "";
     const v3 = await this.hasV3();
+    const legsCol = v3 && (await this.hasBundleLegs());
     // RELAYER v4 §1: while a Verify snapshot of this network is freezing/collecting,
     // no NEW job is taken (both lanes, every op incl. fair_create; attest exempt, E21).
     // In-flight rows (claimed/sent, lease ran out) are still driven to the end:
@@ -252,7 +292,7 @@ export class PostgresJobQueue implements JobQueue {
                  j.last_valid_block_height, j.vault,
                  (extract(epoch FROM j.updated_at) * 1000)::bigint AS sent_at_ms,
                  (extract(epoch FROM j.not_before) * 1000)::bigint AS not_before_ms
-                 ${v3 ? ", j.mint_secret" : ""}`,
+                 ${v3 ? ", j.mint_secret" : ""}${legsCol ? ", j.bundle_legs" : ""}`,
       [leaseId, this.network, opts.leaseMs, v3 ? OPS_V3 : OPS],
     );
     const row = res.rows[0];
@@ -283,6 +323,7 @@ export class PostgresJobQueue implements JobQueue {
               lastValidBlockHeight: Number(row.last_valid_block_height),
               vault: row.vault,
               sentAt: Number(row.sent_at_ms),
+              ...bundleOf(row.bundle_legs),
             },
           ]
         : [];
@@ -303,11 +344,21 @@ export class PostgresJobQueue implements JobQueue {
     // v6 §4: Verify attest also records out_sig here (before the memo tx goes out).
     const sig = a.outSig !== undefined && (await this.hasV4()) ? a.outSig : null;
     const params: unknown[] = [job.id, a.signature, a.lastValidBlockHeight, a.vault, job.leaseId, this.leaseMs];
-    if (sig !== null) params.push(sig);
+    let extra = "";
+    if (sig !== null) {
+      params.push(sig);
+      extra += `, out_sig = $${params.length}`;
+    }
+    // Fair-launch v2: every leg recorded with leg 0 (signatures + vaults only, public data;
+    // NULL for a single tx so a previous bundle's legs never stick to a new attempt).
+    if (await this.hasBundleLegs()) {
+      params.push(a.bundle ? JSON.stringify(a.bundle.legs.map((l) => ({ sig: l.signature, vault: l.vault }))) : null);
+      extra += `, bundle_legs = $${params.length}::jsonb`;
+    }
     const res = await this.pool.query(
       `UPDATE relayer_jobs
           SET status = 'sent', signature = $2, last_valid_block_height = $3, vault = $4,
-              lease_until = now() + $6 * interval '1 millisecond', updated_at = now()${sig !== null ? ", out_sig = $7" : ""}
+              lease_until = now() + $6 * interval '1 millisecond', updated_at = now()${extra}
         WHERE id = $1 AND status IN ('claimed', 'sent') AND claimed_by = $5 AND settled_at IS NULL`,
       params,
     );
@@ -403,7 +454,23 @@ export class PostgresJobQueue implements JobQueue {
         [kind, v, e.mint, e.symbol, tokens.toString(), sol.toString(), e.decimals, e.signature, e.slot, ts],
       );
     await insert("create", 0n, 0n);
-    if (e.tokenAmount > 0n) await insert("buy", e.tokenAmount, e.solAmount);
+    if (!e.legs?.length) {
+      if (e.tokenAmount > 0n) await insert("buy", e.tokenAmount, e.solAmount);
+      return;
+    }
+    // Fair-launch v2 bundle: one 'buy' per leg, each with its own signature (as on chain).
+    // e.tokenAmount / e.solAmount are launch totals; leg 0 = totals minus the other legs.
+    const restTok = e.legs.reduce((s, l) => s + l.tokenAmount, 0n);
+    const restSol = e.legs.reduce((s, l) => s + l.solAmount, 0n);
+    if (e.tokenAmount - restTok > 0n) await insert("buy", e.tokenAmount - restTok, e.solAmount - restSol);
+    for (const l of e.legs) {
+      await client.query(
+        `INSERT INTO trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts)
+         VALUES ('buy', $1, $2, $3, $4, $5, $6, $7, $8, COALESCE(to_timestamp($9::double precision), now()))
+         ON CONFLICT (signature, kind, mint) DO NOTHING`,
+        [v, e.mint, e.symbol, l.tokenAmount.toString(), l.solAmount.toString(), l.decimals, l.signature, l.slot, l.blockTime ?? ts],
+      );
+    }
   }
 
   /** Public data only (already on Solana). Transfers never reach the feed. */

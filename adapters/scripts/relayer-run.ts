@@ -42,7 +42,7 @@ async function main(): Promise<void> {
   }
 
   const connection = makeConnection(cfg);
-  const { relayer, fees, pipeline, pool, attester, fairAttester, launchCurves, snapshotter } = buildRelayer({
+  const { relayer, fees, pipeline, pool, attester, fairAttester, launchCurves, snapshotter, jitoTips } = buildRelayer({
     cfg,
     connection,
     network,
@@ -60,9 +60,15 @@ async function main(): Promise<void> {
   // Signing only reads this cache (R-relayer-5). Value is not logged.
   await fees.refresh();
   fees.start();
+  // Fair-launch v2 (mainnet): Jito tip floor in the background (30-60 s), read-only GET; value not logged.
+  if (jitoTips) {
+    await jitoTips.refresh();
+    jitoTips.start();
+  }
   console.error(
     `[relayer] running with ${keys.vaults.length} vault(s), fee source ${cfg.priorityFeeSource}, send via ${pipeline.broadcaster.name}` +
-      `${pipeline.tip ? ` (pool tip ${pipeline.tip.lamports} lamports on every tx)` : ""}, >= ${cfg.sendMinIntervalMs} ms between sends`,
+      `${pipeline.tip ? ` (pool tip ${pipeline.tip.lamports} lamports on every tx)` : ""}, >= ${cfg.sendMinIntervalMs} ms between sends` +
+      `, fair-launch ${jitoTips ? "multi-vault Jito bundles" : "single tx"}`,
   );
   // RELAYER v3: launch curve of this network (core caps), at start and every 10 min.
   const curves = (await launchCurvesWritable(db))
@@ -95,6 +101,7 @@ async function main(): Promise<void> {
   await curves;
   await verify;
   fees.stop();
+  jitoTips?.stop();
   await db.end();
   await lockDb.end();
 }

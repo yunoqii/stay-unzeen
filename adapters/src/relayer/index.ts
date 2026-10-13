@@ -11,3 +11,4 @@ export * from "./runtime";
 export * from "./fee-sweeper";
 export * from "./fee-runtime";
 export * from "./launch-curves";
+export * from "./fair-bundler";

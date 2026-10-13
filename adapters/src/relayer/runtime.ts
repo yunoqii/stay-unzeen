@@ -17,6 +17,8 @@ import { DBC_PROGRAM_ID, MeteoraDbcAdapter, dbcConfigAddress, derivePartnerKeypa
 import { PumpFunAdapter } from "../pumpfun";
 import { txPipeline, type TxPipeline } from "../sender";
 import { TokenWithdrawer } from "../withdraw";
+import { jitoConfigFromEnv, type JitoConfig, type JitoTipCache } from "../jito";
+import { jitoFairBundler, type FairBundler } from "./fair-bundler";
 import { Relayer, type RelayerEvent } from "./engine";
 import { AttestExecutor, RpcChainProbe, VenueTradeExecutor, WithdrawExecutor, type JobExecutor } from "./executors";
 import { LaunchCurveWriter, pumpLaunchCurve } from "./launch-curves";
@@ -131,6 +133,11 @@ export interface RelayerRuntimeOptions {
   meteoraConfig?: PublicKey | null;
   /** Count-only log lines of background jobs (Verify snapshot). */
   log?: (m: string) => void;
+  /**
+   * Fair-launch v2 Jito config; default from env (JITO_*, FAIR_*) on mainnet,
+   * null elsewhere (devnet has no Jito: every fair_create is one tx).
+   */
+  jito?: JitoConfig | null;
 }
 
 export interface RelayerRuntime {
@@ -159,6 +166,10 @@ export interface RelayerRuntime {
   launchCurves: LaunchCurveWriter;
   /** RELAYER v4 Verify vault snapshot; run it only when `verifySnapshotsWritable`. */
   snapshotter: VaultSnapshotter;
+  /** Fair-launch v2 bundler (mainnet + Jito on); null = v1 single-tx launches. */
+  fairBundler: FairBundler | null;
+  /** Background Jito tip floor: `await refresh(); start()` with the fee cache, `stop()` after. Null when off. */
+  jitoTips: JitoTipCache | null;
 }
 
 /**
@@ -281,15 +292,17 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     mints: pinsInFile ? new FileMintSource(path.join(o.cfg.keysDir, "mint-vaults.json")) : new PgMintSource(o.db, o.network),
     ...(o.log ? { log: o.log } : {}),
   });
+  const withdrawer = new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: fees, pipeline });
+  // Fair-launch v2: Jito bundles over several vaults, mainnet only (decision 13.10: Jito ONLY here, never Now).
+  const jito = o.jito !== undefined ? o.jito : jitoConfigFromEnv(o.cfg.cluster, env);
+  const fair = o.cfg.cluster === "mainnet-beta" && jito ? jitoFairBundler({ adapter, metadata, connection: o.connection, withdrawer, cfg: jito }) : null;
   const relayer = new Relayer({
     queue,
     pool,
+    ...(fair ? { fairBundler: fair.bundler } : {}),
     executors: {
       trade,
-      withdraw: new WithdrawExecutor(
-        new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: fees, pipeline }),
-        cryptoRng,
-      ),
+      withdraw: new WithdrawExecutor(withdrawer, cryptoRng),
       attest: new AttestExecutor({ verify: attester, fair: fairAttester }),
     },
     probe,
@@ -297,7 +310,24 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     ...(o.leaseMs ? { leaseMs: o.leaseMs } : {}),
     ...(o.onEvent ? { onEvent: o.onEvent } : {}),
   });
-  return { relayer, adapter, meteora, jupiter, pool, queue, mintVaults, metadata, fees, pipeline, attester, fairAttester, launchCurves, snapshotter };
+  return {
+    relayer,
+    adapter,
+    meteora,
+    jupiter,
+    pool,
+    queue,
+    mintVaults,
+    metadata,
+    fees,
+    pipeline,
+    attester,
+    fairAttester,
+    launchCurves,
+    snapshotter,
+    fairBundler: fair?.bundler ?? null,
+    jitoTips: fair?.tips ?? null,
+  };
 }
 
 /** Jupiter venue on the pool pipeline: same fee cache (one CU price), same tip and broadcaster. */

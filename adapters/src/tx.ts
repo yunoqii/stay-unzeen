@@ -106,16 +106,20 @@ export function poolPrefix(
   return ixs;
 }
 
-/** Signs a transaction with a fresh blockhash. Nothing is sent. */
+/**
+ * Signs a transaction with a fresh blockhash (or `recent`: the legs of one
+ * Jito bundle share one blockhash, so they all expire together). Nothing is sent.
+ */
 export async function signTx(
-  connection: Connection,
+  connection: Pick<Connection, "getLatestBlockhash">,
   instructions: TransactionInstruction[],
   feePayer: Signer,
   extraSigners: Signer[],
   opts: SendOptions,
+  recent?: { blockhash: string; lastValidBlockHeight: number },
 ): Promise<SignedTx> {
   const budget = poolPrefix(opts, feePayer.publicKey);
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+  const { blockhash, lastValidBlockHeight } = recent ?? (await connection.getLatestBlockhash("confirmed"));
   const raw = buildSigned([...budget, ...instructions], feePayer, extraSigners, blockhash, lastValidBlockHeight, opts);
   return { signature: signatureOf(raw), raw, blockhash, lastValidBlockHeight };
 }

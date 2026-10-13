@@ -39,7 +39,8 @@ import type { CreatorKeyring } from "./keys";
 import { formatUnits, spotPriceSol, toBN, toBig } from "./math";
 import { fixedPrice, type PriorityPrice } from "./fees";
 import type { TxPipeline } from "./sender";
-import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SendFailure, type SignedTx } from "./tx";
+import { quoteFairLegs, quoteFreshBuy, splitMinOut } from "./fair-bundle";
+import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SendFailure, type SenderTip, type SignedTx } from "./tx";
 import type {
   CreateOptions,
   CurveStatus,
@@ -134,6 +135,33 @@ export interface CreateResult extends TxResult {
    * fee). 0 without a first buy; undefined/null = unknown (core estimates).
    */
   creatorFee?: bigint | null;
+}
+
+/** One signed leg of a fair-launch bundle (legs[0] = create + first buy). */
+export interface PreparedFairLeg extends SignedTx {
+  vault: string;
+  lamports: bigint;
+  /** Tokens quoted on the simulated fresh curve. */
+  expectedOut: bigint;
+  /** min_tokens_out of this leg (core's min_out split pro rata). */
+  minOut: bigint;
+}
+
+/** A signed, not yet broadcast fair-launch bundle: all legs share one blockhash. */
+export interface PreparedFairBundle {
+  kind: "fair_bundle";
+  mint: string;
+  creator: string;
+  creatorIndex: number;
+  legs: PreparedFairLeg[];
+  blockhash: string;
+  lastValidBlockHeight: number;
+}
+
+/** Executed bundle leg (a buy of the new mint by a pool vault). */
+export interface FairLegResult extends TxResult {
+  /** TradeEvent.creatorFee of this buy (v3 keeps it on the curve until swept); null = unknown. */
+  creatorFee: bigint | null;
 }
 
 interface CurveState extends MintInfo {
@@ -260,6 +288,134 @@ export class PumpFunAdapter implements LaunchpadAdapter {
       creator: creator.toBase58(),
       creatorIndex,
       expectedOut: tokens,
+    };
+  }
+
+  /**
+   * Fair-launch v2 (mainnet, Jito): signs a bundle of 2..5 legs with ONE
+   * blockhash. Leg 0 = `create_v2 + buy_v2` from `legs[0].vault` (the mint's
+   * pinned vault, v0 + its lookup table), legs 1.. = `buy_exact_quote_in_v3`
+   * from other vaults, built OFFLINE against the simulated fresh curve (the
+   * mint does not exist yet). Every leg carries `tip` in the pool prefix (same
+   * shape as every pool tx; never via the lookup table) and its own
+   * min_tokens_out, so an unbundled leg (uncled block) fills fairly or fails.
+   * Sends nothing.
+   */
+  async prepareFairBundle(
+    meta: TokenMeta,
+    legs: readonly { vault: Signer; lamports: bigint }[],
+    minOut: bigint,
+    opts: { mintKeypair: Keypair; tip: SenderTip; creatorIndex?: number },
+  ): Promise<PreparedFairBundle> {
+    validateMeta(meta);
+    if (legs.length < 2 || legs.length > 5) throw new AdapterError("bad_request", "a fair bundle has 2..5 legs");
+    if (legs.some((l) => l.lamports <= 0n)) throw new AdapterError("bad_request", "leg lamports must be > 0");
+    const keys = legs.map((l) => l.vault.publicKey.toBase58());
+    if (new Set(keys).size !== keys.length) throw new AdapterError("bad_request", "one vault per leg");
+    if (minOut <= 0n) throw new AdapterError("bad_request", "fair bundle needs minOut > 0");
+    const { global, feeConfig } = await this.loadParams();
+    if (!global.createV2Enabled) throw new AdapterError("venue_unavailable", "pump.fun create_v2 is disabled");
+    const ataRent = await this.ataRent();
+    await Promise.all(
+      legs.map((l, i) =>
+        this.requireSol(
+          l.vault.publicKey,
+          l.lamports + opts.tip.lamports + ACCUMULATOR_RENT_HEADROOM + (i === 0 ? CREATE_RENT_HEADROOM + ALT_RENT_HEADROOM : ataRent),
+        ),
+      ),
+    );
+
+    const creatorIndex = opts.creatorIndex ?? (await this.creators.allocate());
+    const creator = this.creators.publicKey(creatorIndex);
+    if (this.vaultKeys.has(creator.toBase58())) throw new AdapterError("internal", "creator collides with a vault");
+
+    const mint = opts.mintKeypair.publicKey;
+    const quotes = quoteFairLegs(global, feeConfig, creator, legs.map((l) => l.lamports));
+    let minOuts: bigint[];
+    try {
+      minOuts = splitMinOut(minOut, quotes.map((q) => q.tokens));
+    } catch (e) {
+      throw new AdapterError("slippage", e instanceof Error ? e.message : "legs below min_out");
+    }
+
+    const a = legs[0]!;
+    const build = (m: PublicKey, u: PublicKey, c: PublicKey) => createIxs(global, feeConfig, meta, m, u, c, a.lamports);
+    const create = await build(mint, a.vault.publicKey, creator);
+    if (create.tokens !== quotes[0]!.tokens) throw new AdapterError("internal", "create leg quote mismatch");
+    if (create.tokens < minOuts[0]!) throw new AdapterError("slippage", "create leg below its min_out");
+    const table = await this.lookupTable(a.vault, create.ixs, async (m, u, c) => (await build(m, u, c)).ixs, global);
+    // Jito: tip accounts must not be resolved through a lookup table.
+    if (opts.tip.accounts.some((t) => table.state.addresses.some((x) => x.equals(t)))) {
+      throw new AdapterError("internal", "tip account inside the lookup table");
+    }
+
+    const legIxs: TransactionInstruction[][] = [create.ixs];
+    for (let i = 1; i < legs.length; i++) {
+      legIxs.push(
+        await PUMP_SDK.buyExactQuoteInV3Instructions({
+          bondingCurve: quotes[i]!.curveBefore,
+          associatedUserAccountInfo: null, // new mint: the vault has no ATA yet (idempotent create)
+          mint,
+          user: legs[i]!.vault.publicKey,
+          amount: toBN(minOuts[i]!), // slippage 0 => min_tokens_out = minOut of the leg
+          quoteAmount: toBN(legs[i]!.lamports),
+          slippage: 0,
+          tokenProgram: TOKEN_2022_PROGRAM_ID,
+          quoteTokenProgram: TOKEN_PROGRAM_ID,
+        }),
+      );
+    }
+
+    const recent = await this.rpc(() => this.connection.getLatestBlockhash("confirmed"));
+    const signed: PreparedFairLeg[] = [];
+    for (let i = 0; i < legs.length; i++) {
+      const l = legs[i]!;
+      const tx = await this.sign(legIxs[i]!, l.vault, i === 0 ? CU_CREATE : CU_TRADE, i === 0 ? [opts.mintKeypair] : [], i === 0 ? [table] : undefined, {
+        tip: opts.tip,
+        recent,
+      });
+      signed.push({ ...tx, vault: keys[i]!, lamports: l.lamports, expectedOut: quotes[i]!.tokens, minOut: minOuts[i]! });
+    }
+    return {
+      kind: "fair_bundle",
+      mint: mint.toBase58(),
+      creator: creator.toBase58(),
+      creatorIndex,
+      legs: signed,
+      blockhash: recent.blockhash,
+      lastValidBlockHeight: recent.lastValidBlockHeight,
+    };
+  }
+
+  /** Tokens a single create+buy of `lamports` gets on a fresh curve (capped fallback). */
+  async freshQuote(lamports: bigint): Promise<bigint> {
+    const { global, feeConfig } = await this.loadParams();
+    return quoteFreshBuy(global, feeConfig, lamports);
+  }
+
+  /** Executed bundle leg: buy amounts + creator fee from its TradeEvent. Null when unreadable. */
+  async fairLegResult(signature: string, vault: string, mint: string): Promise<FairLegResult | null> {
+    const tx = await fetchTx(this.connection, signature, 10).catch(() => null);
+    if (!tx) return null;
+    const mi = await this.loadMint(parseMint(mint));
+    const vaultPk = new PublicKey(vault);
+    const ev = extractTradeEvents(tx, PUMP_PROGRAM_ID).find((e) => e.mint.equals(mi.mint) && e.user.equals(vaultPk));
+    if (!ev) return null; // a landed leg always emits its TradeEvent; never guess SOL from deltas
+    return {
+      venue: this.id,
+      kind: "buy",
+      signature,
+      slot: tx.slot,
+      mint,
+      vault,
+      tokenAmount: BigInt(ev.tokenAmount.toString(10)),
+      solAmount: tradeLamports(ev),
+      networkFee: BigInt(tx.meta?.fee ?? 0),
+      blockTime: tx.blockTime ?? null,
+      decimals: mi.decimals,
+      amountsKnown: true,
+      fromEvent: true,
+      creatorFee: creatorFeeOf(ev),
     };
   }
 
@@ -517,14 +673,23 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     cu: number,
     extra: Signer[] = [],
     lookupTables?: AddressLookupTableAccount[],
+    /** Fair bundle legs: Jito tip instead of the Sender tip, one shared blockhash. */
+    o: { tip?: SenderTip; recent?: { blockhash: string; lastValidBlockHeight: number } } = {},
   ): Promise<SignedTx> {
     try {
-      return await signTx(this.connection, ixs, payer, extra, {
-        computeUnits: cu,
-        priorityMicroLamports: this.priority.microLamports(),
-        tip: this.pipeline?.tip ?? null,
-        ...(lookupTables ? { lookupTables } : {}),
-      });
+      return await signTx(
+        this.connection,
+        ixs,
+        payer,
+        extra,
+        {
+          computeUnits: cu,
+          priorityMicroLamports: this.priority.microLamports(),
+          tip: o.tip ?? this.pipeline?.tip ?? null,
+          ...(lookupTables ? { lookupTables } : {}),
+        },
+        o.recent,
+      );
     } catch (e) {
       throw this.sendError(e);
     }

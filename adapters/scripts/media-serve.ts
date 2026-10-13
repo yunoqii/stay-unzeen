@@ -4,6 +4,12 @@
  * resolves. Production: nginx on our own VPS (no CDN) serving the same directory.
  *   pnpm media:serve [port=8787]   ->  http://127.0.0.1:8787/media/<sha>.<ext>
  * No access log (no IPs are recorded).
+ *
+ * NOT for the frontend: web shows token images only from the API origin
+ * (web/lib/media.ts + CSP img-src), and the API itself serves /media/* from the
+ * same directory. For any run with the web app set
+ *   UNZEEN_METADATA_BASE_URL = <API origin> + /media   (devnet: http://127.0.0.1:8080/media)
+ * Images published with an 8787 base render as a glyph (docs/RUNBOOK.md 1.9).
  */
 import fs from "node:fs";
 import http from "node:http";

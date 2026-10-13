@@ -27,3 +27,5 @@ export * from "./sender";
 export * from "./creator-fees";
 export * from "./attest";
 export * as intel from "./intel";
+export * from "./jito";
+export * as fairBundle from "./fair-bundle";

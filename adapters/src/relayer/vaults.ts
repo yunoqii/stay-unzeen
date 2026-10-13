@@ -246,6 +246,18 @@ export class VaultPool {
     throw new VaultsBusyError();
   }
 
+  /** SOL balances of `keys` (fair-launch planning; no lock taken). */
+  async solBalances(keys: readonly string[]): Promise<Map<string, bigint>> {
+    const out = new Map<string, bigint>();
+    await Promise.all(
+      keys.map(async (k) => {
+        if (!this.byKey.has(k)) return;
+        out.set(k, await this.inventory.solBalance(new PublicKey(k)));
+      }),
+    );
+    return out;
+  }
+
   /** Marks a vault as used now (call when a tx from it is broadcast). */
   async markUsed(vault: string, at: number): Promise<void> {
     await this.usage.touch(vault, at);
