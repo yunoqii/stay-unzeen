@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Unzeen brand v3 overview</title>
+<link rel="stylesheet" href="base.css"><script src="dirs.js"></script>
+<style>
+  body { width: 2400px; height: 1800px; padding: 44px 56px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 22px; }
+  header h1 { font: 600 30px "Geist"; letter-spacing: -0.02em; } header h1 span { color: var(--fog-3); font-weight: 400; }
+  header p { font: 13px "Geist Mono"; color: var(--fog-2); }
+  .row { display: grid; grid-template-columns: 290px 400px 180px 220px 900px; gap: 34px; align-items: center; padding: 14px 0; border-top: 1px solid var(--hair); height: 326px; }
+  .t b { display: block; font: 600 26px "Geist"; letter-spacing: -0.02em; margin-bottom: 8px; }
+  .t span { display: block; font: 13px/1.55 "Geist Mono"; color: var(--fog-3); }
+  .t i { font-style: normal; display: inline-block; margin-top: 12px; font: 600 11px "Geist Mono"; letter-spacing: .1em; text-transform: uppercase; padding: 4px 8px; border: 1px solid var(--zec); color: var(--zec); }
+  .lk img { width: 100%; display: block; border-radius: 6px; } .lk img + img { margin-top: 12px; }
+  .av { width: 170px; height: 170px; border-radius: 50%; display: block; }
+  .sz { display: flex; gap: 16px; align-items: flex-end; font: 11px "Geist Mono"; color: var(--fog-2); }
+  .sz figure { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .sz .c { border-radius: 50%; }
+  .bn img { width: 100%; display: block; border-radius: 4px; outline: 1px solid var(--hair-2); }
+</style></head><body>
+<header><h1>unzeen · brand v3 <span>five directions</span></h1><p>lockup · X avatar (circle) · 16 / 32 / 48 + 32 in circle · X header 1500×500</p></header>
+<script>
+const rec = { a: "recommended", c: "runner-up" };
+for (const d of DIRS) {
+  const f = `../svg/${d.k}-${d.n}`;
+  document.write(`<div class="row"><div class="t"><b>${d.title}</b><span>${d.line}</span>${d.zk ? '<span style="color:var(--fog-2)">zk-paper direction</span>' : ""}${rec[d.k] ? `<i>${rec[d.k]}</i>` : ""}</div>
+  <div class="lk"><img src="${f}-lockup-dark.svg"><img src="${f}-lockup-light.svg"></div>
+  <img class="av" src="../x/avatar-${d.k}@2x.png">
+  <div class="sz"><figure><img src="../png/${d.k}-${d.n}-favicon-16.png" width="16">16</figure><figure><img src="../png/${d.k}-${d.n}-favicon-32.png" width="32">32</figure>
+    <figure><img src="../png/${d.k}-${d.n}-favicon-48.png" width="48">48</figure><figure><img class="c" src="../x/avatar-${d.k}.png" width="32">X 32</figure></div>
+  <div class="bn"><img src="../x/banner-${d.k}.png"></div></div>`);
+}
+</script></body></html>

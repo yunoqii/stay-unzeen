@@ -1,0 +1,112 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Unzeen X header v3</title>
+<link rel="stylesheet" href="base.css"><script src="dirs.js"></script>
+<style>
+  /* X header 1500x500. Safe zone for text: x 400..1325, y 60..440 (avatar covers bottom-left, mobile crops edges). */
+  body { width: 1500px; height: 500px; }
+  .b { position: relative; width: 1500px; height: 500px; overflow: hidden; background: var(--ink-1); }
+  .abs { position: absolute; }
+  /* paper-figure grid (A, B) */
+  .paper { background-color: var(--ink-1);
+    background-image: linear-gradient(var(--hair) 1px, transparent 1px), linear-gradient(90deg, var(--hair) 1px, transparent 1px);
+    background-size: 40px 40px; background-position: -1px -1px; }
+  .eq { font-family: "Geist Mono"; font-weight: 400; color: var(--fog-3); }
+  .eq b { font-weight: 500; color: var(--paper); }
+  .eq .k { color: var(--fog-2); }
+  .redact { display: inline-block; background: var(--zec); height: .78em; vertical-align: -0.04em; }
+  .hatch { background: var(--zec-deep); background-image: repeating-linear-gradient(-45deg, var(--zec) 0 1.6px, transparent 1.6px 7px); box-shadow: inset 0 0 0 1.5px var(--zec); }
+  .tag { font: 500 13px "Geist Mono"; letter-spacing: .08em; text-transform: uppercase; color: var(--fog-2); }
+  .y { color: var(--zec); } .buy { color: var(--buy); } .sell { color: var(--sell); }
+  h1 { font-weight: 600; letter-spacing: -0.035em; line-height: .95; }
+</style></head><body>
+<div class="b grain" id="b"></div>
+<script>
+const d = dirByHash(), b = document.getElementById("b");
+const M = (s) => `../svg/${d.k}-${d.n}-${s}.svg`;
+
+/* A · Proof: a paper figure. Statement in the clear, the trader committed in brackets. */
+if (d.k === "a") {
+  b.classList.add("paper");
+  b.innerHTML = `
+  <div class="abs tag" style="left:420px;top:66px">statement · public</div>
+  <div class="abs eq" style="left:420px;top:96px;font-size:30px;line-height:1.5">
+    <div><span class="k">trade&nbsp;&nbsp;=</span> <b>unzeen bought 1.2M $PEPE</b> <span class="k">for</span> <b>0.4 SOL</b></div>
+  </div>
+  <div class="abs tag" style="left:420px;top:184px">witness · private</div>
+  <div class="abs eq" style="left:420px;top:212px;font-size:30px;line-height:1.5">
+    <div><span class="k">trader =</span> <span class="y" style="font-weight:600">[</span><span class="redact" style="width:330px"></span><span class="y" style="font-weight:600">]</span></div>
+  </div>
+  <div class="abs" style="left:420px;top:306px;width:860px;height:1px;background:var(--hair-2)"></div>
+  <h1 class="abs" style="left:418px;top:326px;font-size:64px">Launch anywhere. <span class="y">Stay unzeen.</span></h1>
+  <div class="abs eq" style="left:420px;top:404px;font-size:14px;color:var(--fog-2)">Paid in shielded ZEC. The trade is on-chain; who made it is not.</div>
+  <img class="abs" src="${M("mark-transparent")}" style="left:1250px;top:96px;width:170px;height:170px">`;
+}
+
+/* B · Root: Fig. 1, a Merkle-sum tree. Root is public, leaves are hatched. */
+if (d.k === "b") {
+  b.classList.add("paper");
+  const W = 560, X0 = 870, Y0 = 70; // tree box
+  const node = (x, y, w, kind) => kind === "root"
+    ? `<rect x="${x - w/2}" y="${y}" width="${w}" height="34" fill="#F4B728"/>`
+    : kind === "mid" ? `<rect x="${x - w/2}" y="${y}" width="${w}" height="30" fill="#0B0B0D" stroke="#F4B728" stroke-width="2"/>`
+    : `<rect x="${x - w/2}" y="${y}" width="${w}" height="30" fill="url(#hh)" stroke="#F4B728" stroke-width="2"/>`;
+  const lvl = [[X0 + W/2], [X0 + W*0.25, X0 + W*0.75], [X0 + W*0.125, X0 + W*0.375, X0 + W*0.625, X0 + W*0.875]];
+  const ys = [Y0, Y0 + 120, Y0 + 240];
+  let edges = "", nodes = "";
+  lvl[1].forEach((x) => edges += `<path d="M${lvl[0][0]},${ys[0] + 34} L${x},${ys[1]}" />`);
+  lvl[2].forEach((x, i) => edges += `<path d="M${lvl[1][i >> 1]},${ys[1] + 30} L${x},${ys[2]}" />`);
+  nodes += node(lvl[0][0], ys[0], 150, "root");
+  lvl[1].forEach((x) => nodes += node(x, ys[1], 120, "mid"));
+  lvl[2].forEach((x) => nodes += node(x, ys[2], 112, "leaf"));
+  b.innerHTML = `
+  <svg class="abs" style="left:0;top:0" width="1500" height="500"><defs><pattern id="hh" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-45)"><rect width="7" height="7" fill="#1A1405"/><rect width="1.8" height="7" fill="#F4B728"/></pattern></defs>
+    <g stroke="#F4B728" stroke-width="1.5" fill="none" opacity=".7">${edges}</g>${nodes}
+    <g font-family="Geist Mono" font-size="14" fill="#0B0B0D" text-anchor="middle"><text x="${lvl[0][0]}" y="${ys[0] + 22}" font-weight="600">root · Σ</text></g>
+    <g font-family="Geist Mono" font-size="13" fill="#8B8B95" text-anchor="middle">${lvl[1].map((x) => `<text x="${x}" y="${ys[1] + 20}">Σ</text>`).join("")}${lvl[2].map((x) => `<text x="${x}" y="${ys[2] + 52}">owner ▓▓▓</text>`).join("")}</g>
+  </svg>
+  <div class="abs tag" style="left:420px;top:72px">fig. 1</div>
+  <h1 class="abs" style="left:418px;top:100px;font-size:62px;font-weight:300;letter-spacing:-0.03em;line-height:1.02">Every balance<br>adds up.<br><span class="y" style="font-weight:500">None has a name.</span></h1>
+  <div class="abs eq" style="left:420px;top:316px;font-size:15px;line-height:1.7;color:var(--fog-3)">Private trading for Solana launchpads,<br>paid in shielded ZEC.</div>
+  <div class="abs eq" style="left:420px;top:388px;font-size:15px;color:var(--paper)">Launch anywhere. <span class="y">Stay unzeen.</span></div>
+  <div class="abs eq" style="left:${X0}px;top:${ys[2] + 84}px;font-size:12px;color:var(--fog-2)">Merkle-sum tree over pool balances. Anyone can check the root.</div>`;
+}
+
+/* C · Bite: the product. The live feed, big; every buyer is the same mark. */
+if (d.k === "c") {
+  const rows = [
+    ["bought", "1.2M", "$PEPE", "0.4", "pump.fun", "12s"],
+    ["sold", "9.1M", "$HUSH", "2.6", "pump.fun", "31s"],
+    ["bought", "402K", "$DUSK", "1.1", "meteora", "48s"],
+    ["bought", "88K", "$MOTH", "0.2", "pump.fun", "1m"],
+    ["sold", "3.3M", "$LULL", "0.9", "meteora", "2m"],
+  ];
+  const op = [.28, .55, 1, .55, .28], blur = [2.2, .8, 0, .8, 2.2];
+  b.innerHTML = `<div class="abs" style="left:0;right:0;top:0;bottom:0;background:radial-gradient(70% 90% at 62% 50%, rgb(244 183 40 / .06), transparent 70%)"></div>` +
+    rows.map((r, i) => `<div class="abs" style="left:420px;top:${58 + i * 78}px;display:flex;align-items:center;gap:22px;opacity:${op[i]};filter:blur(${blur[i]}px);white-space:nowrap">
+      <img src="${M("mark-transparent")}" width="${i === 2 ? 56 : 44}" height="${i === 2 ? 56 : 44}">
+      <span style="font:${i === 2 ? 600 : 500} ${i === 2 ? 46 : 38}px Geist;letter-spacing:-0.03em">unzeen ${r[0]} <span class="${r[0] === "bought" ? "buy" : "sell"}">${r[1]}</span> ${r[2]} <span style="color:var(--fog-3)">for</span> ${r[3]} SOL</span>
+      <span class="mono" style="font-size:15px;color:var(--fog-2);letter-spacing:.04em">${r[4]} · ${r[5]}</span></div>`).join("") +
+    "";
+}
+
+/* D · Tape: meme typography. The name is torn out. */
+if (d.k === "d") {
+  b.innerHTML = `
+  <div class="abs" style="left:420px;top:62px;font:900 128px/1 Geist;letter-spacing:-0.055em;white-space:nowrap">Bought by</div>
+  <svg class="abs" style="left:404px;top:182px" width="900" height="170" viewBox="0 0 900 170"><g transform="rotate(-3 450 85)">
+    <path fill="#F4B728" d="M6,22 L842,8 L812,40 L848,66 L816,94 L850,122 L826,150 L10,160 Z"/></g></svg>
+  <div class="abs" style="left:422px;top:372px;font:600 30px Geist;letter-spacing:-0.02em">Launch anywhere. <span style="color:var(--fog-3)">Stay unzeen.</span></div>
+  <div class="abs mono" style="left:424px;top:418px;font-size:14px;color:var(--fog-2)">private trading for solana launchpads · paid in shielded zec</div>`;
+}
+
+/* E · Visor: the lineup. Yellow ground, identical suspects, height lines. */
+if (d.k === "e") {
+  b.style.background = "var(--zec)";
+  let lines = "";
+  for (let i = 0; i < 6; i++) { const y = 120 + i * 62; lines += `<path d="M380,${y} H1500" stroke="#0B0B0D" stroke-opacity=".28" stroke-width="1.5"/><text x="1480" y="${y - 8}" text-anchor="end" font-family="Geist Mono" font-size="13" fill="#0B0B0D" fill-opacity=".55">${(7 - i) * 10}</text>`; }
+  const lumps = [0, 1, 2, 3, 4, 5].map((i) => `<img class="abs" src="../svg/e-visor-avatar-body.svg" style="left:${470 + i * 150}px;bottom:-26px;width:${210}px;height:${210}px">`).join("");
+  b.innerHTML = `<svg class="abs" style="left:0;top:0" width="1500" height="500">${lines}</svg>${lumps}
+  <div class="abs" style="left:420px;top:72px;font:900 72px/1 Geist;letter-spacing:-0.05em;color:#0B0B0D">Pick the buyer.</div>
+  <div class="abs mono" style="left:424px;top:154px;font-size:16px;color:#0B0B0D">You can't. Launch anywhere. Stay unzeen.</div>
+  ${[0,1,2,3,4,5].map((i) => `<div class="abs mono" style="left:${566 + i * 150}px;top:262px;font-size:14px;font-weight:600;color:#0B0B0D">${i + 1}</div>`).join("")}`;
+}
+</script></body></html>

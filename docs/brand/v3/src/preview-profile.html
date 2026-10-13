@@ -1,0 +1,32 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X profile mock v3</title>
+<link rel="stylesheet" href="base.css"><script src="dirs.js"></script>
+<style>
+  body { width: 1460px; padding: 30px 40px; background: #000; }
+  .pair { display: flex; gap: 40px; margin-bottom: 34px; align-items: flex-start; }
+  .tag { font: 12px "Geist Mono", monospace; color: var(--fog-3); margin-bottom: 8px; }
+  .desk { width: 900px; border: 1px solid #2f3336; } .mob { width: 390px; border: 1px solid #2f3336; border-radius: 22px; overflow: hidden; }
+  .hdr { position: relative; aspect-ratio: 3 / 1; overflow: hidden; } .hdr img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .mob .hdr { aspect-ratio: auto; height: 125px; } /* X mobile shows the header shorter: top and bottom get cropped */
+  .body { position: relative; padding: 0 16px 16px; color: #e7e9ea; font-family: "Geist"; }
+  .av { position: absolute; border-radius: 50%; border: 4px solid #000; }
+  .desk .av { width: 134px; height: 134px; left: 16px; top: -67px; } .mob .av { width: 80px; height: 80px; left: 14px; top: -40px; }
+  .btn { position: absolute; right: 16px; top: 12px; border: 1px solid #536471; border-radius: 99px; padding: 6px 16px; font-weight: 700; font-size: 14px; }
+  .name { padding-top: 78px; font-weight: 700; font-size: 20px; } .mob .name { padding-top: 48px; font-size: 18px; }
+  .handle { color: #71767b; font-size: 15px; } .bio { margin-top: 10px; font-size: 15px; line-height: 1.35; }
+  .meta { margin-top: 10px; color: #71767b; font-size: 14px; } .meta a { color: #f4b728; text-decoration: none; }
+  .pin { margin-top: 14px; border-top: 1px solid #2f3336; padding-top: 12px; display: flex; gap: 10px; }
+  .pin .pa { width: 40px; height: 40px; border-radius: 50%; flex: none; }
+  .pin .pl { font-size: 13px; color: #71767b; } .pin .pt { font-size: 15px; margin-top: 2px; } .pin .pt b { font-weight: 700; }
+  .mob .pin { display: none; }
+</style></head><body>
+<script>
+const bio = "Private trading for Solana launchpads, paid in shielded ZEC. Launch anywhere. Stay unzeen.";
+for (const d of DIRS) {
+  const card = (cls) => `<div class="${cls}"><div class="hdr"><img src="../x/banner-${d.k}@2x.png"></div><div class="body"><img class="av" src="../x/avatar-${d.k}@2x.png">
+    <div class="btn">Follow</div><div class="name">unzeen</div><div class="handle">@stayunzeen (placeholder)</div><div class="bio">${bio}</div>
+    <div class="meta">unzeen.xyz (placeholder) · Built for ZECATHON</div>
+    <div class="pin"><img class="pa" src="../x/avatar-${d.k}@2x.png"><div><div class="pl">Pinned</div><div class="pt"><b>unzeen</b> <span style="color:#71767b">@stayunzeen</span><br>Every trade is on-chain. Who made it is not. Here's how a shielded ZEC deposit turns into a pump.fun buy with no wallet link.</div></div></div>
+    </div></div>`;
+  document.write(`<div class="tag">${d.title} · desktop (left) · mobile (right)</div><div class="pair">${card("desk")}${card("mob")}</div>`);
+}
+</script></body></html>

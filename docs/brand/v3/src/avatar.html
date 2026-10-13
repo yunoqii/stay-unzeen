@@ -1,0 +1,25 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Unzeen X avatar v3</title>
+<link rel="stylesheet" href="base.css"><script src="dirs.js"></script>
+<style>
+  body { width: 400px; height: 400px; }
+  .av { position: relative; width: 400px; height: 400px; overflow: hidden; background: var(--ink-1); display: grid; place-items: center; }
+  .av img { display: block; }
+  .yel { background: var(--zec); }
+</style></head><body>
+<div class="av grain" id="av"></div>
+<script>
+const d = dirByHash(), av = document.getElementById("av");
+const svgUrl = (s) => `../svg/${d.k}-${d.n}-${s}.svg`;
+if (d.k === "a") av.innerHTML = `<img src="${svgUrl("mark-transparent")}" width="232" height="232">`;
+if (d.k === "b") av.innerHTML = `<img src="${svgUrl("mark-transparent")}" width="236" height="236" style="margin-top:-6px">`;
+if (d.k === "c") av.innerHTML = `<img src="${svgUrl("mark-transparent")}" width="250" height="250">`;
+if (d.k === "d") {
+  // tape bleeds through the whole circle; torn end and fade gaps sit inside the crop
+  av.innerHTML = `<svg width="400" height="400" viewBox="0 0 400 400"><defs><mask id="m"><rect width="400" height="400" fill="#fff"/>
+    </mask></defs>
+    <g transform="rotate(-14 200 200)"><path mask="url(#m)" fill="#F4B728" d="M-60,140 H350 L326,163 L350,186 L330,209 L352,232 L330,260 H-60 Z"/></g></svg>`;
+}
+// E: dark ground, yellow lump rising from the bottom. Not a yellow ground: in the X circle crop a yellow
+// disc with a dark glyph reads as the Zcash coin at 32px.
+if (d.k === "e") av.innerHTML = `<img src="../svg/e-visor-avatar-yellow.svg" width="330" height="330" style="position:absolute;left:35px;bottom:-12px">`;
+</script></body></html>
