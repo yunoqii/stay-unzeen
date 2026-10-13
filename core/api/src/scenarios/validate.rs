@@ -195,6 +195,10 @@ struct Facts {
     jumps: Vec<usize>,
     /// `end`: no successor.
     terminal: bool,
+    /// Mints under any price guard (slippage or limit).
+    guard_mints: Vec<MintR>,
+    /// `create`: its pair (`quote`, default SOL).
+    create_quote: Option<String>,
 }
 
 struct P<'a> {
@@ -302,7 +306,20 @@ impl P<'_> {
         }
     }
 
+    /// `abs` ZEC amount below `minActionZat` → `bad_amount` (checked at creation, not hours later).
+    fn min_zat(&self, v: Option<&Value>) -> Result<(), ValidationError> {
+        match v
+            .and_then(|x| x.get("abs"))
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            Some(z) if z < self.ctx.min_action_zat => Err(self.e("bad_amount")),
+            _ => Ok(()),
+        }
+    }
+
     fn guard(&self, v: Option<&Value>, mint: &MintR, f: &mut Facts) -> Result<(), ValidationError> {
+        f.guard_mints.push(mint.clone());
         let o = v
             .and_then(Value::as_object)
             .filter(|o| o.len() == 1)
@@ -497,7 +514,10 @@ impl P<'_> {
                 self.venue(b.get("venue"))?;
                 let m = self.mint(b.get("mint"))?;
                 match ty {
-                    "buy" => self.amount(b.get("zec"), Out::Zat)?,
+                    "buy" => {
+                        self.amount(b.get("zec"), Out::Zat)?;
+                        self.min_zat(b.get("zec"))?;
+                    }
                     "sell" => self.amount(b.get("amount"), Out::Tokens)?,
                     _ => {}
                 }
@@ -581,6 +601,9 @@ impl P<'_> {
                     Some("limit_sell" | "take_profit" | "stop_loss" | "bracket") => Out::Tokens,
                     _ => return Err(self.e("bad_field")),
                 };
+                if o.get("venue").is_some_and(|v| v.as_str() != Some("pumpfun")) {
+                    return Err(self.e("bad_venue"));
+                }
                 // P2: a fired order is a public trade of the mint (any kind).
                 let m = self.mint(o.get("mint"))?;
                 self.amount(o.get("amount"), want)?;
@@ -622,7 +645,9 @@ impl P<'_> {
                 }
                 if c.contains_key("initialBuyZec") {
                     self.amount(c.get("initialBuyZec"), Out::Zat)?;
+                    self.min_zat(c.get("initialBuyZec"))?;
                 }
+                f.create_quote = Some(c.get("quote").and_then(Value::as_str).unwrap_or("SOL").to_string());
                 if c.contains_key("exec") {
                     self.exec(c.get("exec"), true, &mut f)?;
                 }
@@ -693,6 +718,7 @@ impl P<'_> {
                     return Err(self.e("bad_address"));
                 }
                 self.amount(b.get("amount"), Out::Zat)?;
+                self.min_zat(b.get("amount"))?;
                 self.exec(b.get("exec"), false, &mut f)?;
             }
             "check_safety" => {
@@ -734,7 +760,17 @@ impl P<'_> {
                 if from >= i || !(2..=10).contains(&times) {
                     return Err(self.e("bad_repeat"));
                 }
-                let forbidden = ["manual_start", "deposit_received", "create", "repeat"];
+                // Sealed fields (addresses, text) are erased after their first use: a step that
+                // needs one cannot run twice (front review 13.10).
+                let forbidden = [
+                    "manual_start",
+                    "deposit_received",
+                    "create",
+                    "repeat",
+                    "withdraw_token",
+                    "withdraw_zec",
+                    "chat",
+                ];
                 if self.types[from..i]
                     .iter()
                     .any(|t| forbidden.contains(&t.as_str()) || t.starts_with("fl_"))
@@ -903,12 +939,27 @@ pub fn validate(plan: &Value, ctx: &Ctx) -> Outcome {
             }
         }
     }
-    // P8: price-dependent blocks only on mints with a pool price tick; a mint created by the
-    // plan is allowed, a `{step: swap}` must have a tick on its `to`.
+    // Guards on a token the plan launches in a USDC/USD1 pair: no price unit the executor can
+    // check without a quote-pool read (literal mints: the server checks `tokens.quote_mint`).
+    let quote_of = |m: &MintR| match m {
+        MintR::Step(k) => facts[*k].create_quote.clone(),
+        MintR::Lit(_) => None,
+    };
     for (i, f) in facts.iter().enumerate() {
-        let bad = f.need_tick.iter().map(&resolve).any(|m| match m {
-            MintR::Lit(m) => !ctx.priced_mints.contains(&m),
-            MintR::Step(_) => false,
+        if f.guard_mints
+            .iter()
+            .map(&resolve)
+            .any(|m| matches!(quote_of(&m).as_deref(), Some("USDC" | "USD1")))
+        {
+            return Err(inv(Some(i), "unsupported_pair"));
+        }
+    }
+    // P8: price-dependent blocks only on mints with a pool price tick; a SOL-pair mint created by
+    // the plan is allowed (pool tokens get ticks), a `{step: swap}` must have a tick on its `to`.
+    for (i, f) in facts.iter().enumerate() {
+        let bad = f.need_tick.iter().map(&resolve).any(|m| match &m {
+            MintR::Lit(m) => !ctx.priced_mints.contains(m),
+            MintR::Step(_) => quote_of(&m).is_some_and(|q| q != "SOL"),
         });
         if bad {
             return Err(rule(i, "unpriced_mint"));

@@ -599,3 +599,165 @@ pub async fn take_sealed<C: GenericClient>(tx: &C, id: &[u8; 16], step: usize) -
         .await?
         .map(|r| r.get(0)))
 }
+
+// ------------------------------------------------------------------ S4–S6 helpers
+
+/// Savepoint around a step that writes through an `*_in` ledger function (orders, claim).
+pub async fn savepoint<C: GenericClient>(tx: &C) -> Result<()> {
+    tx.batch_execute("SAVEPOINT scenario_step").await?;
+    Ok(())
+}
+
+pub async fn release<C: GenericClient>(tx: &C) -> Result<()> {
+    tx.batch_execute("RELEASE SAVEPOINT scenario_step").await?;
+    Ok(())
+}
+
+pub async fn rollback_to<C: GenericClient>(tx: &C) -> Result<()> {
+    tx.batch_execute("ROLLBACK TO SAVEPOINT scenario_step").await?;
+    Ok(())
+}
+
+/// Σ zat ever credited to the key by deposits (not sells, not claims): `deposit_received` arms
+/// with this value and fires on growth. Day-coarse deposit times are never needed.
+pub async fn deposits_total<C: GenericClient>(tx: &C, pk: &[u8; 32]) -> Result<u64> {
+    let pk_s: &[u8] = pk;
+    let v: i64 = tx
+        .query_one(
+            "SELECT COALESCE(sum(credited_zat), 0)::bigint FROM deposits
+             WHERE anon_pubkey = $1 AND status = 'credited' AND NOT reorged",
+            &[&pk_s],
+        )
+        .await?
+        .get(0);
+    Ok(u64::try_from(v).unwrap_or(0))
+}
+
+/// Indexer tick of a mint: (price_sol text, tick_at ms, age ms, status).
+pub async fn tick<C: GenericClient>(tx: &C, mint: &str) -> Result<Option<(String, i64, i64, String)>> {
+    Ok(tx
+        .query_opt(
+            "SELECT price_sol::text, tick_at, (extract(epoch FROM now()) * 1000)::bigint - tick_at, status
+             FROM intel_prices WHERE mint = $1",
+            &[&mint],
+        )
+        .await?
+        .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))))
+}
+
+/// Safety snapshot of a mint: (data, age secs) — `None` without a snapshot (or `missing`).
+pub async fn safety<C: GenericClient>(tx: &C, mint: &str) -> Result<Option<(Value, i64)>> {
+    Ok(tx
+        .query_opt(
+            "SELECT data, extract(epoch FROM now() - as_of)::bigint FROM token_safety
+             WHERE mint = $1 AND NOT missing AND data IS NOT NULL",
+            &[&mint],
+        )
+        .await?
+        .map(|r| (r.get(0), r.get(1))))
+}
+
+/// Queue a cold mint for the indexer's next tick (same queue and cap as a CA search).
+pub async fn request_intel<C: GenericClient>(tx: &C, mint: &str, queue_max: i64) -> Result<()> {
+    tx.execute(
+        "INSERT INTO intel_requests (mint)
+         SELECT $1 WHERE (SELECT count(*) FROM intel_requests) < $2
+                     AND NOT EXISTS (SELECT 1 FROM tokens WHERE mint = $1)
+         ON CONFLICT (mint) DO NOTHING",
+        &[&mint, &queue_max],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Status of an order of this key (`own_result`, `order_cancel` by id).
+pub async fn order_status<C: GenericClient>(tx: &C, pk: &[u8; 32], id: &[u8; 16]) -> Result<Option<String>> {
+    let (pk_s, oid): (&[u8], &[u8]) = (pk, id);
+    Ok(tx
+        .query_opt(
+            "SELECT status FROM orders WHERE id = $1 AND anon_pubkey = $2",
+            &[&oid, &pk_s],
+        )
+        .await?
+        .map(|r| r.get(0)))
+}
+
+/// Status of an action of this key (`own_result {actionId}`).
+pub async fn action_status<C: GenericClient>(tx: &C, pk: &[u8; 32], id: &[u8; 16]) -> Result<Option<String>> {
+    let (pk_s, aid): (&[u8], &[u8]) = (pk, id);
+    Ok(tx
+        .query_opt(
+            "SELECT status FROM actions WHERE id = $1 AND anon_pubkey = $2",
+            &[&aid, &pk_s],
+        )
+        .await?
+        .map(|r| r.get(0)))
+}
+
+/// The order placed by step `step` of this plan (latest run).
+pub async fn step_order<C: GenericClient>(tx: &C, id: &[u8; 16], step: usize) -> Result<Option<[u8; 16]>> {
+    let sid: &[u8] = id;
+    Ok(tx
+        .query_opt(
+            "SELECT order_id FROM scenario_runs WHERE scenario_id = $1 AND step = $2 AND order_id IS NOT NULL
+             ORDER BY seq DESC LIMIT 1",
+            &[&sid, &(step as i16)],
+        )
+        .await?
+        .map(|r| id16(r.get(0))))
+}
+
+/// A run that completed in the same transaction (order placed, claim, chat, fl_*).
+pub async fn insert_done_run<C: GenericClient>(
+    tx: &C,
+    id: &[u8; 16],
+    step: usize,
+    action_id: Option<&[u8; 16]>,
+    order_id: Option<&[u8; 16]>,
+) -> Result<()> {
+    let sid: &[u8] = id;
+    let aid: Option<&[u8]> = action_id.map(|a| &a[..]);
+    let oid: Option<&[u8]> = order_id.map(|a| &a[..]);
+    tx.execute(
+        "INSERT INTO scenario_runs (scenario_id, seq, step, attempt, status, action_id, order_id)
+         VALUES ($1, (SELECT COALESCE(max(seq) + 1, 0) FROM scenario_runs WHERE scenario_id = $1),
+                 $2, 0, 'done', $3, $4)",
+        &[&sid, &(step as i16), &aid, &oid],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Read a sealed blob without deleting it (a retried step needs it again).
+pub async fn sealed<C: GenericClient>(tx: &C, id: &[u8; 16], step: usize) -> Result<Option<Vec<u8>>> {
+    let sid: &[u8] = id;
+    Ok(tx
+        .query_opt(
+            "SELECT blob FROM scenario_sealed WHERE scenario_id = $1 AND step = $2",
+            &[&sid, &(step as i16)],
+        )
+        .await?
+        .map(|r| r.get(0)))
+}
+
+pub async fn drop_sealed<C: GenericClient>(tx: &C, id: &[u8; 16], step: usize) -> Result<()> {
+    let sid: &[u8] = id;
+    tx.execute(
+        "DELETE FROM scenario_sealed WHERE scenario_id = $1 AND step = $2",
+        &[&sid, &(step as i16)],
+    )
+    .await?;
+    Ok(())
+}
+
+impl Ledger {
+    /// (venue, quote_mint) of a pool token, if the pool knows it.
+    pub async fn token_venue_quote(&self, mint: &str) -> Result<Option<(String, Option<String>)>> {
+        let c = self.pool.get().await?;
+        Ok(
+            c.query_opt("SELECT venue, quote_mint FROM tokens WHERE mint = $1", &[&mint])
+                .await?
+                .map(|r| (r.get(0), r.get(1))),
+        )
+    }
+}

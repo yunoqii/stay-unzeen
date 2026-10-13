@@ -231,7 +231,7 @@ pub async fn submit(st: &AppState, raw: Value, body_len: usize, n: NonceCtx) -> 
     }
 }
 
-async fn submit_inner(st: &AppState, raw: Value, body_len: usize, n: NonceCtx) -> ApiResult<Value> {
+pub(crate) async fn submit_inner(st: &AppState, raw: Value, body_len: usize, n: NonceCtx) -> ApiResult<Value> {
     let is_noop = raw.get("op").and_then(Value::as_str) == Some("noop");
     let enabled = if is_noop { st.cfg.chat.noop } else { st.cfg.chat.enabled };
     if !enabled {

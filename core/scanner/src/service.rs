@@ -37,8 +37,16 @@ pub fn policy_from_env(c: &Common) -> anyhow::Result<Policy> {
         .parse()
         .map_err(|e: String| anyhow!(e))?;
     let confirmations = u32::try_from(env_u64("UNZEEN_CONFIRMATIONS", 3)?)?.max(1);
+    // Same pairing rule as the API (review-numeric-hood п. 15): a testnet wallet with a
+    // mainnet-beta cluster would freeze every deposit as `bad_signature` (chain id 0201).
+    let chain = ChainId::new(c.network.zcash_net(), cluster);
+    if ChainId::from_bytes(chain.to_bytes()).is_none() {
+        anyhow::bail!(
+            "UNZEEN_SOLANA_CLUSTER does not match the Zcash network (mainnet ↔ mainnet-beta, testnet ↔ devnet)"
+        );
+    }
     Ok(Policy {
-        chain: ChainId::new(c.network.zcash_net(), cluster),
+        chain,
         confirmations,
         min_deposit_zat: env_u64("MIN_DEPOSIT_ZAT", 100_000)?,
         min_action_zat: env_u64("MIN_ACTION_ZAT", 100_000)?,

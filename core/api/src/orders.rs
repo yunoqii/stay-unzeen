@@ -104,7 +104,30 @@ fn unsupported() -> ApiError {
     )
 }
 
+/// A checked order request (also built by the scenario executor for `order_place`).
+// Built once per request and consumed right away: the size difference does not matter.
+#[allow(clippy::large_enum_variant)]
+pub enum OrderReq {
+    Create(NewOrder),
+    Cancel([u8; 16]),
+}
+
 pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], hash: &[u8; 32]) -> ApiResult<Value> {
+    match parse(st, raw).await? {
+        OrderReq::Cancel(id) => {
+            let r = st.ledger.order_cancel(pk, nonce, hash, &id).await?;
+            Ok(json!({ "id": hex::encode(r.id), "status": r.status }))
+        }
+        OrderReq::Create(o) => {
+            let rec = st.ledger.order_create(pk, nonce, hash, &o).await?;
+            Ok(json!({ "id": hex::encode(rec.id), "status": rec.status }))
+        }
+    }
+}
+
+/// Parse and check `order_create` / `order_cancel` (prices, amounts, minimum value, creator cap
+/// estimate) exactly as a signed request is checked.
+pub async fn parse(st: &AppState, raw: Value) -> ApiResult<OrderReq> {
     let op: OrderOp = serde_json::from_value(raw).map_err(|_| ApiError::bad_request("invalid action body"))?;
     match op {
         OrderOp::OrderCancel { order_id } => {
@@ -114,8 +137,7 @@ pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], 
             .flatten()
             .and_then(|v| v.try_into().ok())
             .ok_or_else(ApiError::not_found)?;
-            let r = st.ledger.order_cancel(pk, nonce, hash, &id).await?;
-            Ok(json!({ "id": hex::encode(r.id), "status": r.status }))
+            Ok(OrderReq::Cancel(id))
         }
         OrderOp::OrderCreate {
             venue,
@@ -175,7 +197,7 @@ pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], 
             let amount: u128 = if kind == "limit_buy" {
                 u128::from(parse_amount(&amount, "amount")?)
             } else {
-                parse_token_amount(&amount, "amount")?
+                crate::actions::token_cap(st, parse_token_amount(&amount, "amount")?, "amount")?
             };
             if amount == 0 {
                 return Err(ApiError::bad_request("amount must be > 0"));
@@ -236,8 +258,7 @@ pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], 
                 sl_slippage_bps: sl_slip,
                 rearm: rearm.unwrap_or(false),
             };
-            let rec = st.ledger.order_create(pk, nonce, hash, &o).await?;
-            Ok(json!({ "id": hex::encode(rec.id), "status": rec.status }))
+            Ok(OrderReq::Create(o))
         }
     }
 }

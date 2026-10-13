@@ -15,18 +15,6 @@ use crate::{
     error::{ApiError, ApiResult},
 };
 
-/// Blocks the executor runs today (S3). The rest of v0.19 is advertised as it lands (S4–S6);
-/// a plan with another block → `bad_request` / `feature_disabled`, like a disabled feature.
-pub const EXEC_BLOCKS: &[&str] = &[
-    "manual_start",
-    "wait_fixed",
-    "wait_random",
-    "buy",
-    "sell",
-    "sell_all",
-    "end",
-];
-
 pub fn is_scenario_op(raw: &Value) -> bool {
     raw.get("op")
         .and_then(Value::as_str)
@@ -173,6 +161,14 @@ pub fn split_sealed(plan: &Value) -> (Value, Vec<(usize, Value)>) {
                     m.insert("meta".into(), json!({ "name": "", "symbol": "" }));
                 }
             }
+            "fl_create" => {
+                if let Some(l) = b.get_mut("launch").and_then(Value::as_object_mut)
+                    && let Some(meta) = l.get("meta").cloned()
+                {
+                    secret.insert("meta".into(), meta);
+                    l.insert("meta".into(), json!({ "name": "", "symbol": "" }));
+                }
+            }
             "fl_bid" => {
                 if let Some(ct) = b.get("ciphertext").cloned() {
                     secret.insert("ciphertext".into(), ct);
@@ -213,6 +209,69 @@ fn literal_mints(plan: &Value) -> Vec<String> {
     out
 }
 
+fn invalid(step: usize, code: &'static str) -> ApiError {
+    validation_error(ValidationError {
+        kind: Kind::Invalid,
+        step: Some(step),
+        code,
+    })
+}
+
+/// Checks that need server state, at creation rather than hours later at execution: UA of
+/// `withdraw_zec`, the fair-launch hold grid, the venue and pair of literal mints the pool knows
+/// (`tokens`), orders only on pump.fun curve tokens of the pool. DB only, no RPC.
+async fn server_checks(st: &AppState, steps: &[Value]) -> ApiResult<()> {
+    for (i, s) in steps.iter().enumerate() {
+        let b = &s["block"];
+        let ty = b["type"].as_str().unwrap_or("");
+        if ty == "withdraw_zec" && crate::actions::check_ua(st, b["to"].as_str().unwrap_or("")).is_err() {
+            return Err(invalid(i, "bad_address"));
+        }
+        if ty == "fl_bid" {
+            let ok = b["holdZat"]
+                .as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .is_some_and(|h| st.cfg.fair.hold_tiers_zat.contains(&h));
+            if !ok {
+                return Err(invalid(i, "bad_amount"));
+            }
+        }
+        if ty == "order_place"
+            && let Some(m) = b["order"]["mint"].as_str()
+        {
+            match st.ledger.order_mint_info(m).await? {
+                Some((v, status, ..)) if v == "pumpfun" && status == "curve" => {}
+                _ => return Err(invalid(i, "unsupported_mint")),
+            }
+        }
+        // (mint key, venue key, guard key) of the trade legs with a literal mint.
+        let legs: &[(&str, &str, &str)] = match ty {
+            "buy" | "sell" | "sell_all" | "dca" => &[("mint", "venue", "guard")],
+            "swap" => &[("from", "venueSell", "guardSell"), ("to", "venueBuy", "guardBuy")],
+            _ => &[],
+        };
+        for (mk, vk, gk) in legs {
+            let Some(m) = b[*mk].as_str() else { continue };
+            let Some((venue, quote)) = st.ledger.token_venue_quote(m).await? else {
+                continue;
+            };
+            if let Some(v) = b[*vk].as_str()
+                && v != venue
+                && v != "jupiter"
+            {
+                return Err(invalid(i, "bad_venue"));
+            }
+            if b.get(*gk).is_some()
+                && let Some(q) = quote
+                && st.cfg.quotes.by_mint(&q).is_none_or(|c| !c.is_zec())
+            {
+                return Err(invalid(i, "unsupported_pair"));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn validation_ctx(st: &AppState, plan: &Value) -> ApiResult<Ctx> {
     let venues = crate::venues_block(st)
         .as_array()
@@ -247,28 +306,7 @@ pub async fn submit(
             let ctx = validation_ctx(st, &plan).await?;
             let sum = validate::validate(&plan, &ctx).map_err(validation_error)?;
             let steps = plan["steps"].as_array().expect("validated");
-            if let Some(i) = steps
-                .iter()
-                .position(|s| !EXEC_BLOCKS.contains(&s["block"]["type"].as_str().unwrap_or("")))
-            {
-                return Err(validation_error(ValidationError {
-                    kind: Kind::BadRequest,
-                    step: Some(i),
-                    code: "feature_disabled",
-                }));
-            }
-            // Checks that need server state, at creation rather than hours later (review 14).
-            for (i, s) in steps.iter().enumerate() {
-                let b = &s["block"];
-                if b["type"] == "withdraw_zec" && crate::actions::check_ua(st, b["to"].as_str().unwrap_or("")).is_err()
-                {
-                    return Err(validation_error(ValidationError {
-                        kind: Kind::Invalid,
-                        step: Some(i),
-                        code: "bad_address",
-                    }));
-                }
-            }
+            server_checks(st, steps).await?;
             let replaces = replaces.as_deref().map(id16).transpose()?;
             let (echo, sealed_plain) = split_sealed(&plan);
             let key = st.cfg.scenarios.key.as_ref().ok_or_else(ApiError::internal)?;
@@ -365,10 +403,7 @@ pub fn scenario_json(v: &ScenarioView) -> Value {
 
 /// `PoolInfo.scenarios` (only when the flag is on).
 pub fn pool_block(st: &AppState) -> Value {
-    let blocks: Vec<&str> = validate::enabled_blocks(st.cfg.fair.enabled, st.cfg.chat.enabled)
-        .into_iter()
-        .filter(|b| EXEC_BLOCKS.contains(b))
-        .collect();
+    let blocks: Vec<&str> = validate::enabled_blocks(st.cfg.fair.enabled, st.cfg.chat.enabled);
     json!({
         "blocks": blocks,
         "maxSteps": validate::MAX_STEPS,

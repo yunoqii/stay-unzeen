@@ -2,11 +2,12 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.19** (13.10; миграция `0027_scenarios.sql`; сценарии за флагом `UNZEEN_SCENARIOS`: S2–S3 реализованы — create/start/cancel, `Portfolio.scenarios`, исполнитель блоков `manual_start`/`wait_*`/`buy`/`sell`/`sell_all`/`end`; остальные блоки — S4–S6, до тех пор `feature_disabled`). Изменения против v0.18:
+Статус: **v0.19** (13.10; миграция `0027_scenarios.sql`; сценарии за флагом `UNZEEN_SCENARIOS`, реализованы все блоки S2–S6: create/start/cancel, `Portfolio.scenarios`, исполнитель триггеров, ожиданий, сделок, ордеров, swap/dca/repeat, create/fl_*/claim/withdraw/chat; `fl_*` — только при `features.fairLaunch`, `chat` — при `features.chat`). Изменения против v0.18:
 - **Сценарии** (план из ≤ 12 блоков, одна подпись): раздел «Сценарии (v0.19)» ниже, спека `docs/analysis/scenarios.md`, решения владельца 13.10. Векторы валидации: `core/testdata/scenario-vectors.json` (фронт и core проверяют по одному файлу).
 - **`Portfolio` выравнивается до кратного 8192 байт** (было 4096) — для всех, со сценариями и без: размер ответа не выдаёт их наличие. Вступает вместе с S3.
 - **`pad` тела `POST /api/actions`**: до 16384 байт (было 8192), чтобы `scenario_create` дополнялся до 16 КиБ. Вступает вместе с S3.
 - Новые коды ошибок: `scenario_invalid` (400), `scenario_rule` (422), `scenario_limit` (422), `scenario_not_active` (409).
+- **Подготовка hood (ревью `review-numeric-hood.md`):** на сервере Solana токен-суммы (`amount`, `minOut`, сумма ордера на продажу) ограничены **u64** (SPL) → больше → `400 bad_request`; у hood-сервера — 38 цифр. Шаг округления суммы покупки D10 зависит от цепочки: 0.001 SOL на Solana, **0.0001 ETH** на hood. Снимок Verify с активом, который нельзя закоммитить (например, `0x…` ERC-20 до Verify v3), пропускается целиком (`skip_reason = unsupported_asset`), а не молча без этого актива.
 
 v0.18 (13.10; миграция `0026_amounts_numeric.sql`; RELAYER.md v12). Robinhood Chain, этап 0: всё на Solana работает как раньше, бекенд hood (сканер EVM, исполнение) — следующий шаг. Изменения против v0.17:
 - **Суммы токенов и quote больше не ограничены u64 / i64.** ERC-20 с 18 знаками и саплаем 1e9 = 1e27 базовых единиц, ETH в wei проходит i64 уже на 9,2 ETH. Сервер хранит их в `NUMERIC(78,0)`, считает в i128 и принимает/отдаёт **целыми десятичными строками до 38 цифр** (< 1e38): `SignedAction.amount` (sell, withdraw_token, ордера на продажу), `minOut` (buy), `holdings[].amount/held`, `FeedEvent.tokenAmount/solAmount`, `TokenTrade.*`, `ActionStatus.parts[].amount`, `fill.tokenAmount/solAmount/quoteAmount`, `claimable[].solAmount`, `CreatorToken.fees.*Lamports/volumeLamports/lock.lockedAmount/cap.*`, `FairBid.tokens`, `VerifySnapshot.vaults[].lamports`, `committedLamports`. **Фронт: никогда не `Number()`/`parseInt` для этих полей — только `BigInt`** (формат строк не изменился, на Solana значения те же). 39+ цифр, ведущие нули, знак → `400 bad_request`. Суммы в зат (`zecIn`, `minZecOut`, `withdraw_zec.amount`, ордер `limit_buy.amount`, `PoolInfo.*Zat`) — по-прежнему ≤ 2^63−1.
@@ -1069,14 +1070,18 @@ interface Scenario {                       // Portfolio.scenarios: ≤ 5, акт
 **Исполнений** (`maxRuns` 40): каждый торговый шаг, ордер, вывод, claim, create, fl_*, chat = 1; `swap` = 2; `dca` = `slices`; тело `repeat` × (`times` − 1) сверху; триггеры, ожидания, `check_safety`, `repeat`, `end`, `manual_start` = 0.
 
 **Ошибки валидации** (`details: { step?: number, code }`, `step` нет у ошибок плана целиком):
-- `scenario_invalid` (400): `bad_version`, `empty`, `too_many_steps`, `bad_field`, `bad_step_id`, `unknown_block`, `bad_ttl`, `bad_mint`, `bad_amount`, `bad_guard`, `bad_exec`, `bad_venue`, `bad_ref`, `bad_goto`, `bad_on_fail`, `bad_range`, `bad_repeat`, `too_many_runs`, `manual_start_not_first`, `deposit_twice`, `same_mint`, `bad_address`, `bad_meta`, `bad_text`;
+- `scenario_invalid` (400): `bad_version`, `empty`, `too_many_steps`, `bad_field`, `bad_step_id`, `unknown_block`, `bad_ttl`, `bad_mint`, `bad_amount`, `bad_guard`, `bad_exec`, `bad_venue`, `bad_ref`, `bad_goto`, `bad_on_fail`, `bad_range`, `bad_repeat`, `too_many_runs`, `manual_start_not_first`, `deposit_twice`, `same_mint`, `bad_address`, `bad_meta`, `bad_text`, `unsupported_pair` (ценовой guard на токен пары USDC/USD1 — у исполнителя нет единицы цены без чтения пула; литеральный mint — по `tokens.quote_mint`, свой запуск — по `create.quote`), `unsupported_mint` (`order_place` на литеральный mint, который не pump.fun-токен пула на кривой);
 - `scenario_rule` (422):
   - `now_not_first` (P1, решение лида 13.10): `exec:"now"` допустим **только у шага 1 плана, который начинается с `manual_start`** (сделка сразу после нажатия «старт»), и не внутри `repeat`. План без `manual_start` не может содержать Now. Повтор такого шага по `onFail: {retry}` исполняется как `delayed`;
   - `withdraw_too_soon` (P2): на **каждом пути** графа шагов (следующий шаг, `skip`, `goto` из `onFail`/`onFalse`, возврат `repeat`) от сделки по mint M до `withdraw_token` по M гарантированные ожидания в сумме ≥ 3600 с. Сделка по M — `buy`, `sell`, `sell_all`, `swap` (обе стороны), `dca`, `create` (свой mint), **`order_place` любого вида** (исполнение ордера публично). `{step: k}` шага `swap` = его `to`. Гарантированное ожидание: `wait_random.minSecs`, `wait_fixed.secs − max(30, 10 %)`; уход по `goto`/`repeat` ожидания шага не засчитывает; триггеры считаются за 0;
   - `unpriced_mint` (P8): `slippageBps`, `price_cross`, `curve_progress` только по mint с ценой тика пула; `{step: swap}` проверяется по его `to`; mint, созданный планом (`{step: create}`), допустим; `limitPrice` — для любого mint;
 - `bad_request` с `details.code = "feature_disabled"`: блок выключенной функции (`fl_*`, `chat`, `maxSniperPct`/`maxDevPct`) — ответ как на неизвестную операцию;
 - `scenario_limit` (422): > 3 активных планов ключа; `scenario_not_active` (409): `start`/`cancel` не из нужного статуса.
-- `dca` с `side: "buy"` и `total.abs`: каждый срез (с весом −20 %) ≥ `minActionZat`, иначе `bad_amount`.
+- **`scenario_cancel {all: true}`** отвечает `{ ids: string[], status: "cancelled" }` — поля `id` в этом ответе **нет** (в `ActionReceipt` для этого случая `id` необязателен).
+- **Коды ошибок шага** (`Scenario.error`, `steps[].error`): обычные коды действий (`insufficient_balance`, `below_minimum`, `slippage`, `pool_liquidity`, `venue_unavailable`, `graduated`, `creator_locked`, `creator_cap`, `order_limit`, `order_not_open`, `order_unsupported_mint`, `not_found`, `bad_request`, `rate_limited`, `chat_*`, `launch_*`, `already_bid`, …) и два новых: **`timeout`** (триггер не сработал за `timeoutSecs`) и **`check_failed`** (`check_safety` не прошёл, `onFalse: "stop"`). `own_result`, у которого объект закрылся «не так» (ждали `filled`, а ордер отменён), → `order_not_open`.
+- `dca` с `side: "buy"` и `total.abs`: каждый срез (с весом −20 %) ≥ `minActionZat`, иначе `bad_amount`. `buy.zec.abs`, `withdraw_zec.amount.abs`, `create.initialBuyZec.abs` < `minActionZat` → `bad_amount`.
+- **`repeat`**: в теле нельзя `manual_start`, `deposit_received`, `create`, `fl_*`, `repeat`, а также **`withdraw_token`, `withdraw_zec`, `chat`** (их запечатанные адрес/текст стираются после первого использования) → `bad_repeat`.
+- **Площадка литерального mint**: если пул знает токен (`tokens`), `venue` шага (`venueSell`/`venueBuy` у swap) должен совпадать с его площадкой (кроме `jupiter`), иначе `bad_venue`. `order_place.order.venue` — только `pumpfun`.
 - Сервер дополнительно проверяет **при создании** UA `withdraw_zec` (`check_ua` → `scenario_invalid` / `bad_address`) и (с S6) сетку `fl_bid.holdZat`; правила ордера, кап и лок создателя — при исполнении шага.
 - `details` у ошибок сценариев — объект `{ code, step? }` (у остальных кодов `details` по-прежнему строка).
 
@@ -1096,7 +1101,9 @@ interface Scenario {                       // Portfolio.scenarios: ≤ 5, акт
 11. P2 по всем путям графа (goto/skip/repeat), учитывает `order_place` и `{step: swap}`; P8 проверяет `{step: swap}` по его `to` (ревью `docs/analysis/review-numeric-hood.md` п. 1–5, 11).
 12. `dca` (buy, `abs`): минимальный срез проверяется при создании.
 
-**Этапы.** Блоки появляются в `PoolInfo.scenarios.blocks` по мере готовности исполнителя; блок, которого там нет, → `bad_request` / `feature_disabled` (как выключенная функция). Сейчас (S3): `manual_start`, `wait_fixed`, `wait_random`, `buy`, `sell`, `sell_all`, `end`. Дальше: S4 триггеры (`time_at`, `price_cross`, `deposit_received`, `own_result`, `curve_progress`, `check_safety`), S5 `order_place`/`order_cancel`/`swap`/`dca`/`repeat`, S6 `create`/`fl_*`/`claim`/`withdraw_*`/`chat`.
+**Блоки.** `PoolInfo.scenarios.blocks` — все блоки, кроме `fl_*` без `features.fairLaunch` и `chat` без `features.chat`; блок, которого там нет, → `bad_request` / `feature_disabled`.
+
+**Как исполняются (сервер):** триггеры опрашиваются раз в 20–40 с только по данным core (тик индексатора, снимок безопасности, реестр, часы), без RPC; `deposit_received` взводится на текущую сумму депозитов ключа и срабатывает на её рост; `check_safety` без свежего снимка (≤ 10 мин) ставит mint в общую очередь CA и ждёт до 3 тиков, затем без данных — `false`; `swap` = продажа → скрытая пауза 3–15 мин → покупка на 92–98 % выручки; `dca` — срезы с весами ±20 % и паузами `U(everySecs)`; `repeat` — `abs`-суммы итераций ±10 %; `withdraw_token` — ещё `U(0, 30 мин)` перед постановкой; `chat` после своей сделки по mint — всегда `slow` + 10–30 мин. Выход шага `create` — его mint и токены первой покупки; `claim` — зачисленные зат.
 
 ## Единицы сумм
 
@@ -1189,6 +1196,8 @@ type ErrorCode =
   | "scenario_rule"        // 422 (v0.19): план нарушает правило приватности P1/P2/P8; details = { step, code }
   | "scenario_limit"       // 422 (v0.19): > 3 активных планов ключа
   | "scenario_not_active"  // 409 (v0.19): scenario_start / scenario_cancel не из нужного статуса
+  | "timeout"              // v0.19: только в Scenario.error / steps[].error — триггер не сработал за timeoutSecs
+  | "check_failed"         // v0.19: только в Scenario.error / steps[].error — check_safety не прошёл
   | "internal";            // 500
 ```
 404 отдаётся и для mint, который сервис не отслеживает (даже если токен существует на Solana); исключения v0.5 — `GET /api/tokens/:mint` и `/safety`, они отвечают `202` и ставят mint в очередь индексатора. `message` — для разработчика, текст UI фронт берёт по `code`.

@@ -209,6 +209,23 @@ pub fn lamports_to_zat_ceil(lamports: u64, lamports_per_zec: u64) -> u64 {
 
 /// SOL amounts of buys are rounded to this step (0.001 SOL).
 pub const LAMPORTS_STEP: u64 = 1_000_000;
+/// Robinhood Chain: ETH amounts of buys are rounded to 0.0001 ETH (1e14 wei). A Solana-sized
+/// step (1e6) on wei would leave `zecIn × rate` almost exact on chain (review-numeric-hood п. 7).
+pub const WEI_STEP: u64 = 100_000_000_000_000;
+
+/// D10 rounding step of a buy's native quote amount on the pool's trading chain.
+pub const fn buy_step(trade: unzeen_protocol::TradeNet) -> u64 {
+    match trade {
+        unzeen_protocol::TradeNet::Solana(_) => LAMPORTS_STEP,
+        unzeen_protocol::TradeNet::Hood(_) => WEI_STEP,
+    }
+}
+
+/// zat × (native units per ZEC) / 1e8, ceil, in u128 (no saturation: wei amounts pass u64 at
+/// 18.4 ETH; review-numeric-hood п. 13).
+pub fn zat_to_units_ceil(zat: u64, units_per_zec: u64) -> u128 {
+    ((zat as u128) * (units_per_zec as u128)).div_ceil(100_000_000)
+}
 
 /// D10: the SOL amount of a buy must not reveal the ZEC amount the user typed (zecIn × rate is
 /// reversible). Shave a random 0–1 % and round DOWN to 0.001 SOL; the user is only charged

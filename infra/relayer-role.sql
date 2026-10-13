@@ -76,6 +76,9 @@ GRANT SELECT, INSERT, UPDATE ON pool_sol_inventory TO unzeen_relayer;
 GRANT SELECT ON pool_quotes TO unzeen_relayer;
 GRANT SELECT, INSERT, UPDATE ON pool_quote_inventory TO unzeen_relayer;
 
+-- Robinhood Chain relayer (0028, RELAYER v13): launches in flight (public-chain facts only).
+GRANT SELECT, INSERT, DELETE ON relayer_launches TO unzeen_relayer;
+
 -- Public market data.
 GRANT SELECT, INSERT, UPDATE ON tokens TO unzeen_relayer;
 GRANT SELECT, INSERT ON trades TO unzeen_relayer;

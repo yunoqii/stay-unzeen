@@ -32,6 +32,8 @@ const ETH: &[&str] = &["nep141:eth.omft.near", "nep141:hood.omft.near"];
 
 /// Refresh period of the cache (seconds).
 pub const REFRESH_SECS: f64 = 60.0;
+/// Largest `/v0/tokens` body accepted.
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// A snapshot older than this is not served (5 missed refreshes).
 pub const MAX_AGE_SECS: u64 = 300;
 
@@ -78,11 +80,22 @@ impl PublicRates {
     }
 
     async fn fetch(&self) -> Result<Snapshot, &'static str> {
-        let res = self.http.get(&self.url).send().await.map_err(|_| "transport")?;
+        let mut res = self.http.get(&self.url).send().await.map_err(|_| "transport")?;
         if !res.status().is_success() {
             return Err("http_status");
         }
-        let v: Value = res.json().await.map_err(|_| "decode")?;
+        // Bounded body (review п. 17): the list is ~60 KiB today; refuse anything above 2 MiB.
+        if res.content_length().is_some_and(|n| n > MAX_BODY_BYTES as u64) {
+            return Err("too_large");
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = res.chunk().await.map_err(|_| "transport")? {
+            if body.len() + chunk.len() > MAX_BODY_BYTES {
+                return Err("too_large");
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let v: Value = serde_json::from_slice(&body).map_err(|_| "decode")?;
         parse_tokens(&v, now_ms()).ok_or("missing_prices")
     }
 

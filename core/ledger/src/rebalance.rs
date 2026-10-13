@@ -156,26 +156,27 @@ impl Ledger {
     /// launch buys, plus the gas drops of token withdrawals.
     pub async fn committed_sol(&self, network: &str) -> Result<u64> {
         let c = self.pool.get().await?;
-        let v: i64 = c
+        // NUMERIC sum read as such (review п. 8: `::bigint` overflows on wei queues > 9.2 ETH).
+        let v: Num = c
             .query_one(
                 "SELECT COALESCE(sum(CASE WHEN op IN ('buy', 'create', 'fair_create') THEN COALESCE(lamports_in, 0)
                                           WHEN op = 'transfer' THEN COALESCE(gas_lamports, 0)
-                                          ELSE 0 END), 0)::bigint
+                                          ELSE 0 END), 0)
                  FROM relayer_jobs WHERE network = $1 AND status IN ('held', 'queued', 'claimed')",
                 &[&network],
             )
             .await?
             .get(0);
-        Ok(to_u64(v))
+        Ok(num_u64(v))
     }
 
     /// ZEC SPL units promised to queued ZEC-pair buys / launch buys (RELAYER v8: their
     /// `lamports_in` is in ZEC SPL units).
     pub async fn committed_zec_spl(&self, network: &str) -> Result<u64> {
         let c = self.pool.get().await?;
-        let v: i64 = c
+        let v: Num = c
             .query_one(
-                "SELECT COALESCE(sum(j.lamports_in), 0)::bigint FROM relayer_jobs j
+                "SELECT COALESCE(sum(j.lamports_in), 0) FROM relayer_jobs j
                  LEFT JOIN tokens t ON t.mint = j.mint
                  WHERE j.network = $1 AND j.status IN ('held', 'queued', 'claimed')
                    AND ((j.op = 'buy' AND t.quote_mint = $2) OR (j.op = 'create' AND j.meta->>'quote' = 'ZEC'))",
@@ -183,7 +184,7 @@ impl Ledger {
             )
             .await?
             .get(0);
-        Ok(to_u64(v))
+        Ok(num_u64(v))
     }
 
     /// Σ ZEC the pool owes its users (available + held of every balance; pending payouts are

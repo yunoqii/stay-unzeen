@@ -415,7 +415,9 @@ impl Ledger {
         for r in rows {
             let mint: String = r.get(0);
             if asset_bytes(&mint).is_none() {
-                continue;
+                // A liability that cannot be committed (e.g. a `0x…` ERC-20 before Verify v3) must
+                // never be dropped silently: skip the whole snapshot (review-numeric-hood п. 9).
+                return Ok(Err("unsupported_asset"));
             }
             let dec: i16 = r.get(1);
             let pk: Vec<u8> = r.get(2);
@@ -469,9 +471,9 @@ impl Ledger {
         let zcash_height = meta_u64(&tx, "reserve_height").await?.min(u32::MAX as u64) as u32;
         // E9: SOL of queued buys/creates stays an asset (its ZEC hold is the liability); only
         // the gas of queued withdrawals leaves the pool on top of liabilities.
-        let committed: i64 = tx
+        let committed: Num = tx
             .query_one(
-                "SELECT COALESCE(sum(COALESCE(gas_lamports, 0)), 0)::bigint
+                "SELECT COALESCE(sum(COALESCE(gas_lamports, 0)), 0)
                  FROM relayer_jobs WHERE network = $1 AND op = 'transfer' AND status IN ('queued', 'claimed', 'sent')",
                 &[&network],
             )
@@ -614,7 +616,7 @@ impl Ledger {
                 &to_i64(zec_reserve)?,
                 &(n as i32),
                 &digest.to_vec(),
-                &Num::from(committed),
+                &committed,
                 &rate,
                 &job,
                 &rate_buy,
@@ -959,8 +961,16 @@ impl Ledger {
     }
 }
 
-/// ed25519 check of the operator signature (base58) over the hex digest bytes.
+/// Operator signature over the hex digest bytes: ed25519 (base58 key and signature, Solana), or
+/// v0.18/RELAYER v13 on Robinhood Chain an EIP-191 secp256k1 signature (`0x` + 130 hex) by the
+/// attestation key whose address (`0x` + 40 hex) is the job's `vault`.
 fn detached_ok(pubkey_b58: &str, sig_b58: &str, memo_hex: &str) -> bool {
+    if pubkey_b58.starts_with("0x") {
+        let Some(msg) = hex::decode(memo_hex).ok().and_then(|v| <[u8; 32]>::try_from(v).ok()) else {
+            return false;
+        };
+        return unzeen_protocol::evm::verify_eip191(pubkey_b58, sig_b58, &msg);
+    }
     let Some(pk) = bs58::decode(pubkey_b58)
         .into_vec()
         .ok()

@@ -283,9 +283,23 @@ impl Ledger {
         request_hash: &[u8; 32],
         o: &NewOrder,
     ) -> Result<ActionReceipt> {
-        let (pk_s, nonce_s): (&[u8], &[u8]) = (pk, nonce);
         let mut c = self.pool.get().await?;
         let tx = c.transaction().await?;
+        let r = self.order_create_in(&tx, pk, nonce, request_hash, o).await?;
+        tx.commit().await?;
+        Ok(r)
+    }
+
+    /// [`Self::order_create`] inside a caller's transaction (scenario `order_place`).
+    pub async fn order_create_in<C: GenericClient>(
+        &self,
+        tx: &C,
+        pk: &[u8; 32],
+        nonce: &[u8; 16],
+        request_hash: &[u8; 32],
+        o: &NewOrder,
+    ) -> Result<ActionReceipt> {
+        let (pk_s, nonce_s): (&[u8], &[u8]) = (pk, nonce);
         let a = NewAction {
             kind: "order_create".into(),
             amount_zat: if o.is_buy() {
@@ -297,8 +311,8 @@ impl Ledger {
             gain: o.gain.map(|g| (o.mint.clone(), g)),
             ..NewAction::default()
         };
-        if is_replay(&tx, pk_s, nonce_s).await? {
-            let mut r = self.submit_in(&tx, pk, nonce, request_hash, &a).await?;
+        if is_replay(tx, pk_s, nonce_s).await? {
+            let mut r = self.submit_in(tx, pk, nonce, request_hash, &a).await?;
             let rid: &[u8] = &r.id;
             if let Some(row) = tx.query_opt("SELECT status FROM orders WHERE id = $1", &[&rid]).await? {
                 r.status = row.get(0);
@@ -323,7 +337,7 @@ impl Ledger {
         if per_key >= MAX_OPEN_PER_KEY || per_mint >= MAX_OPEN_PER_MINT {
             return Err(LedgerError::OrderLimit);
         }
-        let mut r = self.submit_in(&tx, pk, nonce, request_hash, &a).await?;
+        let mut r = self.submit_in(tx, pk, nonce, request_hash, &a).await?;
         let id: &[u8] = &r.id;
         tx.execute(
             "INSERT INTO orders (id, anon_pubkey, venue, mint, kind, trigger_price_sol, amount, slippage_bps, exec_mode,
@@ -350,7 +364,6 @@ impl Ledger {
             ],
         )
         .await?;
-        tx.commit().await?;
         r.status = "open".into();
         Ok(r)
     }
@@ -363,15 +376,29 @@ impl Ledger {
         request_hash: &[u8; 32],
         order_id: &[u8; 16],
     ) -> Result<ActionReceipt> {
-        let (pk_s, nonce_s, oid): (&[u8], &[u8], &[u8]) = (pk, nonce, order_id);
         let mut c = self.pool.get().await?;
         let tx = c.transaction().await?;
+        let r = self.order_cancel_in(&tx, pk, nonce, request_hash, order_id).await?;
+        tx.commit().await?;
+        Ok(r)
+    }
+
+    /// [`Self::order_cancel`] inside a caller's transaction (scenario `order_cancel`).
+    pub async fn order_cancel_in<C: GenericClient>(
+        &self,
+        tx: &C,
+        pk: &[u8; 32],
+        nonce: &[u8; 16],
+        request_hash: &[u8; 32],
+        order_id: &[u8; 16],
+    ) -> Result<ActionReceipt> {
+        let (pk_s, nonce_s, oid): (&[u8], &[u8], &[u8]) = (pk, nonce, order_id);
         let cancel = NewAction {
             kind: "order_cancel".into(),
             ..NewAction::default()
         };
-        if is_replay(&tx, pk_s, nonce_s).await? {
-            let mut r = self.submit_in(&tx, pk, nonce, request_hash, &cancel).await?;
+        if is_replay(tx, pk_s, nonce_s).await? {
+            let mut r = self.submit_in(tx, pk, nonce, request_hash, &cancel).await?;
             r.status = "cancelled".into();
             return Ok(r);
         }
@@ -387,15 +414,14 @@ impl Ledger {
         if o.get::<_, String>(0) != "open" {
             return Err(LedgerError::OrderNotOpen);
         }
-        let mut r = self.submit_in(&tx, pk, nonce, request_hash, &cancel).await?;
-        close_order(&tx, oid, "cancelled", None).await?;
+        let mut r = self.submit_in(tx, pk, nonce, request_hash, &cancel).await?;
+        close_order(tx, oid, "cancelled", None).await?;
         let rid: &[u8] = &r.id;
         tx.execute(
             "UPDATE actions SET status = 'executed', updated_at = now() WHERE id = $1",
             &[&rid],
         )
         .await?;
-        tx.commit().await?;
         r.status = "cancelled".into();
         Ok(r)
     }

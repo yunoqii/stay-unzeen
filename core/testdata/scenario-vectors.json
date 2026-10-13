@@ -2088,7 +2088,7 @@
    }
   },
   {
-   "name": "review 2: P2 across a repeat back-jump",
+   "name": "withdraw_* inside a repeat body (sealed address is used once)",
    "plan": {
     "v": 1,
     "steps": [
@@ -2155,89 +2155,9 @@
    },
    "expect": {
     "ok": false,
-    "error": "scenario_rule",
-    "step": 2,
-    "code": "withdraw_too_soon"
-   }
-  },
-  {
-   "name": "review 2: repeat body with its own wait",
-   "plan": {
-    "v": 1,
-    "steps": [
-     {
-      "id": 0,
-      "block": {
-       "type": "buy",
-       "venue": "pumpfun",
-       "mint": "So11111111111111111111111111111111111111112",
-       "zec": {
-        "abs": "1000000"
-       },
-       "guard": {
-        "slippageBps": 500
-       },
-       "exec": "delayed"
-      }
-     },
-     {
-      "id": 1,
-      "block": {
-       "type": "wait_random",
-       "minSecs": 7200,
-       "maxSecs": 9000
-      }
-     },
-     {
-      "id": 2,
-      "block": {
-       "type": "withdraw_token",
-       "mint": "So11111111111111111111111111111111111111112",
-       "amount": {
-        "abs": "5"
-       },
-       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
-       "exec": "max"
-      }
-     },
-     {
-      "id": 3,
-      "block": {
-       "type": "buy",
-       "venue": "pumpfun",
-       "mint": "So11111111111111111111111111111111111111112",
-       "zec": {
-        "abs": "1000000"
-       },
-       "guard": {
-        "slippageBps": 500
-       },
-       "exec": "delayed"
-      }
-     },
-     {
-      "id": 4,
-      "block": {
-       "type": "wait_random",
-       "minSecs": 3600,
-       "maxSecs": 4000
-      }
-     },
-     {
-      "id": 5,
-      "block": {
-       "type": "repeat",
-       "from": 2,
-       "times": 3
-      }
-     }
-    ],
-    "ttlSecs": 172800
-   },
-   "expect": {
-    "ok": true,
-    "runs": 7,
-    "ttlSecs": 172800
+    "error": "scenario_invalid",
+    "step": 4,
+    "code": "bad_repeat"
    }
   },
   {
@@ -2635,6 +2555,336 @@
     "error": "scenario_invalid",
     "step": 0,
     "code": "bad_amount"
+   }
+  },
+  {
+   "name": "review 2: trade in a repeat body then withdraw after it",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "repeat",
+       "from": 0,
+       "times": 2
+      }
+     },
+     {
+      "id": 3,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "abs": "5"
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_rule",
+    "step": 3,
+    "code": "withdraw_too_soon"
+   }
+  },
+  {
+   "name": "chat inside a repeat body",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "chat",
+       "mint": "So11111111111111111111111111111111111111112",
+       "text": "gm"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "repeat",
+       "from": 0,
+       "times": 2
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 2,
+    "code": "bad_repeat"
+   },
+   "ctx": {
+    "chat": true
+   }
+  },
+  {
+   "name": "buy below minActionZat",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "99999"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_amount"
+   }
+  },
+  {
+   "name": "withdraw_zec below minActionZat",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "withdraw_zec",
+       "to": "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+       "amount": {
+        "abs": "1000"
+       },
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_amount"
+   }
+  },
+  {
+   "name": "guard on an own USDC-pair launch",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "create",
+       "create": {
+        "venue": "pumpfun",
+        "meta": {
+         "name": "Test",
+         "symbol": "TST"
+        },
+        "quote": "USDC"
+       }
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "sell_all",
+       "venue": "pumpfun",
+       "mint": {
+        "step": 0
+       },
+       "guard": {
+        "limitPrice": "1"
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 2,
+    "code": "unsupported_pair"
+   }
+  },
+  {
+   "name": "slippage guard on an own ZEC-pair launch (no tick)",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "create",
+       "create": {
+        "venue": "pumpfun",
+        "meta": {
+         "name": "Test",
+         "symbol": "TST"
+        },
+        "quote": "ZEC"
+       }
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "sell_all",
+       "venue": "pumpfun",
+       "mint": {
+        "step": 0
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_rule",
+    "step": 2,
+    "code": "unpriced_mint"
+   }
+  },
+  {
+   "name": "limit guard on an own ZEC-pair launch",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "create",
+       "create": {
+        "venue": "pumpfun",
+        "meta": {
+         "name": "Test",
+         "symbol": "TST"
+        },
+        "quote": "ZEC"
+       }
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "sell_all",
+       "venue": "pumpfun",
+       "mint": {
+        "step": 0
+       },
+       "guard": {
+        "limitPrice": "0.0001"
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 2,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "order on another venue",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "order_place",
+       "order": {
+        "kind": "limit_sell",
+        "venue": "meteora-dbc",
+        "mint": "So11111111111111111111111111111111111111112",
+        "amount": {
+         "abs": "5"
+        },
+        "triggerPriceSol": "0.1"
+       }
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_venue"
    }
   }
  ]

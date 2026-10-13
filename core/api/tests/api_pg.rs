@@ -4482,8 +4482,14 @@ async fn public_rates_and_hood_venue() {
     let r = e.signed(&user(1), "POST", "/api/actions", &body).await;
     assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{:?}", r.body);
     assert_eq!(r.body["error"]["code"], "venue_unavailable");
-    // A 1e27 sell on a Solana venue parses (u128) and fails only on the balance.
+    // A Solana server caps token amounts at u64 (SPL); 1e27 is refused on input.
     let body = json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":"1000000000000000000000000000",
+                      "minZecOut":"200000","exec":"delayed"})
+    .to_string();
+    let r = e.signed(&user(1), "POST", "/api/actions", &body).await;
+    assert_eq!(r.body["error"]["code"], "bad_request", "{:?}", r.body);
+    // u64::MAX still parses (u128 path) and fails only on the balance.
+    let body = json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":u64::MAX.to_string(),
                       "minZecOut":"200000","exec":"delayed"})
     .to_string();
     let r = e.signed(&user(1), "POST", "/api/actions", &body).await;
@@ -4746,8 +4752,8 @@ mod scenarios_v019 {
         assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(r.body["error"]["code"], "scenario_rule");
         assert_eq!(r.body["error"]["details"], json!({"code":"now_not_first","step":1}));
-        // A block of a later stage is not offered yet: like a disabled feature.
-        let later = json!({"v":1,"steps":[{"id":0,"block":{"type":"claim"}}]});
+        // A block of a disabled feature (chat is off here) answers like an unknown op.
+        let later = json!({"v":1,"steps":[{"id":0,"block":{"type":"chat","mint":MINT,"text":"gm"}}]});
         let r = e
             .signed(
                 &user(9),
@@ -4864,5 +4870,417 @@ mod scenarios_v019 {
         assert_eq!(sc["id"], id);
         assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.scenario_sealed")).await, 0);
         e.drop_schema().await;
+    }
+
+    async fn wait_sql(e: &Env, q: &str) {
+        for _ in 0..100 {
+            if e.one_i64(q).await >= 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("condition not reached: {q}");
+    }
+
+    /// Wait for `n` jobs of `op`, skipping floors / waits on the way (P2/P9 add random delays).
+    async fn wait_jobs_skipping(e: &Env, op: &str, n: i64) {
+        let s = &e.schema;
+        for _ in 0..100 {
+            skip_timers(e).await;
+            if e.one_i64(&format!("SELECT count(*) FROM {s}.relayer_jobs WHERE op = '{op}'"))
+                .await
+                >= n
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("no {op} job");
+    }
+
+    async fn create_plan(e: &Env, n: u8, plan: Value) -> String {
+        let r = e
+            .signed(
+                &user(n),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_create","plan":plan})),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        r.body["id"].as_str().unwrap().to_string()
+    }
+
+    /// Skip the current timer of every plan (waits, floors, polls).
+    async fn skip_timers(e: &Env) {
+        e.sql(&format!(
+            "UPDATE {}.scenarios SET next_at = now() WHERE next_at IS NOT NULL",
+            e.schema
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn s4_deposit_trigger_feeds_a_buy() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.token_with_tick().await;
+        e.fund(11, 0, 1_000_000).await;
+        let plan = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"deposit_received","minZat":"20000000"}},
+            {"id":1,"block":{"type":"buy","venue":"pumpfun","mint":MINT,"zec":{"pct":50,"of":{"step":0}},
+                             "guard":{"limitPrice":"0.00001"},"exec":"delayed"}},
+            {"id":2,"block":{"type":"end"}}]});
+        create_plan(&e, 11, plan).await;
+        // Armed on the deposits total before the new deposit (old balance does not count).
+        wait_sql(
+            &e,
+            &format!("SELECT count(*) FROM {s}.scenarios WHERE state->'sub' ? 'base'"),
+        )
+        .await;
+        e.fund(11, 1, 30_000_000).await;
+        skip_timers(&e).await;
+        // P3: fired → waiting 10–40 min (phase waiting), nothing traded yet.
+        wait_sql(
+            &e,
+            &format!("SELECT count(*) FROM {s}.scenarios WHERE phase = 'waiting' AND cursor = 0"),
+        )
+        .await;
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.relayer_jobs")).await, 0);
+        skip_timers(&e).await;
+        e.wait_jobs("buy", 1).await;
+        // 50 % of the 0.3 ZEC deposit (the earlier 0.01 ZEC is not the trigger's output).
+        let hold = e
+            .one_i64(&format!("SELECT hold_zat FROM {s}.actions WHERE kind = 'buy'"))
+            .await;
+        assert!((14_000_000..=15_000_000).contains(&hold), "{hold}");
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn s4_s5_order_place_cancel_own_result_and_time() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.token_with_tick().await;
+        e.fund(12, 0, 10_000_000).await;
+        let pk = hex::encode(user(12).verifying_key().to_bytes());
+        e.sql(&format!(
+            "INSERT INTO {s}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{pk}', '{MINT}', 5000000000)"
+        ))
+        .await;
+        let at = (now_ms() / 60_000 + 5) * 60_000;
+        let plan = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"time_at","at":at}},
+            {"id":1,"block":{"type":"order_place","order":{"kind":"limit_sell","venue":"pumpfun","mint":MINT,
+                             "amount":{"pct":40,"of":"balance"},"triggerPriceSol":"0.001"}}},
+            {"id":2,"block":{"type":"order_cancel","ref":{"step":1}}},
+            {"id":3,"block":{"type":"own_result","ref":{"step":1},"on":"failed"}},
+            {"id":4,"block":{"type":"end"}}]});
+        create_plan(&e, 12, plan).await;
+        // time_at: waiting until `at` + U(0, 10 min).
+        wait_sql(
+            &e,
+            &format!(
+                "SELECT count(*) FROM {s}.scenarios WHERE phase = 'waiting' AND next_at > now() + interval '4 minutes'"
+            ),
+        )
+        .await;
+        skip_timers(&e).await;
+        let sc = e.wait_scenario(12, |x| x["status"] == "done").await;
+        let oid = sc["steps"][1]["orderId"].as_str().unwrap().to_string();
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.orders WHERE id = '\\x{oid}' AND status = 'cancelled'"
+            ))
+            .await,
+            1
+        );
+        // The order's token hold went back.
+        let pf = e.signed(&user(12), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(
+            (pf["holdings"][0]["amount"].as_str(), pf["holdings"][0]["held"].as_str()),
+            (Some("5000000000"), Some("0"))
+        );
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn s5_swap_dca_repeat() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.token_with_tick().await;
+        let now = now_ms();
+        e.sql(&format!(
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol)
+             VALUES ('{MINT2}', 'pumpfun', 'B', 'B', 6, 0.000002, 1000);
+             INSERT INTO {s}.intel_prices (mint, price_sol, status, tick_at) VALUES ('{MINT2}', 0.000002, 'curve', {now})"
+        ))
+        .await;
+        e.fund(13, 0, 100_000_000).await;
+        let pk = hex::encode(user(13).verifying_key().to_bytes());
+        e.sql(&format!(
+            "INSERT INTO {s}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{pk}', '{MINT}', 90000000000)"
+        ))
+        .await;
+        let plan = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"swap","from":MINT,"to":MINT2,"amount":{"abs":"90000000000"},
+                             "guardSell":{"slippageBps":1500},"guardBuy":{"slippageBps":500},"exec":"delayed"}},
+            {"id":1,"block":{"type":"dca","side":"buy","venue":"pumpfun","mint":{"step":0},"total":{"abs":"4000000"},
+                             "slices":2,"everySecs":{"min":600,"max":900},"guard":{"slippageBps":500},"exec":"delayed"}},
+            {"id":2,"block":{"type":"end"}}]});
+        create_plan(&e, 13, plan).await;
+        // Swap: sell leg, then a hidden pause, then the buy leg (spending 92–98 % of the proceeds).
+        e.wait_jobs("sell", 1).await;
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SW1', out_token_amount = token_amount,
+                    out_lamports = 500000000 WHERE op = 'sell'"
+        ))
+        .await;
+        wait_sql(
+            &e,
+            &format!("SELECT count(*) FROM {s}.scenarios WHERE phase = 'waiting' AND state->'sub'->>'leg' = 'buy'"),
+        )
+        .await;
+        skip_timers(&e).await;
+        e.wait_jobs("buy", 1).await;
+        let proceeds = e
+            .one_i64(&format!("SELECT amount_zat FROM {s}.actions WHERE kind = 'sell'"))
+            .await;
+        let _ = proceeds;
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SW2', out_token_amount = 7000000000,
+                    out_lamports = lamports_in WHERE op = 'buy'"
+        ))
+        .await;
+        // DCA on the swap's `to` (MINT2): two slices with a wait in between (P9 gap first).
+        wait_jobs_skipping(&e, "buy", 2).await;
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'D' || id, out_token_amount = 1000,
+                    out_lamports = lamports_in WHERE op = 'buy' AND status = 'queued'"
+        ))
+        .await;
+        wait_jobs_skipping(&e, "buy", 3).await;
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'buy' AND mint = '{MINT2}'"
+            ))
+            .await,
+            3
+        );
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'D' || id, out_token_amount = 1000,
+                    out_lamports = lamports_in WHERE op = 'buy' AND status = 'queued'"
+        ))
+        .await;
+        let sc = e.wait_scenario(13, |x| x["status"] == "done").await;
+        assert_eq!(sc["steps"][1]["runs"], 2, "{sc:?}");
+        // Repeat: abs buys twice.
+        let plan = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"buy","venue":"pumpfun","mint":MINT,"zec":{"abs":"2000000"},
+                             "guard":{"slippageBps":500},"exec":"delayed"}},
+            {"id":1,"block":{"type":"wait_random","minSecs":60,"maxSecs":120}},
+            {"id":2,"block":{"type":"repeat","from":0,"times":2}}]});
+        create_plan(&e, 13, plan).await;
+        for round in 0..2 {
+            wait_sql(
+                &e,
+                &format!(
+                    "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'buy' AND mint = '{MINT}' AND status = 'queued'"
+                ),
+            )
+            .await;
+            e.sql(&format!(
+                "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'R' || id, out_token_amount = 1000,
+                        out_lamports = lamports_in WHERE op = 'buy' AND status = 'queued'"
+            ))
+            .await;
+            wait_sql(
+                &e,
+                &format!("SELECT count(*) FROM {s}.scenarios WHERE status = 'active' AND phase = 'waiting'"),
+            )
+            .await;
+            skip_timers(&e).await;
+            let _ = round;
+        }
+        let sc = e.wait_scenario(13, |x| x["status"] == "done").await;
+        assert_eq!(sc["status"], "done");
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'buy' AND mint = '{MINT}'"
+            ))
+            .await,
+            2
+        );
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn s6_sealed_withdrawal_claim_and_safety() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.token_with_tick().await;
+        e.fund(14, 0, 10_000_000).await;
+        let pk = hex::encode(user(14).verifying_key().to_bytes());
+        e.sql(&format!(
+            "INSERT INTO {s}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{pk}', '{MINT}', 5000000000);
+             INSERT INTO {s}.creator_tokens (mint, anon_pubkey) VALUES ('{MINT2}', '\\x{pk}');
+             INSERT INTO {s}.creator_claimable (anon_pubkey, mint, lamports) VALUES ('\\x{pk}', '{MINT2}', 50000000);
+             INSERT INTO {s}.token_safety (mint, as_of, data) VALUES ('{MINT}', date_trunc('minute', now()),
+               '{{\"authorities\":{{\"mintRevoked\":true,\"freezeRevoked\":true,\"riskyExtensions\":[]}},\"market\":{{\"status\":\"curve\"}}}}')"
+        ))
+        .await;
+        let dest = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
+        let plan = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"check_safety","mint":MINT,"require":{"authoritiesRevoked":true,"noRiskyExtensions":true},"onFalse":"stop"}},
+            {"id":1,"block":{"type":"claim","mint":MINT2}},
+            {"id":2,"block":{"type":"wait_random","minSecs":3600,"maxSecs":7200}},
+            {"id":3,"block":{"type":"withdraw_token","mint":MINT,"amount":{"pct":100,"of":"balance"},"to":dest,"exec":"max"}}]});
+        create_plan(&e, 14, plan).await;
+        // The address is sealed (masked echo), the plain one is nowhere in the plan row.
+        let sc = e.scenario(14).await;
+        assert_eq!(sc["plan"]["steps"][3]["block"]["to"], "4Nd1…DB4T");
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.scenarios WHERE plan::text LIKE '%{dest}%'"
+            ))
+            .await,
+            0
+        );
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.scenario_sealed")).await, 1);
+        // Safety passes, claim credits 0.05 SOL at 10 SOL/ZEC = 0.005 ZEC, then the wait.
+        wait_sql(
+            &e,
+            &format!("SELECT count(*) FROM {s}.scenarios WHERE phase = 'waiting' AND cursor = 2"),
+        )
+        .await;
+        let pf = e.signed(&user(14), "GET", "/api/portfolio", "").await.body;
+        assert_eq!(pf["zecBalance"], "10500000");
+        wait_jobs_skipping(&e, "transfer", 1).await;
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'transfer' AND dest = '{dest}'"
+            ))
+            .await,
+            1
+        );
+        // Used once → the sealed blob is gone in the same transaction.
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.scenario_sealed")).await, 0);
+        // A failing safety check stops the plan with `check_failed`.
+        e.sql(&format!(
+            "UPDATE {s}.token_safety SET data = jsonb_set(data, '{{authorities,mintRevoked}}', 'false')"
+        ))
+        .await;
+        let plan = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"check_safety","mint":MINT,"require":{"authoritiesRevoked":true},"onFalse":"stop"}},
+            {"id":1,"block":{"type":"end"}}]});
+        let id2 = create_plan(&e, 14, plan).await;
+        wait_sql(
+            &e,
+            &format!("SELECT count(*) FROM {s}.scenarios WHERE id = '\\x{id2}' AND status = 'failed'"),
+        )
+        .await;
+        let pf = e.signed(&user(14), "GET", "/api/portfolio", "").await.body;
+        let sc = pf["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == id2.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(sc["error"], "check_failed");
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn s7_cancel_while_in_flight_and_flag_off() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.token_with_tick().await;
+        e.fund(15, 0, 50_000_000).await;
+        let plan = json!({"v":1,"steps":[
+            {"id":0,"block":{"type":"buy","venue":"pumpfun","mint":MINT,"zec":{"abs":"10000000"},
+                             "guard":{"slippageBps":500},"exec":"delayed"}},
+            {"id":1,"block":{"type":"wait_random","minSecs":60,"maxSecs":120}},
+            {"id":2,"block":{"type":"sell_all","venue":"pumpfun","mint":MINT,"guard":{"slippageBps":1500},"exec":"delayed"}}]});
+        let id = create_plan(&e, 15, plan).await;
+        e.wait_jobs("buy", 1).await;
+        // Cancel while the buy is queued: the buy is not recalled (like a fired order), the plan stops.
+        let r = e
+            .signed(
+                &user(15),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_cancel","id":id})),
+            )
+            .await;
+        assert_eq!(r.body["status"], "cancelled", "{:?}", r.body);
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'C1', out_token_amount = 1000,
+                    out_lamports = lamports_in WHERE op = 'buy'"
+        ))
+        .await;
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert_eq!(
+            e.one_i64(&format!("SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'sell'"))
+                .await,
+            0
+        );
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs WHERE settled_at IS NOT NULL"
+            ))
+            .await,
+            1
+        );
+        // Executor pass over a closed plan does nothing.
+        let rep = unzeen_api::scenarios::exec::pass(&e.state).await;
+        assert_eq!((rep.fired, rep.failed), (0, 0));
+        e.drop_schema().await;
+
+        // Flag off: ops answer like unknown ops, nothing in PoolInfo / Portfolio.
+        let Some(e) = setup_with(|c| c.scenarios = Default::default()).await else {
+            return;
+        };
+        e.ledger.set_pool_meta("network", "test").await.unwrap();
+        e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+        let r = e
+            .signed(
+                &user(1),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_cancel","all":true})),
+            )
+            .await;
+        assert_eq!(
+            (r.status, r.body["error"]["message"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid action body"))
+        );
+        let p = e.get("/api/pool").await.body;
+        assert!(p.get("scenarios").is_none() && p["features"].get("scenarios").is_none());
+        let pf = e.signed(&user(1), "GET", "/api/portfolio", "").await;
+        assert!(pf.body.get("scenarios").is_none());
+        assert_eq!(pf.raw_len % 8192, 0, "same 8 KiB bucket without the feature");
+        e.drop_schema().await;
+    }
+
+    /// S7: the executor never talks to the network — no HTTP client, no RPC, no 1Click call
+    /// (rates come only from the background cache, prices from the indexer's tables).
+    #[test]
+    fn executor_makes_no_network_requests() {
+        let src = include_str!("../src/scenarios/exec.rs");
+        for banned in [
+            "reqwest",
+            "http::",
+            ".refresh(",
+            "fetch",
+            "tonic",
+            "TcpStream",
+            "rpc_url",
+            "connect(",
+        ] {
+            assert!(!src.contains(banned), "executor must not use {banned}");
+        }
+        let ops = include_str!("../src/scenarios/ops.rs");
+        assert!(!ops.contains("reqwest") && !ops.contains(".refresh("));
     }
 }

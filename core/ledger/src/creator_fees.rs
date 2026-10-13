@@ -13,6 +13,7 @@
 //! belongs to the pool. Settlement records it in `creator_tokens.launch_fee_lamports`
 //! ([`launch_creator_fee`]); crediting withholds it from the first sweeps of the mint.
 
+use deadpool_postgres::GenericClient;
 use serde_json::json;
 
 use crate::{
@@ -188,15 +189,30 @@ impl Ledger {
         mint: Option<&str>,
         rate: &RateUsed,
     ) -> Result<ActionReceipt> {
-        let pk_s: &[u8] = pk;
         let mut c = self.pool.get().await?;
         let tx = c.transaction().await?;
+        let r = self.claim_in(&tx, pk, nonce, request_hash, mint, rate).await?;
+        tx.commit().await?;
+        Ok(r)
+    }
+
+    /// [`Self::claim`] inside a caller's transaction (scenario `claim`).
+    pub async fn claim_in<C: GenericClient>(
+        &self,
+        tx: &C,
+        pk: &[u8; 32],
+        nonce: &[u8; 16],
+        request_hash: &[u8; 32],
+        mint: Option<&str>,
+        rate: &RateUsed,
+    ) -> Result<ActionReceipt> {
+        let pk_s: &[u8] = pk;
         let a = NewAction {
             kind: "claim".into(),
             rate: Some(rate.clone()),
             ..NewAction::default()
         };
-        let mut receipt = self.submit_in(&tx, pk, nonce, request_hash, &a).await?;
+        let mut receipt = self.submit_in(tx, pk, nonce, request_hash, &a).await?;
         if receipt.replayed {
             return Ok(receipt);
         }
@@ -236,7 +252,7 @@ impl Ledger {
         )
         .await?;
         let aid: &[u8] = &receipt.id;
-        journal(&tx, pk_s, "fee_credit", z, 0, None, Some(aid)).await?;
+        journal(tx, pk_s, "fee_credit", z, 0, None, Some(aid)).await?;
         let fill = json!({
             "solAmount": lamports.to_string(),
             "zecCredited": zat.to_string(),
@@ -248,7 +264,6 @@ impl Ledger {
             &[&aid, &z, &fill],
         )
         .await?;
-        tx.commit().await?;
         receipt.status = "executed".into();
         Ok(receipt)
     }

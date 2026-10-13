@@ -12,7 +12,7 @@ use zcash_address::unified::{self, Container, Encoding};
 use crate::{
     AppState,
     error::{ApiError, ApiResult},
-    rate::{self, apply_spread, lamports_to_zat_ceil, zat_to_lamports, zat_to_lamports_ceil},
+    rate::{self, apply_spread, lamports_to_zat_ceil, zat_to_lamports},
 };
 
 #[derive(Debug, Deserialize)]
@@ -162,6 +162,21 @@ pub fn parse_token_amount(s: &str, field: &str) -> ApiResult<u128> {
         && (s == "0" || !s.starts_with('0'));
     (if ok { s.parse::<u128>().ok() } else { None })
         .ok_or_else(|| ApiError::bad_request(format!("{field}: expected an integer string in base units")))
+}
+
+/// Largest token amount this server's chain can move: SPL amounts are u64 on Solana
+/// (review п. 12: a larger minOut only produced a doomed job and a refund); 38 digits on hood.
+pub fn token_cap(st: &AppState, v: u128, field: &str) -> ApiResult<u128> {
+    let cap = match st.cfg.policy.chain.trade {
+        unzeen_protocol::TradeNet::Solana(_) => u128::from(u64::MAX),
+        unzeen_protocol::TradeNet::Hood(_) => 10u128.pow(38) - 1,
+    };
+    if v > cap {
+        return Err(ApiError::bad_request(format!(
+            "{field}: above the token amount limit of this chain"
+        )));
+    }
+    Ok(v)
 }
 
 fn positive_tokens(s: &str, field: &str) -> ApiResult<u128> {
@@ -495,9 +510,21 @@ pub fn fuzzed_buy_step(
             "zecIn too small (buys are rounded down to 0.001 SOL / 0.0001 ZEC)",
         ));
     }
-    // minOut (token base units, u128) scaled by lamports/full ≤ 1: no overflow below 3.4e38/1.8e19.
-    let min_out = min_out.saturating_mul(lamports as u128) / (full.max(1) as u128);
+    // minOut × lamports / full, exact for any u128 minOut (review-numeric-hood п. 6: a 1e27 minOut
+    // times wei would saturate a plain product and silently drop the slippage guard).
+    let min_out = mul_div(min_out, lamports as u128, full.max(1) as u128);
     Ok((zat, lamports, min_out))
+}
+
+/// `a × b / d` (floor) without overflow for `b ≤ d` (a ratio ≤ 1): `(a / d) · b + (a % d) · b / d`,
+/// where `(a % d) · b < d · b ≤ d²`; `d < 2^64` keeps that below `u128::MAX`. Saturates otherwise.
+pub fn mul_div(a: u128, b: u128, d: u128) -> u128 {
+    if d == 0 {
+        return 0;
+    }
+    let (q, r) = (a / d, a % d);
+    q.saturating_mul(b)
+        .saturating_add(r.checked_mul(b).map_or(u128::MAX, |x| x / d))
 }
 
 pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<NewAction> {
@@ -560,7 +587,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             let v = venue(st, &v)?;
             let mint = solana_address(&mint, "mint")?;
             let zec_in = positive(&zec_in, "zecIn")?;
-            let min_out = parse_token_amount(&min_out, "minOut")?;
+            let min_out = token_cap(st, parse_token_amount(&min_out, "minOut")?, "minOut")?;
             if zec_in < min_action {
                 return Err(ApiError::below_minimum("zecIn below PoolInfo.minActionZat"));
             }
@@ -601,7 +628,13 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             let known = known.map(|t| (t.price_sol, t.decimals));
             let r = rate(st).await?;
             let applied = apply_spread(r.lamports_per_zec, spread(&r), true);
-            let (amount_zat, lamports, min_out) = fuzzed_buy(zec_in, min_out, applied, min_action)?;
+            let (amount_zat, lamports, min_out) = fuzzed_buy_step(
+                zec_in,
+                min_out,
+                applied,
+                min_action,
+                rate::buy_step(st.cfg.policy.chain.trade),
+            )?;
             // Creator cap (v0.5): upper-bound token estimate; the ledger applies it only if
             // this key created the mint.
             let spot = known.and_then(|(p, d)| {
@@ -638,7 +671,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
         } => {
             let v = venue(st, &v)?;
             let mint = solana_address(&mint, "mint")?;
-            let amount = positive_tokens(&amount, "amount")?;
+            let amount = token_cap(st, positive_tokens(&amount, "amount")?, "amount")?;
             let min_zec_out = parse_amount(&min_zec_out, "minZecOut")?;
             // A6: a sell that mirrors this key's public buy (±1 %) is shaved 0.5–2 % and
             // rounded to 3 significant digits (the rest stays available); minZecOut shrinks in
@@ -684,7 +717,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                         venue: Some(v),
                         mint: Some(mint),
                         token_amount: Some(amount),
-                        min_out: Some(zat_to_lamports_ceil(min_zec_out, applied).into()),
+                        min_out: Some(rate::zat_to_units_ceil(min_zec_out, applied)),
                         ..job(JobOp::Sell, mode, epoch(mode))
                     }],
                     ..base("sell")
@@ -711,7 +744,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                     venue: Some(v),
                     mint: Some(mint),
                     token_amount: Some(amount),
-                    min_out: Some(zat_to_lamports_ceil(min_zec_out, applied).into()),
+                    min_out: Some(rate::zat_to_units_ceil(min_zec_out, applied)),
                     ..job(JobOp::Sell, mode, epoch(mode))
                 }],
                 ..base("sell")
@@ -803,7 +836,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 let step = if zec.is_some() {
                     ZEC_UNITS_STEP
                 } else {
-                    rate::LAMPORTS_STEP
+                    rate::buy_step(st.cfg.policy.chain.trade)
                 };
                 if full - full % step > max {
                     return Err(ApiError::creator_cap());
@@ -812,7 +845,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             let step = if zec.is_some() {
                 ZEC_UNITS_STEP
             } else {
-                rate::LAMPORTS_STEP
+                rate::buy_step(st.cfg.policy.chain.trade)
             };
             let (amount_zat, lamports, _) = if initial > 0 {
                 fuzzed_buy_step(initial, 0, applied, min_action, step)?
@@ -896,7 +929,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
         } => {
             no_now(mode)?;
             let mint = solana_address(&mint, "mint")?;
-            let amount = positive_tokens(&amount, "amount")?;
+            let amount = token_cap(st, positive_tokens(&amount, "amount")?, "amount")?;
             let dests: Vec<String> = match to {
                 To::One(s) => vec![s],
                 To::Many(v) => v,
@@ -978,6 +1011,17 @@ mod tests {
         for bad in ["", "01", "-1", "+1", "1.0", " 1", "1e5", "9223372036854775808", "abc"] {
             assert!(parse_amount(bad, "x").is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn mul_div_is_exact_at_1e27() {
+        // 1e27 minOut, 0.0999 ETH spent of 0.1 ETH (wei): 9.99e26 exactly.
+        let (m, l, f) = (10u128.pow(27), 99_900_000_000_000_000u128, 100_000_000_000_000_000u128);
+        assert_eq!(mul_div(m, l, f), 999_000_000_000_000_000_000_000_000);
+        assert!(m.checked_mul(l).is_none(), "the plain product overflows");
+        assert_eq!(mul_div(7, 3, 2), 10);
+        assert_eq!(mul_div(u128::MAX, 1, 1), u128::MAX);
+        assert_eq!(mul_div(5, 1, 0), 0);
     }
 
     #[test]
