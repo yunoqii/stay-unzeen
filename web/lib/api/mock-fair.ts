@@ -51,6 +51,8 @@ const MAX_TOTAL: Record<Network, bigint> = { mainnet: BigInt(7_500_000_000), dev
 /** The demo's "Delayed epoch" before a new launch shows up publicly (core: 30-60 s). */
 const PUBLISH_MS: [number, number] = [5_000, 10_000];
 const ATTEST_MS = 4_000;
+/** v0.8: at most 1024 bids per launch (commitment tree of depth 10). */
+export const MAX_BIDS = 1024;
 const REVEAL_MS = 2_000;
 const EXECUTE_MS = 3_500;
 export const ATTESTATION_SIGNER = "UnzAttest1111111111111111111111111111111111";
@@ -258,7 +260,16 @@ export function createFairMock(host: FairHost): FairMock {
       if (now < l.pub.publishedAt) continue;
       if (s === "open" && now >= l.pub.closeAt) close(l);
       if (l.pub.status === "closed" && l.pub.commitment && !l.pub.commitment.attestation && now >= l.pub.closeAt + ATTEST_MS) {
-        l.pub.commitment.attestation = { solanaTx: host.b58(88), slot: 380_000_000 + Math.floor((l.pub.closeAt / 400) % 10_000_000), signer: ATTESTATION_SIGNER, matches: true };
+        const blockTime = Math.floor(now / 1000);
+        l.pub.commitment.attestation = {
+          solanaTx: host.b58(88),
+          slot: 380_000_000 + Math.floor((l.pub.closeAt / 400) % 10_000_000),
+          signer: ATTESTATION_SIGNER,
+          matches: true,
+          // v0.8: block time of the memo-tx and whether it landed before the round (2 s margin).
+          blockTime,
+          beforeRound: blockTime * 1000 + 2000 < l.pub.drand.roundTime,
+        };
       }
       const minAction = BigInt(host.pool(l.network).minActionZat);
       if (l.pub.status === "closed" && now >= l.pub.drand.roundTime) reveal(l, minAction);
@@ -321,6 +332,8 @@ export function createFairMock(host: FairHost): FairMock {
         const l = own(network, action.launchId);
         if (l.pub.publishedAt > now) throw new ApiError("not_found", "launch not published", 404);
         if (l.pub.status !== "open" || now >= l.pub.closeAt) throw new ApiError("launch_closed", "window closed", 409);
+        // v0.8: the commitment tree has a fixed depth of 10 (1024 leaves).
+        if (l.bids.filter((b) => b.status === "sealed").length >= MAX_BIDS) throw new ApiError("launch_full", "1024 bids already", 409);
         const hold = big(action.holdZat, "holdZat");
         if (!TIERS[network].includes(action.holdZat)) throw new ApiError("bad_request", "holdZat is not a tier", 400);
         const head = parseTlockArmor(action.ciphertext);

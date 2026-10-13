@@ -23,6 +23,8 @@ export const LEAF_TAG = enc.encode("unzeen/verify/v1/leaf");
 export const NODE_TAG = enc.encode("unzeen/verify/v1/node");
 export const SNAPSHOT_TAG = enc.encode("unzeen/verify/v1/snapshot");
 export const ZEC_ASSET = new Uint8Array(32);
+/** v0.8: creator fees owed (lamports) live in their own tree, asset = 32 × 0xFF. */
+export const SOL_ASSET = new Uint8Array(32).fill(0xff);
 const U128_MAX = (BigInt(1) << BigInt(128)) - BigInt(1);
 const U64_MAX = (BigInt(1) << BigInt(64)) - BigInt(1);
 
@@ -73,9 +75,10 @@ function chainBytes(chainId: string): Uint8Array {
   return hexToBytes(chainId);
 }
 
-/** 32 bytes of an asset: ZEC = zeros, a mint = its base58 bytes. Null when the mint is not 32 bytes. */
+/** 32 bytes of an asset: ZEC = zeros, SOL = 0xFF × 32, a mint = its base58 bytes. Null when the mint is not 32 bytes. */
 export function assetBytes(asset: AssetId): Uint8Array | null {
   if (asset === "ZEC") return ZEC_ASSET;
+  if (asset === "SOL") return SOL_ASSET;
   try {
     const b = base58.decode(asset);
     return b.length === 32 ? b : null;
@@ -146,7 +149,8 @@ export function rootsDigest(s: Pick<VerifySnapshot, "chainId" | "id" | "takenAt"
   const trees = s.trees.map((t) => {
     const asset = assetBytes(t.asset);
     const sum = parseUint(t.sum);
-    if (!asset || !isHex32(t.root) || sum === null) throw new Error(`malformed tree ${t.asset}`);
+    if (!asset) throw new Error(`unknown asset id "${String(t.asset).slice(0, 48)}": not ZEC, SOL or a base58 mint, so the digest can't be recomputed`);
+    if (!isHex32(t.root) || sum === null) throw new Error(`malformed tree ${t.asset}`);
     return { asset, root: hex32(t.root), sum };
   });
   trees.sort((a, b) => cmpBytes(a.asset, b.asset));
@@ -206,6 +210,8 @@ export interface SnapshotCheck {
   /** address -> signature valid */
   vaults: Record<string, boolean>;
   allVaultsOk: boolean;
+  /** Addresses listed more than once (review E12): counted once, and the snapshot is flagged. */
+  duplicateVaults: string[];
   anchor: "anchored" | "mismatch" | "pending";
   error?: string;
 }
@@ -226,13 +232,22 @@ export function checkSnapshot(s: VerifySnapshot, pinnedOperator: string | null):
     operator = !sigOk ? "bad_signature" : !pinnedOperator ? "unpinned" : pinnedOperator === s.operator.pubkey ? "verified" : "wrong_key";
   }
   const vaults: Record<string, boolean> = {};
-  for (const v of s.vaults) vaults[v.address] = verifyVault(s.chainId, s.id, v);
+  const duplicateVaults: string[] = [];
+  for (const v of s.vaults) {
+    if (v.address in vaults) {
+      if (!duplicateVaults.includes(v.address)) duplicateVaults.push(v.address);
+      continue;
+    }
+    vaults[v.address] = verifyVault(s.chainId, s.id, v);
+  }
   return {
     digest,
     digestOk,
     operator,
     vaults,
-    allVaultsOk: s.vaults.length > 0 && Object.values(vaults).every(Boolean),
+    duplicateVaults,
+    // A vault listed twice would count its balance twice: never "all good" then.
+    allVaultsOk: s.vaults.length > 0 && duplicateVaults.length === 0 && Object.values(vaults).every(Boolean),
     anchor: !s.anchor ? "pending" : s.anchor.matches ? "anchored" : "mismatch",
     error,
   };
@@ -244,24 +259,34 @@ export interface SolvencyRow {
   asset: AssetId;
   decimals: number;
   liabilities: bigint;
-  /** Mint: Σ vault tokens. ZEC: proven SOL part + attested ZEC part, in zatoshis. */
+  /** Mint: Σ vault tokens. SOL: spare vault lamports. ZEC: proven SOL part + attested ZEC part, in zatoshis. */
   assets: bigint;
   /** ZEC only: spare SOL converted at rateLamportsPerZecSell (zat). Proven on Solana. */
   provenZat?: bigint;
   /** ZEC only: the operator's statement (zat). */
   attestedZat?: bigint;
   covered: boolean;
-  /** "proven": mint covered by signed vaults. "proven_attested": ZEC (SOL proven + ZEC attested). */
-  kind: "proven" | "proven_attested";
+  /**
+   * "proven": mint (or SOL) covered by signed vaults. "proven_attested": ZEC (SOL proven + ZEC attested).
+   * "unknown": an asset id this page can't map to 32 bytes (not ZEC, SOL or a base58 mint): not checkable.
+   */
+  kind: "proven" | "proven_attested" | "unknown";
   /** Signatures of every vault check out (otherwise the assets side means nothing). */
   vaultsSigned: boolean;
+  /** The tree's granule from the snapshot (never assumed: review E1). */
+  granule?: string;
 }
 
 const ZAT_PER_ZEC = BigInt(100_000_000);
 
 export function solvency(s: VerifySnapshot, check: Pick<SnapshotCheck, "vaults">): SolvencyRow[] {
-  // Only vaults whose signature verified count towards the cover.
-  const signed = s.vaults.filter((v) => check.vaults[v.address]);
+  // Only vaults whose signature verified count towards the cover, each address once (review E12).
+  const seen = new Set<string>();
+  const signed = s.vaults.filter((v) => {
+    if (seen.has(v.address)) return false;
+    seen.add(v.address);
+    return check.vaults[v.address];
+  });
   const vaultsSigned = signed.length === s.vaults.length && s.vaults.length > 0;
   const tokenTotals = new Map<string, bigint>();
   let lamports = BigInt(0);
@@ -269,11 +294,18 @@ export function solvency(s: VerifySnapshot, check: Pick<SnapshotCheck, "vaults">
     lamports += parseUint(v.lamports) ?? BigInt(0);
     for (const t of v.tokens) tokenTotals.set(t.mint, (tokenTotals.get(t.mint) ?? BigInt(0)) + (parseUint(t.amount) ?? BigInt(0)));
   }
+  const committed = parseUint(s.committedLamports) ?? BigInt(0);
+  const spareAll = lamports > committed ? lamports - committed : BigInt(0);
+  // v0.8: creator fees owed (SOL tree) are paid from the same spare SOL, so they take it first and
+  // only the remainder counts towards the ZEC cover (no lamport is counted twice).
+  const solTree = s.trees.find((t) => t.asset === "SOL");
+  const solLiab = solTree ? (parseUint(solTree.sum) ?? BigInt(0)) : BigInt(0);
   const rows = s.trees.map((t): SolvencyRow => {
     const liabilities = parseUint(t.sum) ?? BigInt(0);
+    if (!assetBytes(t.asset)) return { asset: t.asset, decimals: t.decimals, liabilities, assets: BigInt(0), covered: false, kind: "unknown", vaultsSigned };
+    if (t.asset === "SOL") return { asset: t.asset, decimals: t.decimals, liabilities, assets: spareAll, covered: liabilities <= spareAll, kind: "proven", vaultsSigned };
     if (t.asset === "ZEC") {
-      const committed = parseUint(s.committedLamports) ?? BigInt(0);
-      const spare = lamports > committed ? lamports - committed : BigInt(0);
+      const spare = spareAll > solLiab ? spareAll - solLiab : BigInt(0);
       const rate = parseUint(s.rateLamportsPerZecSell ?? "");
       const provenZat = rate && rate > BigInt(0) ? (spare * ZAT_PER_ZEC) / rate : BigInt(0);
       const attestedZat = parseUint(s.zecReserve.amountZat) ?? BigInt(0);
@@ -282,9 +314,10 @@ export function solvency(s: VerifySnapshot, check: Pick<SnapshotCheck, "vaults">
     }
     const assets = tokenTotals.get(t.asset) ?? BigInt(0);
     return { asset: t.asset, decimals: t.decimals, liabilities, assets, covered: liabilities <= assets, kind: "proven", vaultsSigned };
-  });
-  // ZEC first, then mints by liability size (stable for equal sizes).
-  return rows.sort((a, b) => (a.asset === "ZEC" ? -1 : b.asset === "ZEC" ? 1 : a.liabilities === b.liabilities ? 0 : a.liabilities > b.liabilities ? -1 : 1));
+  }).map((r, i) => ({ ...r, granule: s.trees[i].granule }));
+  // ZEC first, then SOL, then mints by liability size (stable for equal sizes).
+  const rank = (a: SolvencyRow) => (a.asset === "ZEC" ? 0 : a.asset === "SOL" ? 1 : a.kind === "unknown" ? 3 : 2);
+  return rows.sort((a, b) => rank(a) - rank(b) || (a.liabilities === b.liabilities ? 0 : a.liabilities > b.liabilities ? -1 : 1));
 }
 
 /** Coverage in basis points (10000 = 100 %), capped for display. */
@@ -366,7 +399,7 @@ export function checkProof(s: VerifySnapshot, proof: VerifyProof, anonPubkeyB58:
     const bytes = assetBytes(ap.asset);
     const fail = (error: string): AssetResult => ({ asset: ap.asset, decimals: ap.decimals, committed: BigInt(0), pieces: [], ok: false, error });
     if (!tree) return fail("no tree for this asset in the snapshot");
-    if (!bytes) return fail("asset is not a 32-byte mint");
+    if (!bytes) return fail("unknown asset id: not ZEC, SOL or a base58 mint");
     const rootSum = parseUint(tree.sum);
     if (!isHex32(tree.root) || rootSum === null) return fail("malformed tree root");
     const granule = parseUint(tree.granule) ?? BigInt(0);

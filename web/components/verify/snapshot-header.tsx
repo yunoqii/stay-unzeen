@@ -57,8 +57,12 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
     },
     {
       tone: check.allVaultsOk ? "ok" : "bad",
-      label: `Vault signatures ${vaultsOk}/${snap.vaults.length}`,
-      detail: check.allVaultsOk ? "Every vault signed this snapshot with its own key." : "A vault did not sign this snapshot. Its balance does not count.",
+      label: `Vault signatures ${vaultsOk}/${Object.keys(check.vaults).length}`,
+      detail: check.allVaultsOk
+        ? "Every vault signed this snapshot with its own key."
+        : check.duplicateVaults.length > 0
+          ? `A vault is listed more than once (${check.duplicateVaults.length}). It counts once; a snapshot like this should not be trusted.`
+          : "A vault did not sign this snapshot. Its balance does not count.",
     },
   ];
 

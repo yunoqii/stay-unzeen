@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useId, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowDown, CaretDown, Info, Key, LockKey, ShieldCheck, SlidersHorizontal, WarningCircle } from "@phosphor-icons/react";
-import { ApiError, errorText } from "@/lib/api/client";
+import { CaretDown, Info, Key, LockKey, ShieldCheck, SlidersHorizontal } from "@phosphor-icons/react";
+import { ApiError } from "@/lib/api/client";
 import type { SignedAction, Token, Venue } from "@/lib/api/types";
 import { lastRate, submitAction, useAction, useActivityVersion } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
@@ -16,54 +16,72 @@ import { isSlippageBps, MAX_SLIPPAGE_BPS, SELL_PRESETS, SLIPPAGE_CHOICES_BPS, up
 import { cn } from "@/lib/utils";
 import { usePool } from "@/hooks/use-pool";
 import { usePortfolio } from "@/hooks/use-portfolio";
+import { useTokens } from "@/hooks/use-tokens";
+import { orderSupport } from "@/lib/orders";
+import { OrdersPanel, OrdersUnavailable } from "./orders-panel";
 import { Button } from "@/components/ui/button";
 import { ActionStatusCard } from "./action-status";
 import { ExecSwitch } from "./exec-switch";
+import { Chip, ErrorNote } from "./parts";
 
 type Side = "buy" | "sell";
+type Tab = Side | "orders";
+const TAB_LABEL: Record<Tab, string> = { buy: "Buy", sell: "Sell", orders: "Orders" };
 
 export function TradePanel({ token, priceSol }: { token: Token; priceSol: string }) {
   const key = useKeyState();
-  const [side, setSide] = useState<Side>("buy");
+  const [side, setSide] = useState<Tab>("buy");
   const tabsId = useId();
+  const { pool } = usePool();
+  // Public list, same for every visitor: "has the pool traded this mint" decides whether orders apply.
+  const { tokens } = useTokens(undefined, 60_000);
+  const support = orderSupport(token, pool, tokens);
 
   return (
     <section aria-labelledby={`${tabsId}-title`} className="p-4 sm:p-5">
       <h2 id={`${tabsId}-title`} className="sr-only">
         Trade ${token.symbol}
       </h2>
-      <div role="tablist" aria-label="Side" className="grid grid-cols-2 gap-1 rounded-full border border-border p-1">
-        {(["buy", "sell"] as const).map((s) => (
+      <div role="tablist" aria-label="Side" className="grid grid-cols-3 gap-1 rounded-full border border-border p-1">
+        {(["buy", "sell", "orders"] as const).map((s) => (
           <button
             key={s}
             role="tab"
             aria-selected={side === s}
+            // Orders stay reachable when unsupported: the panel explains why instead of a dead tab.
+            aria-disabled={s === "orders" && !support.ok ? true : undefined}
+            title={s === "orders" && !support.ok ? support.reason : undefined}
             onClick={() => setSide(s)}
             className={cn(
               "relative rounded-full py-2 text-sm font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
               side === s ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+              s === "orders" && !support.ok && "text-faint-foreground hover:text-muted-foreground",
             )}
           >
             {side === s && (
               <motion.span layoutId={`${tabsId}-side`} className="absolute inset-0 rounded-full bg-surface-3" transition={{ type: "spring", bounce: 0, duration: 0.3 }} />
             )}
-            <span className="relative">{s === "buy" ? "Buy" : "Sell"}</span>
+            <span className="relative">{TAB_LABEL[s]}</span>
           </button>
         ))}
       </div>
 
-      {key.status === "loading" ? (
+      {side === "orders" && !support.ok ? (
+        <OrdersUnavailable reason={support.reason} />
+      ) : key.status === "loading" ? (
         <div className="h-64" aria-busy />
       ) : key.status !== "unlocked" ? (
         <KeyPrompt mint={token.mint} locked={key.status === "locked"} />
-      ) : (
+      ) : side === "orders" && support.ok ? (
+        <OrdersPanel key={key.pubkey} token={token} priceSol={priceSol} support={support} />
+      ) : side !== "orders" ? (
         <OrderForm key={`${side}:${key.pubkey}`} side={side} token={token} priceSol={priceSol} />
-      )}
+      ) : null}
     </section>
   );
 }
 
-function KeyPrompt({ mint, locked }: { mint: string; locked: boolean }) {
+export function KeyPrompt({ mint, locked }: { mint: string; locked: boolean }) {
   const href = `/key?next=${encodeURIComponent(`/token/${mint}`)}`;
   return (
     <div className="mt-6 flex flex-col items-center px-2 pb-2 text-center">
@@ -404,43 +422,7 @@ function Quote({
   );
 }
 
-function ErrorNote({ error, minAction }: { error: ApiError; minAction: bigint | null }) {
-  let text = errorText(error);
-  if (error.code === "below_minimum" && minAction !== null) text = `Below the pool minimum of ${formatZec(minAction.toString())} ZEC worth. Try a larger amount.`;
-  if (error.code === "slippage") text = "The price moved past your limit. Raise max slippage or try a smaller amount.";
-  return (
-    <div role="alert" className="flex gap-2 rounded-xl border border-sell/30 bg-sell/5 px-3 py-2.5 text-sm text-pretty">
-      <WarningCircle size={16} weight="light" className="mt-0.5 shrink-0 text-sell" aria-hidden />
-      <div>
-        <p className="text-foreground/90">{text}</p>
-        {error.code === "insufficient_balance" && (
-          <Link href="/pay" className="mt-1 inline-flex items-center gap-1 text-xs text-zec underline-offset-4 hover:underline">
-            <ArrowDown size={12} weight="bold" aria-hidden />
-            Top up
-          </Link>
-        )}
-      </div>
-    </div>
-  );
-}
 
-function Chip({
-  active,
-  className,
-  ...props
-}: React.ComponentProps<"button"> & { active?: boolean }) {
-  return (
-    <button
-      type="button"
-      {...props}
-      className={cn(
-        "tabular inline-flex h-9 items-center rounded-full border px-3 text-xs sm:h-8 transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-40",
-        active ? "border-zec/50 bg-zec/10 text-foreground" : "border-border text-muted-foreground hover:border-border-strong hover:text-foreground",
-        className,
-      )}
-    />
-  );
-}
 
 /**
  * Panel settings: max slippage (saved per network in this browser). Priority is the execution mode

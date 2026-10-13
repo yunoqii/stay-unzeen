@@ -28,6 +28,7 @@ const FAILURE: Record<NonNullable<FairLaunch["failure"]>, string> = {
   drand_unavailable: "The drand round could not be fetched and verified within an hour.",
   venue_unavailable: "pump.fun was not available when the round fired.",
   tx_failed: "The launch transaction did not land.",
+  internal: "The bids the pool held did not match the published commitment, so nothing was bought.",
 };
 
 type Load = { id: string; state: "loading" } | { id: string; state: "missing" } | { id: string; state: "error"; error: string } | { id: string; state: "ready"; launch: FairLaunch };

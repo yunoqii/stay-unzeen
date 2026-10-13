@@ -3,7 +3,8 @@
 import dynamic from "next/dynamic";
 import { useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { WarningCircle } from "@phosphor-icons/react";
+import Link from "next/link";
+import { ArrowRight, WarningCircle } from "@phosphor-icons/react";
 import { useActions } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
 import { useNetwork } from "@/lib/network";
@@ -14,6 +15,8 @@ import { usePortfolio } from "@/hooks/use-portfolio";
 import { useTokens } from "@/hooks/use-tokens";
 import { KeyGate } from "@/components/key/key-gate";
 import { BalanceCard } from "./balance-card";
+import { CreatorFees } from "./creator-fees";
+import { OrdersCard } from "./orders-card";
 import { DepositsList } from "./deposits-list";
 import { HoldingsList } from "./holdings-list";
 import { PeekProvider } from "./peek";
@@ -63,6 +66,16 @@ function PortfolioView() {
         )}
         <BalanceCard portfolio={portfolio} onWithdraw={() => open("zec")} />
         <HoldingsList holdings={portfolio?.holdings ?? null} tokens={tokens} onWithdraw={(m) => open("token", m)} />
+        <CreatorFees claimable={portfolio?.claimable ?? null} tokens={tokens} pool={pool} />
+        <Link
+          href="/creator"
+          className="flex items-center justify-between rounded-2xl border border-border px-5 py-3.5 text-sm text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        >
+          <span>
+            Creator cabinet <span className="text-faint-foreground">· fees, volume and holders of your launches</span>
+          </span>
+          <ArrowRight size={14} weight="light" aria-hidden />
+        </Link>
         <div aria-hidden className="min-h-0 flex-1" />
       </div>
       <div className="ledger-col self-stretch">
@@ -92,6 +105,7 @@ function PortfolioView() {
         {Sealed && sealedOn(pool) && portfolio && (portfolio.fairBids?.length || portfolio.fairLaunches?.length) ? (
           <Sealed bids={portfolio.fairBids ?? []} launches={portfolio.fairLaunches ?? []} />
         ) : null}
+        <OrdersCard orders={portfolio?.orders ?? null} tokens={tokens} />
         <SessionActivity actions={actions} />
         <DepositsList deposits={portfolio?.deposits ?? null} confirmations={pool?.confirmations} />
         <SettingsCard />

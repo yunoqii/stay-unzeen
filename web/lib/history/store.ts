@@ -133,8 +133,15 @@ export function recordSubmitted(network: Network, pubkey: string, entry: Omit<Hi
 }
 
 /** From every portfolio poll (fixed rhythm; nothing extra is requested for the history). */
-export function applyPolledStatuses(network: Network, pubkey: string, polled: (ActionStatus & { id: string })[] | undefined, now = Date.now()): Promise<void> {
-  return mutate(network, pubkey, (e) => applyStatuses(e, polled, now));
+export function applyPolledStatuses(
+  network: Network,
+  pubkey: string,
+  polled: (ActionStatus & { id: string })[] | undefined,
+  now = Date.now(),
+  /** v0.8: trades your orders turned into (seen in Portfolio.orders[].actionId), added before settling. */
+  fromOrders: Omit<HistoryEntry, "status" | "fill">[] = [],
+): Promise<void> {
+  return mutate(network, pubkey, (e) => applyStatuses(fromOrders.reduce(addPending, e), polled, now));
 }
 
 /** Delete this key's history on this device (Forget device). */

@@ -13,6 +13,8 @@ import { formatCompact, formatPrice, shortAddr, timeAgo } from "@/lib/format";
 import { useLiveFeed } from "@/hooks/use-live-feed";
 import { useNow } from "@/hooks/use-now";
 import { usePending } from "@/hooks/use-pending";
+import { usePortfolio } from "@/hooks/use-portfolio";
+import { ORDER_LABEL } from "@/lib/orders";
 import { PeekProvider, usePeek } from "@/components/portfolio/peek";
 import { PositionCard } from "@/components/trade/position-card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -92,6 +94,15 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
   const curve =
     safety.state !== "ready" ? null : safety.data.market.status === "graduated" ? 100 : safety.data.market.curveProgressPct ? Number(safety.data.market.curveProgressPct) : null;
   const ownFills = useMemo(() => fillsOf(history.entries, token.mint), [history.entries, token.mint]);
+  const { portfolio } = usePortfolio();
+  // Your open orders as dashed trigger lines: drawn from the owner-only portfolio, behind Peek, never sent anywhere.
+  const triggers = useMemo(
+    () =>
+      (portfolio?.orders ?? [])
+        .filter((o) => o.mint === token.mint && o.status === "open")
+        .map((o) => ({ id: o.id, price: Number(o.triggerPriceSol), label: ORDER_LABEL[o.kind] })),
+    [portfolio?.orders, token.mint],
+  );
 
   return (
     <Frame>
@@ -133,7 +144,7 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
       <div aria-hidden className="hatch mt-6 h-3" />
       <div className="ledger grid lg:grid-cols-[minmax(0,1fr)_360px] lg:grid-rows-[auto_1fr]">
         <div className="min-w-0">
-          <PriceChart mint={token.mint} trades={feed.events} markers={ownFills} showMarkers={shown} />
+          <PriceChart mint={token.mint} trades={feed.events} markers={ownFills} triggers={triggers} showMarkers={shown} />
         </div>
 
         <aside className="flex flex-col gap-px bg-border lg:col-start-2 lg:row-span-2 lg:row-start-1 [&>*]:bg-background">

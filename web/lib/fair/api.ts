@@ -13,6 +13,7 @@ registerErrorCodes({
   launch_closed: "The bid window has closed. Nothing was held.",
   already_bid: "You already have a sealed bid here. Withdraw it first to change the amount.",
   bad_ciphertext: "The sealed bid was refused. Reload the page and seal it again.",
+  launch_full: "This launch already has the maximum of 1,024 bids. Nothing was held.",
 });
 
 /** Same rhythm for every viewer of a launch page (3-5 s), never tied to one's own actions. */

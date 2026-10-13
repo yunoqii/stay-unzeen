@@ -3,14 +3,15 @@
 import { useId, useState } from "react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
-import { CheckCircle, CircleNotch, DownloadSimple, Key, LockKey, ShieldCheck, XCircle } from "@phosphor-icons/react";
+import { CheckCircle, CircleNotch, DownloadSimple, Key, LockKey, ShieldCheck, WarningCircle, XCircle } from "@phosphor-icons/react";
 import { errorText } from "@/lib/api/client";
 import type { VerifySnapshot } from "@/lib/api/types";
 import { getSigner, useKeyState } from "@/lib/crypto/session";
 import { shortAddr } from "@/lib/format";
 import type { Network } from "@/lib/network";
 import { assetLabel, fmtAmount, fmtUtc } from "@/lib/verify/display";
-import { checkOwnBalance, downloadJson, proofJson, type OwnCheck } from "@/lib/verify/own";
+import { checkOwnBalance, compareWithPortfolio, downloadJson, proofJson, type CompareStatus, type OwnCheck } from "@/lib/verify/own";
+import { usePortfolio } from "@/hooks/use-portfolio";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { MerkleTrace } from "./merkle-trace";
@@ -187,16 +188,73 @@ function Summary({ own, snap, symbols }: { own: OwnCheck; snap: VerifySnapshot; 
             <span className="text-muted-foreground">{assetLabel(a.asset, symbols)}</span>
             <span className="font-mono tabular">
               <span className="text-faint-foreground">committed ≥ </span>
-              {fmtAmount(a.committed, a.decimals, a.asset === "ZEC" ? 3 : 0)}
-              {a.asset === "ZEC" ? " ZEC" : ""}
+              {fmtAmount(a.committed, a.decimals, a.asset === "ZEC" || a.asset === "SOL" ? 3 : 0)}
+              {a.asset === "ZEC" || a.asset === "SOL" ? ` ${a.asset}` : ""}
             </span>
           </li>
         ))}
       </ul>
+      <BalanceCompare own={own} snap={snap} symbols={symbols} />
       <p className="mt-2 text-xs text-pretty text-faint-foreground">
         The pool committed at least this much to your key at {fmtUtc(snap.takenAt)}: your balance, rounded up, split into 2–4 pieces nobody else can link.
         {own.proof.truncated && " You hold more than 12 assets: this proof covers ZEC and 11 picked at random. Check again for others."}
       </p>
+    </div>
+  );
+}
+
+const COMPARE_TEXT: Record<CompareStatus, string> = {
+  covered: "covered",
+  short: "less than your balance",
+  missing: "not in the proof",
+  changed: "changed since the snapshot",
+  truncated: "not in this sample",
+};
+
+/**
+ * "committed ≥ your balance" against the portfolio this tab already polls (review E11). Computed only
+ * here. A shortfall with no activity since the snapshot is called out plainly: that is exactly what
+ * a proof of liabilities exists to catch.
+ */
+function BalanceCompare({ own, snap, symbols }: { own: OwnCheck; snap: VerifySnapshot; symbols: Map<string, string> }) {
+  const { portfolio } = usePortfolio();
+  if (!portfolio) return null;
+  const { rows, changed } = compareWithPortfolio(own, snap, portfolio);
+  if (rows.length === 0) return null;
+  const bad = rows.filter((r) => r.status === "short" || r.status === "missing");
+  return (
+    <div className={cn("mt-4 border p-3", bad.length ? "border-sell/40 bg-sell/5" : "border-border")}>
+      <p className={cn("flex items-center gap-2 text-sm", bad.length ? "text-sell" : "text-foreground")}>
+        {bad.length ? <WarningCircle size={15} weight="fill" aria-hidden /> : <CheckCircle size={15} weight="fill" className="text-zec" aria-hidden />}
+        {bad.length
+          ? "The pool committed less than your balance, and nothing moved on this key since the snapshot."
+          : changed
+            ? "Against your balance now: your key moved since the snapshot, so small differences are expected."
+            : "Against your balance now: every asset is covered."}
+      </p>
+      <ul className="mt-2 space-y-1">
+        {rows.map((r) => {
+          const frac = r.asset === "ZEC" || r.asset === "SOL" ? 3 : Math.min(3, r.decimals);
+          const unit = r.asset === "ZEC" || r.asset === "SOL" ? ` ${r.asset}` : "";
+          const tone = r.status === "covered" ? "text-zec" : r.status === "short" || r.status === "missing" ? "text-sell" : "text-muted-foreground";
+          return (
+            <li key={r.asset} className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 text-xs sm:grid-cols-[minmax(0,0.6fr)_minmax(0,1fr)_auto]">
+              <span className="text-muted-foreground">{assetLabel(r.asset, symbols)}</span>
+              <span className="col-span-2 row-start-2 font-mono tabular text-faint-foreground sm:col-span-1 sm:row-start-auto">
+                {r.committed === null ? "—" : fmtAmount(r.committed, r.decimals, frac)} committed · {fmtAmount(r.now, r.decimals, frac)}
+                {unit} now
+              </span>
+              <span className={cn("text-right", tone)}>{COMPARE_TEXT[r.status]}</span>
+            </li>
+          );
+        })}
+      </ul>
+      {bad.length > 0 && (
+        <p className="mt-2 text-[11px] text-pretty text-muted-foreground">
+          Download the proof and keep it: it is signed evidence of what the pool committed to your key at {fmtUtc(snap.takenAt)}. Your balance from this
+          browser is not sent anywhere.
+        </p>
+      )}
     </div>
   );
 }

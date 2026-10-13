@@ -1,6 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useRef, useState } from "react";
+import { ArrowRight } from "@phosphor-icons/react";
 import { motion } from "motion/react";
 import { useLiveFeed } from "@/hooks/use-live-feed";
 import { useNow } from "@/hooks/use-now";
@@ -85,6 +87,13 @@ export function HomeClient() {
                 <span className="text-xs text-faint-foreground">last 10 min</span>
               </header>
               <HotTokens tokens={tokens} events={feed.events} now={now} />
+              <Link
+                href="/stats"
+                className="flex items-center justify-between border-t border-border/60 px-4 py-3 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              >
+                Platform stats · updated daily
+                <ArrowRight size={12} weight="light" aria-hidden />
+              </Link>
             </div>
           </aside>
         </div>

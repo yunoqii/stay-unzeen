@@ -1,22 +1,34 @@
 #!/usr/bin/env node
 // Unzeen: check a Verify proof offline. No dependencies: Node.js >= 18 (node:crypto) only.
 //
-//   node verify-proof.mjs unzeen-proof-0202-101.json [--operator <base58 attestation key>]
+//   node verify-proof.mjs unzeen-proof-0202-101.json --operator <base58 attestation key>
+//   node verify-proof.mjs unzeen-proof-0202-101.json --trust-any-operator     (not recommended)
 //
 // The input is the file from "Download proof" on /verify: { anonPubkey, snapshot, proof }.
-// Checks, exactly as the page does (docs/API.md v0.7, "Verify"):
+// Checks, exactly as the page does (docs/API.md, "Verify"):
 //   1. rootsDigest recomputed from the snapshot fields;
-//   2. operator.sig = ed25519 over the 32 digest bytes (and the key equals --operator, if given);
-//   3. every vault.sig = ed25519 over "unzeen/verify/v1/vault\n<chainId>\n<id>\n<address>";
-//   4. every piece of your balance climbs its Merkle-sum path to the tree root (hash and sum);
-//   5. solvency: mints by signed vault balances, ZEC by spare SOL (proven) + reserve (attested).
+//   2. operator.sig = ed25519 over the 32 digest bytes, by the attestation key you pinned with
+//      --operator (also published in the README). Without --operator a signature is NOT accepted,
+//      unless you pass --trust-any-operator on purpose;
+//   3. every vault.sig = ed25519 over "unzeen/verify/v1/vault\n<chainId>\n<id>\n<address>", each
+//      vault address counted once;
+//   4. every piece of your balance climbs its Merkle-sum path to the tree root (hash and sum); pieces
+//      and leaf positions are distinct and inside the tree, values are multiples of the tree's granule;
+//   5. solvency: mints by signed vault balances, SOL (creator fees owed, if present) by spare vault SOL,
+//      ZEC by the remaining spare SOL (proven) + reserve (attested by the operator).
+// Asset ids: "ZEC" (32 zero bytes), "SOL" (32 × 0xFF) or a base58 mint (32 bytes). Any other id is
+// reported as a failed check, never a crash.
 // Then compare the digest with the memo of the anchor tx in any Solana explorer or RPC you trust.
 
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
 import { readFileSync } from "node:fs";
 
+/** Attestation keys pinned per chain id, filled in for releases. Empty = pass --operator. */
+export const PINNED_OPERATOR = { "0202": "", "0101": "" };
+
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 export function b58decode(s) {
+  if (typeof s !== "string") throw new Error("bad base58");
   let n = 0n;
   for (const c of s) {
     const i = B58.indexOf(c);
@@ -44,15 +56,33 @@ const be = (v, len) => {
 };
 const sha = (...parts) => createHash("sha256").update(Buffer.concat(parts)).digest();
 const tag = (t) => Buffer.from(`unzeen/verify/v1/${t}`);
-const asset32 = (a) => (a === "ZEC" ? Buffer.alloc(32) : b58decode(a));
+const isUint = (v) => typeof v === "string" && /^\d{1,40}$/.test(v);
+const isHex32 = (v) => typeof v === "string" && /^[0-9a-f]{64}$/i.test(v);
+
+/** 32 bytes of an asset id, or null for an id that is not ZEC, SOL or a 32-byte base58 mint. */
+export function asset32(a) {
+  if (a === "ZEC") return Buffer.alloc(32);
+  if (a === "SOL") return Buffer.alloc(32, 0xff);
+  try {
+    const b = b58decode(a);
+    return b.length === 32 ? b : null;
+  } catch {
+    return null;
+  }
+}
+const mustAsset = (a) => {
+  const b = asset32(a);
+  if (!b) throw new Error(`unknown asset id "${String(a).slice(0, 48)}"`);
+  return b;
+};
 
 export function leafHash(chainId, snapshotId, asset, pubkey, piece, value, blind) {
-  return sha(tag("leaf"), Buffer.from(chainId, "hex"), be(snapshotId, 4), asset32(asset), pubkey, be(piece, 1), be(value, 8), Buffer.from(blind, "hex"));
+  return sha(tag("leaf"), Buffer.from(chainId, "hex"), be(snapshotId, 4), mustAsset(asset), pubkey, be(piece, 1), be(value, 8), Buffer.from(blind, "hex"));
 }
 const node = (l, r) => ({ hash: sha(tag("node"), l.hash, be(l.sum, 16), r.hash, be(r.sum, 16)), sum: l.sum + r.sum });
 
 export function rootsDigest(s) {
-  const trees = s.trees.map((t) => ({ a: asset32(t.asset), root: Buffer.from(t.root, "hex"), sum: BigInt(t.sum) })).sort((x, y) => Buffer.compare(x.a, y.a));
+  const trees = s.trees.map((t) => ({ a: mustAsset(t.asset), root: Buffer.from(t.root, "hex"), sum: BigInt(t.sum) })).sort((x, y) => Buffer.compare(x.a, y.a));
   const parts = [tag("snapshot"), Buffer.from(s.chainId, "hex"), be(s.id, 4), be(Math.floor(s.takenAt / 1000), 8), be(s.leaves, 4), be(s.solanaSlot, 8), be(s.zcashHeight, 4), be(s.zecReserve.amountZat, 8), be(trees.length, 4)];
   for (const t of trees) parts.push(t.a, t.root, be(t.sum, 16));
   return sha(...parts).toString("hex");
@@ -60,62 +90,134 @@ export function rootsDigest(s) {
 
 export function ed25519Ok(pubB58, sigB58, msg) {
   try {
-    const key = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: b58decode(pubB58).toString("base64url") }, format: "jwk" });
-    return edVerify(null, msg, key, b58decode(sigB58));
+    const pk = b58decode(pubB58);
+    const sig = b58decode(sigB58);
+    if (pk.length !== 32 || sig.length !== 64) return false;
+    const key = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: pk.toString("base64url") }, format: "jwk" });
+    return edVerify(null, msg, key, sig);
   } catch {
     return false;
   }
 }
 
-export function check(file, operator) {
+/**
+ * @param file      the downloaded proof file
+ * @param operator  base58 attestation key to require (else the pinned one for the chain id, if any)
+ * @param opts      { trustAnyOperator: true } accepts any signing key, with a warning
+ */
+export function check(file, operator, opts = {}) {
   const { snapshot: s, proof: p, anonPubkey } = file;
   const out = [];
   const ok = (cond, what) => (out.push(`${cond ? "OK  " : "FAIL"} ${what}`), cond);
-  const digest = rootsDigest(s);
-  let all = ok(digest === s.rootsDigest, `rootsDigest ${digest}`);
+  let all = true;
+
+  // 1. digest
+  let digest = "";
+  try {
+    digest = rootsDigest(s);
+  } catch (e) {
+    out.push(`FAIL rootsDigest: ${e instanceof Error ? e.message : "malformed snapshot"}`);
+    all = false;
+  }
+  if (digest) all = ok(digest === String(s.rootsDigest).toLowerCase(), `rootsDigest ${digest}`) && all;
+
+  // 2. operator
+  const pinned = operator || PINNED_OPERATOR[s.chainId] || "";
   if (s.operator) {
-    all = ok(ed25519Ok(s.operator.pubkey, s.operator.sig, Buffer.from(digest, "hex")), `operator signature by ${s.operator.pubkey}`) && all;
-    if (operator) all = ok(s.operator.pubkey === operator, "operator key equals the pinned one") && all;
+    all = ok(!!digest && ed25519Ok(s.operator.pubkey, s.operator.sig, Buffer.from(digest, "hex")), `operator signature by ${s.operator.pubkey}`) && all;
+    if (pinned) all = ok(s.operator.pubkey === pinned, "operator key equals the pinned one") && all;
+    else if (opts.trustAnyOperator) out.push("WARN operator key NOT compared with a pinned key (--trust-any-operator): anyone could have signed this");
+    else all = ok(false, "operator key pinned (pass --operator <key from the README>, or --trust-any-operator)") && all;
   } else {
     out.push("WAIT snapshot not signed / anchored yet");
     // Asked to check against a pinned key: no signature is not a pass.
-    if (operator) all = ok(false, "operator signature present") && all;
+    if (pinned) all = ok(false, "operator signature present") && all;
   }
-  const signed = s.vaults.filter((v) => ok(ed25519Ok(v.address, v.sig, Buffer.from(`unzeen/verify/v1/vault\n${s.chainId}\n${s.id}\n${v.address}`)), `vault ${v.address} signed`));
-  all = signed.length === s.vaults.length && all;
-  const pk = b58decode(anonPubkey);
+
+  // 3. vaults, each address once
+  const seen = new Set();
+  const signed = [];
+  for (const v of s.vaults) {
+    if (seen.has(v.address)) {
+      all = ok(false, `vault ${v.address} listed once`) && all;
+      continue;
+    }
+    seen.add(v.address);
+    if (ok(ed25519Ok(v.address, v.sig, Buffer.from(`unzeen/verify/v1/vault\n${s.chainId}\n${s.id}\n${v.address}`)), `vault ${v.address} signed`)) signed.push(v);
+    else all = false;
+  }
+
+  // 4. own pieces
+  let pk = null;
+  try {
+    pk = b58decode(anonPubkey);
+  } catch {
+    /* below */
+  }
+  if (!ok(!!pk && pk.length === 32, "anon pubkey is 32 bytes")) return { ok: false, lines: out };
   all = ok(p.snapshotId === s.id, `proof is for snapshot #${s.id}`) && all;
+  const depth = Math.log2(s.leaves);
   for (const ap of p.proofs) {
     const tree = s.trees.find((t) => t.asset === ap.asset);
-    if (!ok(!!tree, `tree for ${ap.asset}`)) {
+    if (!ok(!!tree, `tree for ${ap.asset}`) || !ok(!!asset32(ap.asset), `${ap.asset} is a known asset id`)) {
       all = false;
       continue;
     }
+    const granule = isUint(tree.granule) ? BigInt(tree.granule) : 0n;
+    const pieces = new Set();
+    const leaves = new Set();
     let committed = 0n;
     for (const pc of ap.pieces) {
-      let cur = { hash: leafHash(s.chainId, s.id, ap.asset, pk, pc.piece, pc.value, pc.blind), sum: BigInt(pc.value) };
-      let idx = pc.leafIndex;
-      for (const sib of pc.path) {
-        const sn = { hash: Buffer.from(sib.hash, "hex"), sum: BigInt(sib.sum) };
-        cur = idx % 2 === 0 ? node(cur, sn) : node(sn, cur);
-        idx = Math.floor(idx / 2);
+      let good = false;
+      try {
+        const fresh = !pieces.has(pc.piece) && !leaves.has(pc.leafIndex);
+        pieces.add(pc.piece);
+        leaves.add(pc.leafIndex);
+        const shapeOk =
+          fresh &&
+          Number.isInteger(pc.piece) && pc.piece >= 0 && pc.piece <= 255 &&
+          Number.isInteger(pc.leafIndex) && pc.leafIndex >= 0 && pc.leafIndex < s.leaves &&
+          isUint(pc.value) && BigInt(pc.value) < 1n << 64n && (granule === 0n || BigInt(pc.value) % granule === 0n) &&
+          isHex32(pc.blind) && Array.isArray(pc.path) && pc.path.length === depth;
+        if (shapeOk) {
+          let cur = { hash: leafHash(s.chainId, s.id, ap.asset, pk, pc.piece, pc.value, pc.blind), sum: BigInt(pc.value) };
+          let idx = pc.leafIndex;
+          for (const sib of pc.path) {
+            if (!isHex32(sib.hash) || !isUint(sib.sum)) throw new Error("bad path entry");
+            const sn = { hash: Buffer.from(sib.hash, "hex"), sum: BigInt(sib.sum) };
+            cur = idx % 2 === 0 ? node(cur, sn) : node(sn, cur);
+            idx = Math.floor(idx / 2);
+          }
+          good = cur.hash.toString("hex") === String(tree.root).toLowerCase() && cur.sum === BigInt(tree.sum);
+        }
+      } catch {
+        good = false;
       }
-      const good = pc.path.length === Math.log2(s.leaves) && cur.hash.toString("hex") === tree.root && cur.sum === BigInt(tree.sum);
       all = ok(good, `${ap.asset} piece ${pc.piece} (${pc.value}) climbs to the root`) && all;
       if (good) committed += BigInt(pc.value);
     }
     out.push(`     ${ap.asset}: committed to your key >= ${committed} base units`);
   }
-  // Solvency
-  const lamports = signed.reduce((n, v) => n + BigInt(v.lamports), 0n);
+
+  // 5. solvency (each vault once, signed only)
+  const lamports = signed.reduce((n, v) => n + (isUint(v.lamports) ? BigInt(v.lamports) : 0n), 0n);
+  const committedL = isUint(s.committedLamports) ? BigInt(s.committedLamports) : 0n;
+  const spareAll = lamports > committedL ? lamports - committedL : 0n;
+  const solTree = s.trees.find((t) => t.asset === "SOL");
+  const solLiab = solTree && isUint(solTree.sum) ? BigInt(solTree.sum) : 0n;
   for (const t of s.trees) {
-    if (t.asset === "ZEC") {
-      const spare = lamports > BigInt(s.committedLamports) ? lamports - BigInt(s.committedLamports) : 0n;
+    if (!asset32(t.asset)) {
+      all = ok(false, `${String(t.asset).slice(0, 48)}: unknown asset id, can't check solvency`) && all;
+    } else if (t.asset === "ZEC") {
+      const spare = spareAll > solLiab ? spareAll - solLiab : 0n;
       const proven = s.rateLamportsPerZecSell ? (spare * 100_000_000n) / BigInt(s.rateLamportsPerZecSell) : 0n;
       const attested = BigInt(s.zecReserve.amountZat);
-      ok(BigInt(t.sum) <= proven + attested, `ZEC liabilities ${t.sum} <= ${proven} proven (SOL) + ${attested} attested (operator) zat`);
+      // Informational: part of the ZEC cover is the operator's statement, so it does not set the exit code.
+      ok(BigInt(t.sum) <= proven + attested, `ZEC liabilities ${t.sum} <= ${proven} proven (SOL) + ${attested} attested (operator) zat  [informational: attested part]`);
+    } else if (t.asset === "SOL") {
+      all = ok(BigInt(t.sum) <= spareAll, `SOL (creator fees owed) ${t.sum} <= spare vault lamports ${spareAll}`) && all;
     } else {
-      const held = signed.flatMap((v) => v.tokens).filter((x) => x.mint === t.asset).reduce((n, x) => n + BigInt(x.amount), 0n);
+      const held = signed.flatMap((v) => v.tokens).filter((x) => x.mint === t.asset).reduce((n, x) => n + (isUint(x.amount) ? BigInt(x.amount) : 0n), 0n);
       all = ok(BigInt(t.sum) <= held, `${t.asset} liabilities ${t.sum} <= vaults ${held}`) && all;
     }
   }
@@ -125,13 +227,15 @@ export function check(file, operator) {
 const isMain = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 if (isMain) {
   const args = process.argv.slice(2);
-  const file = args.find((a) => !a.startsWith("--"));
+  const file = args.find((a, i) => !a.startsWith("--") && args[i - 1] !== "--operator");
   const i = args.indexOf("--operator");
+  const trustAnyOperator = args.includes("--trust-any-operator");
   if (!file) {
-    console.error("usage: node verify-proof.mjs <proof.json> [--operator <base58 attestation key>]");
+    console.error("usage: node verify-proof.mjs <proof.json> --operator <base58 attestation key>   (or --trust-any-operator)");
     process.exit(2);
   }
-  const r = check(JSON.parse(readFileSync(file, "utf8")), i >= 0 ? args[i + 1] : undefined);
+  if (trustAnyOperator) console.error("WARNING: --trust-any-operator: the operator signature is checked, but not WHO signed. Pin the key from the README instead.\n");
+  const r = check(JSON.parse(readFileSync(file, "utf8")), i >= 0 ? args[i + 1] : undefined, { trustAnyOperator });
   console.log(r.lines.join("\n"));
   console.log(r.ok ? "\nAll checks passed." : "\nSome checks FAILED.");
   process.exit(r.ok ? 0 : 1);

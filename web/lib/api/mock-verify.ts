@@ -24,7 +24,7 @@ export interface VerifyHost {
   /** lamports per ZEC on the sell side (what SOL counts for in the ZEC cover). */
   rateSell(): bigint;
   /** Every mock account with a balance right now: available + held. */
-  accounts(network: Network): { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[] }[];
+  accounts(network: Network): { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[]; claimLamports?: bigint }[];
   /** Tokens the mock market knows (synthetic holders pick from these). */
   tokens(): { mint: string; decimals: number }[];
   /** Signed-request check with nonce replay, as in core. Returns the header pubkey. */
@@ -40,6 +40,8 @@ export interface VerifyMock {
 const N0 = BigInt(0);
 const ZAT = BigInt(100_000_000);
 const ZEC_GRANULE = BigInt(100_000);
+/** v0.8: SOL tree (creator fees owed), granule 0.001 SOL. */
+const SOL_GRANULE = BigInt(1_000_000);
 const RESERVE_STEP = BigInt(1_000_000);
 const MIN_LEAVES = 1024;
 const DAY = 86_400_000;
@@ -152,6 +154,8 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
       const balances = new Map<AssetId, bigint>();
       if (a.zat > N0) balances.set("ZEC", a.zat);
       for (const t of a.tokens) if (t.amount > N0) balances.set(t.mint, (balances.get(t.mint) ?? N0) + t.amount);
+      // v0.8: creator fees owed are a liability in SOL (its own tree).
+      if (a.claimLamports && a.claimLamports > N0) balances.set("SOL", a.claimLamports);
       return { pubkey: a.pubkey, balances };
     });
   }
@@ -159,7 +163,9 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
   function build(network: Network, id: number, takenAt: number, holders: Holder[], now: number, anchorAt: number): Snap {
     const chainId = host.chainId(network);
     const decimals = new Map<string, number>(host.tokens().map((t) => [t.mint, t.decimals]));
-    const granuleOf = (asset: AssetId) => (asset === "ZEC" ? ZEC_GRANULE : BigInt(10) ** BigInt(decimals.get(asset) ?? 6));
+    // Review E1: mint trees use 1 base unit (vaults hold exactly Σ balances); ZEC and SOL round up.
+    const granuleOf = (asset: AssetId) => (asset === "ZEC" ? ZEC_GRANULE : asset === "SOL" ? SOL_GRANULE : BigInt(1));
+    const decimalsOf = (asset: AssetId) => (asset === "ZEC" ? 8 : asset === "SOL" ? 9 : (decimals.get(asset) ?? 6));
 
     // Pieces per asset: rounded UP, split into 2-4.
     const pieces = new Map<AssetId, { pubkey: Uint8Array; owner: string; piece: number; value: bigint }[]>([["ZEC", []]]);
@@ -191,7 +197,7 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
         const leafIdx = slots[k];
         leaves[leafIdx] = { hash: leafHash({ chainId, snapshotId: id, asset: ab, anonPubkey: p.pubkey, piece: p.piece, value: p.value, blind }), sum: p.value };
         const own = owners.get(p.owner) ?? [];
-        own.push({ asset, decimals: asset === "ZEC" ? 8 : (decimals.get(asset) ?? 6), piece: p.piece, leafIdx, value: p.value, blind });
+        own.push({ asset, decimals: decimalsOf(asset), piece: p.piece, leafIdx, value: p.value, blind });
         owners.set(p.owner, own);
       });
       // Dummy leaves: value 0, random pubkey and blind, indistinguishable by hash.
@@ -206,7 +212,7 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
       }
       levels.set(asset, lv);
       const root = lv[lv.length - 1][0];
-      trees.push({ asset, decimals: asset === "ZEC" ? 8 : (decimals.get(asset) ?? 6), granule: granuleOf(asset).toString(), root: bytesToHex(root.hash), sum: root.sum.toString() });
+      trees.push({ asset, decimals: decimalsOf(asset), granule: granuleOf(asset).toString(), root: bytesToHex(root.hash), sum: root.sum.toString() });
     }
     // Same order core returns (ORDER BY asset text).
     trees.sort((a, b) => (a.asset < b.asset ? -1 : a.asset > b.asset ? 1 : 0));
@@ -216,7 +222,7 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
     const seeds = vaultSeeds(network);
     const vaultTokens: { mint: string; amount: bigint }[][] = seeds.map(() => []);
     for (const t of trees) {
-      if (t.asset === "ZEC") continue;
+      if (t.asset === "ZEC" || t.asset === "SOL") continue;
       const total = (BigInt(t.sum) * BigInt(10_000 + Math.floor(rnd() * 400))) / BigInt(10_000) + BigInt(t.granule);
       // One or two vaults per mint, like mint_vaults in the relayer.
       const a = Math.floor(rnd() * seeds.length);
@@ -230,7 +236,9 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
     const reserve = ((zecLiab * BigInt(58 + Math.floor(rnd() * 10))) / BigInt(100) / RESERVE_STEP) * RESERVE_STEP;
     const committed = BigInt(Math.floor((0.3 + rnd() * 2.5) * 1e9));
     const lamportsNeeded = ((zecLiab - reserve) * rate) / ZAT;
-    const lamportsTotal = (lamportsNeeded * BigInt(108 + Math.floor(rnd() * 10))) / BigInt(100) + committed + BigInt(250_000_000);
+    // Creator fees owed (SOL tree) are paid from the same vault SOL: covered first, the rest backs ZEC.
+    const solLiab = BigInt(trees.find((t) => t.asset === "SOL")?.sum ?? "0");
+    const lamportsTotal = (lamportsNeeded * BigInt(108 + Math.floor(rnd() * 10))) / BigInt(100) + committed + solLiab + BigInt(250_000_000);
     const weights = seeds.map(() => 1 + rnd() * 3);
     const wsum = weights.reduce((x, y) => x + y, 0);
     let given = N0;

@@ -7,6 +7,7 @@ import { base64 } from "@scure/base";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import type { Network } from "@/lib/network";
+import type { OrderKind } from "@/lib/api/types";
 import type { Fill } from "@/lib/pnl";
 
 export const HISTORY_VERSION = 1;
@@ -21,6 +22,8 @@ export interface HistoryEntry {
   symbol?: string;
   decimals?: number;
   submittedAt: number;
+  /** v0.8: placed by one of your private orders (its kind), not by hand. */
+  via?: OrderKind;
   /**
    * pending: accepted, not settled yet; executed: `fill` known; expired: the server dropped the action
    * before this browser saw it settle (retention 24-48 h), so PnL is incomplete.

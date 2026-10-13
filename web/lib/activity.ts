@@ -8,12 +8,12 @@
 import { useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { api, ApiError, errorText } from "@/lib/api/client";
-import type { ActionReceipt, ActionStatus, ExecMode, RateUsed, SignedAction } from "@/lib/api/types";
+import type { ActionReceipt, ActionState, ActionStatus, ExecMode, RateUsed, SignedAction } from "@/lib/api/types";
 import { getSigner } from "@/lib/crypto/session";
 import type { Network } from "@/lib/network";
 import { recordSubmitted } from "@/lib/history/store";
 
-export type TrackedOp = "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token";
+export type TrackedOp = "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token" | "claim";
 
 export interface TrackedAction {
   id: string;
@@ -103,6 +103,10 @@ export function applyActionStatuses(
 }
 
 const acceptedListeners = new Set<() => void>();
+/** Something moved balances right now (an order placed or cancelled): refetch the portfolio off-rhythm. */
+export function notifyAccepted() {
+  acceptedListeners.forEach((l) => l());
+}
 /** Fires when the pool accepted an action: balances moved at a moment the POST already revealed. */
 export function onActionAccepted(l: () => void): () => void {
   acceptedListeners.add(l);
@@ -128,12 +132,15 @@ export function describe(a: Pick<TrackedAction, "op" | "symbol">): string {
       return "ZEC withdrawal";
     case "withdraw_token":
       return `${sym} withdrawal`;
+    case "claim":
+      return "Creator fees claim";
   }
 }
 
 function settledText(a: TrackedAction): string | undefined {
   if (a.op === "withdraw_token") return "Tokens sent to your fresh address.";
   if (a.op === "withdraw_zec") return "Shielded payout sent.";
+  if (a.op === "claim") return "Credited to your ZEC balance.";
   return "Unzeen made the trade. The chain only sees “unzeen”.";
 }
 
@@ -156,11 +163,12 @@ export async function submitAction(
     ...meta,
     exec: "exec" in action ? action.exec : undefined,
     submittedAt: Date.now(),
-    status: { status: receipt.status, rate: receipt.rate },
+    // Order receipts ("open" / "cancelled") never come through here (lib/orders.ts).
+    status: { status: receipt.status as ActionState, rate: receipt.rate },
   };
   items.set(it.id, it);
   emit();
-  if (meta.op !== "withdraw_zec") {
+  if (meta.op !== "withdraw_zec" && meta.op !== "claim") {
     // Encrypted local history for PnL (T4): the id, kind and mint only; the fill arrives with the poll.
     void recordSubmitted(network, signer.pubkey, { id: it.id, kind: meta.op, mint: meta.mint, symbol: meta.symbol, decimals: meta.decimals, submittedAt: it.submittedAt });
   }

@@ -7,7 +7,7 @@ import type { ApiErrorBody, ErrorCode } from "./types";
  * Codes of features that load on demand (fair-launch, v0.6) are registered by their own chunk via
  * registerErrorCodes(), so the main bundle carries neither their names nor their texts.
  */
-type LateCode = "launch_closed" | "already_bid" | "bad_ciphertext";
+type LateCode = "launch_closed" | "already_bid" | "bad_ciphertext" | "launch_full";
 type BaseCode = Exclude<ErrorCode, LateCode>;
 
 const CODES: BaseCode[] = [
@@ -26,6 +26,9 @@ const CODES: BaseCode[] = [
   "feature_disabled",
   "creator_locked",
   "creator_cap",
+  "order_limit",
+  "order_not_open",
+  "order_unsupported_mint",
   "internal",
 ];
 
@@ -112,6 +115,9 @@ const UI_TEXT: Record<BaseCode | ClientErrorCode, string> = {
   feature_disabled: "This isn't switched on yet.",
   creator_locked: "Your launch buy is locked for now. The lock ends 24 hours after launch; tokens you bought later are free to move.",
   creator_cap: "As the creator you can hold at most 5% of supply through the pool. Try a smaller amount.",
+  order_limit: "You have the maximum number of open orders. Cancel one first.",
+  order_not_open: "This order is no longer open: it already triggered, expired or was cancelled.",
+  order_unsupported_mint: "Orders work only for pump.fun tokens on the bonding curve that the pool already trades.",
   internal: "Something went wrong on our side. Try again.",
   network: "Can't reach Unzeen. Check your connection.",
   locked: "Unlock your anon key to continue.",

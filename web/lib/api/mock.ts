@@ -21,10 +21,15 @@ import type {
   ActionReceipt,
   ActionStatus,
   Candle,
+  CreatorCabinet,
+  CreatorToken,
   CandleTimeframe,
   DepositInfo,
   ExecMode,
   FeedEvent,
+  Order,
+  OrderKind,
+  OrdersParams,
   PlatformStats,
   PoolInfo,
   Portfolio,
@@ -243,6 +248,7 @@ function makeCreateEvent(ts: number): FeedEvent | null {
 
 function nextEvent(now: number): FeedEvent {
   const ev = (Math.random() < 0.06 && makeCreateEvent(now)) || makeTradeEvent(now);
+  accrueCreatorFee(ev);
   history.unshift(ev);
   if (history.length > 1000) history.length = 1000;
   return ev;
@@ -320,7 +326,7 @@ function authorize(
 // ---- pool and accounts (per network) ----
 
 const hex16 = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (x) => x.toString(16).padStart(2, "0")).join("");
-const UNSUPPORTED_OPS = new Set(["claim", "order_create", "order_cancel", "chat"]);
+const UNSUPPORTED_OPS = new Set(["chat"]);
 
 function poolAddress(network: Network): string {
   // Looks like a UA (bech32 charset); not a real address.
@@ -351,6 +357,7 @@ export function mockPool(network: Network): PoolInfo {
     ...(process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1"
       ? { features: { fullTrades: FULL_FEED, fairLaunch: true }, ...(fair ? { fairLaunch: fair.params(network) } : {}) }
       : { features: { fullTrades: FULL_FEED } }),
+    orders: ORDER_PARAMS,
     launchRules: {
       lockSecs: 86_400,
       capBps: 500,
@@ -370,6 +377,8 @@ interface MockAccount {
   frozen: boolean;
   holdings: { mint: string; amount: string; held: string }[];
   deposits: DepositInfo[];
+  /** v0.7 creator fees owed, lamports per mint this key launched. */
+  claimable: Map<string, bigint>;
 }
 
 const accounts = new Map<string, MockAccount>(); // `${network}:${pubkey}`
@@ -387,6 +396,7 @@ function account(network: Network, pubkey: string): MockAccount {
       frozen: false,
       holdings: picks.map((s) => ({ mint: s.token.mint, amount: toBaseUnits((rnd() * 4 + 0.2) / s.price, s.token.decimals), held: "0" })),
       deposits: [],
+      claimable: new Map(),
     };
     accounts.set(key, a);
   }
@@ -400,10 +410,13 @@ function portfolioOf(network: Network, pubkey: string): Portfolio {
     zecHeld: a.zecHeld.toString(),
     frozen: a.frozen,
     holdings: a.holdings.map((h) => ({ ...h })),
-    claimable: [],
+    claimable: [...a.claimable].filter(([, v]) => v > N0).map(([mint, v]) => ({ mint, solAmount: v.toString() })),
     deposits: a.deposits.slice(0, 20).map((d) => ({ ...d })),
-    // Pending in docs/API.md (analysis N-2): every own action rides along with the regular poll.
-    actions: [...actions.values()].filter((x) => x.network === network && x.pubkey === pubkey && !x.hidden).map((x) => ({ id: x.id, ...x.status })),
+    // Every own action rides along with the regular poll (order_* never: an order shows in `orders`).
+    actions: [...actions.values()]
+      .filter((x) => x.network === network && x.pubkey === pubkey && !x.hidden)
+      .map((x) => ({ id: x.id, kind: x.action.op as NonNullable<NonNullable<Portfolio["actions"]>[number]["kind"]>, ...x.status })),
+    orders: ordersOf(network, pubkey, Date.now()),
     ...(fair ? fair.portfolio(network, pubkey) : {}),
   };
 }
@@ -492,27 +505,66 @@ export function mockDepositPhase(network: Network, memo: string): { phase: MockD
   return { phase: confs === 0 ? "mempool" : "confirming", confirmations: confs };
 }
 
-function stats(): PlatformStats {
-  const byVenue: PlatformStats["byVenue"] = {
-    pumpfun: { volumeSol: "0", trades: 0 },
-    "meteora-dbc": { volumeSol: "0", trades: 0 },
-    jupiter: { volumeSol: "0", trades: 0 },
-  };
-  let vol = 0;
-  for (const e of history) {
-    const sol = Number(e.solAmount) / 1e9;
-    vol += sol;
-    byVenue[e.venue].trades++;
-    byVenue[e.venue].volumeSol = trimDecimals(Number(byVenue[e.venue].volumeSol) + sol, 2);
+// ---- GET /api/stats (v0.9): one frozen snapshot per UTC day, k-anonymity k = 5 ----
+
+const K = 5;
+const DAY_MS = 86_400_000;
+/** Mock twin of "before the first snapshot": NEXT_PUBLIC_MOCK_STATS_EMPTY=1 answers 404. */
+const STATS_EMPTY = process.env.NEXT_PUBLIC_MOCK_STATS_EMPTY === "1";
+let statsSnap: { day: number; data: PlatformStats } | null = null;
+
+const kCount = (n: number): number | "<5" => (n < K ? "<5" : n);
+/** SOL rounded DOWN to 0.1 SOL, "<5" when built from fewer than 5 trades. */
+const kSol = (lamports: bigint, n: number): string | "<5" => (n < K ? "<5" : trimDecimals(Number(lamports / BigInt(100_000_000)) / 10, 1) || "0");
+
+/**
+ * The mock has only ~40 minutes of history, so its "daily snapshot" is taken over everything seen
+ * when it is first asked for that UTC day, then frozen until the next day (core: strictly before
+ * 00:00 UTC, built once). Nothing here moves when a trade or deposit happens.
+ */
+function stats(now: number): PlatformStats {
+  if (STATS_EMPTY) throw new ApiError("not_found", "no stats snapshot yet", 404);
+  const day = Math.floor(now / DAY_MS) * DAY_MS;
+  if (statsSnap?.day === day) return structuredClone(statsSnap.data);
+  const trades = history.filter((e) => e.kind !== "create");
+  const venues: Venue[] = ["pumpfun", "meteora-dbc", "jupiter"];
+  const byVenue = Object.fromEntries(
+    venues.map((v) => {
+      const t = trades.filter((e) => e.venue === v);
+      const vol = t.reduce((x, e) => x + BigInt(e.solAmount), N0);
+      return [v, { volumeSol: kSol(vol, t.length), trades: kCount(t.length), launches: kCount(history.filter((e) => e.kind === "create" && e.venue === v).length) }];
+    }),
+  ) as PlatformStats["byVenue"];
+  const per = new Map<string, { vol: bigint; n: number }>();
+  for (const e of trades) {
+    const x = per.get(e.mint) ?? { vol: N0, n: 0 };
+    per.set(e.mint, { vol: x.vol + BigInt(e.solAmount), n: x.n + 1 });
   }
-  return {
-    volumeSol: trimDecimals(vol, 2),
-    zecShielded: trimDecimals(vol * 0.31, 2),
-    trades: history.length,
-    launches: history.filter((e) => e.kind === "create").length,
+  const top = state!
+    .filter((st) => (per.get(st.token.mint)?.n ?? 0) >= K)
+    .sort((a, b) => Number(per.get(b.token.mint)!.vol - per.get(a.token.mint)!.vol))
+    .slice(0, 10)
+    .map((st) => ({ ...st.token, volumeSol: kSol(per.get(st.token.mint)!.vol, K) as string, trades: per.get(st.token.mint)!.n }));
+  const deposits = [...accounts.values()].reduce((n, a) => n + a.deposits.length, 0);
+  const total = trades.reduce((x, e) => x + BigInt(e.solAmount), N0);
+  const data: PlatformStats = {
+    asOf: day,
+    volumeSol: kSol(total, trades.length),
+    trades: kCount(trades.length),
+    launches: kCount(history.filter((e) => e.kind === "create").length),
+    // Demo figure: the mock has no real deposit history worth summing; core rounds down to 1 ZEC.
+    zecShielded: deposits + 40 < K ? "<5" : String(Math.floor(Number(total) / 1e9 * 0.31)),
     byVenue,
-    topTokens: state!.filter((s) => s.heat > 0).sort((a, b) => b.price * b.supply - a.price * a.supply).slice(0, 5).map((s) => ({ ...s.token })),
+    topTokens: top,
+    topWindowDays: 7,
   };
+  statsSnap = { day, data };
+  return structuredClone(data);
+}
+
+/** TEST: forget the frozen daily snapshot. */
+export function mockResetStats() {
+  statsSnap = null;
 }
 
 // ---- actions from the balance (rules of docs/API.md "Правила исполнения действий" and core/api) ----
@@ -726,6 +778,7 @@ function fail(act: MockAction, a: MockAccount, error: ActionStatus["error"]) {
   releaseZat(a, act, N0);
   releaseTokens(a, act, N0);
   act.status = { status: "failed", error, rate: act.status.rate };
+  settleOrderOf(act);
 }
 
 /** The relayer: executes one queued action and publishes the trade like any other vault trade. */
@@ -779,6 +832,8 @@ function execute(act: MockAction) {
     unzeenLaunches.add(s.token.mint);
     syncTokenFields();
     const out = lamports > N0 ? BigInt(toBaseUnits(Number(lamports) / 1e9 / price, s.token.decimals)) : N0;
+    // Launch buy locked for launchRules.lockSecs (end rounded up to the hour).
+    creators.set(s.token.mint, { network: act.network, pubkey: act.pubkey, lockedAmount: out, lockUntil: Math.ceil((now + 86_400_000) / 3_600_000) * 3_600_000, claimed: N0 });
     releaseZat(a, act, act.holdZat);
     if (out > N0) holdingOf(a, s.token.mint).amount = out.toString();
     publish({ id: b58(16), kind: "create", venue, mint: s.token.mint, symbol: s.token.symbol, tokenAmount: out.toString(), solAmount: lamports.toString(), decimals: s.token.decimals, solanaTx: tx, ts: now });
@@ -793,6 +848,7 @@ function execute(act: MockAction) {
     act.status = { status: "executed" };
   }
   tidyHoldings(a);
+  settleOrderOf(act);
 }
 
 function submit(network: Network, method: "POST", path: string, body: string | undefined, headers: Partial<SignedHeaders>): ActionReceipt {
@@ -818,10 +874,21 @@ function submit(network: Network, method: "POST", path: string, body: string | u
     execDelay({ op: "fl", pad: (action as { pad?: unknown }).pad } as unknown as SignedAction, true);
     const receipt = fair.submit(network, pubkey, action);
     seenNonces.set(nonceKey, now + 120_000);
-    const act: MockAction = { id: receipt.id, network, pubkey, action, nonceKey, bodyHash: hash, receipt, status: { status: receipt.status }, holdZat: N0, hidden: true };
+    const act: MockAction = { id: receipt.id, network, pubkey, action, nonceKey, bodyHash: hash, receipt, status: { status: receipt.status as ActionStatus["status"] }, holdZat: N0, hidden: true };
     actions.set(receipt.id, act);
     byNonce.set(nonceKey, receipt.id);
     return receipt;
+  }
+  if (LEDGER_OPS.has(action.op)) {
+    execDelay(action, true); // pad check only: ledger ops have no batch
+    const r = ledgerOp(network, pubkey, action, now);
+    seenNonces.set(nonceKey, now + 120_000);
+    const act: MockAction = { ...r.act, id: r.receipt.id, network, pubkey, action, nonceKey, bodyHash: hash, receipt: r.receipt };
+    // Orders are kept for nonce idempotency only (not in Portfolio.actions, not under GET /api/actions/:id).
+    const key = act.hidden ? `ledger:${nonceKey}` : act.id;
+    actions.set(key, act);
+    byNonce.set(nonceKey, key);
+    return r.receipt;
   }
   const [lo, hi] = execDelay(action);
   // Rejected actions do not burn the nonce (docs/API.md).
@@ -833,6 +900,358 @@ function submit(network: Network, method: "POST", path: string, body: string | u
   byNonce.set(nonceKey, id);
   setTimeout(() => execute(act), rand(lo, hi));
   return act.receipt;
+}
+
+// ---- private orders (v0.8) and creator fees (v0.7 claim) ----
+
+const ORDER_PARAMS: OrdersParams = {
+  kinds: ["limit_buy", "limit_sell", "take_profit", "stop_loss"],
+  venues: ["pumpfun"],
+  maxOpenPerKey: 10,
+  maxOpenPerMint: 4,
+  maxTtlSecs: 259_200,
+  defaultTtlSecs: 86_400,
+  defaultSlippageBps: { limit_buy: 500, limit_sell: 500, take_profit: 500, stop_loss: 1500 },
+  slConfirmTicks: 2,
+  priceTick: { minSecs: 45, maxSecs: 75 },
+};
+const ORDER_KINDS = new Set<string>(ORDER_PARAMS.kinds);
+const SELL_KINDS = new Set<OrderKind>(["limit_sell", "take_profit", "stop_loss"]);
+const HOUR = 3_600_000;
+/** Closed orders stay in Portfolio.orders for 24 h (D1), then their amounts and price are erased. */
+const ORDER_KEEP_MS = 24 * HOUR;
+
+/**
+ * Indexer price tick (core: every 45-75 s over all pool tokens at once, independent of orders),
+ * compressed for the demo. Orders are checked once per tick; stop-loss needs 2 ticks in a row.
+ */
+export const MOCK_ORDER_TICK_MS = 10_000;
+/** Pool-wide creator-fee collector (core: every 6-12 h), compressed for the demo. */
+export const MOCK_FEE_SWEEP_MS = 30_000;
+/** Creator fee share of each trade on a token launched through the pool (mock figure). */
+const CREATOR_FEE_BPS = BigInt(30);
+
+interface MockOrder {
+  pub: Order;
+  network: Network;
+  pubkey: string;
+  /** ms when it left `open`/`triggered` (for the 24 h retention). */
+  closedAt?: number;
+}
+
+const orders = new Map<string, MockOrder>();
+/** Mints launched through the pool -> their (anonymous) creator key. Never exposed publicly. */
+const creators = new Map<string, { network: Network; pubkey: string; lockedAmount: bigint; lockUntil: number; claimed: bigint }>();
+/** Fees earned since the last collector run, per mint. */
+const pendingFees = new Map<string, bigint>();
+let lastOrderTick: number | null = null;
+let lastSweep: number | null = null;
+
+const DECIMAL_RE = /^(0|[1-9]\d*)(\.\d+)?$/;
+function sigDigits(v: string): number {
+  return v.replace(".", "").replace(/^0+/, "").replace(/0+$/, "").length;
+}
+
+function ordersOf(network: Network, pubkey: string, now: number): Order[] {
+  const live = (o: MockOrder) => o.pub.status === "open" || o.pub.status === "triggered";
+  return [...orders.values()]
+    .filter((o) => o.network === network && o.pubkey === pubkey && (live(o) || now - (o.closedAt ?? now) < ORDER_KEEP_MS))
+    .sort((a, b) => Number(live(b)) - Number(live(a)) || b.pub.createdAt - a.pub.createdAt)
+    .slice(0, 20)
+    .map((o) => structuredClone(o.pub));
+}
+
+function releaseOrder(o: MockOrder) {
+  const a = account(o.network, o.pubkey);
+  if (o.pub.kind === "limit_buy") {
+    const v = BigInt(o.pub.amount);
+    a.zecHeld -= v;
+    a.zecBalance += v;
+  } else {
+    const h = holdingOf(a, o.pub.mint);
+    h.held = (BigInt(h.held) - BigInt(o.pub.amount)).toString();
+    h.amount = (BigInt(h.amount) + BigInt(o.pub.amount)).toString();
+  }
+}
+
+function closeOrder(o: MockOrder, status: Order["status"], now: number, error?: Order["error"]) {
+  o.pub.status = status;
+  delete o.pub.armed;
+  if (error) o.pub.error = error;
+  o.closedAt = now;
+}
+
+/** Value of `amount` base units at `priceSol`, lamports (floor). */
+function lamportsAt(amount: bigint, decimals: number, priceSol: number): bigint {
+  return BigInt(Math.floor((Number(amount) / 10 ** decimals) * priceSol * 1e9));
+}
+
+function createOrder(network: Network, pubkey: string, x: Extract<SignedAction, { op: "order_create" }>, now: number): MockOrder {
+  const pool = mockPool(network);
+  if (x.venue !== "pumpfun") throw new ApiError("bad_request", "venue: orders are pumpfun only", 400);
+  if (!ORDER_KINDS.has(x.kind)) throw new ApiError("bad_request", "kind: limit_buy | limit_sell | take_profit | stop_loss", 400);
+  if (!isSolanaAddress(String(x.mint))) throw new ApiError("bad_request", "mint: not a Solana address", 400);
+  const t = String(x.triggerPriceSol ?? "");
+  if (!DECIMAL_RE.test(t) || !(Number(t) > 0) || sigDigits(t) > 18) throw new ApiError("bad_request", "triggerPriceSol: positive decimal, <= 18 significant digits", 400);
+  const amount = amountOf(x.amount, "amount");
+  const slippageBps = x.slippageBps ?? ORDER_PARAMS.defaultSlippageBps[x.kind];
+  if (!Number.isInteger(slippageBps) || slippageBps < 50 || slippageBps > 5000) throw new ApiError("bad_request", "slippageBps: 50..5000", 400);
+  const ttl = x.ttlSecs ?? ORDER_PARAMS.defaultTtlSecs;
+  if (!Number.isInteger(ttl) || ttl < 3600 || ttl > ORDER_PARAMS.maxTtlSecs) throw new ApiError("bad_request", `ttlSecs: 3600..${ORDER_PARAMS.maxTtlSecs}`, 400);
+  const exec = x.exec ?? "delayed";
+  if (exec !== "delayed" && exec !== "max") throw new ApiError("bad_request", 'exec: orders take "delayed" | "max"', 400);
+  // Only mints the pool already trades (public GET /api/tokens), on the pump.fun curve.
+  const s = state!.find((y) => y.token.mint === x.mint);
+  if (!s || s.heat === 0 || s.token.venue !== "pumpfun" || s.token.status !== "curve") throw new ApiError("order_unsupported_mint", "mint not supported for orders", 422);
+  const a = account(network, pubkey);
+  if (a.frozen) throw new ApiError("balance_frozen", "balance frozen", 423);
+  const open = [...orders.values()].filter((o) => o.network === network && o.pubkey === pubkey && o.pub.status === "open");
+  if (open.length >= ORDER_PARAMS.maxOpenPerKey || open.filter((o) => o.pub.mint === x.mint).length >= ORDER_PARAMS.maxOpenPerMint)
+    throw new ApiError("order_limit", "too many open orders", 422);
+  const minAction = BigInt(pool.minActionZat);
+  if (x.kind === "limit_buy") {
+    if (amount < minAction) throw new ApiError("below_minimum", "amount below PoolInfo.minActionZat", 422);
+    if (a.zecBalance < amount) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
+    a.zecBalance -= amount;
+    a.zecHeld += amount;
+  } else {
+    const value = (lamportsAt(amount, s.token.decimals, Number(t)) * ZAT) / BigInt(mockRate(false).lamportsPerZec);
+    if (value < minAction) throw new ApiError("below_minimum", "amount × trigger below PoolInfo.minActionZat", 422);
+    const h = holdingOf(a, x.mint);
+    if (BigInt(h.amount) < amount) {
+      tidyHoldings(a);
+      throw new ApiError("insufficient_balance", "not enough tokens", 422);
+    }
+    h.amount = (BigInt(h.amount) - amount).toString();
+    h.held = (BigInt(h.held) + amount).toString();
+  }
+  const o: MockOrder = {
+    network,
+    pubkey,
+    pub: {
+      id: hex16(),
+      venue: "pumpfun",
+      mint: x.mint,
+      kind: x.kind,
+      triggerPriceSol: t,
+      amount: amount.toString(),
+      slippageBps,
+      exec,
+      status: "open",
+      createdAt: Math.floor(now / 60_000) * 60_000,
+      expiresAt: Math.ceil((now + ttl * 1000) / HOUR) * HOUR,
+    },
+  };
+  orders.set(o.pub.id, o);
+  return o;
+}
+
+/** Ledger-only ops: no batch, no chain. Throws exactly where core/ would answer non-2xx. */
+function ledgerOp(network: Network, pubkey: string, x: SignedAction, now: number): { receipt: ActionReceipt; act: Pick<MockAction, "status" | "holdZat" | "hidden"> } {
+  if (x.op === "order_create") {
+    const o = createOrder(network, pubkey, x, now);
+    return { receipt: { id: o.pub.id, status: "open" }, act: { status: { status: "queued" }, holdZat: N0, hidden: true } };
+  }
+  if (x.op === "order_cancel") {
+    const o = orders.get(String(x.orderId));
+    if (!o || o.network !== network || o.pubkey !== pubkey) throw new ApiError("not_found", "unknown order", 404);
+    if (o.pub.status !== "open") throw new ApiError("order_not_open", `order is ${o.pub.status}`, 409);
+    releaseOrder(o);
+    closeOrder(o, "cancelled", now);
+    tidyHoldings(account(network, pubkey));
+    return { receipt: { id: o.pub.id, status: "cancelled" }, act: { status: { status: "queued" }, holdZat: N0, hidden: true } };
+  }
+  if (x.op === "claim") {
+    if (x.mint !== undefined && !isSolanaAddress(String(x.mint))) throw new ApiError("bad_request", "mint: not a Solana address", 400);
+    const a = account(network, pubkey);
+    if (a.frozen) throw new ApiError("balance_frozen", "balance frozen", 423);
+    const mints = x.mint === undefined ? [...a.claimable.keys()] : [x.mint];
+    const lamports = mints.reduce((sum, m) => sum + (a.claimable.get(m) ?? N0), N0);
+    const rate = mockRate(false);
+    const zat = (lamports * ZAT) / BigInt(rate.lamportsPerZec);
+    if (zat === N0 || zat < BigInt(mockPool(network).minActionZat)) throw new ApiError("below_minimum", "nothing to claim above PoolInfo.minActionZat", 422);
+    for (const m of mints) {
+      const c = creators.get(m);
+      if (c && c.network === network && c.pubkey === pubkey) c.claimed += a.claimable.get(m) ?? N0;
+      a.claimable.delete(m);
+    }
+    a.zecBalance += zat;
+    const id = hex16();
+    return {
+      receipt: { id, status: "executed", rate },
+      act: { status: { status: "executed", executedAt: Math.floor(now / 60_000) * 60_000, rate }, holdZat: N0 },
+    };
+  }
+  throw new ApiError("bad_request", "op not supported yet", 400);
+}
+const LEDGER_OPS = new Set(["order_create", "order_cancel", "claim"]);
+
+/** One indexer tick: check every open order against the pool's current prices. */
+function orderTick(now: number) {
+  for (const o of orders.values()) {
+    if (o.pub.status !== "open") continue;
+    if (now >= o.pub.expiresAt) {
+      releaseOrder(o);
+      closeOrder(o, "expired", now);
+      tidyHoldings(account(o.network, o.pubkey));
+      continue;
+    }
+    const s = state!.find((y) => y.token.mint === o.pub.mint);
+    if (!s) continue;
+    if (s.token.status === "graduated") {
+      releaseOrder(o);
+      closeOrder(o, "failed", now, "graduated");
+      tidyHoldings(account(o.network, o.pubkey));
+      continue;
+    }
+    const trigger = Number(o.pub.triggerPriceSol);
+    const p = s.price;
+    const hit = o.pub.kind === "limit_buy" || o.pub.kind === "stop_loss" ? p <= trigger : p >= trigger;
+    if (o.pub.kind === "stop_loss") {
+      if (!hit) {
+        delete o.pub.armed;
+        continue;
+      }
+      if (!o.pub.armed) {
+        o.pub.armed = true; // confirmed only on the next tick in a row
+        continue;
+      }
+    } else if (!hit) continue;
+    fireOrder(o, s);
+  }
+}
+
+/** The order becomes an ordinary buy/sell in the next batch; the hold moves over unchanged. */
+function fireOrder(o: MockOrder, s: MockTokenState) {
+  const slip = o.pub.slippageBps / 10_000;
+  const trigger = Number(o.pub.triggerPriceSol);
+  const amount = BigInt(o.pub.amount);
+  let action: SignedAction;
+  let rate: RateUsed;
+  if (o.pub.kind === "limit_buy") {
+    rate = mockRate(true);
+    const lamports = (amount * BigInt(rate.lamportsPerZec)) / ZAT;
+    const minOut = BigInt(Math.floor((Number(lamports) / 1e9 / (trigger * (1 + slip))) * 10 ** s.token.decimals));
+    action = { op: "buy", venue: "pumpfun", mint: o.pub.mint, zecIn: o.pub.amount, minOut: minOut.toString(), exec: o.pub.exec };
+  } else {
+    rate = mockRate(false);
+    const minLamports = BigInt(Math.floor(Number(lamportsAt(amount, s.token.decimals, trigger)) * (1 - slip)));
+    action = { op: "sell", venue: "pumpfun", mint: o.pub.mint, amount: o.pub.amount, minZecOut: ((minLamports * ZAT) / BigInt(rate.lamportsPerZec)).toString(), exec: o.pub.exec };
+  }
+  const id = hex16();
+  const act: MockAction = {
+    id,
+    network: o.network,
+    pubkey: o.pubkey,
+    nonceKey: "",
+    bodyHash: "",
+    action,
+    receipt: { id, status: "queued", rate },
+    status: { status: "queued", rate },
+    holdZat: o.pub.kind === "limit_buy" ? amount : N0,
+    ...(SELL_KINDS.has(o.pub.kind) ? { holdToken: { mint: o.pub.mint, amount } } : {}),
+  };
+  actions.set(id, act);
+  delete o.pub.armed;
+  o.pub.status = "triggered";
+  o.pub.actionId = id;
+  setTimeout(() => execute(act), rand(...MOCK_EXEC_MODE_MS[o.pub.exec]));
+}
+
+/** The trade an order turned into has settled: the order follows it. */
+function settleOrderOf(act: MockAction) {
+  for (const o of orders.values()) {
+    if (o.pub.actionId !== act.id || o.pub.status !== "triggered") continue;
+    if (act.status.status === "executed") closeOrder(o, "filled", Date.now());
+    else if (act.status.status === "failed") closeOrder(o, "failed", Date.now(), act.status.error);
+  }
+}
+
+/** Creator fee of a trade on a token launched through the pool: pending until the collector runs. */
+function accrueCreatorFee(ev: FeedEvent) {
+  if (ev.kind === "create" || !creators.has(ev.mint)) return;
+  const fee = (BigInt(ev.solAmount) * CREATOR_FEE_BPS) / BigInt(10_000);
+  if (fee > N0) pendingFees.set(ev.mint, (pendingFees.get(ev.mint) ?? N0) + fee);
+}
+
+/** The pool's global collector: moves pending fees to the creators' claimable balances. */
+function sweepFees() {
+  for (const [mint, fee] of pendingFees) {
+    const c = creators.get(mint);
+    if (!c) continue;
+    const a = account(c.network, c.pubkey);
+    a.claimable.set(mint, (a.claimable.get(mint) ?? N0) + fee);
+  }
+  pendingFees.clear();
+}
+
+/** Fixed schedules, independent of requests: price ticks for orders, the fee collector. */
+function catchUpTicks(now: number) {
+  const tick = Math.floor(now / MOCK_ORDER_TICK_MS);
+  if (lastOrderTick === null || tick < lastOrderTick) lastOrderTick = tick;
+  // At most a few missed ticks are replayed (the price did not move in between anyway).
+  for (let i = 0; i < Math.min(tick - lastOrderTick, 3); i++) orderTick(now);
+  lastOrderTick = tick;
+  const sweep = Math.floor(now / MOCK_FEE_SWEEP_MS);
+  if (lastSweep !== null && sweep > lastSweep) sweepFees();
+  lastSweep = sweep;
+}
+
+/** GET /api/creator (v0.9): the key's own launches only, padded to a multiple of 4096 bytes. */
+function creatorCabinet(network: Network, pubkey: string, now: number): CreatorCabinet {
+  const a = account(network, pubkey);
+  const tokens: CreatorToken[] = [];
+  for (const [mint, c] of creators) {
+    if (c.network !== network || c.pubkey !== pubkey) continue;
+    const st = state!.find((y) => y.token.mint === mint);
+    if (!st) continue;
+    const t = st.token;
+    const trades = history.filter((e) => e.mint === mint && e.kind !== "create");
+    const h = a.holdings.find((x) => x.mint === mint);
+    const rnd = seeded("holders:" + mint);
+    const locked = now < c.lockUntil ? c.lockedAmount : N0;
+    tokens.push({
+      mint,
+      symbol: t.symbol,
+      name: t.name,
+      image: t.image,
+      decimals: t.decimals,
+      venue: t.venue === "meteora-dbc" ? "meteora-dbc" : "pumpfun",
+      status: t.status,
+      ...(t.status === "curve" ? { curveProgressPct: pct(Math.min(99, 3 + (st.price / 2.8e-8 - 1) * 12)) } : {}),
+      createdAt: t.createdAt,
+      fees: { claimableLamports: (a.claimable.get(mint) ?? N0).toString(), claimedLamports: c.claimed.toString() },
+      volumeLamports: trades.reduce((x, e) => x + BigInt(e.solAmount), N0).toString(),
+      trades: trades.length,
+      holders: trades.length === 0 ? null : 1 + Math.floor(trades.length * (1.5 + rnd())),
+      holdersAsOf: Math.floor(now / 60_000) * 60_000,
+      lock: { lockedAmount: locked.toString(), until: locked > N0 ? c.lockUntil : null },
+      cap: {
+        capBps: 500,
+        capTokens: ((BigInt(toBaseUnits(SUPPLY, t.decimals)) * BigInt(500)) / BigInt(10_000)).toString(),
+        positionTokens: (h ? BigInt(h.amount) + BigInt(h.held) : N0).toString(),
+      },
+    });
+  }
+  tokens.sort((x, y) => (y.createdAt ?? 0) - (x.createdAt ?? 0));
+  const out: CreatorCabinet = { tokens: tokens.slice(0, 50), pad: "" };
+  const len = JSON.stringify(out).length;
+  out.pad = " ".repeat(Math.ceil(len / 4096) * 4096 - len);
+  return out;
+}
+
+/** TEST / DEMO: move a token's price (the indexer reads it on the next tick). */
+export function mockSetPrice(mint: string, priceSol: number) {
+  init(Date.now());
+  findToken(mint).price = priceSol;
+  syncTokenFields();
+}
+
+/** TEST / DEMO: credit creator fees straight to a key's claimable balance. */
+export function mockCreditCreatorFees(network: Network, pubkey: string, mint: string, lamports: bigint) {
+  init(Date.now());
+  const a = account(network, pubkey);
+  a.claimable.set(mint, (a.claimable.get(mint) ?? N0) + lamports);
 }
 
 // ---- router ----
@@ -850,6 +1269,7 @@ export async function handle(
   await delay(rand(120, 380));
   scan(Date.now());
   fair?.tick(Date.now());
+  catchUpTicks(Date.now());
   const url = new URL(pathWithQuery, "http://mock.local");
   const p = url.pathname;
   const q = url.searchParams;
@@ -860,7 +1280,7 @@ export async function handle(
     // Cold mints from CA searches stay out of the public list until unzeen trades them: listing them
     // would tell everyone what someone searched for.
     if (p === "/api/tokens") return state!.filter((s) => s.heat > 0).map((s) => ({ ...s.token }));
-    if (p === "/api/stats") return stats();
+    if (p === "/api/stats") return stats(Date.now());
 
     if ((m = p.match(/^\/api\/tokens\/([^/]+)$/))) {
       const s = resolveMint(decodeURIComponent(m[1]));
@@ -911,10 +1331,8 @@ export async function handle(
     }
     // Verify (v0.7): its own chunk, loaded on the first call.
     if (p === "/api/verify" || p.startsWith("/api/verify/")) return (await loadVerify()).get(network, pathWithQuery, headers);
-    if (p === "/api/orders" || p === "/api/creator") {
-      authorize(network, method, pathWithQuery, body, headers);
-      return [];
-    }
+    // v0.9: the creator's cabinet, padded so its size does not tell "creator" from "not".
+    if (p === "/api/creator") return creatorCabinet(network, authorize(network, method, pathWithQuery, body, headers), Date.now());
   }
 
   if (method === "POST") {
@@ -1089,6 +1507,7 @@ const feedSubs = new Set<(e: FeedEvent) => void>();
 
 /** A trade made by the mock relayer: into history and out to every open socket. */
 function publish(ev: FeedEvent) {
+  accrueCreatorFee(ev);
   history.unshift(ev);
   if (history.length > 1000) history.length = 1000;
   feedSubs.forEach((f) => f(ev));
@@ -1182,11 +1601,12 @@ function loadVerify(): Promise<VerifyMock> {
       chainId: (network) => mockPool(network).chainId as "0202" | "0101",
       rateSell: () => BigInt(mockRate(false).lamportsPerZec),
       accounts(network) {
-        const out: { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[] }[] = [];
+        const out: { pubkey: string; zat: bigint; tokens: { mint: string; amount: bigint }[]; claimLamports: bigint }[] = [];
         for (const [key, a] of accounts) {
           const [net, pubkey] = key.split(":");
           if (net !== network) continue;
-          out.push({ pubkey, zat: a.zecBalance + a.zecHeld, tokens: a.holdings.map((h) => ({ mint: h.mint, amount: BigInt(h.amount) + BigInt(h.held) })) });
+          const claimLamports = [...a.claimable.values()].reduce((x, y) => x + y, N0);
+          out.push({ pubkey, zat: a.zecBalance + a.zecHeld, tokens: a.holdings.map((h) => ({ mint: h.mint, amount: BigInt(h.amount) + BigInt(h.held) })), claimLamports });
         }
         return out;
       },

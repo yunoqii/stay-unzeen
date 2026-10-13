@@ -13,9 +13,8 @@ import type {
   ActionStatus,
   Candle,
   CandleTimeframe,
-  CreatorToken,
+  CreatorCabinet,
   FeedEvent,
-  Order,
   PendingResponse,
   PlatformStats,
   PoolInfo,
@@ -93,8 +92,7 @@ export interface Api {
   postAction(signer: Signer, action: SignedAction): Promise<ActionReceipt>;
   /** Owner only (header pubkey = action author), otherwise 404. */
   getAction(signer: Signer, id: string): Promise<ActionStatus>;
-  getOrders(signer: Signer): Promise<Order[]>;
-  getCreator(signer: Signer): Promise<CreatorToken[]>;
+  getCreator(signer: Signer): Promise<CreatorCabinet>;
   getStats(): Promise<PlatformStats>;
   /**
    * Plain GET for features that bring their own endpoints and load on demand (their paths stay out
@@ -192,7 +190,6 @@ function makeApi(send: <T>(call: Call) => Promise<T>, subscribeFeed: Api["subscr
     // Padded to a fixed size bucket before signing: the length must not reveal the op or the mode.
     postAction: (signer, action) => post("/api/actions", padAction(action), signer, 2),
     getAction: (signer, id) => get(`/api/actions/${enc(id)}`, signer),
-    getOrders: (signer) => get("/api/orders", signer),
     getCreator: (signer) => get("/api/creator", signer),
     getStats: () => get("/api/stats"),
     request: (path, signer) => get(path, signer),

@@ -6,6 +6,7 @@
 // withdrawal removes cost pro rata (avg cost × amount). Integers only (bigint) for the ledger; floats
 // only for the displayed price per token.
 
+import type { OrderKind } from "@/lib/api/types";
 import { lamportsToZat, tokensToLamports } from "@/lib/trade";
 
 const ZERO = BigInt(0);
@@ -21,6 +22,8 @@ export interface Fill {
   solAmount?: string;
   zecSpent?: string;
   zecCredited?: string;
+  /** v0.8: the trade came from one of your private orders (marker label on the chart). */
+  via?: OrderKind;
 }
 
 export interface Position {

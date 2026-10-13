@@ -25,8 +25,10 @@ export function ActionStatusCard({ action, className }: { action: TrackedAction;
     { key: "signed", label: "Signed with your anon key", detail: "Accepted by the pool. Nothing left this browser but the signed order." },
     {
       key: "queued",
-      label: queuedLabel(action.exec),
-      detail: action.stale
+      label: action.op === "claim" ? "No batch: ledger only" : queuedLabel(action.exec),
+      detail: action.op === "claim"
+        ? "Creator fees move inside the pool's private ledger. Nothing is sent on Solana."
+        : action.stale
         ? "Still waiting. Payouts can take a while; your balance updates when it goes out."
         : action.exec === "now"
           ? "Skips the batch with a priority fee. Lands in seconds."
@@ -40,7 +42,9 @@ export function ActionStatusCard({ action, className }: { action: TrackedAction;
     },
     failed
       ? { key: "failed", label: "Failed", detail: errorText(new ApiError(st.error ?? "internal", "")) + " Your balance was returned." }
-      : { key: "done", label: action.op.startsWith("withdraw") ? "Sent" : "Confirmed on Solana", detail: done ? <FillLine action={action} /> : undefined },
+      : action.op === "claim"
+        ? { key: "done", label: "Credited to your balance", detail: "A ledger entry at the pool’s sell rate. No on-chain transaction." }
+        : { key: "done", label: action.op.startsWith("withdraw") ? "Sent" : "Confirmed on Solana", detail: done ? <FillLine action={action} /> : undefined },
   ];
 
   return (

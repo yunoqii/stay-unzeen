@@ -6,6 +6,7 @@ import type { Portfolio } from "@/lib/api/types";
 import { applyActionStatuses, onActionAccepted } from "@/lib/activity";
 import { getSigner, useKeyState } from "@/lib/crypto/session";
 import { applyPolledStatuses } from "@/lib/history/store";
+import { applyPolledOrders } from "@/lib/order-session";
 import type { Network } from "@/lib/network";
 
 /**
@@ -48,7 +49,9 @@ async function load() {
     entry = { id, data, error: null };
     const [network, pubkey] = id.split(":") as [Network, string];
     applyActionStatuses(network, pubkey, data.actions);
-    void applyPolledStatuses(network, pubkey, data.actions);
+    // v0.8: orders ride along in the same poll; trades they turned into join the local history.
+    const fromOrders = applyPolledOrders(network, pubkey, data.orders);
+    void applyPolledStatuses(network, pubkey, data.actions, Date.now(), fromOrders);
   } catch (e) {
     if (activeId !== id) return;
     entry = { id, data: entry?.id === id ? entry.data : null, error: errorText(e) };

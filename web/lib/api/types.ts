@@ -1,4 +1,4 @@
-// Mirrors docs/API.md v0.7 (token intel, fair-launch and Verify blocks at the bottom). Do not diverge: change the contract first.
+// Mirrors docs/API.md v0.9 (token intel, fair-launch and Verify blocks at the bottom). Do not diverge: change the contract first.
 //
 // Units (docs/API.md "Единицы сумм"):
 //   - spendable amounts: integer strings in BASE units (token base units, lamports, zatoshis)
@@ -95,6 +95,8 @@ export interface PoolInfo {
   };
   /** v0.6: only with features.fairLaunch = true. */
   fairLaunch?: FairLaunchParams;
+  /** v0.8: private orders (limit / take-profit / stop-loss). Absent = the server has no orders. */
+  orders?: OrdersParams;
   /** v0.5: creator rules of Unzeen launches, enforced by the ledger. 0 = rule off. */
   launchRules?: {
     lockSecs: number;
@@ -135,7 +137,7 @@ export interface Portfolio {
   frozen: boolean;
   /** amount: available; held: reserved by queued sell / withdraw_token. */
   holdings: { mint: string; amount: TokenBaseUnits; held: TokenBaseUnits }[];
-  /** Always [] for now. */
+  /** v0.7: creator fees owed to this key, per mint it launched (lamports). `claim` credits them as ZEC. */
   claimable: { mint: string; solAmount: Lamports }[];
   /** Last 20, newest first. */
   deposits: DepositInfo[];
@@ -145,6 +147,8 @@ export interface Portfolio {
    * when it settled.
    */
   actions?: (ActionStatus & { id: string; kind?: ActionKind })[];
+  /** v0.8: open / triggered first, then closed (amounts and price kept 24 h after closing); at most 20. */
+  orders?: Order[];
   /** v0.6, only with features.fairLaunch: the key's last 20 sealed bids. */
   fairBids?: FairBid[];
   /** v0.6, only with features.fairLaunch: launches created by this key. */
@@ -163,7 +167,7 @@ export type SignedAction =
       initialBuyZec?: Zatoshis;
       exec?: ExecMode;
     }
-  // Not supported yet (400 "op not supported yet"): claim, order_create, order_cancel, chat. UI shows "soon".
+  // v0.7: creator fees -> ZEC balance, ledger only (no on-chain tx). Response { id, status: "executed", rate }.
   | { op: "claim"; mint?: string }
   | { op: "withdraw_zec"; to: string; amount: Zatoshis; exec?: "delayed" | "max" }
   | {
@@ -174,13 +178,21 @@ export type SignedAction =
       smart?: { parts: number; maxDelayMin: number }; // parts 2..5, to.length === parts
       exec?: "delayed" | "max"; // withdrawals are never "now"
     }
+  // v0.8 private orders. Response { id, status: "open" } / { id, status: "cancelled" }.
   | {
       op: "order_create";
-      venue: Venue;
+      venue: "pumpfun";
       mint: string;
       kind: OrderKind;
+      /** SOL per whole token (like Token.priceSol), > 0, at most 18 significant digits. */
       triggerPriceSol: DecimalString;
-      amount: string; // zatoshis for buy kinds, token base units for sell kinds
+      /** limit_buy: zatoshis; the sell kinds: token base units. */
+      amount: string;
+      /** 50..5000; default PoolInfo.orders.defaultSlippageBps[kind]. Measured from the trigger price. */
+      slippageBps?: number;
+      /** 3600..PoolInfo.orders.maxTtlSecs; default 86400. expiresAt is rounded UP to the hour. */
+      ttlSecs?: number;
+      exec?: "delayed" | "max"; // "now" -> 400
     }
   | { op: "order_cancel"; orderId: string }
   | { op: "chat"; mint: string; text: string; showCreatorBadge?: boolean }
@@ -199,7 +211,7 @@ export type PaddedAction = SignedAction & { pad?: string };
 /** v0.4: "sent" = tx signed and sent, waiting for finality. ActionReceipt is only ever "queued". */
 export type ActionState = "queued" | "sent" | "executed" | "failed";
 
-export type ActionKind = "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token";
+export type ActionKind = "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token" | "claim";
 
 /** Rate fixed when the action was accepted. */
 export interface RateUsed {
@@ -212,7 +224,8 @@ export interface RateUsed {
 /** POST /api/actions. */
 export interface ActionReceipt {
   id: string; // 32 hex
-  status: ActionState;
+  /** v0.8: order_create answers "open", order_cancel "cancelled"; claim answers "executed" (v0.7). */
+  status: ActionState | "open" | "cancelled";
   rate?: RateUsed; // buy / sell / create / withdraw_token
   /** v0.6: fl_create only. */
   launchId?: string;
@@ -239,16 +252,44 @@ export interface ActionStatus {
 
 export type OrderKind = "limit_buy" | "limit_sell" | "take_profit" | "stop_loss";
 
+export type OrderStatus = "open" | "triggered" | "filled" | "cancelled" | "expired" | "failed";
+
+/** v0.8: only in Portfolio.orders (owner). Lives in the pool's ledger only, never on-chain. */
 export interface Order {
-  id: string;
-  venue: Venue;
+  id: string; // 32 hex (= id of the order_create receipt)
+  venue: "pumpfun";
   mint: string;
-  kind: string;
+  kind: OrderKind;
   triggerPriceSol: DecimalString;
+  /** limit_buy: zatoshis; the sell kinds: token base units. */
   amount: string;
-  status: "open" | "filled" | "cancelled" | "failed";
+  slippageBps: number;
+  exec: "delayed" | "max";
+  status: OrderStatus;
+  /** unix ms, rounded down to the minute. */
   createdAt: number;
-  filledTx?: string;
+  /** unix ms, rounded up to the hour. */
+  expiresAt: number;
+  /** stop_loss: the condition held on one tick, waiting for the next one in a row. */
+  armed?: true;
+  /** triggered / filled / failed after the trigger: the trade's status is in Portfolio.actions. */
+  actionId?: string;
+  error?: ErrorCode;
+}
+
+/** PoolInfo.orders (v0.8). */
+export interface OrdersParams {
+  kinds: OrderKind[];
+  venues: "pumpfun"[];
+  maxOpenPerKey: number;
+  maxOpenPerMint: number;
+  maxTtlSecs: number;
+  defaultTtlSecs: number;
+  defaultSlippageBps: Record<OrderKind, number>;
+  /** stop_loss fires after this many ticks in a row at or below the trigger. */
+  slConfirmTicks: number;
+  /** Indexer price tick, seconds ("checks about once a minute"). */
+  priceTick: { minSecs: number; maxSecs: number };
 }
 
 export interface ChatMessage {
@@ -260,24 +301,60 @@ export interface ChatMessage {
   ts: number;
 }
 
+/** v0.9: GET /api/creator (signed). Owner only; none of it is public anywhere (T1). */
+export interface CreatorCabinet {
+  /** Tokens created by this key (create / fl_create), newest first, at most 50. */
+  tokens: CreatorToken[];
+  /** Spaces up to a multiple of 4096 bytes; ignore. */
+  pad?: string;
+}
+
 export interface CreatorToken {
   mint: string;
   symbol: string;
-  venue: Venue;
+  name: string;
+  image?: string;
+  decimals: number;
+  venue: "pumpfun" | "meteora-dbc";
   status: "curve" | "graduated";
-  feesEarnedSol: DecimalString;
-  feesClaimedSol: DecimalString;
-  volumeSol: DecimalString;
-  holders: number;
+  /** Only on the curve and with an indexer snapshot. */
+  curveProgressPct?: DecimalString;
+  /** unix ms (= Token.createdAt). */
+  createdAt: number | null;
+  fees: {
+    /** = Portfolio.claimable[mint].solAmount ("0" when nothing); claim -> ZEC. */
+    claimableLamports: Lamports;
+    /** Claimed so far for this mint (since v0.9). */
+    claimedLamports: Lamports;
+  };
+  /** Pool trade volume of the mint (buy + sell), all time. */
+  volumeLamports: Lamports;
+  trades: number;
+  /** From the indexer snapshot; null while there is none. */
+  holders: number | null;
+  holdersAsOf?: number;
+  /** Lock of the launch buy (launchRules.lockSecs). */
+  lock: { lockedAmount: TokenBaseUnits; until: number | null };
+  /** Creator position cap through the pool (launchRules.capBps). */
+  cap: { capBps: number; capTokens: TokenBaseUnits; positionTokens: TokenBaseUnits };
 }
 
+/** v0.9 k-anonymity: a category built from fewer than 5 events is the string "<5". */
+export type KCount = number | "<5";
+export type KAmount = DecimalString | "<5";
+
+/** v0.9: GET /api/stats (public). One snapshot a day; no live aggregates. 404 before the first one. */
 export interface PlatformStats {
-  volumeSol: DecimalString;
-  zecShielded: DecimalString;
-  trades: number;
-  launches: number;
-  byVenue: Record<Venue, { volumeSol: DecimalString; trades: number }>;
-  topTokens: Token[];
+  /** unix ms: 00:00 UTC of the snapshot day; all data strictly before it. */
+  asOf: number;
+  volumeSol: KAmount;
+  trades: KCount;
+  launches: KCount;
+  zecShielded: KAmount;
+  byVenue: Record<Venue, { volumeSol: KAmount; trades: KCount; launches: KCount }>;
+  /** <= 10 by pool volume over topWindowDays before asOf; only tokens with >= 5 pool trades in the window. */
+  topTokens: (Token & { volumeSol: DecimalString; trades: number })[];
+  topWindowDays: number;
 }
 
 // ---- errors ----
@@ -301,6 +378,10 @@ export type ErrorCode =
   | "launch_closed" // 409 (v0.6)
   | "already_bid" // 409 (v0.6)
   | "bad_ciphertext" // 400 (v0.6)
+  | "launch_full" // 409 (v0.8): the launch already has 1024 bids
+  | "order_limit" // 422 (v0.8): > 10 open orders per key or > 4 per key and mint
+  | "order_not_open" // 409 (v0.8): order_cancel of an order that is no longer open
+  | "order_unsupported_mint" // 422 (v0.8): mint not traded by the pool, not pump.fun, or graduated
   | "internal";
 
 export interface ApiErrorBody {
@@ -451,10 +532,10 @@ export interface FairLaunch {
       slot: number;
       signer: string;
       matches: boolean;
-      /** Pending in docs/API.md (review F2): block time of the memo-tx, unix seconds. */
-      blockTime?: number;
-      /** Pending in docs/API.md (review F2): memo landed before the drand round (with a margin). Only `true` lets the UI say so. */
-      beforeRound?: boolean;
+      /** v0.8: block time of the memo-tx, unix SECONDS (null while unknown). */
+      blockTime: number | null;
+      /** v0.8: blockTime·1000 + 2000 < drand.roundTime. Only `true` lets the UI say "anchored before the round". */
+      beforeRound: boolean;
     };
   };
   /** launched only */
@@ -468,7 +549,8 @@ export interface FairLaunch {
     bids: number | "<5";
     oversubscribed: boolean;
   };
-  failure?: "no_bids" | "drand_unavailable" | "venue_unavailable" | "tx_failed";
+  /** internal (v0.8): the set of bids did not match the committed root; everything was returned. */
+  failure?: "no_bids" | "drand_unavailable" | "venue_unavailable" | "tx_failed" | "internal";
   rules: UnzeenRule[];
 }
 
@@ -496,8 +578,8 @@ export interface OwnFairLaunch {
 
 // ---- Verify (v0.7): proof of liabilities, public vaults, attested ZEC reserve ----
 
-/** "ZEC" or a base58 mint. In hashes: ZEC = 32 zero bytes, a mint = its 32 decoded bytes. */
-export type AssetId = "ZEC" | (string & {});
+/** "ZEC", "SOL" (creator fees owed, v0.8) or a base58 mint. In hashes: ZEC = 32 zero bytes, SOL = 32 × 0xFF, a mint = its 32 decoded bytes. */
+export type AssetId = "ZEC" | "SOL" | (string & {});
 
 export interface VerifyAnchor {
   /** SPL Memo tx whose data is exactly the 64-hex rootsDigest. */

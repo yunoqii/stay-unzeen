@@ -39,6 +39,7 @@ export function applyStatuses(entries: HistoryEntry[], polled: readonly Polled[]
       if (f.solAmount !== undefined) fill.solAmount = f.solAmount;
       if (f.zecSpent !== undefined) fill.zecSpent = f.zecSpent;
       if (f.zecCredited !== undefined) fill.zecCredited = f.zecCredited;
+      if (e.via) fill.via = e.via;
       // solanaTx is deliberately not copied: it would tie this device to an on-chain tx (T4).
       out.push({ ...e, mint: e.mint ?? f.mint, status: "executed", fill });
       changed = true;

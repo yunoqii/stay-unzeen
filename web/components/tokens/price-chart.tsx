@@ -2,11 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import type { CandlestickData, IChartApi, ISeriesApi, ISeriesMarkersPluginApi, HistogramData, SeriesMarker, Time, UTCTimestamp } from "lightweight-charts";
+import type { CandlestickData, IChartApi, IPriceLine, ISeriesApi, ISeriesMarkersPluginApi, HistogramData, SeriesMarker, Time, UTCTimestamp } from "lightweight-charts";
 import { api, errorText } from "@/lib/api/client";
 import type { Candle, CandleTimeframe, FeedEvent } from "@/lib/api/types";
 import type { Fill } from "@/lib/pnl";
 import { formatPrice, lamportsToSol, unitsToNumber } from "@/lib/format";
+import { ORDER_LABEL } from "@/lib/orders";
 import { useNetwork } from "@/lib/network";
 import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -46,7 +47,20 @@ function cssVar(name: string, fallback: string) {
  * lightweight-charts is loaded on demand (client only). `markers` are the user's own fills from the
  * local encrypted history: drawn only while `showMarkers` (Peek), never sent anywhere.
  */
-export function PriceChart({ mint, trades, markers = [], showMarkers = false }: { mint: string; trades: FeedEvent[]; markers?: readonly Fill[]; showMarkers?: boolean }) {
+export function PriceChart({
+  mint,
+  trades,
+  markers = [],
+  triggers = [],
+  showMarkers = false,
+}: {
+  mint: string;
+  trades: FeedEvent[];
+  markers?: readonly Fill[];
+  /** v0.8: your open orders' trigger prices, drawn as dashed lines (local only, behind Peek like markers). */
+  triggers?: readonly { id: string; price: number; label: string }[];
+  showMarkers?: boolean;
+}) {
   const [tf, setTf] = useState<CandleTimeframe>("5m");
   const [state, setState] = useState<"loading" | "ready" | "empty" | { error: string }>("loading");
   const box = useRef<HTMLDivElement>(null);
@@ -144,13 +158,24 @@ export function PriceChart({ mint, trades, markers = [], showMarkers = false }: 
           position: buy ? "belowBar" : "aboveBar",
           shape: buy ? "arrowUp" : "arrowDown",
           color: buy ? up : down,
-          text: buy ? "You bought" : "You sold",
+          // A fill of one of your private orders reads as such (still local only, behind Peek).
+          text: f.via ? `${ORDER_LABEL[f.via]} filled` : buy ? "You bought" : "You sold",
           size: 0.8,
         } satisfies SeriesMarker<Time>;
       })
       .sort((a, b) => (a.time as number) - (b.time as number));
     marks.current.setMarkers(list);
   }, [markers, showMarkers, tf, state, readyTick]);
+
+  // Trigger lines of open orders.
+  useEffect(() => {
+    const series = candles.current;
+    if (!series || !showMarkers) return;
+    const lines: IPriceLine[] = triggers
+      .filter((t) => t.price > 0)
+      .map((t) => series.createPriceLine({ price: t.price, color: "rgba(244,183,40,0.55)", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: t.label }));
+    return () => lines.forEach((l) => series.removePriceLine(l));
+  }, [triggers, showMarkers, readyTick]);
 
   // History for the selected timeframe.
   useEffect(() => {

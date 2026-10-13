@@ -2,7 +2,7 @@
 // the caller's memory (React state). It is never written to localStorage, sessionStorage, IndexedDB
 // or a cookie: it reveals the balance. The only way to keep it is "Download proof".
 
-import type { VerifyProof, VerifySnapshot } from "@/lib/api/types";
+import type { Portfolio, VerifyProof, VerifySnapshot } from "@/lib/api/types";
 import type { Signer } from "@/lib/crypto/sign";
 import { getOwnProof } from "./api";
 import { checkProof, proofFile, type ProofCheck } from "./merkle-sum";
@@ -40,4 +40,65 @@ export function downloadJson(name: string, json: string) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+// ---- committed vs. your balance now (review E11) ----
+
+export type CompareStatus =
+  /** committed ≥ the balance the portfolio shows now. */
+  | "covered"
+  /** committed < balance, and nothing happened on this key since the snapshot: the pool under-committed. */
+  | "short"
+  /** You hold it now, it is not in the proof, and nothing happened since: omitted from the trees. */
+  | "missing"
+  /** Differs, but the key moved since the snapshot (trade, deposit, order): can't compare exactly. */
+  | "changed"
+  /** Not in the proof because it was truncated to 12 assets: check again for another sample. */
+  | "truncated";
+
+export interface CompareRow {
+  asset: string;
+  decimals: number;
+  committed: bigint | null;
+  now: bigint;
+  status: CompareStatus;
+}
+
+type PortfolioLike = Pick<Portfolio, "zecBalance" | "zecHeld" | "holdings" | "claimable" | "deposits"> & Partial<Pick<Portfolio, "actions" | "orders">>;
+
+/** Anything on this key after the snapshot that could explain a difference. */
+export function changedSince(p: PortfolioLike, takenAt: number): boolean {
+  const day = Math.floor(takenAt / 86_400_000) * 86_400_000; // deposit times are rounded down to the day
+  return (
+    (p.actions ?? []).some((a) => a.status === "queued" || a.status === "sent" || (a.executedAt ?? 0) >= Math.floor(takenAt / 60_000) * 60_000 || (a.status === "executed" && a.executedAt === undefined)) ||
+    p.deposits.some((d) => d.ts >= day) ||
+    (p.orders ?? []).some((o) => o.createdAt >= Math.floor(takenAt / 60_000) * 60_000 || o.status === "triggered")
+  );
+}
+
+/**
+ * Compare what the pool committed to this key (proof) with what the portfolio shows now. Liabilities
+ * are `available + held` per asset, so the same is used here. Only computed in this browser.
+ */
+export function compareWithPortfolio(own: Pick<OwnCheck, "result" | "proof">, snap: Pick<VerifySnapshot, "takenAt" | "trees">, p: PortfolioLike): { rows: CompareRow[]; changed: boolean } {
+  const changed = changedSince(p, snap.takenAt);
+  const now = new Map<string, bigint>();
+  const add = (k: string, v: bigint) => v > BigInt(0) && now.set(k, (now.get(k) ?? BigInt(0)) + v);
+  const u = (v: string) => (/^\d+$/.test(v) ? BigInt(v) : BigInt(0));
+  add("ZEC", u(p.zecBalance) + u(p.zecHeld));
+  for (const h of p.holdings) add(h.mint, u(h.amount) + u(h.held));
+  // Creator fees owed are their own tree only when the snapshot has one (else they are folded into ZEC).
+  if (snap.trees.some((t) => t.asset === "SOL")) add("SOL", p.claimable.reduce((s, c) => s + u(c.solAmount), BigInt(0)));
+
+  const rows: CompareRow[] = [];
+  const decimalsOf = (a: string) => snap.trees.find((t) => t.asset === a)?.decimals ?? (a === "ZEC" ? 8 : a === "SOL" ? 9 : 6);
+  for (const a of own.result.assets) {
+    const n = now.get(a.asset) ?? BigInt(0);
+    rows.push({ asset: a.asset, decimals: a.decimals, committed: a.committed, now: n, status: a.committed >= n ? "covered" : changed ? "changed" : "short" });
+  }
+  for (const [asset, n] of now) {
+    if (own.result.assets.some((a) => a.asset === asset)) continue;
+    rows.push({ asset, decimals: decimalsOf(asset), committed: null, now: n, status: own.proof.truncated ? "truncated" : changed ? "changed" : "missing" });
+  }
+  return { rows, changed };
 }
