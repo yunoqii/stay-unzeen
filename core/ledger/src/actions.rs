@@ -50,6 +50,9 @@ pub struct NewJob {
     pub delay_secs: f64,
     /// `now` | `delayed` | `max` (relayer_jobs.exec_mode).
     pub exec_mode: &'static str,
+    /// v0.16 (RELAYER v10): inserted as `held` — the first buy of a Bags launch, released by
+    /// [`Ledger::release_held_jobs`] once the create job (part 0) of the action is confirmed.
+    pub held: bool,
 }
 
 impl NewJob {
@@ -66,6 +69,7 @@ impl NewJob {
             gas_lamports: None,
             delay_secs,
             exec_mode: "delayed",
+            held: false,
         }
     }
 }
@@ -366,9 +370,9 @@ impl Ledger {
             let part = i16::try_from(part).map_err(|_| LedgerError::Range)?;
             tx.execute(
                 "INSERT INTO relayer_jobs (action_id, part, op, venue, mint, lamports_in, token_amount,
-                                           min_out, meta, dest, gas_lamports, network, not_before, exec_mode)
+                                           min_out, meta, dest, gas_lamports, network, not_before, exec_mode, status)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                         now() + make_interval(secs => $13), $14)",
+                         now() + make_interval(secs => $13), $14, $15)",
                 &[
                     &id_s,
                     &part,
@@ -384,6 +388,7 @@ impl Ledger {
                     &a.network,
                     &j.delay_secs.max(0.0),
                     &j.exec_mode,
+                    &(if j.held { "held" } else { "queued" }),
                 ],
             )
             .await?;
@@ -538,6 +543,37 @@ impl Ledger {
             .collect())
     }
 
+    /// v0.16 (RELAYER v10): release the `held` first-buy jobs of Bags launches. Create job
+    /// (part 0) confirmed with its mint → the buy gets `mint` and becomes `queued` right away
+    /// (the sooner after the launch, the smaller the sniper window); create failed → the buy
+    /// fails with the create's error code (the action then fails whole, hold released).
+    /// Returns (released, failed).
+    pub async fn release_held_jobs(&self) -> Result<(u64, u64)> {
+        let c = self.pool.get().await?;
+        let released = c
+            .execute(
+                "UPDATE relayer_jobs b SET status = 'queued', mint = c.out_mint,
+                        not_before = GREATEST(b.not_before, now()), updated_at = now()
+                 FROM relayer_jobs c
+                 WHERE b.status = 'held' AND b.action_id IS NOT NULL AND c.action_id = b.action_id
+                   AND c.part = 0 AND c.op = 'create' AND c.status = 'confirmed' AND c.out_mint IS NOT NULL",
+                &[],
+            )
+            .await?;
+        let failed = c
+            .execute(
+                "UPDATE relayer_jobs b SET status = 'failed', error_code = COALESCE(c.error_code, 'internal'),
+                        error_message = 'launch failed', updated_at = now()
+                 FROM relayer_jobs c
+                 WHERE b.status = 'held' AND b.action_id IS NOT NULL AND c.action_id = b.action_id
+                   AND c.part = 0 AND c.op = 'create'
+                   AND (c.status = 'failed' OR (c.status = 'confirmed' AND c.out_mint IS NULL))",
+                &[],
+            )
+            .await?;
+        Ok((released, failed))
+    }
+
     /// Settle up to `limit` actions whose relayer jobs are all final. Returns how many.
     pub async fn settle_ready(&self, limit: i64) -> Result<usize> {
         let ids: Vec<Vec<u8>> = {
@@ -636,6 +672,22 @@ impl Ledger {
         let mut tok_back: i64 = 0;
         let mut sol_total: i64 = 0;
         let mut tok_total: i64 = 0;
+        // v0.16 Bags: a create's first buy is its own `buy` job (part ≥ 1). Its tokens are the
+        // creator's initial-buy tokens (locked like a first buy inside the create tx), and a
+        // failed one refunds its share of the ZEC hold even though the create went through.
+        let chained_tokens: i64 = if kind == "create" {
+            jobs.iter()
+                .filter(|r| r.get::<_, &str>(1) == "buy" && r.get::<_, &str>(5) == "confirmed")
+                .map(|r| r.get::<_, Option<i64>>(7).unwrap_or(0).max(0))
+                .sum()
+        } else {
+            0
+        };
+        let li_total: i64 = jobs
+            .iter()
+            .filter(|r| matches!(r.get::<_, &str>(1), "buy" | "create"))
+            .map(|r| r.get::<_, Option<i64>>(3).unwrap_or(0).max(0))
+            .sum();
 
         for j in &jobs {
             let op: &str = j.get(1);
@@ -647,6 +699,12 @@ impl Ledger {
             if !ok {
                 if first_err.is_none() {
                     first_err = Some(j.get::<_, Option<String>>(9).unwrap_or_else(|| "internal".into()));
+                }
+                // A failed buy of a multi-job action: its ZEC share back (single-job actions
+                // that failed return the whole hold below anyway).
+                let li = lamports_in.unwrap_or(0).max(0);
+                if matches!(op, "buy" | "create") && li > 0 && li_total > 0 {
+                    refund += ((amount as i128) * (li as i128) / (li_total as i128)) as i64;
                 }
                 if matches!(op, "sell" | "transfer") {
                     tok_back += job_tokens.unwrap_or(0);
@@ -671,8 +729,9 @@ impl Ledger {
                         if op == "create" {
                             // Creator rule: the initial-buy tokens are locked; the end is rounded
                             // up to the hour (never earlier than lock_secs).
-                            let (locked, lock_secs) = if self.rules.lock_secs > 0 && out_tokens > 0 {
-                                (out_tokens, self.rules.lock_secs as f64)
+                            let first_buy = out_tokens + chained_tokens;
+                            let (locked, lock_secs) = if self.rules.lock_secs > 0 && first_buy > 0 {
+                                (first_buy, self.rules.lock_secs as f64)
                             } else {
                                 (0, 0.0)
                             };

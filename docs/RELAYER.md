@@ -1,8 +1,20 @@
 # Unzeen — контракт core ↔ relayer
 
-Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql`, `0009_verify.sql`, `0010_creator_fees.sql`, `0011_orders.sql`, `0012_fair_review.sql`, `0013_creator_stats.sql`, `0014_verify_review.sql`, `0015_rebalance.sql`, `0017_fair_bundle.sql`, `0018_discovery.sql`, `0019_quotes.sql`, `0020_quote_fees.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
+Источник правды для `core/` (Rust, API + реестр) и релейера (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0002_relayer.sql`, `0003_payouts_epochs.sql`, `0004_relayer_state.sql`, `0005_exec_mode.sql`, `0006_exec_mode_scrub.sql`, `0008_fair_launch.sql`, `0009_verify.sql`, `0010_creator_fees.sql`, `0011_orders.sql`, `0012_fair_review.sql`, `0013_creator_stats.sql`, `0014_verify_review.sql`, `0015_rebalance.sql`, `0017_fair_bundle.sql`, `0018_discovery.sql`, `0019_quotes.sql`, `0020_quote_fees.sql`, `0021_bracket_orders.sql`, `0022_bags_first_buy.sql` (применяет core при старте; релейер миграции **не** запускает и схему не меняет).
 
-Статус: **v9** (13.10; миграция `0020_quote_fees.sql`; API.md v0.14). Изменения против v8:
+Статус: **v10** (13.10; миграция `0022_bags_first_buy.sql`; API.md v0.16). Изменения против v9:
+
+1. **Bags (`venue = 'bags'`, только `mainnet-beta`).** Core ставит задания `bags` только на mainnet. Площадка — только пары к SOL.
+2. **`create` на Bags: всегда `lamports_in = 0`.** Первая покупка пользователя — **отдельное задание** того же действия: `op = 'buy'`, `part = 1`, `venue = 'bags'`, `lamports_in` > 0, `min_out` (0 или от кривой Bags, если есть своя строка `launch_curves`). Core вставляет его со статусом **`held`**: релейер его не видит в выборке (берёт только `queued`) и не трогает. Когда `create` (`part = 0`) стал `confirmed` с `out_mint`, core (раз в 1 с) ставит покупке `mint = out_mint`, `status = 'queued'`, `not_before = max(not_before, now())` — дальше это обычный `buy`. Если `create` `failed` — core переводит покупку в `failed` с тем же `error_code`.
+   - **Vault:** покупка должна идти с того же vault, что запуск. Релейер закрепляет `mint_vaults(mint → vault)` при подтверждении Bags-`create` (vault задания, не launch wallet), и `buy` берёт vault из `mint_vaults`, как всегда.
+   - Не атомарно: между запуском и покупкой кто-то может купить (API.md v0.16 это говорит пользователю).
+3. **Факт `create` Bags в `confirmed`:** `out_mint` обязателен, `out_token_amount = 0`, `out_lamports = 0`, `out_creator_fee = 0` (launch-tx Bags creator fee пулу не даёт). Creator fees Bags пока не собираются: строк `creator_fee_sweeps` с `venue = 'bags'` не писать.
+4. **Settlement `create` из двух заданий:** токены `buy` (`part = 1`) — это первая покупка создателя (лок создателя), упавший `buy` возвращает свою долю ZEC; `create` прошёл → комиссия запуска удержана. Действие закрывается, когда закрыты оба задания (`held` тоже считается незакрытым).
+5. `committed_sol` (резерв SOL под очередь) учитывает и `held`.
+
+Прав роли не добавилось (`status` — та же колонка). Перезапустить `infra/relayer-role.sql` после миграции — как всегда.
+
+Изменения v9 против v8:
 
 1. **Пул A для USD1 — Raydium CLMM** SOL/USD1 (не DAMM v2); для USDC — Meteora DAMM v2 SOL/USDC, как было (adapters `7cea54a`).
 2. **Creator fees в quote-токенах (заменяет п. 8 v8).** Sweeper для сбора в quote пишет `quote_mint` и `quote_amount` (базовые единицы, дошло до vault) и:
@@ -128,7 +140,7 @@
 | `action_id` | core | bytea(16) или NULL. Релейеру не нужен, не логировать |
 | `part` | core | номер части (`transfer` при умном выводе: 0..N-1), иначе 0 |
 | `op` | core | `buy` \| `sell` \| `create` \| `transfer` \| `fair_create` (v3) \| `attest` (v3) \| `fund_vaults` (v7) \| `consolidate` (v7) \| `fund_quote` (v8) |
-| `venue` | core | `pumpfun` \| `meteora-dbc` \| `jupiter` (NULL для `transfer`) |
+| `venue` | core | `pumpfun` \| `meteora-dbc` \| `jupiter` \| `raydium-launchlab` \| `bags` (v10, mainnet) (NULL для `transfer`) |
 | `mint` | core | base58 mint (NULL для `create`) |
 | `lamports_in` | core | `buy`: лампорты на покупку; `create`: первая покупка (0 = без покупки) |
 | `token_amount` | core | `sell` / `transfer`: базовые единицы токена |
@@ -138,7 +150,7 @@
 | `gas_lamports` | core | `transfer`: капля SOL получателю на комиссии (отправить вместе с токенами) |
 | `network` | core | `devnet` \| `mainnet-beta`. Релейер берёт только свою сеть |
 | `exec_mode` | core | `now` \| `delayed` \| `max` (0005); `now` — сразу, тот же единый priority fee, что у всех tx пула, без Jito. NULL после settle |
-| `status` | оба | `queued` → `claimed` → `sent` → `confirmed` \| `failed` |
+| `status` | оба | `queued` → `claimed` → `sent` → `confirmed` \| `failed`; v10: `held` (только core: первая покупка Bags до подтверждения запуска; релейер не берёт и не меняет) → `queued` |
 | `not_before` | core (+ relayer: только увеличение) | граница эпохи / задержка вывода; раньше не брать. Релейер может отложить (backoff), но не ускорить |
 | `attempts`, `claimed_by`, `claimed_at`, `lease_until` | relayer | аренда задания |
 | `signature`, `last_valid_block_height` | relayer | пишутся **до** отправки tx |
@@ -159,6 +171,7 @@
 | `buy` | `venue, mint, lamports_in, min_out` | токенов получено | лампортов фактически потрачено (≤ `lamports_in`, комиссии площадки включены, network fee и рента — нет) | |
 | `sell` | `venue, mint, token_amount, min_out` | токенов продано (≤ `token_amount`) | лампортов получено | |
 | `create` | `venue, meta, lamports_in, min_out` | токенов от первой покупки (0 если без) | лампортов на первую покупку | `out_mint` обязателен. creator — свежий адрес пула (не vault) |
+| `create` Bags (v10) | `venue='bags', meta, lamports_in = 0` | `0` | `0` | `out_mint` обязателен, `out_creator_fee = 0`; закрепить `mint_vaults` на vault задания; первая покупка — задание `buy` `part = 1` (было `held`) |
 | `buy`/`sell`/`create` в паре к ZEC (v8) | суммы в единицах ZEC SPL | как выше | **`NULL`** | `out_quote_mint`, `out_quote_amount` обязательны; core читает `COALESCE(out_lamports, out_quote_amount)` в единицах quote |
 | `transfer` | `mint, token_amount, dest, gas_lamports` | токенов отправлено (= `token_amount`) | 0 | с vault этого mint (`mint_vaults`) вместе с каплей SOL `gas_lamports`; отдельная tx на каждую часть |
 | `fair_create` (v3) | `venue, meta, lamports_in, min_out, mint_secret` | токенов куплено | лампортов на покупку | `out_mint` = pubkey `mint_secret`; creator — свежий адрес пула; одна v0-tx + ALT |

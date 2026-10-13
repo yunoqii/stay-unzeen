@@ -324,6 +324,9 @@ async fn pool_info() {
                "createEnabled":true,
                "orders": unzeen_api::orders::pool_block(),
                "features":{"fullTrades":false},
+               // v0.16: enabled venues with what the pool can do there.
+               "venues":[{"venue":"pumpfun","trade":true,"create":true,"quotes":["SOL","USDC"],
+                          "atomicFirstBuy":true,"creatorFees":true,"mainnetOnly":false}],
                "launchRules":{"lockSecs":86400,"capBps":500,"maxInitialBuyLamports":"1466000000",
                               "maxInitialBuyLamportsByVenue":{"pumpfun":"1466000000"}},
                "fees":{"createFeeZat":"100000","withdrawZecFeeZat":"15000",
@@ -4000,5 +4003,203 @@ async fn quote_pairs_zec_spl_and_usdc() {
     let h2 = api_auth::sign_request(CHAIN, &user(2), "POST", "/api/actions", b2.as_bytes(), nonce, now_ms());
     let r = e.raw("POST", "/api/actions", &b2, Some(&h2)).await;
     assert_eq!((r.status, code(&r)), (StatusCode::CONFLICT, "replay"));
+    e.drop_schema().await;
+}
+
+// ================================================================== API v0.16: Bags
+
+/// Wait until the action `id` of `user(n)` reaches a final status.
+async fn wait_final(e: &Env, n: u8, id: &str) -> Value {
+    let path = format!("/api/actions/{id}");
+    for _ in 0..60 {
+        let st = e.signed(&user(n), "GET", &path, "").await;
+        if st.body["status"] == "executed" || st.body["status"] == "failed" {
+            return st.body;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("action {id} not final");
+}
+
+#[tokio::test]
+async fn bags_devnet_unavailable_and_pool_venues() {
+    let Some(e) = setup_with(|c| c.venues = vec!["pumpfun".into(), "bags".into(), "jupiter".into()]).await else {
+        return;
+    };
+    e.ledger.set_pool_meta("network", "test").await.unwrap();
+    e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+    let v = e.get("/api/pool").await.body["venues"].clone();
+    assert_eq!(
+        v,
+        json!([
+            {"venue":"pumpfun","trade":true,"create":true,"quotes":["SOL","USDC"],"atomicFirstBuy":true,
+             "creatorFees":true,"mainnetOnly":false},
+            {"venue":"bags","trade":false,"create":false,"quotes":[],"atomicFirstBuy":false,
+             "creatorFees":false,"mainnetOnly":true},
+            {"venue":"jupiter","trade":false,"create":false,"quotes":[],"atomicFirstBuy":true,
+             "creatorFees":false,"mainnetOnly":true}
+        ])
+    );
+    e.fund(9, 0, 100_000_000).await;
+    let body = json!({"op":"create","venue":"bags","meta":{"name":"Bag","symbol":"BAG"},"initialBuyZec":"1000000"})
+        .to_string();
+    let r = e.signed(&user(9), "POST", "/api/actions", &body).await;
+    assert_eq!(code(&r), "venue_unavailable", "{:?}", r.body);
+    e.drop_schema().await;
+}
+
+#[tokio::test]
+async fn bags_first_buy_is_a_separate_held_job() {
+    let Some(e) = setup_with(|c| {
+        c.cluster = "mainnet-beta";
+        c.venues = vec!["pumpfun".into(), "bags".into()];
+    })
+    .await
+    else {
+        return;
+    };
+    let s = e.schema.clone();
+    let n = 10u8;
+    e.fund(n, 0, 100_000_000).await;
+    let create = |sym: &str| {
+        json!({"op":"create","venue":"bags","meta":{"name":"Bag","symbol":sym},"initialBuyZec":"10000000"}).to_string()
+    };
+    let job = |sym: &str, part: i16, col: &str| {
+        format!(
+            "SELECT {col} FROM {s}.relayer_jobs WHERE part = {part} AND action_id =
+               (SELECT action_id FROM {s}.relayer_jobs WHERE op = 'create' AND meta->>'symbol' = '{sym}')"
+        )
+    };
+    // Quote pairs: Bags is SOL only.
+    let usdc = json!({"op":"create","venue":"bags","meta":{"name":"Bag","symbol":"BAGU"},"quote":"USDC"}).to_string();
+    assert_eq!(
+        code(&e.signed(&user(n), "POST", "/api/actions", &usdc).await),
+        "bad_request"
+    );
+
+    // 1) Create + first buy, both confirmed.
+    let r = e.signed(&user(n), "POST", "/api/actions", &create("BAGA")).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let a = r.body["id"].as_str().unwrap().to_string();
+    let (avail0, held0) = e.avail(n).await;
+    assert_eq!(avail0 + held0, 100_000_000);
+    let lamports = e.one_i64(&job("BAGA", 1, "lamports_in")).await;
+    assert!(lamports > 0);
+    assert_eq!(
+        e.one_i64(&job("BAGA", 0, "lamports_in")).await,
+        0,
+        "create carries no buy"
+    );
+    let st = e
+        .admin
+        .query_one(
+            &job("BAGA", 1, "status || '/' || op || '/' || COALESCE(mint, '-')"),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(st.get::<_, String>(0), "held/buy/-");
+    // Held while the create is queued (the settler runs every second).
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        e.admin
+            .query_one(&job("BAGA", 1, "status"), &[])
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+        "held"
+    );
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGBAGC', out_mint = '{MINT}',
+                out_token_amount = 0, out_lamports = 0, out_creator_fee = 0
+         WHERE op = 'create' AND meta->>'symbol' = 'BAGA'"
+    ))
+    .await;
+    let mut released = String::new();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        released = e
+            .admin
+            .query_one(&job("BAGA", 1, "status || '/' || COALESCE(mint, '-')"), &[])
+            .await
+            .unwrap()
+            .get(0);
+        if released != "held/-" {
+            break;
+        }
+    }
+    assert_eq!(released, format!("queued/{MINT}"), "released onto the new mint");
+    let st = e.signed(&user(n), "GET", &format!("/api/actions/{a}"), "").await.body["status"].clone();
+    assert!(st == "queued" || st == "sent", "action waits for its first buy: {st}");
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGBAGB', out_token_amount = 5000000,
+                out_lamports = lamports_in WHERE op = 'buy' AND mint = '{MINT}'"
+    ))
+    .await;
+    let done = wait_executed(&e, n, &a).await;
+    assert_eq!(done["fill"]["mint"], MINT);
+    assert_eq!(done["fill"]["tokenAmount"], "5000000");
+    let ct = e
+        .admin
+        .query_one(
+            &format!("SELECT locked_amount, launch_fee_lamports FROM {s}.creator_tokens WHERE mint = '{MINT}'"),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (ct.get::<_, i64>(0), ct.get::<_, i64>(1)),
+        (5_000_000, 0),
+        "first-buy tokens locked; Bags launch fee is not ours"
+    );
+    let (avail1, held1) = e.avail(n).await;
+    assert_eq!((held1, avail1), (0, avail0 + held0 - held0), "whole hold spent");
+
+    // 2) Create confirmed, first buy fails (a sniper moved the price): create fee spent,
+    //    the first buy's ZEC comes back.
+    let r = e.signed(&user(n), "POST", "/api/actions", &create("BAGB")).await;
+    let b = r.body["id"].as_str().unwrap().to_string();
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGBAGC2', out_mint = '{MINT2}',
+                out_token_amount = 0, out_lamports = 0, out_creator_fee = 0
+         WHERE op = 'create' AND meta->>'symbol' = 'BAGB'"
+    ))
+    .await;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'buy' AND mint = '{MINT2}' AND status = 'queued'"
+        ))
+        .await
+            == 1
+        {
+            break;
+        }
+    }
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'failed', error_code = 'slippage', error_message = 'x'
+         WHERE op = 'buy' AND mint = '{MINT2}'"
+    ))
+    .await;
+    let done = wait_executed(&e, n, &b).await;
+    assert_eq!(done["fill"]["mint"], MINT2);
+    let fee = 100_000; // createFeeZat in tests
+    assert_eq!(e.avail(n).await, (avail1 - fee, 0), "only the create fee is spent");
+
+    // 3) Create fails → the held buy fails with it, everything back.
+    let r = e.signed(&user(n), "POST", "/api/actions", &create("BAGC")).await;
+    let c = r.body["id"].as_str().unwrap().to_string();
+    e.sql(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'failed', error_code = 'venue_unavailable', error_message = 'x'
+         WHERE op = 'create' AND meta->>'symbol' = 'BAGC'"
+    ))
+    .await;
+    let done = wait_final(&e, n, &c).await;
+    assert_eq!(
+        (done["status"].as_str(), done["error"].as_str()),
+        (Some("failed"), Some("venue_unavailable")),
+        "{done:?}"
+    );
+    assert_eq!(e.avail(n).await, (avail1 - fee, 0));
     e.drop_schema().await;
 }

@@ -2,7 +2,17 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.15** (13.10; миграция `0021_bracket_orders.sql`; RELAYER.md без изменений). Изменения против v0.14:
+Статус: **v0.16** (13.10; миграция `0022_bags_first_buy.sql`; RELAYER.md v10). Изменения против v0.15:
+- **Bags включён (`venue: "bags"`), только mainnet.** Площадка доступна, если `bags` есть в `UNZEEN_VENUES` и сеть — mainnet (на devnet любой запрос с `bags` → `503 venue_unavailable`, как у `jupiter`). Только пары к SOL (`quote` ≠ `"SOL"` → `400`). `buy`/`sell` — как на других площадках (кривая Meteora DBC под конфигом Bags, после выпуска — Jupiter).
+- **Первая покупка Bags не атомарна.** Транзакцию запуска строит Bags, первой покупки в ней нет. `initialBuyZec` исполняется отдельной сделкой с того же vault пула **после** подтверждения запуска: между ними кто-то может купить раньше (снайпер), и цена первой покупки будет хуже, чем на pump.fun/DBC/LaunchLab. Действие `create` остаётся одним (`id` тот же) и закрывается, когда закрыты обе сделки:
+  - запуск и покупка прошли → `executed`, `fill.tokenAmount` = токены первой покупки (они под локом создателя, как обычно);
+  - запуск прошёл, покупка нет (`slippage` и т. п.) → `executed` с `fill.mint`, `fill.tokenAmount: "0"`; ZEC первой покупки вернулся на баланс, удержана только `createFeeZat` (+ `nowFeeZat`);
+  - запуск не прошёл → `failed`, всё возвращено.
+  UI для Bags: показать предупреждение «first buy is not atomic on Bags» рядом с полем первой покупки (`PoolInfo.venues[].atomicFirstBuy = false`).
+- **Creator fees Bags пока не собираются:** у токенов Bags в `Portfolio.claimable` и в кабинете создателя ничего не появляется (`PoolInfo.venues[].creatorFees = false`). Creator fee самой launch-tx — 0.
+- **`PoolInfo.venues: VenueInfo[]`** — включённые площадки и что на них можно сейчас (см. тип). `PoolInfo.quotes` не меняется.
+
+Изменения v0.15 против v0.14 (13.10; миграция `0021_bracket_orders.sql`; RELAYER.md без изменений):
 - **Bracket-ордер (TP + SL на одну позицию, OCO).** `order_create` += `kind: "bracket"` с полями `tpPriceSol` и `slPriceSol` (вместо `triggerPriceSol`, его у bracket быть не должно → `400`), `tpPriceSol > slPriceSol` (иначе `400`). **Один hold токенов** на обе ноги. TP-нога = `take_profit` (`p ≥ tpPriceSol`), SL-нога = `stop_loss` (`p ≤ slPriceSol` на 2 тиках подряд). Срабатывает первая нога, чьё условие выполнилось; вторая гасится **в той же транзакции реестра** (ордер — одна запись, двойного исполнения нет). Slippage: `slippageBps` — TP-нога (по умолчанию `defaultSlippageBps.bracket` = 500), `slSlippageBps` — SL-нога (по умолчанию `defaultSlippageBps.stop_loss` = 1500). `below_minimum` при создании — по стоимости `amount × slPriceSol`. Bracket считается **одним** ордером в лимитах (10 на ключ, 4 на ключ и mint). Остальные правила — как у одиночных: цена только с тика, `minOut` от цены тика с квантованием, только `delayed`/`max`, только SOL-пары pump.fun, TTL ≤ 72 ч, D1-ретеншн 24/48 ч.
 - **`Order`** += `slPriceSol?`, `slSlippageBps?` (только bracket; `triggerPriceSol` у bracket = цена TP), `leg?: "tp" | "sl"` (какая нога сработала; есть у `triggered`/`filled` и у `failed` после срабатывания), `rearm?: true`, `rearms: number`. `armed` у bracket — взведена SL-нога.
 - **Перевзвод после slippage (`rearm`).** `order_create` += `rearm?: boolean` (по умолчанию `false`, любой `kind`). Если сделка ордера не прошла по `slippage` (в сети или серверный guard stop-loss: `p < trigger · (1 − slippage)`), ордер с `rearm: true` **возвращается в `open`** с тем же hold (SL снова ждёт 2 тика), `rearms += 1`; не больше `PoolInfo.orders.maxRearms` (3) раз и только до `expiresAt`. Иначе — как раньше: `failed` (`slippage`), hold освобождён. Другие ошибки (`graduated`, `pool_liquidity`, …) не перевзводят. У `limit_buy` после перевзвода `amount` = фактический hold (остаток D10 первой попытки уже возвращён на баланс). Связь со старой сделкой не хранится: `actionId` после перевзвода пуст, неудачная сделка видна в `Portfolio.actions` как обычный `failed`.
@@ -160,7 +170,7 @@
 ## Типы
 
 ```ts
-type Venue = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "bags";   // v0.13: + raydium-launchlab, bags (зарезервировано)
+type Venue = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "bags";   // v0.13: + raydium-launchlab, bags; v0.16: bags включён (mainnet)
 type Quote = "SOL" | "USDC" | "USD1" | "ZEC";   // v0.13: ZEC = ZEC SPL A7bd…QXaS (мостовой)
 
 interface FeedEvent {
@@ -254,6 +264,7 @@ interface PoolInfo {
   fairLaunch?: FairLaunchParams;  // v0.6: только при features.fairLaunch = true
   chat?: ChatParams;        // v0.12: только при features.chat = true
   quotes: QuoteAsset[];     // v0.13: включённые пары не к SOL (пусто — только SOL)
+  venues: VenueInfo[];      // v0.16: включённые площадки (UNZEEN_VENUES) в этом порядке
   orders: {                 // v0.8: приватные ордера
     kinds: ("limit_buy" | "limit_sell" | "take_profit" | "stop_loss" | "bracket")[];   // v0.15: + bracket
     venues: "pumpfun"[];
@@ -282,6 +293,16 @@ interface PoolInfo {
     source: "near-1click" | "fixed";
     ts: number;                 // время котировки, unix мс
   };
+}
+
+interface VenueInfo {        // v0.16: PoolInfo.venues[]
+  venue: Venue;
+  trade: boolean;           // buy/sell принимаются (false: площадка только для mainnet на devnet, или действия на сети выключены)
+  create: boolean;          // create принимается (trade && createEnabled && площадка — лаунчпад; jupiter — всегда false)
+  quotes: Quote[];          // пары для create на этой площадке: "SOL" + включённые из PoolInfo.quotes; пусто, если create = false
+  atomicFirstBuy: boolean;  // false (bags): первая покупка — отдельная сделка после запуска, её могут опередить
+  creatorFees: boolean;     // false (bags, jupiter): creator fees не начисляются в claimable
+  mainnetOnly: boolean;     // jupiter, bags
 }
 
 interface Portfolio {

@@ -121,7 +121,7 @@ pub struct Smart {
     pub max_delay_min: u32,
 }
 
-const VENUES: [&str; 5] = ["pumpfun", "meteora-dbc", "jupiter", "raydium-launchlab", "bags"];
+pub(crate) const VENUES: [&str; 5] = ["pumpfun", "meteora-dbc", "jupiter", "raydium-launchlab", "bags"];
 const PLATFORMS: [&str; 3] = ["unzeen", "bonk", "stonk"];
 /// ZEC SPL amounts are rounded to 0.0001 ZEC (D10 for ZEC pairs).
 pub const ZEC_UNITS_STEP: u64 = 10_000;
@@ -248,11 +248,17 @@ fn venue(st: &AppState, v: &str) -> ApiResult<String> {
     if !st.cfg.venues.iter().any(|e| e == v) {
         return Err(ApiError::venue_unavailable(format!("venue {v} is not enabled")));
     }
-    // Jupiter routes only on mainnet liquidity (relayer 4b9a2a7): refused before any hold.
-    if v == "jupiter" && st.cfg.cluster != "mainnet-beta" {
-        return Err(ApiError::venue_unavailable("jupiter is mainnet-only"));
+    // Jupiter routes only on mainnet liquidity (relayer 4b9a2a7), Bags exists only on mainnet
+    // (v0.16): refused before any hold.
+    if mainnet_only(v) && st.cfg.cluster != "mainnet-beta" {
+        return Err(ApiError::venue_unavailable(format!("{v} is mainnet-only")));
     }
     Ok(v.to_string())
+}
+
+/// Venues without a devnet deployment.
+pub(crate) fn mainnet_only(v: &str) -> bool {
+    matches!(v, "jupiter" | "bags")
 }
 
 /// Known token facts from the public `tokens` table.
@@ -768,18 +774,48 @@ pub async fn build(st: &AppState, a: SignedAction) -> ApiResult<NewAction> {
             if let Some(p) = platform {
                 m["platform"] = json!(p);
             }
+            let delay = epoch(mode);
+            let mut jobs = Vec::with_capacity(2);
+            if v == "bags" && lamports > 0 {
+                // v0.16 (RELAYER v10): Bags' launch tx carries no first buy. The user's first
+                // buy is a second job, `held` until the create is confirmed, then bought on the
+                // pool through the vault pinned to the new mint. Not atomic: a sniper can buy
+                // in between; min_out (own Bags curve row only) bounds the price paid.
+                let (curve, _, own) = crate::rules_curve(st, &v).await?;
+                let min_out = if own {
+                    curve.tokens_out_initial(lamports) / 4 * 3
+                } else {
+                    0
+                };
+                jobs.push(NewJob {
+                    venue: Some(v.clone()),
+                    lamports_in: Some(0),
+                    min_out: Some(0),
+                    meta: Some(m),
+                    ..job(JobOp::Create, mode, delay)
+                });
+                jobs.push(NewJob {
+                    venue: Some(v),
+                    lamports_in: Some(lamports),
+                    min_out: Some(min_out),
+                    held: true,
+                    ..job(JobOp::Buy, mode, delay)
+                });
+            } else {
+                jobs.push(NewJob {
+                    venue: Some(v),
+                    lamports_in: Some(lamports),
+                    min_out: Some(0),
+                    meta: Some(m),
+                    ..job(JobOp::Create, mode, delay)
+                });
+            }
             NewAction {
                 amount_zat,
                 fee_zat: st.cfg.fees.create_fee_zat + now_fee(mode),
                 rate: Some(rate_used),
                 quote_mint: zec.map(|q| q.mint.to_string()),
-                jobs: vec![NewJob {
-                    venue: Some(v),
-                    lamports_in: Some(lamports),
-                    min_out: Some(0),
-                    meta: Some(m),
-                    ..job(JobOp::Create, mode, epoch(mode))
-                }],
+                jobs,
                 ..base("create")
             }
         }

@@ -288,6 +288,7 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
             "maxInitialBuyLamportsByVenue": by_venue,
         },
     }));
+    r.0["venues"] = venues_block(&st);
     // v0.13: enabled non-SOL pairs (venues limited to the enabled ones).
     r.0["quotes"] = Value::Array(
         st.cfg
@@ -364,6 +365,42 @@ pub fn max_initial_buy_lamports(l: &config::LaunchConfig) -> u64 {
         return 0;
     }
     l.curve().max_lamports_within(l.cap_tokens())
+}
+
+/// v0.16 `PoolInfo.venues`: every enabled venue with what the pool can do there right now.
+pub fn venues_block(st: &AppState) -> Value {
+    let mainnet = st.cfg.cluster == "mainnet-beta";
+    let mut seen = std::collections::HashSet::new();
+    Value::Array(
+        st.cfg
+            .venues
+            .iter()
+            .map(String::as_str)
+            .filter(|v| actions::VENUES.contains(v) && seen.insert(*v))
+            .map(|v| {
+                let trade = st.cfg.actions_enabled && (mainnet || !actions::mainnet_only(v));
+                let create = trade && st.cfg.create_enabled && v != "jupiter";
+                let mut quotes: Vec<&str> = Vec::new();
+                if create {
+                    quotes.push("SOL");
+                    for q in &st.cfg.quotes.list {
+                        if q.venues.contains(&v) && !quotes.contains(&q.quote) {
+                            quotes.push(q.quote);
+                        }
+                    }
+                }
+                json!({
+                    "venue": v,
+                    "trade": trade,
+                    "create": create,
+                    "quotes": quotes,
+                    "atomicFirstBuy": v != "bags",
+                    "creatorFees": !matches!(v, "bags" | "jupiter"),
+                    "mainnetOnly": actions::mainnet_only(v),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Launch curve of `venue` for the creator rules: the network's curve written by the relayer
@@ -645,6 +682,10 @@ pub fn spawn_background(st: &AppState) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tick.tick().await;
+            // v0.16: Bags first buys wait (`held`) for their launch.
+            if let Err(e) = s.ledger.release_held_jobs().await {
+                tracing::warn!(error = %e, "held job release failed");
+            }
             if let Err(e) = s.ledger.settle_ready(50).await {
                 tracing::warn!(error = %e, "settlement pass failed");
             }

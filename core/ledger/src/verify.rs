@@ -159,7 +159,7 @@ async fn meta_u64<C: GenericClient>(c: &C, key: &str) -> Result<u64> {
 async fn quiescent<C: GenericClient>(c: &C, network: &str) -> Result<bool> {
     Ok(c.query_one(
         "SELECT NOT EXISTS (SELECT 1 FROM relayer_jobs WHERE network = $1 AND op <> 'attest'
-                              AND (status IN ('claimed', 'sent')
+                              AND (status IN ('held', 'claimed', 'sent')
                                    OR (status IN ('confirmed', 'failed') AND settled_at IS NULL)))",
         &[&network],
     )

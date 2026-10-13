@@ -149,7 +149,7 @@ impl Ledger {
                 "SELECT COALESCE(sum(CASE WHEN op IN ('buy', 'create', 'fair_create') THEN COALESCE(lamports_in, 0)
                                           WHEN op = 'transfer' THEN COALESCE(gas_lamports, 0)
                                           ELSE 0 END), 0)::bigint
-                 FROM relayer_jobs WHERE network = $1 AND status IN ('queued', 'claimed')",
+                 FROM relayer_jobs WHERE network = $1 AND status IN ('held', 'queued', 'claimed')",
                 &[&network],
             )
             .await?
@@ -165,7 +165,7 @@ impl Ledger {
             .query_one(
                 "SELECT COALESCE(sum(j.lamports_in), 0)::bigint FROM relayer_jobs j
                  LEFT JOIN tokens t ON t.mint = j.mint
-                 WHERE j.network = $1 AND j.status IN ('queued', 'claimed')
+                 WHERE j.network = $1 AND j.status IN ('held', 'queued', 'claimed')
                    AND ((j.op = 'buy' AND t.quote_mint = $2) OR (j.op = 'create' AND j.meta->>'quote' = 'ZEC'))",
                 &[&network, &ZEC_SPL_MINT],
             )
