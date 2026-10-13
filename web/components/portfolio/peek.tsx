@@ -4,15 +4,14 @@ import { createContext, useContext, useState } from "react";
 import { Eye, EyeSlash } from "@phosphor-icons/react";
 import { cn } from "@/lib/utils";
 import { DecryptText } from "@/components/motion/decrypt-text";
-import { PeelTape } from "@/components/motion/tape-peel";
-import { TapeStripFull } from "@/components/brand/tape-strip";
+import { RedactionTape } from "@/components/motion/redaction-tape";
 
-/** Privacy mode: amounts sit under tape by default, shown only while the user peeks. Never persisted. */
-const PeekContext = createContext<{ shown: boolean; toggle: () => void; set: (on: boolean) => void }>({ shown: false, toggle: () => {}, set: () => {} });
+/** Privacy mode: amounts are veiled by default, shown only while the user peeks. Never persisted. */
+const PeekContext = createContext<{ shown: boolean; toggle: () => void }>({ shown: false, toggle: () => {} });
 
 export function PeekProvider({ children, initialShown = false }: { children: React.ReactNode; /** Tests only. */ initialShown?: boolean }) {
   const [shown, setShown] = useState(initialShown);
-  return <PeekContext.Provider value={{ shown, toggle: () => setShown((s) => !s), set: setShown }}>{children}</PeekContext.Provider>;
+  return <PeekContext.Provider value={{ shown, toggle: () => setShown((s) => !s) }}>{children}</PeekContext.Provider>;
 }
 
 export function usePeek() {
@@ -20,68 +19,48 @@ export function usePeek() {
 }
 
 /**
- * What holds the place under the tape: a fixed stand-in, never the real digits, so the tape's width does not
- * leak the size of the amount. Invisible; the tape covers it.
+ * What sits under the blur while veiled: a fixed stand-in, not the real digits. A blurred "1" is a faint dot
+ * and a blurred "1234.5678" is a wide smear, so blurring the real text leaked the size of the amount (and very
+ * short amounts looked like nothing was there at all).
  */
 const VEIL = "00.000";
 
 /**
- * An amount under tape (brand v4, docs/design/tape-peel.md). The real value is in the DOM ONLY while the tape
- * is off: covered, the node holds a fixed stand-in and screen readers hear "hidden". Peeking lifts the tape
- * from its torn end and the value decrypts in; letting go removes the value at once and the tape sticks back.
+ * An amount behind the veil (M6, motion-v2: redaction tape over a blurred stand-in). The real value is in
+ * the DOM ONLY while peeked: veiled, the node holds the fixed stand-in and screen readers hear "hidden".
+ * On Peek a plain text amount "decrypts" from shade glyphs (feedback that it was hidden, now shown).
  */
 export function Veiled({ children, className }: { children: React.ReactNode; className?: string }) {
   const { shown } = usePeek();
   const text = typeof children === "string" || typeof children === "number" ? String(children) : null;
   return (
-    <span className={cn("relative inline-grid", className)} data-veiled={shown ? "open" : "covered"}>
-      {/* The stand-in always holds the cell, so the tape keeps its size while it peels (one grid cell, stacked). */}
-      <span aria-hidden className="invisible col-start-1 row-start-1 select-none">
-        {VEIL}
+    <span className={cn("relative inline-block", className)} data-veiled={shown ? "open" : "covered"}>
+      <span
+        aria-hidden={!shown}
+        className={cn(
+          "inline-block transition-[filter,opacity] duration-(--motion-base) ease-shadow select-none",
+          // M6 (motion-v2): redaction tape is the veil; the blur stays underneath as the fallback.
+          shown ? "opacity-100 blur-none select-auto" : "opacity-70 blur-veil",
+        )}
+      >
+        {!shown ? VEIL : text !== null ? <DecryptText text={text} /> : children}
       </span>
-      {shown ? (
-        <span className="col-start-1 row-start-1">{text !== null ? <DecryptText text={text} /> : children}</span>
-      ) : (
-        <span className="sr-only">hidden</span>
-      )}
-      <PeelTape peeled={shown} rest={-3} className="-inset-x-[4%] -inset-y-[2%]">
-        <TapeStripFull />
-      </PeelTape>
+      <RedactionTape state={shown ? "lifted" : "covered"} instant className="-inset-x-0.5 inset-y-[0.1em] opacity-80" />
+      {!shown && <span className="sr-only">hidden</span>}
     </span>
   );
 }
 
-/**
- * Peek: press and hold to lift the tape, release to stick it back. Keyboard: Space / Enter toggle it
- * (aria-pressed), so it stays readable without holding a key.
- */
 export function PeekToggle({ className }: { className?: string }) {
-  const { shown, set, toggle } = usePeek();
+  const { shown, toggle } = usePeek();
   const Icon = shown ? EyeSlash : Eye;
-  const release = () => set(false);
   return (
     <button
       type="button"
+      onClick={toggle}
       aria-pressed={shown}
-      aria-label={shown ? "Hide amounts" : "Peek at amounts (hold)"}
-      onPointerDown={(e) => {
-        if (e.button !== 0) return;
-        e.currentTarget.setPointerCapture?.(e.pointerId);
-        set(true);
-      }}
-      onPointerUp={release}
-      onPointerCancel={release}
-      onLostPointerCapture={release}
-      onContextMenu={(e) => e.preventDefault()}
-      onKeyDown={(e) => {
-        if (e.key === " " || e.key === "Enter") {
-          e.preventDefault();
-          if (!e.repeat) toggle();
-        }
-      }}
-      onBlur={release}
       className={cn(
-        "inline-flex h-8 touch-none items-center gap-1.5 rounded-full border border-border px-3 text-xs text-muted-foreground transition-colors duration-150 select-none hover:border-border-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-zec focus-visible:outline-none",
+        "inline-flex h-8 items-center gap-1.5 rounded-full border border-border px-3 text-xs text-muted-foreground transition-colors duration-150 hover:border-border-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
         shown && "border-border-strong text-foreground",
         className,
       )}
