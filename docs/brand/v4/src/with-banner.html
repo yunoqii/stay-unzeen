@@ -1,0 +1,18 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>unzeen v4 · avatar next to banner D</title>
+<link rel="stylesheet" href="base.css"><script src="dirs.js"></script>
+<style>
+  body { width: 2000px; height: 1720px; padding: 34px 40px; background: #000; }
+  .tag { font: 12px "Geist Mono"; color: var(--fog-3); margin-bottom: 6px; }
+  .g { display: grid; grid-template-columns: 1fr 1fr; gap: 30px 40px; }
+  .desk { border: 1px solid #2f3336; }
+  .hdr { aspect-ratio: 3 / 1; overflow: hidden; } .hdr img { width: 100%; height: 100%; display: block; }
+  .body { position: relative; padding: 0 16px 14px; color: #e7e9ea; font-family: "Geist"; }
+  .av { position: absolute; width: 132px; height: 132px; left: 16px; top: -66px; border-radius: 50%; border: 4px solid #000; }
+  .btn { position: absolute; right: 16px; top: 12px; border: 1px solid #536471; border-radius: 99px; padding: 6px 16px; font-weight: 700; font-size: 14px; }
+  .name { padding-top: 76px; font-weight: 700; font-size: 20px; } .handle { color: #71767b; font-size: 15px; } .bio { margin-top: 8px; font-size: 15px; }
+</style></head><body><div class="g" id="g"></div>
+<script>
+for (const d of DIRS) document.getElementById("g").insertAdjacentHTML("beforeend", `<div><div class="tag">${d.t}</div><div class="desk"><div class="hdr"><img src="../../final/x-banner-1500x500@2x.png"></div>
+  <div class="body"><img class="av" src="../x/avatar-${d.k}@2x.png"><div class="btn">Follow</div><div class="name">unzeen</div><div class="handle">@stayunzeen (placeholder)</div>
+  <div class="bio">Private trading for launchpads, paid in shielded ZEC. Launch anywhere. Stay unzeen.</div></div></div></div>`);
+</script></body></html>

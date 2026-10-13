@@ -11,8 +11,12 @@ jobs += [J("app-icon.svg", 180, 180, 1, "apple-touch-icon-180.png"), J("app-icon
          J("app-icon.svg", 512, 512, 2, "app-icon-512@2x.png"), J("app-icon.svg", 192, 192, 1, "app-icon-192.png")]
 jobs += [J("unzeen-mark.svg", 512, 512, 1, "unzeen-mark-512.png", True), J("unzeen-mark-dark.svg", 512, 512, 1, "unzeen-mark-dark-512.png"),
          J("unzeen-mark-light.svg", 512, 512, 1, "unzeen-mark-light-512.png")]
-for f in ("unzeen-lockup-dark", "unzeen-lockup-light", "unzeen-wordmark-dark", "unzeen-wordmark-light", "unzeen-wordmark-on-dark", "unzeen-wordmark-on-light"):
+jobs += [J("unzeen-mark-simple.svg", 512, 512, 1, "unzeen-mark-simple-512.png", True)]
+for f in ("unzeen-lockup-dark", "unzeen-lockup-light", "unzeen-wordmark-dark", "unzeen-wordmark-light", "unzeen-wordmark-on-dark", "unzeen-wordmark-on-light", "unzeen-wordmark-small-on-dark", "unzeen-wordmark-small-on-light"):
     w, h = vb(f + ".svg"); jobs.append(J(f + ".svg", w, h, 4, f + "@4x.png", "-on-" in f))
+jobs += [{**J("x-avatar.svg", 400, 400, s, ""), "out": os.path.join(OUT, f"x-avatar-400{'@2x' if s == 2 else ''}.png")} for s in (1, 2)]
+bn = "file://" + os.path.join(SRC, "banner-d.html")
+jobs += [{"url": bn, "w": 1500, "h": 500, "scale": s, "out": os.path.join(OUT, f"x-banner-1500x500{'@2x' if s == 2 else ''}.png")} for s in (1, 2)]
 og = "file://" + os.path.join(SRC, "og.html")
 jobs += [{"url": og, "w": 1200, "h": 630, "scale": 1, "out": os.path.join(OUT, "og.png")},
          {"url": og, "w": 1200, "h": 630, "scale": 1, "out": os.path.join(OUT, "og.jpg")},

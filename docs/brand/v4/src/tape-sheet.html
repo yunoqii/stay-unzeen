@@ -1,0 +1,27 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>unzeen v4 · tape kit</title>
+<link rel="stylesheet" href="base.css">
+<style>
+  body { width: 1800px; height: 1240px; padding: 36px 44px; }
+  h1 { font: 600 24px "Geist"; margin-bottom: 4px; } .sub { font: 12px "Geist Mono"; color: var(--fog-2); margin-bottom: 20px; }
+  table { border-collapse: collapse; } td, th { padding: 14px 18px; border-top: 1px solid var(--hair); vertical-align: middle; text-align: center; }
+  th { font: 500 12px "Geist Mono"; color: var(--fog-3); text-align: left; }
+  td.l { text-align: left; font: 600 16px "Geist"; } td.l span { display: block; font: 11px/1.5 "Geist Mono"; color: var(--fog-2); font-weight: 400; margin-top: 4px; }
+  .wm { height: 84px; } .c { border-radius: 50%; }
+</style></head><body>
+<h1>Tape kit: flat (v3) vs folded tape, two detail levels, one or two layers</h1>
+<div class="sub">mark 200 · favicon 48 / 32 / 16 on tile (1:1) · wordmark D2a · full = banner, OG, big logo · simple = 16–48 px, avatar</div>
+<table>
+<tr><th></th><th>mark 200</th><th>48</th><th>32</th><th>16</th><th>wordmark D2a</th></tr>
+<script>
+const rows = [["flat", "flat (v3, for comparison)", "one tone, regular teeth"],
+  ["full", "folded · full", "crepe ribs, light edges, 2 creases, curled corner, step"],
+  ["simple", "folded · simple", "step, curl, one crease, 2 big teeth"],
+  ["pair-full", "two-layer · full", "dark second piece under, crossed"],
+  ["pair-simple", "two-layer · simple", "for favicon / avatar"]];
+for (const [k, t, n] of rows) {
+  const pre = k.startsWith("pair") ? "pair-mark-" + k.slice(5) : "mark-" + k;
+  const wm = k.startsWith("pair") ? "pair-wordmark-" + k.slice(5) : "wordmark-" + k;
+  document.write(`<tr><td class="l">${t}<span>${n}</span></td><td><img src="../svg/tape/${pre}.svg" width="200"></td>
+  ${[48, 32, 16].map((s) => `<td><img src="../svg/tape/${pre}-tile.svg" width="${s}"></td>`).join("")}<td><img class="wm" src="../svg/tape/${wm}.svg"></td></tr>`);
+}
+</script></table></body></html>

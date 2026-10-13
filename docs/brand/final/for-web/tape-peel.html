@@ -1,0 +1,75 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>unzeen · tape peel / stick (prototype)</title>
+<style>
+  /* Prototype of the "tape peels off / sticks back" micro-interaction. Spec: docs/design/tape-peel.md.
+     Plain CSS + 20 lines of JS; transform/opacity/filter only; prefers-reduced-motion -> opacity crossfade. */
+  @font-face { font-family: "Geist"; src: url("../src/fonts/Geist-Variable.woff2") format("woff2"); font-weight: 100 900; }
+  @font-face { font-family: "Geist Mono"; src: url("../src/fonts/GeistMono-Variable.woff2") format("woff2"); font-weight: 100 900; }
+  :root { --ink: #0b0b0d; --paper: #ededf0; --fog: #8b8b95; --zec: #f4b728;
+          --ease-out: cubic-bezier(.2, .8, .2, 1); --ease-in: cubic-bezier(.5, 0, .9, .3);
+          --peel: 420ms; --hold: 900ms; --stick: 300ms; }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--ink); color: var(--paper); font-family: "Geist", sans-serif; padding: 48px; display: grid; gap: 40px; }
+  section { border: 1px solid rgb(255 255 255 / .1); border-radius: 12px; padding: 28px; }
+  h2 { font: 500 12px "Geist Mono"; color: var(--fog); letter-spacing: .06em; text-transform: uppercase; margin-bottom: 20px; }
+
+  /* the peelable: any element with a tape child. The tape rotates around its right (torn) end, lifts, casts a shadow. */
+  .peelable { position: relative; display: inline-block; }
+  .tape { position: absolute; pointer-events: none; transform-origin: 92% 50%;
+          transform: rotate(var(--rest, -20deg)); filter: drop-shadow(0 0 0 transparent);
+          transition: transform var(--stick) var(--ease-in), filter var(--stick) var(--ease-in); }
+  .peelable[data-peeled="true"] .tape {
+          transform: rotate(calc(var(--rest, -20deg) + 26deg)) translate(6%, -48%) scaleX(.86);
+          filter: drop-shadow(0 14px 10px rgb(0 0 0 / .6));
+          transition: transform var(--peel) var(--ease-out), filter var(--peel) var(--ease-out); }
+  .hidden-value { opacity: .0; transition: opacity 120ms linear; }
+  .peelable[data-peeled="true"] .hidden-value { opacity: 1; }
+
+  /* 1 · header logo: un + [z under tape] + een */
+  .logo { font: 900 64px/1 "Geist"; letter-spacing: -0.04em; display: inline-flex; align-items: baseline; text-decoration: none; color: var(--paper); }
+  .logo .slot { width: .62em; height: .55em; margin: 0 .12em; }
+  .logo .slot .hidden-value { position: absolute; inset: auto 0 -.02em 0; text-align: center; line-height: 1; font-size: 1em; }
+  .logo .tape { left: -38%; top: -10%; width: 176%; }
+
+  /* 2 · Peek: a balance under tape */
+  .peek { display: flex; align-items: center; gap: 20px; }
+  .peek .val { font: 600 40px/1 "Geist"; letter-spacing: -0.02em; padding: 4px 6px; font-variant-numeric: tabular-nums; }
+  .peek .tape { --rest: -4deg; left: -8%; top: -12%; width: 116%; height: 124%; }
+  .peek .tape img { width: 100%; height: 100%; }
+  button { font: 500 14px "Geist"; color: var(--ink); background: var(--zec); border: 0; border-radius: 8px; padding: 10px 16px; cursor: pointer; }
+  button:focus-visible, .logo:focus-visible { outline: 2px solid var(--zec); outline-offset: 4px; }
+  p.note { font: 13px/1.6 "Geist Mono"; color: var(--fog); margin-top: 16px; max-width: 760px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tape, .peelable[data-peeled="true"] .tape { transition: opacity 150ms linear; transform: rotate(var(--rest, -20deg)); filter: none; }
+    .peelable[data-peeled="true"] .tape { opacity: 0; }
+  }
+</style></head><body>
+
+<section><h2>1 · header logo · hover / focus · once on first load</h2>
+  <a href="#" class="logo" aria-label="unzeen">un<span class="peelable slot" data-peel="hover"><span class="hidden-value" aria-hidden="true">z</span><img class="tape" src="tape-strip-simple.svg" alt=""></span>een</a>
+  <p class="note">Hover: the tape lifts off its torn end, the z shows for a beat, the tape sticks back on leave. First visit: plays once ~600 ms after load (sessionStorage), never loops.</p>
+</section>
+
+<section><h2>2 · Peek · press and hold to read the balance</h2>
+  <div class="peek"><span class="peelable" data-peel="hold"><span class="val hidden-value">12.40 ZEC</span><span class="tape"><img src="tape-strip-full.svg" alt=""></span></span>
+    <button type="button" id="peekBtn" aria-pressed="false">Peek</button></div>
+  <p class="note">Replaces the current blur on Peek. The tape peels while the button is held (or toggles with keyboard: Space/Enter), and sticks back on release. In production render the value only while peeled (this demo keeps it at opacity 0).</p>
+</section>
+
+<script>
+  const peel = (el, on) => { el.dataset.peeled = on ? "true" : "false"; };
+  // 1 · logo: hover/focus + one-shot on first load per session
+  document.querySelectorAll('[data-peel="hover"]').forEach((el) => {
+    const host = el.closest("a") || el;
+    host.addEventListener("pointerenter", () => peel(el, true)); host.addEventListener("pointerleave", () => peel(el, false));
+    host.addEventListener("focus", () => peel(el, true)); host.addEventListener("blur", () => peel(el, false));
+    if (!sessionStorage.getItem("uz-peeled")) { sessionStorage.setItem("uz-peeled", "1");
+      setTimeout(() => { peel(el, true); setTimeout(() => peel(el, false), 420 + 900); }, 600); }
+  });
+  // 2 · Peek: hold to read
+  const btn = document.getElementById("peekBtn"), box = document.querySelector('[data-peel="hold"]');
+  const set = (on) => { peel(box, on); btn.setAttribute("aria-pressed", String(on)); };
+  btn.addEventListener("pointerdown", () => set(true)); ["pointerup", "pointerleave"].forEach((e) => btn.addEventListener(e, () => set(false)));
+  btn.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); set(box.dataset.peeled !== "true"); } });
+  if (location.hash === "#still") { document.querySelectorAll(".peelable").forEach((el) => peel(el, true)); }
+</script></body></html>

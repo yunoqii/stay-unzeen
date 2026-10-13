@@ -1,0 +1,27 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>unzeen v4 · louder tape</title>
+<link rel="stylesheet" href="base.css"><script src="dirs.js"></script>
+<style>
+  body { width: 2200px; height: 1640px; padding: 40px 48px; }
+  h1 { font: 600 26px "Geist"; letter-spacing: -0.02em; margin-bottom: 4px; } .sub { font: 13px "Geist Mono"; color: var(--fog-2); margin-bottom: 22px; }
+  .g { display: grid; grid-template-columns: 1fr 1fr; gap: 0 48px; }
+  .row { display: grid; grid-template-columns: 170px 1fr; gap: 20px; padding: 18px 0; border-top: 1px solid var(--hair); height: 380px; }
+  .t b { display: block; font: 600 22px "Geist"; margin-bottom: 6px; } .t span { font: 12px/1.5 "Geist Mono"; color: var(--fog-3); }
+  .t i { font-style: normal; display: inline-block; margin-top: 10px; font: 600 11px "Geist Mono"; letter-spacing: .1em; text-transform: uppercase; padding: 3px 7px; border: 1px solid var(--zec); color: var(--zec); }
+  .lk img { height: 120px; display: block; border-radius: 6px; max-width: 100%; }
+  .sz { display: flex; gap: 16px; align-items: flex-end; margin-top: 18px; font: 11px "Geist Mono"; color: var(--fog-2); }
+  .sz figure { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .c { border-radius: 50%; display: block; }
+  .x32 { background: #000; padding: 8px 12px; border-radius: 8px; display: flex; gap: 10px; align-items: center; font: 700 14px "Geist"; color: #e7e9ea; }
+  .x32 span { color: #71767b; font-weight: 400; }
+</style></head><body>
+<h1>unzeen · v4 · the tape, louder</h1><div class="sub">lockup · favicon 16 / 32 / 48 (1:1) · X avatar 140 · in the X timeline at 32px</div>
+<div class="g" id="g"></div>
+<script>
+const rec = { "1-bleed": "recommended", "8-struck": "alt", "5-masking": "alt" };
+for (const d of window.DIRS) document.getElementById("g").insertAdjacentHTML("beforeend", `<div class="row"><div class="t"><b>${d.t}</b><span>${d.note}</span>${rec[d.k] ? `<br><i>${rec[d.k]}</i>` : ""}</div>
+  <div><div class="lk"><img src="../svg/${d.k}-lockup.svg"></div>
+  <div class="sz"><figure><img src="../png/${d.k}-favicon-16.png" width="16">16</figure><figure><img src="../png/${d.k}-favicon-32.png" width="32">32</figure>
+  <figure><img src="../png/${d.k}-favicon-48.png" width="48">48</figure>
+  <figure><img class="c" src="../x/avatar-${d.k}@2x.png" width="140">X avatar</figure>
+  <figure><div class="x32"><img class="c" src="../x/avatar-${d.k}.png" width="32"><div>unzeen <span>@stayunzeen · 12s</span></div></div>X 32</figure></div></div></div>`);
+</script></body></html>

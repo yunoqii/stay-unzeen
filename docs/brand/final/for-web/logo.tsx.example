@@ -1,27 +1,22 @@
-// Reference for web/components/layout/logo.tsx (frontend owns the real file).
-// Mark = D tape (yellow, torn right end). Wordmark = D2a: "un▬een", the tape hides the z.
-// The visible name is always present for machines and screen readers (aria-label / sr-only text).
+// Reference for web/components/layout/logo.tsx (frontend owns the real file). Brand v4, 13.10.2026.
+// Mark = folded two-layer tape (simple level for the header). Wordmark = D2a "un▬een".
+// The header logo peels its tape on hover/focus: see docs/design/tape-peel.md and for-web/tape-peel.html.
 import { cn } from "@/lib/utils";
 
-const TAPE_D =
-  "M2,21 L62,21 L56,23.75 L62,26.5 L60.5,29.25 L62,32 L56,34.75 L62,37.5 L60.5,40.25 L62,43 L2,43Z";
-
-/** Tape mark: a strip of yellow redaction tape with a torn end. */
+/** Two-layer tape mark. Static SVG (several shapes and tones), so it ships as a file, not an inline path. */
 export function TapeMark({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 64 64" aria-hidden className={cn("size-6", className)}>
-      <path transform="rotate(-14 32 32)" d={TAPE_D} fill="var(--zec)" />
-    </svg>
-  );
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src="/brand/logo-mark.svg" alt="" aria-hidden className={cn("size-6", className)} />;
 }
 
-/** Mark + wordmark. The wordmark SVG lives in /brand/unzeen-wordmark-on-dark.svg (outlined Geist Black). */
+/** Header logo: mark + small wordmark. The name stays readable for machines and screen readers. */
 export function Wordmark({ className }: { className?: string }) {
   return (
-    <span className={cn("inline-flex items-center gap-2", className)} aria-label="unzeen" role="img">
+    <span className={cn("inline-flex items-center gap-2", className)} role="img" aria-label="unzeen">
       <TapeMark />
-      {/* height 20-24px in the header; never below 16px */}
-      <img src="/brand/unzeen-wordmark-on-dark.svg" alt="" aria-hidden className="h-5 w-auto" />
+      {/* 20-24px tall in the header; never below 16px. Use the -small (simple tape) file at this size. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/brand/unzeen-wordmark-small-on-dark.svg" alt="" aria-hidden className="h-6 w-auto" />
     </span>
   );
 }
