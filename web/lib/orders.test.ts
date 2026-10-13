@@ -85,9 +85,12 @@ describe("orders: same amount as a buy", () => {
   it("warns on a sell size matching a buy, or the whole position from one buy", () => {
     const buys = [BigInt(1_000_000), BigInt(5_000_000)];
     expect(sellMatchesBuy(BigInt(1_000_000), buys, BigInt(6_000_000))).toBe("buy");
-    expect(sellMatchesBuy(BigInt(1_010_000), buys, null)).toBe("buy"); // within 2 %
+    expect(sellMatchesBuy(BigInt(1_010_000), buys, null)).toBe("buy"); // within 1 % (A6)
+    expect(sellMatchesBuy(BigInt(1_030_000), buys, null)).toBeNull(); // 3 % off: sent as signed
     expect(sellMatchesBuy(BigInt(3_000_000), buys, BigInt(6_000_000))).toBeNull();
     expect(sellMatchesBuy(BigInt(0), buys, null)).toBeNull();
     expect(sellMatchesBuy(BigInt(7_000_000), [BigInt(7_000_000)], BigInt(7_000_000))).toBe("position");
+    // v0.17: the whole position (available + held) is rounded even with no buy of that size.
+    expect(sellMatchesBuy(BigInt(6_000_000), [], BigInt(6_000_000))).toBe("position");
   });
 });

@@ -138,12 +138,29 @@ describe("mock: actions from the balance", () => {
       smart: { parts: 2, maxDelayMin: 5 },
     });
     const mid = await call<Portfolio>("GET", "/api/portfolio");
-    expect(mid.holdings.find((h) => h.mint === t.mint)).toMatchObject({ amount: "0", held: total });
+    // v0.17 (A1): shaved 0.5–2 %, split, each part rounded to 3 significant digits; the rest stays available.
+    const ws = await call<ActionStatus>("GET", `/api/actions/${w.id}`);
+    expect(ws.parts).toHaveLength(2);
+    const sent = ws.parts!.reduce((n, p) => n + BigInt(p.amount), BigInt(0));
+    for (const p of ws.parts!) {
+      expect(p.status).toBe("queued");
+      expect(p.notBefore % 1000).toBe(0);
+      expect(BigInt(p.amount).toString().replace(/0+$/, "").length).toBeLessThanOrEqual(3);
+    }
+    expect(sent < BigInt(total)).toBe(true);
+    expect(sent * BigInt(1000) >= BigInt(total) * BigInt(975)).toBe(true); // at most ~2 % + rounding
+    const h = mid.holdings.find((x) => x.mint === t.mint)!;
+    expect(h).toMatchObject({ held: sent.toString(), amount: (BigInt(total) - sent).toString() });
     expect(BigInt(mid.zecBalance) < BigInt(after.zecBalance)).toBe(true); // gas paid in ZEC
+    // Parts are owner-only on GET /api/actions/:id, never in the portfolio.
+    expect(JSON.stringify(mid.actions ?? [])).not.toContain("notBefore");
 
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect((await call<ActionStatus>("GET", `/api/actions/${w.id}`)).status).toBe("executed");
-    expect((await call<Portfolio>("GET", "/api/portfolio")).holdings.find((h) => h.mint === t.mint)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(40_000);
+    const done = await call<ActionStatus>("GET", `/api/actions/${w.id}`);
+    expect(done.status).toBe("executed");
+    expect(done.fill!.tokenAmount).toBe(sent.toString());
+    expect(done.parts!.every((p) => p.status === "confirmed")).toBe(true);
+    expect((await call<Portfolio>("GET", "/api/portfolio")).holdings.find((x) => x.mint === t.mint)).toMatchObject({ amount: (BigInt(total) - sent).toString(), held: "0" });
     unsub();
   });
 

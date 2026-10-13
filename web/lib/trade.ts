@@ -131,6 +131,18 @@ export function zecPairValueZat(amount: bigint, spreadBps: number, priceQuote: s
 
 /** WITHDRAW_ZEC_FEE_ZAT default. */
 export const WITHDRAW_ZEC_FEE_ZAT = BigInt(15_000);
+
+/**
+ * v0.17 (A2): on mainnet a ZEC payout above 1 ZEC (core UNZEEN_MAX_PAYOUT_ZAT default) waits for the
+ * operator's approval. The action stays `queued` meanwhile; other payouts are not held up.
+ */
+export const PAYOUT_REVIEW_ABOVE_ZAT = BigInt(100_000_000);
+export const PAYOUT_REVIEW_TEXT = "Large payouts are reviewed by the operator";
+export function payoutReviewed(network: string, amountZat: bigint | string | null): boolean {
+  if (network !== "mainnet" || amountZat === null) return false;
+  const v = typeof amountZat === "bigint" ? amountZat : /^\d+$/.test(amountZat) ? BigInt(amountZat) : null;
+  return v !== null && v > PAYOUT_REVIEW_ABOVE_ZAT;
+}
 /** WITHDRAW_TOKEN_GAS_LAMPORTS: SOL dropped to every recipient for its own fees. */
 export const WITHDRAW_TOKEN_GAS_LAMPORTS = BigInt(2_000_000);
 /** WITHDRAW_TOKEN_COST_LAMPORTS: ATA rent + tx fee per part. */
@@ -153,6 +165,24 @@ export function isSolanaAddress(s: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** v0.17 A6: the pool looks at your buys of the last 48 h. */
+export const MIRROR_WINDOW_MS = 48 * 3_600_000;
+
+/**
+ * API v0.17 (A6): would the pool shave and round this sell so it does not mirror a buy? True when the
+ * amount is within ±1 % of one buy (last 48 h), of their sum, or of the whole position (available + held:
+ * "sell 100 %"). The UI then shows "≈"; the remainder stays on the balance.
+ */
+export function sellMirrorsBuy(amount: bigint, buys: readonly bigint[], position: bigint | null): "buy" | "position" | null {
+  if (amount <= ZERO) return null;
+  // core matches_public_buy: |x − amount| · 100 ≤ x, x = a buy, their sum or the position.
+  const near = (x: bigint) => x > ZERO && (x > amount ? x - amount : amount - x) * BigInt(100) <= x;
+  if (position !== null && near(position)) return "position";
+  if (buys.some(near)) return "buy";
+  const sum = buys.reduce((n, b) => n + (b > ZERO ? b : ZERO), ZERO);
+  return buys.length > 1 && near(sum) ? "buy" : null;
 }
 
 /** Two amounts "look the same" to an observer: within `tolerance` (default 2 %). */

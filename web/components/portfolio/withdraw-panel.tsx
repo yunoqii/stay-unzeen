@@ -6,13 +6,12 @@ import { AnimatePresence, motion } from "motion/react";
 import { ArrowUpRight, CheckCircle, ShieldWarning, WarningCircle, X } from "@phosphor-icons/react";
 import { ApiError, errorText } from "@/lib/api/client";
 import type { PoolInfo, Portfolio, SignedAction, Token } from "@/lib/api/types";
-import { lastRate, recentBuyAmounts, submitAction, useAction, useActivityVersion } from "@/lib/activity";
-import { useKeyState } from "@/lib/crypto/session";
+import { lastRate, submitAction, useAction, useActivityVersion } from "@/lib/activity";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, shortAddr, unitsToNumber, ZEC_DECIMALS } from "@/lib/format";
 import { ExecLane } from "@/components/trade/exec-lane";
 import { WITHDRAW_EXEC_DEFAULT, withExec, type WithdrawExecMode } from "@/lib/exec";
 import { useNetwork } from "@/lib/network";
-import { amountsMatch, isSolanaAddress, WITHDRAW_ZEC_FEE_ZAT, withdrawTokenFee } from "@/lib/trade";
+import { isSolanaAddress, payoutReviewed, PAYOUT_REVIEW_TEXT, WITHDRAW_ZEC_FEE_ZAT, withdrawTokenFee } from "@/lib/trade";
 import { checkWithdrawUa } from "@/lib/zcash/ua";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -94,7 +93,6 @@ export const WithdrawPanel = forwardRef<HTMLElement, Props>(function WithdrawPan
 
 function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfolio; tokens: Token[] | null; mint: string | null; onMint: (m: string) => void }) {
   const network = useNetwork();
-  const key = useKeyState();
   useActivityVersion();
   const ids = useId();
   const owned = portfolio.holdings.filter((h) => h.amount !== "0");
@@ -149,10 +147,6 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
   const rate = lastRate(network, "buy");
   const fee = withdrawTokenFee(n, rate);
   const zecShort = fee.zat !== null && BigInt(portfolio.zecBalance) < fee.zat;
-  const matchesBuy =
-    parsed !== null &&
-    key.status === "unlocked" &&
-    recentBuyAmounts(network, key.pubkey, selected.mint).some((b) => amountsMatch(parsed!, b));
   const ready = parsed !== null && !amountError && dests.every((a, i) => a && !addrErrors[i]) && !busy && !portfolio.frozen;
 
   const submit = async () => {
@@ -171,7 +165,8 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
       setGhost({
         symbol: token.symbol,
         image: token.image,
-        label: formatCompact(unitsToNumber(parsed.toString(), token.decimals)),
+        // A1: never the exact sum; the real parts come with the status.
+        label: `≈ ${formatCompact(unitsToNumber(parsed.toString(), token.decimals))}`,
         ...(smart && parts > 1 ? { addrs: dests.slice(0, parts), maxDelayMin: maxDelay } : {}),
       });
       setSentId(it.id);
@@ -259,25 +254,14 @@ function TokenWithdraw({ portfolio, tokens, mint, onMint }: { portfolio: Portfol
         {amountError && <p className="mt-1.5 text-xs text-sell">{amountError}</p>}
       </div>
 
-      <AnimatePresence initial={false}>
-        {matchesBuy && (
-          <motion.p
-            key="match"
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            style={{ overflow: "hidden" }}
-            role="alert"
-            className="flex gap-2 rounded-xl bg-zec-soft px-3 py-2.5 text-xs text-pretty text-zec"
-          >
-            <WarningCircle size={15} weight="light" className="mt-px shrink-0" aria-hidden />
-            <span>
-              This is the same amount you just bought. Anyone can match a buy and a withdrawal of equal size. Change the amount
-              {smart ? "" : " or turn on Smart withdraw"}.
-            </span>
-          </motion.p>
-        )}
-      </AnimatePresence>
+      {parsed !== null && !amountError && (
+        <p role="note" className="-mt-3 text-xs text-pretty text-faint-foreground">
+          <span className="tabular text-muted-foreground">
+            ≈ {formatCompact(unitsToNumber(parsed.toString(), token.decimals))} ${token.symbol}
+          </span>{" "}
+          · The exact sum is rounded by the server so it never matches your buy. The pool sends 0.5–2 % less{n > 1 ? ", each part rounded" : ""}; the rest stays in your holding.
+        </p>
+      )}
 
       <div className="space-y-2">
         <p className="flex items-start gap-2 rounded-xl border border-zec/25 bg-zec-soft px-3 py-2.5 text-xs text-pretty text-zec">
@@ -436,6 +420,8 @@ function ZecWithdraw({ portfolio, pool }: { portfolio: Portfolio; pool: PoolInfo
     }
   }
   const ready = verdict.ok && parsed !== null && !amountError && !busy && !portfolio.frozen;
+  // v0.17 (A2): mainnet payouts above 1 ZEC wait for the operator.
+  const reviewed = parsed !== null && !amountError && payoutReviewed(network, parsed);
 
   const submit = async () => {
     setToTouched(true);
@@ -525,7 +511,9 @@ function ZecWithdraw({ portfolio, pool }: { portfolio: Portfolio; pool: PoolInfo
 
       <dl className="space-y-1.5 text-xs">
         <Row k="Network fee">{formatZec(WITHDRAW_ZEC_FEE_ZAT.toString())} ZEC</Row>
-        <Row k="Delay">Random, 1 – 10 min, batched with other payouts</Row>
+        <Row k="Delay">
+          {reviewed ? `${PAYOUT_REVIEW_TEXT}: queued until approved, then batched` : "Random, 1 – 10 min, batched with other payouts"}
+        </Row>
         <Row k="Privacy">Shielded to shielded. The pool keeps no outgoing record.</Row>
       </dl>
 
@@ -561,7 +549,17 @@ function Sent({ action, ghost, onAgain }: { action: Parameters<typeof ActionStat
   const scatter = ghost?.addrs && ghost.addrs.length > 1 ? ghost : null;
   return (
     <div className="mt-5 space-y-4">
-      {scatter && <ScatterParts label={`${scatter.label} $${scatter.symbol}`} addrs={scatter.addrs!} maxDelayMin={scatter.maxDelayMin ?? 15} />}
+      {scatter && (
+        <ScatterParts
+          label={`${scatter.label} $${scatter.symbol}`}
+          addrs={scatter.addrs!}
+          maxDelayMin={scatter.maxDelayMin ?? 15}
+          parts={action.status.parts}
+          decimals={action.decimals}
+          startedAt={action.submittedAt}
+          settled={action.status.status === "executed" || action.status.status === "failed" ? action.status.status : null}
+        />
+      )}
       <AnimatePresence mode="wait" initial={false}>
         {showGhost && ghost && !scatter ? (
           <motion.div key="ghost" {...dissolve} className="flex items-center justify-center gap-3 py-6" aria-hidden>
@@ -587,7 +585,7 @@ function ErrorBox({ error }: { error: ApiError }) {
   return (
     <p role="alert" className="flex gap-2 rounded-xl border border-sell/30 bg-sell/5 px-3 py-2.5 text-sm text-pretty text-foreground/90">
       <WarningCircle size={16} weight="light" className="mt-0.5 shrink-0 text-sell" aria-hidden />
-      {error.code === "bad_request" ? "The pool refused this request. Check the address and amount." : errorText(error)}
+      {error.code === "bad_request" ? "The pool refused this request. Check the addresses, and that the amount is not too small to split and round." : errorText(error)}
     </p>
   );
 }

@@ -4,7 +4,7 @@
 // computed here in the browser: only the absolute trigger price ever reaches the server (O2).
 
 import type { Order, OrderKind, OrdersParams, PoolInfo, Token } from "@/lib/api/types";
-import { amountsMatch } from "@/lib/trade";
+import { sellMirrorsBuy } from "@/lib/trade";
 
 export const ORDER_KINDS: readonly OrderKind[] = ["limit_buy", "limit_sell", "take_profit", "stop_loss", "bracket"];
 
@@ -183,14 +183,12 @@ export function clampTtlHours(h: number, params: Pick<OrdersParams, "maxTtlSecs"
 // ---- privacy warning ----
 
 /**
- * A sell order whose size equals one of your buys (or the whole position, when that came from one
- * buy): on-chain the sale can be matched to that buy by size (docs/analysis/orders.md §4). Same
- * tolerance as the withdrawal warning.
+ * v0.17 (A5, A6): a sell order sized like one of your buys of the last 48 h, their sum, or the whole
+ * position: the pool shaves 0.5–2 % and rounds it when it triggers (Order.amount may shrink, the rest
+ * returns to the balance). The UI shows "≈" instead of a warning.
  */
-export function sellMatchesBuy(amount: bigint, buys: readonly bigint[], holding: bigint | null): "buy" | "position" | null {
-  if (amount <= BigInt(0)) return null;
-  if (!buys.some((b) => amountsMatch(amount, b))) return null;
-  return holding !== null && amount === holding ? "position" : "buy";
+export function sellMatchesBuy(amount: bigint, buys: readonly bigint[], position: bigint | null): "buy" | "position" | null {
+  return sellMirrorsBuy(amount, buys, position);
 }
 
 // ---- lists ----

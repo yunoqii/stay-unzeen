@@ -66,3 +66,28 @@ describe("trade math", () => {
     expect(amountsMatch(BigInt(0), BigInt(0))).toBe(false);
   });
 });
+
+describe("v0.17 copy rules", () => {
+  it("A6: a sell mirrors one buy, their sum, or the whole position (core: |x − a| · 100 ≤ x)", async () => {
+    const { sellMirrorsBuy } = await import("./trade");
+    const buys = [BigInt(1_000_000), BigInt(2_000_000)];
+    expect(sellMirrorsBuy(BigInt(1_010_000), buys, null)).toBe("buy");
+    expect(sellMirrorsBuy(BigInt(1_011_000), buys, null)).toBeNull();
+    expect(sellMirrorsBuy(BigInt(2_990_000), buys, null)).toBe("buy"); // the sum
+    expect(sellMirrorsBuy(BigInt(5_000_000), [], BigInt(5_000_000))).toBe("position"); // sell 100 %
+    expect(sellMirrorsBuy(BigInt(0), buys, BigInt(0))).toBeNull();
+  });
+
+  it("A2: only mainnet payouts above 1 ZEC are reviewed", async () => {
+    const { payoutReviewed } = await import("./trade");
+    expect(payoutReviewed("mainnet", BigInt(100_000_001))).toBe(true);
+    expect(payoutReviewed("mainnet", "100000000")).toBe(false);
+    expect(payoutReviewed("devnet", BigInt(500_000_000))).toBe(false);
+  });
+
+  it("A4: a Bags 503 reads as 'no curve yet', other venues keep the generic text", async () => {
+    const { isBagsNotReady } = await import("./launch");
+    expect(isBagsNotReady({ code: "venue_unavailable", status: 503 }, "bags")).toBe(true);
+    expect(isBagsNotReady({ code: "venue_unavailable", status: 503 }, "pumpfun")).toBe(false);
+  });
+});

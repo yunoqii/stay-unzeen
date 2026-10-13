@@ -23,31 +23,32 @@ interface Bar {
   high: number;
   low: number;
   close: number;
-  volume: number; // lamports
+  volume: number; // whole units of the axis currency (SOL, or the pair's quote)
 }
 
 const hourLabel = new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
 const dayLabel = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
 const fullTime = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 
-const toBar = (c: Candle, scale = 1): Bar => ({
+/** v0.17: `volume` is a base-unit string (no i64 limit): lamports, or the pair quote's base units with quote=1. */
+const toBar = (c: Candle, decimals: number): Bar => ({
   time: c.time,
-  open: Number(c.open) * scale,
-  high: Number(c.high) * scale,
-  low: Number(c.low) * scale,
-  close: Number(c.close) * scale,
-  volume: Number(c.volume),
+  open: Number(c.open),
+  high: Number(c.high),
+  low: Number(c.low),
+  close: Number(c.close),
+  volume: /^\d+$/.test(String(c.volume)) ? unitsToNumber(String(c.volume), decimals) : 0,
 });
 
 /**
- * Unit of the price axis. Candles are SOL (API); a non-SOL pair can be drawn in its own quote:
- * history bars scaled by `scale` (quote per SOL from the token's public prices), live trades priced from
- * their own quote amount, so the newest bars are exact.
+ * Unit of the price axis. SOL by default; a non-SOL pair can be drawn in its own quote (v0.17: the server
+ * returns those bars natively with `quote=1`, nothing is converted at today's price), live trades priced from
+ * their own quote amount.
  */
 export interface ChartDenom {
   unit: string;
-  /** Multiplies SOL prices into `unit` (1 for SOL). */
-  scale: number;
+  /** Set for a pair drawn in its own quote: decimals of that quote (volume base units -> whole units). */
+  pairDecimals?: number;
 }
 
 function cssVar(name: string, fallback: string) {
@@ -66,7 +67,7 @@ export function PriceChart({
   markers = [],
   triggers = [],
   showMarkers = false,
-  denom = { unit: "SOL", scale: 1 },
+  denom = { unit: "SOL" },
   denomSwitch,
 }: {
   mint: string;
@@ -91,6 +92,7 @@ export function PriceChart({
   const network = useNetwork();
   const colors = useRef({ up: "#4fc98a", down: "#ef6b73" });
   const [readyTick, setReadyTick] = useState(0);
+  const pair = denom.unit !== "SOL" && denom.pairDecimals !== undefined;
   const [loadedAt, setLoadedAt] = useState(0);
 
   // Chart instance: once per mount.
@@ -219,10 +221,10 @@ export function PriceChart({
     let alive = true;
     setState("loading");
     api
-      .getCandles(mint, { tf })
+      .getCandles(mint, { tf, ...(pair ? { quote: 1 as const } : {}) })
       .then((list) => {
         if (!alive || !candles.current || !volume.current) return;
-        const bars = list.map((c) => toBar(c, denom.scale));
+        const bars = list.map((c) => toBar(c, pair ? denom.pairDecimals! : 9));
         const { up, down } = colors.current;
         candles.current.setData(bars.map((b) => ({ time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close })));
         volume.current.setData(bars.map((b) => volumeBar(b, up, down)));
@@ -236,7 +238,7 @@ export function PriceChart({
     return () => {
       alive = false;
     };
-  }, [mint, tf, network, readyTick, denom.unit, denom.scale]);
+  }, [mint, tf, network, readyTick, denom.unit, pair, denom.pairDecimals]);
 
   // Live: fold new trades into the current bar (or open the next one).
   useEffect(() => {
@@ -249,21 +251,21 @@ export function PriceChart({
       if (t < cut) continue; // already in the history bars
       applied.current.add(e.id);
       const tokens = unitsToNumber(e.tokenAmount, e.decimals);
-      const sol = lamportsToSol(e.solAmount);
-      const q = denom.unit !== "SOL" ? eventQuote(e) : null;
-      const paid = q && q.quote === denom.unit ? q.amount : sol * denom.scale;
+      // Pair view: only trades with a known quote amount (the server's quote=1 bars count the same ones).
+      const q = pair ? eventQuote(e) : null;
+      const paid = pair ? (q && q.quote === denom.unit ? q.amount : 0) : lamportsToSol(e.solAmount);
       if (!(tokens > 0) || !(paid > 0)) continue;
       const price = paid / tokens;
       const prev = last.current;
       const bar: Bar =
         prev && prev.time === t
-          ? { ...prev, high: Math.max(prev.high, price), low: Math.min(prev.low, price), close: price, volume: prev.volume + Number(e.solAmount) }
-          : { time: t, open: prev?.close ?? price, high: Math.max(prev?.close ?? price, price), low: Math.min(prev?.close ?? price, price), close: price, volume: Number(e.solAmount) };
+          ? { ...prev, high: Math.max(prev.high, price), low: Math.min(prev.low, price), close: price, volume: prev.volume + paid }
+          : { time: t, open: prev?.close ?? price, high: Math.max(prev?.close ?? price, price), low: Math.min(prev?.close ?? price, price), close: price, volume: paid };
       last.current = bar;
       candles.current?.update({ time: bar.time as UTCTimestamp, open: bar.open, high: bar.high, low: bar.low, close: bar.close } satisfies CandlestickData);
       volume.current?.update(volumeBar(bar, colors.current.up, colors.current.down));
     }
-  }, [trades, tf, state, denom.unit, denom.scale]);
+  }, [trades, tf, state, denom.unit, pair]);
 
   return (
     <section aria-labelledby="chart-title">
@@ -308,7 +310,6 @@ export function PriceChart({
         )}
       </div>
       <p className="border-t border-border/60 px-4 py-2 text-[11px] text-pretty text-faint-foreground">
-        {denom.unit !== "SOL" && <>Earlier bars converted at the current {denom.unit}/SOL price; new trades in {denom.unit}. Volume in SOL equivalent. </>}
         Chart: TradingView Lightweight Charts™
       </p>
     </section>
@@ -316,5 +317,5 @@ export function PriceChart({
 }
 
 function volumeBar(b: Bar, up: string, down: string): HistogramData {
-  return { time: b.time as UTCTimestamp, value: b.volume / 1e9, color: (b.close >= b.open ? up : down) + "40" };
+  return { time: b.time as UTCTimestamp, value: b.volume, color: (b.close >= b.open ? up : down) + "40" };
 }

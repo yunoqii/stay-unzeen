@@ -12,7 +12,7 @@ import { isSolanaAddress } from "@/lib/trade";
 import { cn } from "@/lib/utils";
 import type { FeedEvent, TokenWithTrades } from "@/lib/api/types";
 import { formatCompact, formatPrice, shortAddr, timeAgo } from "@/lib/format";
-import { eventQuote, quotePerSol, tokenQuote } from "@/lib/quotes";
+import { eventQuote, quoteOfMint, quotePerSol, tokenQuote } from "@/lib/quotes";
 import type { Quote } from "@/lib/api/types";
 import { QuoteBadge } from "./quote-badge";
 import { useLiveFeed } from "@/hooks/use-live-feed";
@@ -98,7 +98,12 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
   const [denomPick, setDenom] = useState<"quote" | "SOL">("quote");
   const scale = quotePerSol(token);
   const quoteView = quote !== "SOL" && denomPick === "quote";
-  const chartDenom = quoteView && scale !== null ? { unit: quote, scale } : { unit: "SOL", scale: 1 };
+  // v0.17: the chart of a pair comes from the server in the pair's own units (candles?quote=1).
+  const pairDecimals = quoteOfMint(token.quoteMint)?.decimals;
+  const chartDenom = useMemo(
+    () => (quoteView && pairDecimals !== undefined ? { unit: quote, pairDecimals } : { unit: "SOL" }),
+    [quoteView, quote, pairDecimals],
+  );
   const shownPrice = quoteView ? priceQuote : priceSol;
   const mcapSol = Number(token.marketCapSol);
   const shownMcap = !(mcapSol > 0) ? null : quoteView ? (scale !== null ? mcapSol * scale : null) : mcapSol;

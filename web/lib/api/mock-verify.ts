@@ -287,6 +287,8 @@ export function createVerifyMock(host: VerifyHost): VerifyMock {
     const base = {
       id,
       chainId,
+      // v0.17: new snapshots sign quoteAssets too (digest v2).
+      digestVersion: 2 as const,
       takenAt,
       leaves: n,
       solanaSlot,

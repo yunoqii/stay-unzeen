@@ -7,6 +7,7 @@ import { ApiError, errorText } from "@/lib/api/client";
 import type { TrackedAction } from "@/lib/activity";
 import { queuedLabel } from "@/lib/exec";
 import { formatCompact, formatZec, shortAddr, unitsToNumber } from "@/lib/format";
+import { payoutReviewed, PAYOUT_REVIEW_TEXT } from "@/lib/trade";
 import { cn } from "@/lib/utils";
 
 type Step = { key: string; label: string; detail?: React.ReactNode };
@@ -28,6 +29,8 @@ export function ActionStatusCard({ action, className }: { action: TrackedAction;
       label: action.op === "claim" ? "No batch: ledger only" : queuedLabel(action.exec),
       detail: action.op === "claim"
         ? "Creator fees move inside the pool's private ledger. Nothing is sent on Solana."
+        : action.op === "withdraw_zec" && payoutReviewed(action.network, action.amount)
+        ? `${PAYOUT_REVIEW_TEXT}. It stays queued until approved; your other payouts are not held up.`
         : action.stale
         ? "Still waiting. Payouts can take a while; your balance updates when it goes out."
         : action.exec === "now"

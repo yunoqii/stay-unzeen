@@ -88,6 +88,8 @@ export function applyActionStatuses(
       const { id: _id, ...status } = hit;
       void _id;
       if (!status.rate && cur.status.rate) status.rate = cur.status.rate;
+      // v0.17: parts come from the one read after signing (never in Portfolio.actions): keep them.
+      if (!status.parts && cur.status.parts) status.parts = cur.status.parts;
       if (JSON.stringify(status) !== JSON.stringify(cur.status)) {
         rememberRate(network, cur.op, status.rate);
         const next = { ...cur, status, stale: false };
@@ -169,12 +171,32 @@ export async function submitAction(
   };
   items.set(it.id, it);
   emit();
+  if (meta.op === "withdraw_token") void readPartsOnce(signer, it.id);
   if (meta.op !== "withdraw_zec" && meta.op !== "claim") {
     // Encrypted local history for PnL (T4): the id, kind and mint only; the fill arrives with the poll.
     void recordSubmitted(network, signer.pubkey, { id: it.id, kind: meta.op, mint: meta.mint, symbol: meta.symbol, decimals: meta.decimals, submittedAt: it.submittedAt });
   }
   acceptedListeners.forEach((l) => l());
   return it;
+}
+
+/**
+ * v0.17: the real parts of a token withdrawal (sizes after the server's rounding, start times) for the M4
+ * view. Read ONCE, right after the POST that already revealed this moment, and never again: a per-action
+ * poll would end when the action settles and so leak its timing (N-2). Progress after that is the clock
+ * (notBefore) plus the action's own status from the regular portfolio poll. A failure just leaves no parts.
+ */
+async function readPartsOnce(signer: NonNullable<ReturnType<typeof getSigner>>, id: string) {
+  try {
+    const st = await api.getAction(signer, id);
+    const parts = Array.isArray(st.parts) ? st.parts.filter((p) => p && /^\d+$/.test(p.amount) && Number.isFinite(p.notBefore)) : [];
+    const cur = items.get(id);
+    if (!cur || parts.length === 0) return;
+    items.set(id, { ...cur, status: { ...cur.status, parts } });
+    emit();
+  } catch {
+    /* no parts: the view falls back to the illustration */
+  }
 }
 
 export function useActions(network: Network, pubkey: string | null): TrackedAction[] {

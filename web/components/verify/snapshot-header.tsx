@@ -40,8 +40,16 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
     {
       tone: check.digestOk ? "ok" : "bad",
       label: check.digestOk ? "Digest recomputed" : "Digest does not match",
-      detail: check.digestOk ? "From the roots, the reserve, the slot and the height below." : "The fields of this snapshot do not hash to the digest the server sent.",
+      detail: check.digestOk
+        ? snap.digestVersion === 2
+          ? "Digest v2: from the roots, the reserve, the slot, the height and the quote assets below."
+          : "From the roots, the reserve, the slot and the height below."
+        : (check.error ?? "The fields of this snapshot do not hash to the digest the server sent."),
     },
+    // v0.17: before digest v2 the quote assets (what counts as bridged ZEC) were not signed.
+    ...(check.digestOk && snap.digestVersion !== 2 && (snap.quoteAssets?.length ?? 0) > 0
+      ? [{ tone: "warn" as Tone, label: "Quote assets not signed", detail: "This older snapshot (digest v1) does not sign its quote asset list. The bridged ZEC part of the cover is the server's word here." }]
+      : []),
     {
       tone: op === "verified" ? "ok" : op === "pending" ? "wait" : op === "unpinned" ? "warn" : "bad",
       label:

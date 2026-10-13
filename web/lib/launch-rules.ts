@@ -40,8 +40,28 @@ export function maxInitialBuyLamports(pool: Pick<PoolInfo, "launchRules"> | null
   return (venue && r?.maxInitialBuyLamportsByVenue?.[venue]) || r?.maxInitialBuyLamports;
 }
 
-/** Largest initialBuyZec (zatoshis) that stays under the venue's cap at the pool's buy rate; null if unknown. */
-export function maxInitialBuyZat(pool: Pick<PoolInfo, "launchRules" | "rate"> | null | undefined, venue?: string): bigint | null {
+/**
+ * v0.17: cap of the first buy of a ZEC-pair `create` on `venue`, in ZEC SPL units (= zatoshis: 1:1 parity,
+ * no rate). Null when the pool does not publish it (devnet `{}`, older servers): the server still checks it.
+ */
+export function maxInitialBuyZecUnits(pool: Pick<PoolInfo, "launchRules"> | null | undefined, venue?: string): bigint | null {
+  const v = venue ? pool?.launchRules?.maxInitialBuyZecUnitsByVenue?.[venue] : undefined;
+  return v && /^\d{1,30}$/.test(v) && v !== "0" ? BigInt(v) : null;
+}
+
+/**
+ * Largest initialBuyZec (zatoshis) that stays under the venue's cap; null if unknown. SOL pairs: the
+ * lamport cap at the pool's buy rate. ZEC pairs (v0.17): maxInitialBuyZecUnitsByVenue as is.
+ */
+export function maxInitialBuyZat(pool: Pick<PoolInfo, "launchRules" | "rate" | "quotes"> | null | undefined, venue?: string, quote: string = "SOL"): bigint | null {
+  if (quote === "ZEC") {
+    // The cap is on the ZEC SPL the curve receives: zat x the 1:1 parity less its spread (core apply_spread).
+    const cap = maxInitialBuyZecUnits(pool, venue);
+    if (cap === null) return null;
+    const bps = Math.min(10_000, Math.max(0, pool?.quotes?.find((q) => q.quote === "ZEC")?.spreadBps ?? 0));
+    const unitsPerZec = (ZAT_PER_ZEC * BigInt(10_000 - Math.floor(bps))) / BigInt(10_000);
+    return unitsPerZec === BigInt(0) ? null : (cap * ZAT_PER_ZEC) / unitsPerZec;
+  }
   const max = maxInitialBuyLamports(pool, venue);
   const rate = pool?.rate?.lamportsPerZecBuy;
   if (!max || !/^\d+$/.test(max) || max === "0" || !rate || !/^\d+$/.test(rate) || rate === "0") return null;

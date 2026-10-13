@@ -12,7 +12,8 @@ import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, unitsToNumber, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
 import { nowFee as poolNowFee, resolveExec, useDefaultExec, withExec, type ExecMode, type NowFee } from "@/lib/exec";
-import { lamportsToZatCeil, quoteBuy, quoteBuyZecPair, quoteSell, quoteSellZecPair } from "@/lib/trade";
+import { lamportsToZatCeil, quoteBuy, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
+import { useRecentBuys } from "@/hooks/use-recent-buys";
 import { formatQuote, QUOTE_DECIMALS, quoteAsset, quotePerSol, tokenQuote, zecSpreadBps } from "@/lib/quotes";
 import type { Quote as Pair } from "@/lib/api/types";
 import { isSlippageBps, MAX_SLIPPAGE_BPS, SELL_PRESETS, SLIPPAGE_CHOICES_BPS, updateTradeSettings, useTradeSettings } from "@/lib/trade-settings";
@@ -136,9 +137,13 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
   const pairDecimals = quoteAsset(pool, pair, token.venue)?.decimals ?? QUOTE_DECIMALS[pair];
 
   const zecBalance = portfolio ? BigInt(portfolio.zecBalance) : null;
-  const holding = portfolio ? BigInt(portfolio.holdings.find((h) => h.mint === token.mint)?.amount ?? "0") : null;
+  const own = portfolio?.holdings.find((h) => h.mint === token.mint);
+  const holding = portfolio ? BigInt(own?.amount ?? "0") : null;
   const available = isBuy ? zecBalance : holding;
   const minAction = pool ? BigInt(pool.minActionZat) : null;
+  // v0.17 (A6): a sell sized like a recent buy, their sum or the whole position is shaved 0.5–2 % and rounded.
+  const position = own ? BigInt(own.amount) + BigInt(own.held) : null;
+  const buys = useRecentBuys(token.mint);
 
   /** Parse and quote an amount string: the form and one-tap presets use the same checks. */
   const evaluate = (value: string) => {
@@ -172,6 +177,7 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
     return { parsed, inputError, quote };
   };
   const { parsed, inputError, quote } = evaluate(amount);
+  const mirrors = !isBuy && parsed !== null && !inputError ? sellMirrorsBuy(parsed, buys, position) : null;
 
   const frozen = portfolio?.frozen ?? false;
   const canSubmit = !busy && parsed !== null && !inputError && !frozen && portfolio !== null;
@@ -299,6 +305,15 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
         </p>
       )}
 
+      {mirrors && parsed !== null && (
+        <p role="note" className="-mt-1 text-xs text-pretty text-faint-foreground">
+          <span className="tabular text-muted-foreground">
+            ≈ {formatCompact(unitsToNumber(parsed.toString(), token.decimals))} {unit}
+          </span>{" "}
+          · Rounded so it doesn&apos;t mirror your buy. The pool sells a little less; the rest stays in your holding.
+        </p>
+      )}
+
       {(inputError || (isBuy && zecBalance === BigInt(0))) && (
         <p id={`${ids}-hint`} className={cn("text-xs", inputError ? "text-sell" : "text-faint-foreground")}>
           {inputError ?? "Your balance is empty. Top up with shielded ZEC first."}
@@ -314,6 +329,7 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
         slippage={slippage}
         nowFee={exec === "now" ? { fee: poolNowFee(pool) } : null}
         pair={{ quote: pair, decimals: pairDecimals, perSol: quotePerSol({ priceSol, priceQuote }), spread }}
+        rounded={!!mirrors}
       />
 
       <PanelSettings slippage={slippage} onSlippage={setSlippage} />
@@ -385,6 +401,7 @@ function Quote({
   slippage,
   nowFee,
   pair,
+  rounded = false,
 }: {
   side: Side;
   token: Token;
@@ -395,6 +412,8 @@ function Quote({
   /** Shown when exec is "now"; fee null = the pool does not publish it yet. */
   nowFee: { fee: NowFee | null } | null;
   pair: PairInfo;
+  /** v0.17 A6: the pool will shave and round this sell. */
+  rounded?: boolean;
 }) {
   const sym = `$${token.symbol}`;
   const zecPair = pair.quote === "ZEC";
@@ -441,7 +460,8 @@ function Quote({
       : [
           ["You receive", <span key="v" className="text-foreground">≈ {formatZec(quote.zecOut.toString())} ZEC</span>],
           ["Trade size", size("lamports" in quote ? quote.lamports : null, "quoteUnits" in quote ? quote.quoteUnits : null)],
-          [`Min received · ${slippage / 100}%`, `${formatZec(quote.minZecOut.toString())} ZEC`],
+          // A6: a rounded sell signs the same minimum price on fewer tokens, so the floor shrinks with it.
+          [`Min received · ${slippage / 100}%`, `${rounded ? "≈ " : ""}${formatZec(quote.minZecOut.toString())} ZEC`],
         ];
   if (zecPair && pair.spread !== null) rows.push(["ZEC parity", `1:1 · ${pair.spread / 100}% spread`]);
   if (nowFee)

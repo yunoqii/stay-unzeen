@@ -10,7 +10,7 @@ import { submitAction, useAction } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
 import { nowFee, useDefaultExec, withExec, type ExecMode } from "@/lib/exec";
 import { formatSol, formatUnits, formatZec, lamportsToSol, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
-import { checkInitialBuy, validateMeta, type MetaInput } from "@/lib/launch";
+import { BAGS_NO_CURVE_TEXT, checkInitialBuy, isBagsNotReady, validateMeta, type MetaInput } from "@/lib/launch";
 import { maxInitialBuyLamports, maxInitialBuyZat } from "@/lib/launch-rules";
 import { useNetwork } from "@/lib/network";
 import { launchQuotes, PLATFORM_LABEL, venueInfo, venueLabel } from "@/lib/quotes";
@@ -223,8 +223,8 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
   const metaErrors = useMemo(() => validateMeta(meta), [meta]);
   const metaOk = Object.keys(metaErrors).length === 0;
   const initial = checkInitialBuy(buy, pool, venue, quote);
-  // ZEC pairs are capped on their own curve, unpublished: the server checks it (creator_cap).
-  const maxZat = quote === "ZEC" ? null : maxInitialBuyZat(pool, venue);
+  // ZEC pairs (v0.17): their own cap in ZEC SPL units, per venue; not published (devnet) -> the server checks it.
+  const maxZat = maxInitialBuyZat(pool, venue, quote);
   const maxLamports = maxInitialBuyLamports(pool, venue);
   const fee = pool?.fees?.createFeeZat && /^\d+$/.test(pool.fees.createFeeZat) ? BigInt(pool.fees.createFeeZat) : null;
   const nf = exec === "now" ? nowFee(pool) : null;
@@ -263,7 +263,8 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
       setExecOverride(null);
     } catch (e) {
       const err = e instanceof ApiError ? e : new ApiError("internal", String(e));
-      if (err.code === "venue_unavailable" && err.status === 503 && pool?.createEnabled !== true) setDisabledByServer(true);
+      // A Bags 503 means "no curve yet" (A4), not "launches are off": keep the form, explain it below.
+      if (err.code === "venue_unavailable" && err.status === 503 && pool?.createEnabled !== true && !isBagsNotReady(err, venue)) setDisabledByServer(true);
       setError(err);
     } finally {
       setBusy(false);
@@ -292,7 +293,10 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
                   aria-checked={on}
                   disabled={busy || !available}
                   title={available ? undefined : "Not switched on for this pool"}
-                  onClick={() => setVenue(id)}
+                  onClick={() => {
+                    setVenue(id);
+                    setError(null);
+                  }}
                   className={cn(
                     "group relative rounded-2xl border p-4 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
                     on ? "border-zec/50 bg-zec/[0.04]" : "border-border hover:border-border-strong hover:bg-surface-1",
@@ -402,7 +406,9 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
             {!initial.ok
               ? initial.error
               : quote === "ZEC"
-                ? `Spent in ZEC on the ZEC curve, in the same transaction as the launch. Capped at ${capPct(pool)} of supply; the pool checks the cap when it accepts.`
+                ? maxZat !== null
+                  ? `Up to ${formatZec(maxZat.toString())} ZEC on the ZEC curve of ${VENUE_LABEL[venue]}, in the same transaction as the launch. Locked for the rule period.`
+                  : `Spent in ZEC on the ZEC curve, in the same transaction as the launch. Capped at ${capPct(pool)} of supply; the pool checks the cap when it accepts.`
                 : maxZat !== null && maxLamports
                 ? `Up to ${formatZec(maxZat.toString())} ZEC on ${VENUE_LABEL[venue]} (≈ ${formatSol(lamportsToSol(maxLamports))} SOL on its curve). Bought in the same transaction as the launch, locked for the rule period.`
                 : "Bought in the same transaction as the launch."}
@@ -467,7 +473,7 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
               style={{ overflow: "hidden" }}
               className="text-xs text-sell"
             >
-              {errorText(error)}
+              {isBagsNotReady(error, venue) ? BAGS_NO_CURVE_TEXT : errorText(error)}
             </motion.p>
           )}
         </AnimatePresence>

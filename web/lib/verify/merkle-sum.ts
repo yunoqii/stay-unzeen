@@ -7,6 +7,9 @@
 //   rootsDigest = SHA256("unzeen/verify/v1/snapshot" ‖ chainId ‖ u32(id) ‖ u64(takenAtSec) ‖ u32(N)
 //                 ‖ u64(solanaSlot) ‖ u32(zcashHeight) ‖ u64(zecReserveZat) ‖ u32(trees)
 //                 ‖ per tree, ascending asset bytes: asset ‖ root.hash ‖ u128(root.sum))
+//   rootsDigest v2 (API v0.17, digestVersion 2) = SHA256("unzeen/verify/v2/snapshot" ‖ the v1 fields
+//                 ‖ u32(Q) ‖ per quote asset, ascending mint bytes: mint[32] ‖ u8(decimals) ‖ u8(bridged)
+//                 ‖ u8(counted) ‖ u64(dustBelow))      no quoteAssets -> Q = 0
 //   operator.sig = ed25519(attestation key, rootsDigest bytes)
 //   vault.sig    = ed25519(vault key, utf8("unzeen/verify/v1/vault\n" + chainId + "\n" + snapshotId + "\n" + address))
 //
@@ -16,12 +19,14 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { base58 } from "@scure/base";
-import type { AssetId, VerifyPathNode, VerifyProof, VerifyProofPiece, VerifySnapshot, VerifyVault } from "@/lib/api/types";
+import type { AssetId, VerifyPathNode, VerifyProof, VerifyProofPiece, VerifyQuoteAsset, VerifySnapshot, VerifyVault } from "@/lib/api/types";
 
 const enc = new TextEncoder();
 export const LEAF_TAG = enc.encode("unzeen/verify/v1/leaf");
 export const NODE_TAG = enc.encode("unzeen/verify/v1/node");
 export const SNAPSHOT_TAG = enc.encode("unzeen/verify/v1/snapshot");
+/** API v0.17: the v2 digest also signs the snapshot's quoteAssets. */
+export const SNAPSHOT_TAG_V2 = enc.encode("unzeen/verify/v2/snapshot");
 export const ZEC_ASSET = new Uint8Array(32);
 const U128_MAX = (BigInt(1) << BigInt(128)) - BigInt(1);
 const U64_MAX = (BigInt(1) << BigInt(64)) - BigInt(1);
@@ -143,7 +148,28 @@ export function climb(leaf: SumNode, leafIndex: number, path: VerifyPathNode[]):
   return { root: cur, steps };
 }
 
-export function rootsDigest(s: Pick<VerifySnapshot, "chainId" | "id" | "takenAt" | "leaves" | "solanaSlot" | "zcashHeight" | "zecReserve" | "trees">): string {
+/** Digest version of a snapshot: no field = 1 (before API v0.17). Anything else than 1 or 2 is refused. */
+export function digestVersionOf(s: Pick<VerifySnapshot, "digestVersion">): 1 | 2 {
+  const v = s.digestVersion ?? 1;
+  if (v !== 1 && v !== 2) throw new Error(`unknown digestVersion ${String(v).slice(0, 16)}: this page can't recompute it`);
+  return v;
+}
+
+/** v2 bytes of one quote asset: mint[32] ‖ u8(decimals) ‖ u8(bridged) ‖ u8(counted) ‖ u64(dustBelow). */
+export function quoteAssetBytes(q: Pick<VerifyQuoteAsset, "mint" | "decimals" | "bridged" | "counted" | "dustBelow">): Uint8Array {
+  const mint = q.mint === "ZEC" ? null : assetBytes(q.mint);
+  if (!mint) throw new Error(`quote asset mint "${String(q.mint).slice(0, 48)}" is not a base58 mint`);
+  if (!Number.isInteger(q.decimals) || q.decimals < 0 || q.decimals > 255) throw new Error(`quote asset ${q.mint}: decimals is not a u8`);
+  if (typeof q.bridged !== "boolean" || typeof q.counted !== "boolean") throw new Error(`quote asset ${q.mint}: bridged / counted must be booleans`);
+  const dust = parseUint(q.dustBelow, U64_MAX);
+  if (dust === null) throw new Error(`quote asset ${q.mint}: dustBelow is not a u64`);
+  return concat([mint, u8(q.decimals), u8(q.bridged ? 1 : 0), u8(q.counted ? 1 : 0), u64(dust)]);
+}
+
+export function rootsDigest(
+  s: Pick<VerifySnapshot, "chainId" | "id" | "takenAt" | "leaves" | "solanaSlot" | "zcashHeight" | "zecReserve" | "trees" | "digestVersion" | "quoteAssets">,
+): string {
+  const version = digestVersionOf(s);
   const reserve = parseUint(s.zecReserve.amountZat, U64_MAX);
   if (reserve === null) throw new Error("zecReserve.amountZat is not a u64");
   const trees = s.trees.map((t) => {
@@ -155,7 +181,7 @@ export function rootsDigest(s: Pick<VerifySnapshot, "chainId" | "id" | "takenAt"
   });
   trees.sort((a, b) => cmpBytes(a.asset, b.asset));
   const parts: Uint8Array[] = [
-    SNAPSHOT_TAG,
+    version === 2 ? SNAPSHOT_TAG_V2 : SNAPSHOT_TAG,
     chainBytes(s.chainId),
     u32(s.id),
     u64(Math.floor(s.takenAt / 1000)),
@@ -166,6 +192,11 @@ export function rootsDigest(s: Pick<VerifySnapshot, "chainId" | "id" | "takenAt"
     u32(trees.length),
   ];
   for (const t of trees) parts.push(t.asset, t.root, u128(t.sum));
+  if (version === 2) {
+    // Sorted by mint bytes (the first 32 bytes of each entry); a v1 digest never covers quoteAssets.
+    const qs = (s.quoteAssets ?? []).map(quoteAssetBytes).sort((a, b) => cmpBytes(a.subarray(0, 32), b.subarray(0, 32)));
+    parts.push(u32(qs.length), ...qs);
+  }
   return bytesToHex(sha256(concat(parts)));
 }
 

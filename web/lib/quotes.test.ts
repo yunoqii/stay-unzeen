@@ -1,3 +1,4 @@
+import { maxInitialBuyZat } from "./launch-rules";
 import { describe, expect, it } from "vitest";
 import type { PoolInfo } from "@/lib/api/types";
 import { canClaim, claimAmount, minClaimZat } from "./claim";
@@ -87,6 +88,23 @@ describe("pairs: launch and orders", () => {
     expect(checkInitialBuy("1", pool, "pumpfun", "SOL").ok).toBe(false);
     expect(checkInitialBuy("1", pool, "meteora-dbc", "USDC").ok).toBe(false);
     expect(checkInitialBuy("0.0001", pool, "pumpfun", "ZEC").ok).toBe(false); // the minimum still applies
+  });
+
+  it("v0.17: ZEC launches respect maxInitialBuyZecUnitsByVenue (ZEC SPL units after the parity spread, like core)", () => {
+    const capped = {
+      ...pool,
+      quotes: [{ quote: "ZEC" as const, mint: "Z", decimals: 8, bridged: true, venues: ["pumpfun" as const], spreadBps: 30 }],
+      launchRules: { lockSecs: 86_400, capBps: 500, maxInitialBuyLamports: "0", maxInitialBuyZecUnitsByVenue: { pumpfun: "1300000000" } },
+    };
+    // 13 ZEC SPL / 0.997 = 13.03911735 ZEC max.
+    expect(maxInitialBuyZat(capped, "pumpfun", "ZEC")).toBe(BigInt(1_303_911_735));
+    expect(checkInitialBuy("13.039", capped, "pumpfun", "ZEC").ok).toBe(true);
+    const over = checkInitialBuy("13.05", capped, "pumpfun", "ZEC");
+    expect(over.ok).toBe(false);
+    expect(!over.ok && over.error).toMatch(/Up to 13\.039/);
+    // Not published for this venue (devnet {}): the server checks it.
+    expect(maxInitialBuyZat(capped, "raydium-launchlab", "ZEC")).toBeNull();
+    expect(checkInitialBuy("99", capped, "raydium-launchlab", "ZEC").ok).toBe(true);
   });
 
   it("orders exist only on SOL pairs, with a reason that names the pair", () => {

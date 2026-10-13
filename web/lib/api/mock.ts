@@ -9,7 +9,7 @@
 import { base58 } from "@scure/base";
 import { bodyHash, HEADER_NONCE, verifyRequest, type SignedHeaders } from "@/lib/crypto/sign";
 import { isExecMode } from "@/lib/exec";
-import { isSolanaAddress } from "@/lib/trade";
+import { isSolanaAddress, MIRROR_WINDOW_MS, PAYOUT_REVIEW_ABOVE_ZAT, sellMirrorsBuy } from "@/lib/trade";
 import { checkWithdrawUa } from "@/lib/zcash/ua";
 import { checkUnz1, decodeUnz1, type ChainId } from "@/lib/crypto/unz1";
 import type { Network } from "@/lib/network";
@@ -32,6 +32,7 @@ import type {
   FeedEvent,
   Order,
   OrderKind,
+  WithdrawPart,
   OrdersParams,
   PlatformStats,
   PoolInfo,
@@ -370,7 +371,11 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const TF_SEC: Record<CandleTimeframe, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14_400, "1d": 86_400 };
 
-function candles(s: MockTokenState, tf: CandleTimeframe, from: number | undefined, to: number | undefined): Candle[] {
+function candles(s: MockTokenState, tf: CandleTimeframe, from: number | undefined, to: number | undefined, inQuote = false): Candle[] {
+  // v0.17 quote=1: the pair's own units (SOL pairs: the same bars).
+  const q = s.token.quote ?? "SOL";
+  const unit = inQuote && q !== "SOL" ? SOL_PER_QUOTE[q] : 1;
+  const volDec = inQuote && q !== "SOL" ? Q_DECIMALS[q] : 9;
   const step = TF_SEC[tf];
   const nowSec = Math.floor(Date.now() / 1000);
   const end = Math.floor(Math.min(to ?? nowSec, nowSec) / step) * step;
@@ -392,11 +397,11 @@ function candles(s: MockTokenState, tf: CandleTimeframe, from: number | undefine
     if (!empty) {
       bars.push({
         time: t,
-        open: plain(open, 6),
-        high: plain(high, 6),
-        low: plain(low, 6),
-        close: plain(close, 6),
-        volume: toLamports(logRand(0.2, 40) * Math.sqrt(step / 60)),
+        open: plain(open / unit, 6),
+        high: plain(high / unit, 6),
+        low: plain(low / unit, 6),
+        close: plain(close / unit, 6),
+        volume: BigInt(Math.round(((logRand(0.2, 40) * Math.sqrt(step / 60)) / unit) * 10 ** volDec)).toString(),
       });
     }
     close = open;
@@ -454,6 +459,67 @@ const FEES = { nowFeeZat: NOW_FEE_ZAT, createFeeZat: "100000", withdrawZecFeeZat
 
 /** Mock twin of UNZEEN_CREATE_ENABLED: NEXT_PUBLIC_MOCK_CREATE_DISABLED=1 shows the disabled launch state. */
 const CREATE_ENABLED = process.env.NEXT_PUBLIC_MOCK_CREATE_DISABLED !== "1";
+/** v0.17 (A4): set to "1" to play a Bags pool whose curve the relayer has not recorded yet (create -> 503). */
+const BAGS_NO_CURVE = process.env.NEXT_PUBLIC_MOCK_BAGS_NO_CURVE === "1";
+
+// ---- v0.17 final audit: amounts that leave the pool never equal a public buy (A1, A5, A6) ----
+
+/** core quantize_min_out: rounded down to 3 significant digits. */
+export function sig3Down(v: bigint): bigint {
+  let p = BigInt(1);
+  while (v / p >= BigInt(1000)) p *= BigInt(10);
+  return (v / p) * p;
+}
+
+/** core fuzz_token_amount: shave 0.5 % + u * 1.5 %, then round down to 3 significant digits (0 for dust). */
+export function fuzzTokenAmount(amount: bigint, u: number = Math.random()): bigint {
+  const ppm = BigInt(5_000 + Math.floor(15_000 * Math.min(1, Math.max(0, u))));
+  let shave = (amount * ppm + BigInt(999_999)) / BigInt(1_000_000);
+  if (shave < BigInt(1)) shave = BigInt(1);
+  return amount > shave ? sig3Down(amount - shave) : N0;
+}
+
+/** core split_amount: `parts` uneven pieces (±20 % around the mean), at least 1 each. */
+export function splitAmount(amount: bigint, parts: number, rnd: () => number = Math.random): bigint[] {
+  const n = BigInt(Math.max(1, parts));
+  const mean = amount / n;
+  const out: bigint[] = [];
+  let left = amount;
+  for (let i = 0; i < parts; i++) {
+    const remaining = BigInt(parts - i);
+    if (remaining === BigInt(1)) {
+      out.push(left);
+      break;
+    }
+    const jitter = BigInt(Math.trunc(Number(mean) * 0.2 * (rnd() * 2 - 1)));
+    let v = mean + jitter;
+    if (v < BigInt(1)) v = BigInt(1);
+    const cap = left - (remaining - BigInt(1));
+    if (v > cap) v = cap;
+    out.push(v);
+    left -= v;
+  }
+  return out;
+}
+
+/** A6: this key's executed buys of `mint` in the last 48 h (token amounts). */
+function publicBuysOf(network: Network, pubkey: string, mint: string, now: number): bigint[] {
+  const out: bigint[] = [];
+  for (const x of actions.values()) {
+    if (x.network !== network || x.pubkey !== pubkey || x.status.status !== "executed" || !x.status.fill) continue;
+    const m = x.action.op === "buy" ? x.action.mint : x.action.op === "create" ? x.status.fill.mint : undefined;
+    if (m !== mint || (x.status.executedAt ?? 0) < now - MIRROR_WINDOW_MS) continue;
+    out.push(BigInt(x.status.fill.tokenAmount));
+  }
+  return out;
+}
+
+/** A6: would selling `amount` mirror a public buy of this key (one, their sum, or the whole position)? */
+function mirrorsPublicBuy(network: Network, pubkey: string, mint: string, amount: bigint, now: number): boolean {
+  const h = account(network, pubkey).holdings.find((x) => x.mint === mint);
+  const position = h ? BigInt(h.amount) + BigInt(h.held) : null;
+  return sellMirrorsBuy(amount, publicBuysOf(network, pubkey, mint, now), position) !== null;
+}
 
 /** NEXT_PUBLIC_MOCK_CHAT=0 shows the server without chat; NEXT_PUBLIC_MOCK_NOOP=0 without cover traffic. */
 const CHAT_ON = process.env.NEXT_PUBLIC_MOCK_CHAT !== "0";
@@ -484,6 +550,10 @@ export function mockPool(network: Network): PoolInfo {
         "raydium-launchlab": mockVenueCap("raydium-launchlab").toString(),
         ...(network === "mainnet" ? { bags: mockVenueCap("meteora-dbc").toString() } : {}),
       },
+      // v0.17: ZEC-pair cap in ZEC SPL units (step 0.0001 ZEC), only venues with the ZEC pair on (core: `{}` without one).
+      maxInitialBuyZecUnitsByVenue: Object.fromEntries(
+        (mockQuotes(network).find((q) => q.quote === "ZEC")?.venues ?? []).map((v) => [v, (MOCK_MAX_INITIAL_BUY_ZEC_UNITS - (MOCK_MAX_INITIAL_BUY_ZEC_UNITS % ZEC_UNITS_STEP)).toString()]),
+      ),
     },
   };
   const rate = { lamportsPerZec: MID_LAMPORTS_PER_ZEC.toString(), lamportsPerZecBuy: mockRate(true).lamportsPerZec, lamportsPerZecSell: mockRate(false).lamportsPerZec, spreadBps: Number(SPREAD_BPS), source: "fixed" as const, ts: Math.floor(Date.now() / 60_000) * 60_000 };
@@ -711,6 +781,8 @@ function mockRate(buy: boolean): SolRateUsed {
 
 const BPS = BigInt(10_000);
 /** Max ZEC SPL of a ZEC-pair launch buy within the 5 % cap: 2.7189 ZEC virtual × cap / (1.073e9 − cap). */
+/** core actions::ZEC_UNITS_STEP: 0.0001 ZEC SPL. */
+const ZEC_UNITS_STEP = BigInt(10_000);
 const MOCK_MAX_INITIAL_BUY_ZEC_UNITS = (BigInt(271_890_000) * BigInt(50_000_000)) / BigInt(1_073_000_000 - 50_000_000);
 
 /** v0.13 ZEC SPL parity: buy 1e8·(1 − s), sell 1e8·(1 + s) ZEC SPL units per ZEC; no lamportsPerZec. */
@@ -790,6 +862,10 @@ interface MockAction {
   holdToken?: { mint: string; amount: bigint };
   /** fl_* ops: kept for nonce idempotency only, never listed in Portfolio.actions (v0.6). */
   hidden?: boolean;
+  /** v0.17: withdraw_token parts (owner-only, GET /api/actions/:id; never in Portfolio.actions). */
+  parts?: WithdrawPart[];
+  /** v0.17 (A2): a large mainnet ZEC payout waiting for the operator. */
+  review?: boolean;
 }
 
 const actions = new Map<string, MockAction>();
@@ -862,9 +938,18 @@ function accept(network: Network, pubkey: string, action: SignedAction): Omit<Mo
         throw new ApiError("below_minimum", "sell value below PoolInfo.minActionZat (raise amount or minZecOut)", 422);
       const h = holdingOf(a, action.mint);
       if (BigInt(h.amount) < amount) throw new ApiError("insufficient_balance", "not enough tokens", 422);
-      h.amount = (BigInt(h.amount) - amount).toString();
-      h.held = (BigInt(h.held) + amount).toString();
-      return { ...base, holdToken: { mint: action.mint, amount }, ...queued(rate) };
+      // v0.17 (A6): a sell mirroring a public buy is shaved and rounded; minZecOut shrinks in proportion.
+      let sold = amount;
+      let minOut = minZecOut;
+      if (mirrorsPublicBuy(network, pubkey, action.mint, amount, Date.now())) {
+        sold = fuzzTokenAmount(amount);
+        if (sold === N0) throw new ApiError("bad_request", "amount too small to sell", 400);
+        minOut = (minZecOut * sold) / amount;
+      }
+      h.amount = (BigInt(h.amount) - sold).toString();
+      h.held = (BigInt(h.held) + sold).toString();
+      const effective: SignedAction = { ...action, amount: sold.toString(), minZecOut: minOut.toString() };
+      return { ...base, action: effective, holdToken: { mint: action.mint, amount: sold }, ...queued(rate) };
     }
     case "create": {
       const initial = action.initialBuyZec === undefined ? N0 : amountOf(action.initialBuyZec, "initialBuyZec", false);
@@ -874,6 +959,7 @@ function accept(network: Network, pubkey: string, action: SignedAction): Omit<Mo
       if (action.venue === "bags" && (action.quote ?? "SOL") !== "SOL") throw new ApiError("bad_request", "bags: SOL pairs only", 400);
       if (!["pumpfun", "meteora-dbc", "raydium-launchlab", "bags"].includes(action.venue)) throw new ApiError("bad_request", "venue: pumpfun | meteora-dbc | raydium-launchlab", 400);
       if (!CREATE_ENABLED) throw new ApiError("venue_unavailable", "create is not enabled", 503);
+      if (action.venue === "bags" && BAGS_NO_CURVE) throw new ApiError("venue_unavailable", "bags: launch curve not recorded yet", 503);
       // v0.13 pair and LaunchLab platform.
       const quote = action.quote ?? "SOL";
       if (!["SOL", "USDC", "USD1", "ZEC"].includes(quote)) throw new ApiError("bad_request", "quote: SOL | USDC | USD1 | ZEC", 400);
@@ -887,7 +973,8 @@ function accept(network: Network, pubkey: string, action: SignedAction): Omit<Mo
       if (initial > N0 && initial < minAction) throw new ApiError("below_minimum", "initialBuyZec below PoolInfo.minActionZat", 422);
       if (quote === "ZEC") {
         // ZEC curve: same token reserves, ZEC virtual reserves (core: UNZEEN_LAUNCH_VIRTUAL_ZEC_UNITS).
-        if (initial > N0 && (initial * (BPS - ZEC_SPREAD_BPS)) / BPS > MOCK_MAX_INITIAL_BUY_ZEC_UNITS) throw new ApiError("creator_cap", "initial buy above the ZEC curve cap", 422);
+        const full = (initial * (BPS - ZEC_SPREAD_BPS)) / BPS;
+        if (initial > N0 && full - (full % ZEC_UNITS_STEP) > MOCK_MAX_INITIAL_BUY_ZEC_UNITS - (MOCK_MAX_INITIAL_BUY_ZEC_UNITS % ZEC_UNITS_STEP)) throw new ApiError("creator_cap", "initial buy above the ZEC curve cap", 422);
       } else if ((initial * BigInt(mockRate(true).lamportsPerZec)) / ZAT > mockVenueCap(action.venue)) throw new ApiError("creator_cap", "initial buy above launchRules.maxInitialBuyLamportsByVenue", 422);
       const total = initial + CREATE_FEE_ZAT;
       if (a.zecBalance < total) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
@@ -904,7 +991,8 @@ function accept(network: Network, pubkey: string, action: SignedAction): Omit<Mo
       if (a.zecBalance < total) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
       a.zecBalance -= total;
       a.zecHeld += total;
-      return { ...base, holdZat: total, ...queued() };
+      // v0.17 (A2): above 1 ZEC on mainnet the payout waits for the operator (still queued).
+      return { ...base, holdZat: total, ...(network === "mainnet" && amount > PAYOUT_REVIEW_ABOVE_ZAT ? { review: true } : {}), ...queued() };
     }
     case "withdraw_token": {
       if (!isSolanaAddress(action.mint)) throw new ApiError("bad_request", "mint: not a Solana address", 400);
@@ -923,11 +1011,21 @@ function accept(network: Network, pubkey: string, action: SignedAction): Omit<Mo
       const h = a.holdings.find((x) => x.mint === action.mint);
       if (!h || BigInt(h.amount) < amount) throw new ApiError("insufficient_balance", "not enough tokens", 422);
       if (a.zecBalance < fee) throw new ApiError("insufficient_balance", "not enough ZEC for gas", 422);
+      // v0.17 (A1): never the exact amount: shaved 0.5–2 %, split, every part rounded to 3 significant digits.
+      const total = fuzzTokenAmount(amount);
+      const split = splitAmount(total, parts).map(sig3Down);
+      if (total < BigInt(parts) || split.some((x) => x === N0)) throw new ApiError("bad_request", "amount too small to withdraw", 400);
+      const sent = split.reduce((x, y) => x + y, N0);
       a.zecBalance -= fee;
       a.zecHeld += fee;
-      h.amount = (BigInt(h.amount) - amount).toString();
-      h.held = (BigInt(h.held) + amount).toString();
-      return { ...base, holdZat: fee, holdToken: { mint: action.mint, amount }, ...queued(rate) };
+      h.amount = (BigInt(h.amount) - sent).toString();
+      h.held = (BigInt(h.held) + sent).toString();
+      const [lo, hi] = execDelay(action);
+      const t0 = Date.now();
+      // notBefore: whole seconds, each part at its own random time (compressed like every mock delay).
+      const partsOut: WithdrawPart[] = split.map((x) => ({ amount: x.toString(), notBefore: Math.floor((t0 + rand(lo, hi * (parts > 1 ? 1.6 : 1))) / 1000) * 1000, status: "queued" }));
+      const effective: SignedAction = { ...action, amount: sent.toString() };
+      return { ...base, action: effective, holdZat: fee, holdToken: { mint: action.mint, amount: sent }, parts: partsOut, ...queued(rate) };
     }
     default:
       throw new ApiError("bad_request", "op not supported yet", 400);
@@ -1111,8 +1209,23 @@ function submit(network: Network, method: "POST", path: string, body: string | u
   const act: MockAction = { ...accepted, id, nonceKey, bodyHash: hash, receipt: { ...accepted.receipt, id } };
   actions.set(id, act);
   byNonce.set(nonceKey, id);
-  setTimeout(() => execute(act), rand(lo, hi));
+  if (act.parts) schedulePartsOf(act);
+  // A2: the operator approves a large payout after a while (compressed); it stays queued until then.
+  else setTimeout(() => execute(act), act.review ? rand(60_000, 120_000) : rand(lo, hi));
   return act.receipt;
+}
+
+/** v0.17: each part leaves at its own notBefore, confirms a moment later; the action settles with the last. */
+function schedulePartsOf(act: MockAction) {
+  for (const p of act.parts!) {
+    setTimeout(() => {
+      p.status = "sent";
+      setTimeout(() => {
+        p.status = "confirmed";
+        if (act.parts!.every((x) => x.status === "confirmed")) execute(act);
+      }, rand(1_500, 3_000));
+    }, Math.max(0, p.notBefore - Date.now()));
+  }
 }
 
 // ---- private orders (v0.8) and creator fees (v0.7 claim) ----
@@ -1382,7 +1495,7 @@ function fireOrder(o: MockOrder, s: MockTokenState, leg?: "tp" | "sl") {
   const slLeg = leg === "sl";
   const slip = (slLeg ? o.pub.slSlippageBps! : o.pub.slippageBps) / 10_000;
   const trigger = Number(slLeg ? o.pub.slPriceSol : o.pub.triggerPriceSol);
-  const amount = BigInt(o.pub.amount);
+  let amount = BigInt(o.pub.amount);
   if (leg) o.pub.leg = leg;
   // Server guard of a stop-loss (and the SL leg): sells only while p ≥ trigger · (1 − slippage).
   if ((o.pub.kind === "stop_loss" || slLeg) && s.price < trigger * (1 - slip)) {
@@ -1397,6 +1510,18 @@ function fireOrder(o: MockOrder, s: MockTokenState, leg?: "tp" | "sl") {
     const minOut = BigInt(Math.floor((Number(lamports) / 1e9 / (trigger * (1 + slip))) * 10 ** s.token.decimals));
     action = { op: "buy", venue: "pumpfun", mint: o.pub.mint, zecIn: o.pub.amount, minOut: minOut.toString(), exec: o.pub.exec };
   } else {
+    // v0.17 (A5): after a re-arm, or when the size mirrors a public buy (A6), the sell is shaved and rounded
+    // again; Order.amount shrinks to it and the rest of the hold goes back to the balance.
+    if ((o.pub.rearms ?? 0) > 0 || mirrorsPublicBuy(o.network, o.pubkey, o.pub.mint, amount, Date.now())) {
+      const next = fuzzTokenAmount(amount);
+      if (next > N0 && next < amount) {
+        const h = holdingOf(account(o.network, o.pubkey), o.pub.mint);
+        h.held = (BigInt(h.held) - (amount - next)).toString();
+        h.amount = (BigInt(h.amount) + (amount - next)).toString();
+        o.pub.amount = next.toString();
+        amount = next;
+      }
+    }
     rate = mockRate(false);
     const minLamports = BigInt(Math.floor(Number(lamportsAt(amount, s.token.decimals, trigger)) * (1 - slip)));
     action = { op: "sell", venue: "pumpfun", mint: o.pub.mint, amount: o.pub.amount, minZecOut: ((minLamports * ZAT) / BigInt(rate.lamportsPerZec)).toString(), exec: o.pub.exec };
@@ -1658,7 +1783,9 @@ export async function handle(
       const tf = (q.get("tf") ?? "5m") as CandleTimeframe;
       if (!(tf in TF_SEC)) throw new ApiError("bad_request", "bad tf", 400);
       const num = (k: string) => (q.get(k) ? Number(q.get(k)) : undefined);
-      return candles(s, tf, num("from"), num("to"));
+      const quote = q.get("quote");
+      if (quote !== null && quote !== "0" && quote !== "1") throw new ApiError("bad_request", "quote: 0 | 1", 400);
+      return candles(s, tf, num("from"), num("to"), quote === "1");
     }
     if (p === "/api/pool") return mockPool(network);
     if (process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1" && fair && (p === "/api/launches" || p.startsWith("/api/launches/"))) return fair.get(network, p, q);
@@ -1666,7 +1793,8 @@ export async function handle(
       const pub = authorize(network, method, pathWithQuery, body, headers);
       const a = actions.get(decodeURIComponent(m[1]));
       if (!a || a.pubkey !== pub || a.network !== network) throw new ApiError("not_found", "unknown action", 404);
-      return structuredClone(a.status);
+      // v0.17: parts only here, to the owner, never in Portfolio.actions.
+      return structuredClone(a.parts ? { ...a.status, parts: a.parts } : a.status);
     }
     if (p === "/api/portfolio") {
       // pubkey comes only from the signed header, never from the path.

@@ -72,6 +72,8 @@ export interface CandlesQuery {
   tf?: CandleTimeframe; // default 5m
   from?: number; // unix seconds
   to?: number; // unix seconds
+  /** v0.17: 1 = bars in the pair's own units (price in quote per whole token, volume in quote base units). */
+  quote?: 0 | 1;
 }
 
 /** Chat (API.md v0.12): one of the three, never combined. */
@@ -216,7 +218,7 @@ function makeApi(rawSend: <T>(call: Call) => Promise<T>, subscribeFeed: Api["sub
         throw e;
       }
     },
-    getCandles: (mint, q = {}) => get(`/api/tokens/${enc(mint)}/candles${qs({ tf: q.tf, from: q.from, to: q.to })}`),
+    getCandles: (mint, q = {}) => get(`/api/tokens/${enc(mint)}/candles${qs({ tf: q.tf, from: q.from, to: q.to, quote: q.quote })}`),
     getPool: () => get("/api/pool"),
     // The anon pubkey never goes into a URL path or query (access logs = IP <-> key). Header only.
     getPortfolio: (signer) => get("/api/portfolio", signer),

@@ -51,7 +51,7 @@ export type InitialBuy =
  * is capped on its own ZEC curve, which the pool does not publish: no client-side cap, the server answers
  * 422 creator_cap above it.
  */
-export function checkInitialBuy(value: string, pool: Pick<PoolInfo, "launchRules" | "rate" | "minActionZat"> | null, venue?: string, quote: Quote = "SOL"): InitialBuy {
+export function checkInitialBuy(value: string, pool: Pick<PoolInfo, "launchRules" | "rate" | "minActionZat" | "quotes"> | null, venue?: string, quote: Quote = "SOL"): InitialBuy {
   const v = value.trim();
   if (!v) return { ok: true, zat: null };
   let zat: bigint;
@@ -62,9 +62,25 @@ export function checkInitialBuy(value: string, pool: Pick<PoolInfo, "launchRules
   }
   if (zat === BigInt(0)) return { ok: true, zat: null };
   if (pool && zat < BigInt(pool.minActionZat)) return { ok: false, error: `At least ${formatZec(pool.minActionZat)} ZEC, or leave it empty.` };
-  if (quote === "ZEC") return { ok: true, zat };
+  if (quote === "ZEC") {
+    // v0.17: the pool publishes the ZEC-pair cap per venue (ZEC SPL units = zatoshis). Not published: the server checks it.
+    const capZec = maxInitialBuyZat(pool, venue, "ZEC");
+    if (capZec !== null && zat > capZec) return { ok: false, error: `Up to ${formatZec(capZec.toString())} ZEC on the ZEC curve: the creator can hold at most the capped share of supply.` };
+    return { ok: true, zat };
+  }
   const max = maxInitialBuyZat(pool, venue);
   if (max === null) return { ok: false, error: "The pool has not published its first-buy limit yet. Launch without a first buy, or try again shortly." };
   if (zat > max) return { ok: false, error: `Up to ${formatZec(max.toString())} ZEC: the creator can hold at most the capped share of supply.` };
   return { ok: true, zat };
+}
+
+/**
+ * v0.17 (A4): a Bags launch answers 503 venue_unavailable until the relayer has recorded the Bags curve
+ * (no first buy without price protection). Say so, instead of a generic "venue unavailable".
+ */
+export const BAGS_NO_CURVE_TEXT =
+  "Bags isn't ready for launches yet: the pool is still loading its Bags curve, and won't place a first buy without price protection. Nothing was charged. Try again in a few minutes, or pick another venue.";
+
+export function isBagsNotReady(err: { code: string; status?: number }, venue: string): boolean {
+  return venue === "bags" && err.code === "venue_unavailable";
 }

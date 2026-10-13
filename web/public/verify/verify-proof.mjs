@@ -6,7 +6,8 @@
 //
 // The input is the file from "Download proof" on /verify: { anonPubkey, snapshot, proof }.
 // Checks, exactly as the page does (docs/API.md, "Verify"):
-//   1. rootsDigest recomputed from the snapshot fields;
+//   1. rootsDigest recomputed from the snapshot fields (digestVersion 2, API v0.17: under the v2 tag and
+//      also over quoteAssets, so the operator signature covers which quote mints count; no field = v1);
 //   2. operator.sig = ed25519 over the 32 digest bytes, by the attestation key you pinned with
 //      --operator (also published in the README). Without --operator a signature is NOT accepted,
 //      unless you pass --trust-any-operator on purpose;
@@ -84,10 +85,26 @@ export function leafHash(chainId, snapshotId, asset, pubkey, piece, value, blind
 }
 const node = (l, r) => ({ hash: sha(tag("node"), l.hash, be(l.sum, 16), r.hash, be(r.sum, 16)), sum: l.sum + r.sum });
 
+/** v2 bytes of a quote asset: mint[32] ‖ u8(decimals) ‖ u8(bridged) ‖ u8(counted) ‖ u64(dustBelow). */
+export function quoteBytes(q) {
+  const mint = q && q.mint !== "ZEC" ? asset32(q.mint) : null;
+  if (!mint) throw new Error(`quote asset mint "${String(q && q.mint).slice(0, 48)}" is not a base58 mint`);
+  if (!Number.isInteger(q.decimals) || q.decimals < 0 || q.decimals > 255) throw new Error(`quote asset ${q.mint}: decimals is not a u8`);
+  if (typeof q.bridged !== "boolean" || typeof q.counted !== "boolean") throw new Error(`quote asset ${q.mint}: bridged / counted must be booleans`);
+  if (!isUint(q.dustBelow)) throw new Error(`quote asset ${q.mint}: dustBelow is not a u64`);
+  return Buffer.concat([mint, Buffer.from([q.decimals, q.bridged ? 1 : 0, q.counted ? 1 : 0]), be(q.dustBelow, 8)]);
+}
+
 export function rootsDigest(s) {
+  const version = s.digestVersion ?? 1;
+  if (version !== 1 && version !== 2) throw new Error(`unknown digestVersion ${String(version).slice(0, 16)}`);
   const trees = s.trees.map((t) => ({ a: mustAsset(t.asset), root: Buffer.from(t.root, "hex"), sum: BigInt(t.sum) })).sort((x, y) => Buffer.compare(x.a, y.a));
-  const parts = [tag("snapshot"), Buffer.from(s.chainId, "hex"), be(s.id, 4), be(Math.floor(s.takenAt / 1000), 8), be(s.leaves, 4), be(s.solanaSlot, 8), be(s.zcashHeight, 4), be(s.zecReserve.amountZat, 8), be(trees.length, 4)];
+  const parts = [version === 2 ? Buffer.from("unzeen/verify/v2/snapshot") : tag("snapshot"), Buffer.from(s.chainId, "hex"), be(s.id, 4), be(Math.floor(s.takenAt / 1000), 8), be(s.leaves, 4), be(s.solanaSlot, 8), be(s.zcashHeight, 4), be(s.zecReserve.amountZat, 8), be(trees.length, 4)];
   for (const t of trees) parts.push(t.a, t.root, be(t.sum, 16));
+  if (version === 2) {
+    const qs = (Array.isArray(s.quoteAssets) ? s.quoteAssets : []).map(quoteBytes).sort((x, y) => Buffer.compare(x.subarray(0, 32), y.subarray(0, 32)));
+    parts.push(be(qs.length, 4), ...qs);
+  }
   return sha(...parts).toString("hex");
 }
 
@@ -122,7 +139,8 @@ export function check(file, operator, opts = {}) {
     out.push(`FAIL rootsDigest: ${e instanceof Error ? e.message : "malformed snapshot"}`);
     all = false;
   }
-  if (digest) all = ok(digest === String(s.rootsDigest).toLowerCase(), `rootsDigest ${digest}`) && all;
+  if (digest) all = ok(digest === String(s.rootsDigest).toLowerCase(), `rootsDigest v${s.digestVersion ?? 1} ${digest}`) && all;
+  if ((s.digestVersion ?? 1) === 1 && Array.isArray(s.quoteAssets) && s.quoteAssets.length) out.push("WARN digest v1: quoteAssets are not covered by the operator signature");
 
   // 2. operator
   const pinned = operator || PINNED_OPERATOR[s.chainId] || "";

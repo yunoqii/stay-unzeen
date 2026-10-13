@@ -5,7 +5,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { Info, LockSimple, ShieldCheck, Timer, WarningCircle } from "@phosphor-icons/react";
 import { ApiError } from "@/lib/api/client";
 import type { Order, OrderKind, Token } from "@/lib/api/types";
-import { recentBuyAmounts } from "@/lib/activity";
+import { useRecentBuys } from "@/hooks/use-recent-buys";
 import { useKeyState } from "@/lib/crypto/session";
 import { EXEC_COPY, useDefaultExec } from "@/lib/exec";
 import { formatCompact, formatPrice, formatUnits, formatZec, parseUnits, unitsToNumber, ZEC_DECIMALS } from "@/lib/format";
@@ -74,8 +74,6 @@ export function OrdersUnavailable({ reason }: { reason: string }) {
 export function OrdersPanel({ token, priceSol, support }: { token: Token; priceSol: string; support: Extract<OrderSupport, { ok: true }> }) {
   const params = support.params;
   const network = useNetwork();
-  const key = useKeyState();
-  const pubkey = key.status === "unlocked" ? key.pubkey : null;
   const { portfolio } = usePortfolio();
   const { pool } = usePool();
   const history = useHistory();
@@ -106,10 +104,7 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
 
   const fills = useMemo(() => fillsOf(history.entries, token.mint), [history.entries, token.mint]);
   const entry = useMemo(() => avgEntrySol(computePosition(fills), token.decimals), [fills, token.decimals]);
-  const buys = useMemo(() => {
-    const local = fills.filter((f) => f.kind === "buy" || f.kind === "create").map((f) => BigInt(f.tokenAmount));
-    return pubkey ? [...local, ...recentBuyAmounts(network, pubkey, token.mint)] : local;
-  }, [fills, network, pubkey, token.mint]);
+  const buys = useRecentBuys(token.mint);
 
   const zecBalance = portfolio ? BigInt(portfolio.zecBalance) : null;
   const holding = portfolio ? BigInt(portfolio.holdings.find((h) => h.mint === token.mint)?.amount ?? "0") : null;
@@ -138,7 +133,9 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
   }
   const note = trigger && !triggerError ? triggerNote(kind, priceSol, trigger) : null;
   const dist = trigger && !triggerError ? pctFrom(priceSol, trigger) : null;
-  const sameAsBuy = sell && parsed !== null && !amountError ? sellMatchesBuy(parsed, buys, holding) : null;
+  const own = portfolio?.holdings.find((h) => h.mint === token.mint);
+  const position = own ? BigInt(own.amount) + BigInt(own.held) : null;
+  const sameAsBuy = sell && parsed !== null && !amountError ? sellMatchesBuy(parsed, buys, position) : null;
   const frozen = portfolio?.frozen ?? false;
   const slNote = bracket && slPrice && !slError ? triggerNote("stop_loss", priceSol, slPrice) : null;
   const slDist = bracket && slPrice && !slError ? pctFrom(priceSol, slPrice) : null;
@@ -394,8 +391,7 @@ export function OrdersPanel({ token, priceSol, support }: { token: Token; priceS
           <p role="note" className="flex gap-2 rounded-xl border border-zec/30 bg-zec-soft px-3 py-2.5 text-xs text-pretty text-zec">
             <WarningCircle size={14} weight="light" className="mt-px shrink-0" aria-hidden />
             <span>
-              {sameAsBuy === "position" ? "This sells your whole position, the same amount as one of your buys." : "Same amount as one of your recent buys."} On-chain a
-              sale of exactly that size can be matched to the buy. Sell a slightly different amount, or split it.
+              <span className="tabular font-medium">≈ {formatCompact(unitsToNumber(parsed!.toString(), token.decimals))} ${token.symbol}</span> · Rounded so it doesn&apos;t mirror your buy. When it triggers, the pool shaves 0.5–2 % off; the order amount shrinks to match and the rest stays on your balance.
             </span>
           </p>
         )}
@@ -620,8 +616,10 @@ export function OrderRow({ order, token, compact = false }: { order: Order; toke
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const sym = token ? `$${token.symbol}` : "token";
+  // v0.17 (A5): a re-armed sell is shaved and rounded again on every trigger, so its amount can shrink.
+  const shrinks = isSellKind(order.kind) && (order.rearm === true || (order.rearms ?? 0) > 0);
   const amount = isSellKind(order.kind)
-    ? `${token ? formatCompact(unitsToNumber(order.amount, token.decimals)) : "—"} ${sym}`
+    ? `${shrinks ? "≈ " : ""}${token ? formatCompact(unitsToNumber(order.amount, token.decimals)) : "—"} ${sym}`
     : `${formatZec(order.amount)} ZEC`;
   const leg = order.kind === "bracket" && order.leg ? (order.leg === "tp" ? " · take-profit leg" : " · stop-loss leg") : "";
   const rearms = order.rearms ?? 0;

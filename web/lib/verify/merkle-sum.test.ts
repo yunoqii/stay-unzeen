@@ -12,6 +12,7 @@ import {
   coverageBps,
   leafHash,
   nodeOf,
+  quoteAssetBytes,
   rootsDigest,
   solvency,
   vaultMessage,
@@ -96,6 +97,66 @@ describe("verify vectors (core/testdata/verify-vectors.json)", () => {
     expect(verifyVault(V.chainId, V.snapshotId, v)).toBe(true);
     expect(verifyVault(V.chainId, V.snapshotId + 1, v)).toBe(false);
     expect(verifyVault("0101", V.snapshotId, v)).toBe(false);
+  });
+});
+
+// ---- v0.17: digest v2 also signs quoteAssets ----
+
+describe("verify vectors: snapshotV2 (API v0.17)", () => {
+  const s = V.snapshot;
+  const S2 = V.snapshotV2;
+  const base = () => ({
+    chainId: V.chainId,
+    id: V.snapshotId,
+    takenAt: s.takenAtSec * 1000,
+    leaves: s.leaves,
+    solanaSlot: s.solanaSlot,
+    zcashHeight: s.zcashHeight,
+    zecReserve: { amountZat: s.zecReserveZat, height: s.zcashHeight, attested: true as const },
+    trees: s.trees.map((t) => ({ asset: t.asset === "0".repeat(64) ? "ZEC" : base58.encode(b(t.asset)), decimals: 0, granule: "1", root: t.root, sum: t.sum })),
+  });
+  const quotes = S2.quoteAssets as VerifySnapshot["quoteAssets"] & object;
+
+  it("each quote asset encodes byte for byte", () => {
+    expect(quotes.map((q) => bytesToHex(quoteAssetBytes(q)))).toEqual(S2.quoteBytes);
+  });
+
+  it("digest v2 equals core's, in any input order; v1 ignores quoteAssets", () => {
+    expect(S2.digestVersion).toBe(2);
+    expect(rootsDigest({ ...base(), digestVersion: 2, quoteAssets: [...quotes].reverse() })).toBe(S2.rootsDigest);
+    expect(rootsDigest({ ...base(), digestVersion: 2, quoteAssets: quotes })).toBe(S2.rootsDigest);
+    expect(rootsDigest({ ...base(), quoteAssets: quotes })).toBe(s.rootsDigest);
+    expect(rootsDigest({ ...base(), digestVersion: 1, quoteAssets: quotes })).toBe(s.rootsDigest);
+  });
+
+  it("v2 changes with any quote field; Q = 0 without quoteAssets", () => {
+    const d0 = rootsDigest({ ...base(), digestVersion: 2 });
+    expect(d0).not.toBe(s.rootsDigest);
+    expect(d0).not.toBe(S2.rootsDigest);
+    expect(rootsDigest({ ...base(), digestVersion: 2, quoteAssets: [] })).toBe(d0);
+    const flip = [{ ...quotes[0], counted: false }, quotes[1]];
+    expect(rootsDigest({ ...base(), digestVersion: 2, quoteAssets: flip })).not.toBe(S2.rootsDigest);
+    const dust = [{ ...quotes[0], dustBelow: "1" }, quotes[1]];
+    expect(rootsDigest({ ...base(), digestVersion: 2, quoteAssets: dust })).not.toBe(S2.rootsDigest);
+  });
+
+  it("operator signature verifies over the v2 digest", () => {
+    expect(ed25519.verify(base58.decode(S2.operatorSig), b(S2.rootsDigest), base58.decode(s.operatorPubkey), { zip215: false })).toBe(true);
+  });
+
+  it("an unknown digestVersion is refused, never guessed", () => {
+    expect(() => rootsDigest({ ...base(), digestVersion: 3 as unknown as 2 })).toThrow(/digestVersion/);
+  });
+
+  it("verify-proof.mjs computes the same v1 and v2 digests and quote bytes", async () => {
+    const mjs = (await import(/* @vite-ignore */ path.resolve(__dirname, "../../public/verify/verify-proof.mjs"))) as {
+      rootsDigest(s: unknown): string;
+      quoteBytes(q: unknown): Uint8Array;
+    };
+    expect(quotes.map((q) => bytesToHex(mjs.quoteBytes(q)))).toEqual(S2.quoteBytes);
+    expect(mjs.rootsDigest({ ...base(), digestVersion: 2, quoteAssets: [...quotes].reverse() })).toBe(S2.rootsDigest);
+    expect(mjs.rootsDigest({ ...base(), quoteAssets: quotes })).toBe(s.rootsDigest);
+    expect(() => mjs.rootsDigest({ ...base(), digestVersion: 3 })).toThrow(/digestVersion/);
   });
 });
 

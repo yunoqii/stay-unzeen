@@ -14,16 +14,14 @@ import { NetworkSwitch } from "./network-switch";
 import { PortfolioSync } from "./portfolio-sync";
 import { CoverTraffic } from "./cover-traffic";
 import { ConnectionBanner } from "@/components/ui/states";
-import { Wordmark } from "./logo";
+import { LogoLink } from "./logo";
 import { NAV, NAV_SECONDARY, isActive } from "./nav-items";
 
 export function SiteHeader() {
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/70 backdrop-blur-xl">
       <div className="mx-auto flex h-(--header-h) max-w-6xl items-center justify-between gap-6 px-4 sm:px-6">
-        <Link href="/" className="rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
-          <Wordmark />
-        </Link>
+        <LogoLink />
 
         <nav aria-label="Primary" className="hidden md:block">
           <Suspense fallback={<DesktopNavList pathname={null} />}>

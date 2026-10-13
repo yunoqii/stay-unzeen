@@ -1,5 +1,5 @@
 {
-  "_comment": "Verify vectors (API.md v0.7; creatorSnapshot: v0.10). Integers big-endian. Signing keys are ed25519 seeds of repeated bytes (TEST ONLY).",
+  "_comment": "Verify vectors (API.md v0.7; creatorSnapshot: v0.10; snapshotV2: v0.17). Integers big-endian. Signing keys are ed25519 seeds of repeated bytes (TEST ONLY).",
   "chainId": "0202",
   "creatorSnapshot": {
     "_comment": "API v0.10: creator fees inside the ZEC leaf (ceil(lamports*1e8/rateBuy), summed per key), mint granule 1, no SOL tree. Solvency: mint sum <= vault tokens; ZEC sum <= zecReserve + floor((lamports - committed)*1e8/rateSell).",
@@ -257,6 +257,34 @@
     "zecReserveZat": "1230000000"
   },
   "snapshotId": 7,
+  "snapshotV2": {
+    "_comment": "API v0.17: digestVersion 2 = the `snapshot` above (same header and trees) under the v2 tag, then u32(Q) and per quote asset by ascending mint bytes: mint[32] u8(decimals) u8(bridged) u8(counted) u64(dustBelow).",
+    "digestVersion": 2,
+    "operatorSig": "44RzjwiFHnQnVkifgnpx2RnruEh2XYEREDpkzSUM1yZ8TFRNacyB5Zw5zt27db69qcgBgqUjyRti3xLhPVNprgHs",
+    "quoteAssets": [
+      {
+        "bridged": true,
+        "counted": true,
+        "decimals": 8,
+        "dustBelow": "100000",
+        "mint": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
+        "quote": "ZEC"
+      },
+      {
+        "bridged": false,
+        "counted": false,
+        "decimals": 6,
+        "dustBelow": "10000",
+        "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+        "quote": "USDC"
+      }
+    ],
+    "quoteBytes": [
+      "8769d3af5983df446c4ebf258400afda125d71c13f12c6147cfbca313c9ef21308010100000000000186a0",
+      "3b442cb3912157f13a933d0134282d032b5ffecd01a2dbf1b7790608df002ea70600000000000000002710"
+    ],
+    "rootsDigest": "f2903abb9037b84b74b9139b0f5c857ba4c59ddbbab129331d0c2f6e39fba11f"
+  },
   "vault": {
     "address": "8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe",
     "message": "unzeen/verify/v1/vault\n0202\n7\n8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe",

@@ -139,7 +139,8 @@ export interface Candle {
   high: DecimalString;
   low: DecimalString;
   close: DecimalString;
-  volume: Lamports;
+  /** v0.17: base-unit string without an i64 limit: lamports, or the pair quote's base units with `quote=1`. */
+  volume: string;
 }
 
 /** GET /api/pool: public, no pubkey, no cookies. Same for every user. */
@@ -198,6 +199,8 @@ export interface PoolInfo {
     maxInitialBuyLamports: Lamports;
     /** v0.6: the same cap per enabled launchpad venue (create is checked against its own venue's curve). */
     maxInitialBuyLamportsByVenue?: Record<string, Lamports>;
+    /** v0.17: ZEC pairs: max first buy of `create` in ZEC SPL units (= zatoshis), step 0.0001 ZEC; only venues with the ZEC pair on (`{}` on devnet). */
+    maxInitialBuyZecUnitsByVenue?: Record<string, string>;
   };
   /** v0.4: public rate from the background cache. Absent = no rate (actions -> 503). */
   rate?: {
@@ -355,12 +358,26 @@ export interface ActionReceipt {
 }
 
 /** GET /api/actions/:id (owner only). */
+/** v0.17: ActionStatus.parts[] */
+export interface WithdrawPart {
+  /** Token base units of this part (after the cut and the 3-significant-digit rounding). */
+  amount: TokenBaseUnits;
+  /** Unix ms (whole seconds): not sent before this. */
+  notBefore: number;
+  status: "queued" | "sent" | "confirmed" | "failed";
+}
+
 export interface ActionStatus {
   status: ActionState;
   /** First confirmed signature; dropped 24 h after execution. */
   solanaTx?: string;
   error?: ErrorCode;
   rate?: RateUsed;
+  /**
+   * v0.17: withdraw_token only, owner only, while the jobs are linked (up to 24 h after execution): the real
+   * parts after the server's cut and rounding (A1). Their sum is never the signed amount.
+   */
+  parts?: WithdrawPart[];
   /** v0.5: execution time, unix ms rounded DOWN to the minute; only while `fill` is kept. */
   executedAt?: number;
   /** After execution, kept 24-48 h. */
@@ -815,6 +832,8 @@ export interface VerifyVault {
 /** GET /api/verify, GET /api/verify/:id. */
 export interface VerifySnapshot extends VerifySnapshotSummary {
   chainId: string;
+  /** v0.17: 2 = rootsDigest v2 (also signs quoteAssets). Absent = 1 (older snapshots). */
+  digestVersion?: 1 | 2;
   /** N, the same for every tree of the snapshot. */
   leaves: number;
   solanaSlot: number;
