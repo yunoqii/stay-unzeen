@@ -40,6 +40,7 @@
 - —
 
 ## Решения
+- 13.10 (владелец): логотип A «crescent», X — avatar-1 + banner-1 (banner-2 запасной); все эффекты motion-v2 (M1–M10) внедряем; подготовку деплоя пока не начинаем
 - 13.10 (владелец): пары к ZEC SPL (`A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS`) на pump.fun/LaunchLab — да, ZEC SPL учитывается в Verify отдельным активом с пометкой «bridged», риск моста — в README; platform config LaunchLab называется «Unzeen» сразу; тестовые запуски в UI bonk.fun/stonk.fun — при mainnet-прогоне; Bags — да, после LaunchLab (ключ подписью отдельного ключа пула)
 - 13.10 (лид, по launchpads-a.md): quote-токены — запас на каждом vault, пополнение пачками (своп-нога в той же tx — только fallback); единая ставка creator fee для всех запусков; LaunchLab-адаптер покрывает stonk.fun и bonk.fun (ID платформ захардкожены); Anoncoin/Surge — только торговля через Jupiter; Bags — с оговоркой, после LaunchLab
 - 13.10 (лид, по launchpads-b.md): пары не к SOL — модель «реестр в лампортах, своп SOL→quote ногой в той же tx через закреплённый пул SOL/USDC, SOL/USD1, пыль — пулу, пакетный своп по расписанию»; делаем DBC с USDC/USD1, затем Raydium LaunchLab со своей platform config; meme.fun — после; Printr/Stoxes/Lesgo — не делаем (только торговля через Jupiter, если подтвердится); xStocks как quote — нет; fair-launch — только SOL
