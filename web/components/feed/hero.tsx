@@ -154,7 +154,7 @@ export function Hero({ onBuy, contact = false }: { onBuy?: () => void; contact?:
       <div className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-b from-transparent to-background" aria-hidden />
       <div className="relative mx-auto max-w-6xl px-4 pt-8 pb-8 sm:px-6 sm:pt-12 sm:pb-10">
         <p className="mb-4 font-mono text-xs tracking-wider text-faint-foreground uppercase">
-          Private trading for Solana launchpads · paid in shielded ZEC
+          Private trading for launchpads · paid in shielded ZEC
         </p>
         <h1 className="max-w-xl text-4xl leading-[1.05] font-medium tracking-tight text-balance sm:text-5xl lg:text-[3.5rem]">
           Launch anywhere.

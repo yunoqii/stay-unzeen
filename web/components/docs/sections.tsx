@@ -73,7 +73,7 @@ export const SECTIONS: DocSection[] = [
     body: (
       <>
         <p>
-          unzeen is a privacy layer for Solana launchpads, paid for with <Strong>shielded ZEC</Strong>. You top up once from any shielded Zcash wallet. After that you buy, sell and launch tokens on
+          unzeen (reads as <em>unseen</em>) is a privacy layer for launchpads, paid for with <Strong>shielded ZEC</Strong>. You top up once from any shielded Zcash wallet. After that you buy, sell and launch tokens on
           pump.fun and Meteora DBC from your balance. The trades are made by the pool&rsquo;s shared Solana vaults, so the feed says &ldquo;unzeen bought 1.2M $PEPE&rdquo;. It never says who.
         </p>
         <List>

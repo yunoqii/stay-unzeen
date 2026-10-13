@@ -11,21 +11,22 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: { default: "unzeen · Launch anywhere. Stay unzeen.", template: "%s · unzeen" },
-  description: "Private trading on Solana launchpads, paid in shielded ZEC.",
+  description: "Private trading for launchpads, paid in shielded ZEC.",
   referrer: "no-referrer",
   // Absolute OG URLs need a base: the deploy sets NEXT_PUBLIC_SITE_URL; locally it falls back to localhost.
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
   openGraph: {
     title: "unzeen · Launch anywhere. Stay unzeen.",
-    description: "Private trading on Solana launchpads, paid in shielded ZEC.",
-    images: [{ url: "/og.jpg", width: 1200, height: 630, alt: "A dark eclipse with a thin gold rim: unzeen" }],
+    description: "Private trading for launchpads, paid in shielded ZEC.",
+    images: [{ url: "/og.jpg", width: 1200, height: 630, alt: "unzeen — Bought by [redacted]. Launch anywhere. Stay unzeen." }],
+    siteName: "unzeen",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
     title: "unzeen · Launch anywhere. Stay unzeen.",
-    description: "Private trading on Solana launchpads, paid in shielded ZEC.",
-    images: ["/og.jpg"],
+    description: "Private trading for launchpads, paid in shielded ZEC.",
+    images: [{ url: "/og.jpg", alt: "unzeen — Bought by [redacted]. Launch anywhere. Stay unzeen." }],
   },
   robots: { index: false },
 };
