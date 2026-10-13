@@ -8,3 +8,5 @@ export * from "./full";
 export * from "./indexer";
 export * from "./memory-store";
 export * from "./config";
+export * from "./discovery";
+export * from "./discovery-pg";

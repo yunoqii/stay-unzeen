@@ -18,6 +18,7 @@
     "media:serve": "tsx scripts/media-serve.ts",
     "intel:run": "tsx scripts/intel-run.ts",
     "intel:probe": "tsx scripts/intel-probe.ts",
+    "intel:discovery-probe": "tsx scripts/discovery-probe.ts",
     "keys:creators-pub": "tsx scripts/creators-pub.ts",
     "keys:attest": "tsx scripts/attest-keys.ts",
     "meteora:config": "tsx scripts/meteora-config.ts",
