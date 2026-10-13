@@ -1,0 +1,29 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>unzeen avatar v2</title>
+<link rel="stylesheet" href="base.css"><script src="mark.js"></script>
+<style>
+  .canvas { width: 400px; height: 400px; background: radial-gradient(120% 90% at 50% 38%, #141418 0%, var(--ink-0) 70%); }
+  .center { position: absolute; inset: 0; display: grid; place-items: center; }
+  /* v1: the bowl. Crescent sits optically centred inside the X circle crop. */
+  .v1 .m { transform: translateY(-34px); }
+  /* v2: redacted disc. The occulting disc is a page of feed rows, all redacted. */
+  .rows { position: absolute; left: 208px; top: 152px; width: 222px; height: 222px; transform: translate(-50%, -50%); border-radius: 50%; overflow: hidden; display: flex; flex-direction: column; justify-content: center; gap: 13px; padding: 0 30px; }
+  .rows i { display: block; height: 14px; border-radius: 2px; background: repeating-linear-gradient(-45deg, rgb(244 183 40 / .55) 0 1.3px, transparent 1.3px 5.5px); box-shadow: inset 0 0 0 1px rgb(244 183 40 / .28); }
+  /* v3: redaction block alone (logo B) */
+  .blk { width: 210px; height: 144px; }
+</style></head><body>
+<div class="canvas grain" id="c"></div>
+<script>
+const v = location.hash.slice(1) || "1", c = document.getElementById("c");
+c.classList.add("v" + v);
+if (v === "1") c.innerHTML = `<div class="center"><div class="m" style="transform:translateY(-40px)">${crescent({ size: 330, disc: "#101013", edge: "rgb(255 255 255 / .08)", glow: 1, id: "a" })}</div></div>`;
+if (v === "2") c.innerHTML = `<div class="center"><div class="m" style="transform:translateY(-34px)">${crescent({ size: 316, disc: "#0b0b0d", edge: "rgb(255 255 255 / .08)", glow: .8, id: "b" })}</div></div>
+  <div class="rows"><i style="width:62%"></i><i style="width:100%"></i><i style="width:84%"></i><i style="width:93%"></i><i style="width:48%"></i></div>`;
+// v3: logo C (totality + one bead of light)
+if (v === "3") c.innerHTML = `<div class="center"><svg viewBox="0 0 64 64" width="280" height="280" style="overflow:visible">
+  <defs><radialGradient id="bg"><stop offset="0" stop-color="#f4b728" stop-opacity=".6"/><stop offset="1" stop-color="#f4b728" stop-opacity="0"/></radialGradient>
+  <radialGradient id="co"><stop offset=".62" stop-color="#f4b728" stop-opacity="0"/><stop offset=".7" stop-color="#f4b728" stop-opacity=".16"/><stop offset="1" stop-color="#f4b728" stop-opacity="0"/></radialGradient></defs>
+  <circle cx="32" cy="32" r="32" fill="url(#co)"/>
+  <circle cx="48.94" cy="18.76" r="12" fill="url(#bg)"/>
+  <circle cx="32" cy="32" r="21.5" fill="#0b0b0d" stroke="#f4b728" stroke-width="1.6"/>
+  <circle cx="48.94" cy="18.76" r="3.6" fill="#f4b728"/></svg></div>`;
+</script></body></html>

@@ -1,0 +1,27 @@
+<!doctype html><meta charset="utf-8"><title>Unzeen logo sheet</title>
+<style>
+@font-face{font-family:"Geist Mono";src:url("../../twitter/src/fonts/GeistMono-Variable.woff2")}
+body{margin:0;background:#060607;color:#8b8b95;font:12px "Geist Mono",monospace;padding:40px;width:1520px}
+h2{color:#ededf0;font-weight:500;font-size:13px;letter-spacing:.06em;margin:28px 0 12px}
+.row{display:flex;gap:20px;align-items:center;flex-wrap:wrap}
+.cell{display:flex;flex-direction:column;gap:8px}
+.cell img{display:block}
+.light{background:#F4F4F6}
+.sizes img{image-rendering:pixelated}
+</style>
+<div id="root"></div>
+<script>
+const V={a:"A · crescent (the bowl / u)",b:"B · redacted z",c:"C · bead (totality)"};
+let h="";
+for(const v of "abc"){
+ h+=`<h2>${V[v]}</h2><div class="row">`;
+ h+=`<div class="cell"><img src="../svg/logo-${v}-lockup-dark.svg" height="144"><span>lockup · dark</span></div>`;
+ h+=`<div class="cell"><img src="../svg/logo-${v}-lockup-light.svg" height="144"><span>lockup · light</span></div>`;
+ h+=`<div class="cell"><img src="../svg/logo-${v}-mark-dark.svg" width="144"><span>mark · dark</span></div>`;
+ h+=`<div class="cell"><img src="../svg/logo-${v}-mark-light.svg" width="144"><span>mark · light</span></div>`;
+ h+=`<div class="cell"><img src="../svg/logo-${v}-app-512.svg" width="144" style="border-radius:32px"><span>app 512 (masked)</span></div>`;
+ h+=`<div class="cell sizes"><div class="row"><img src="../svg/logo-${v}-favicon.svg" width="32"><img src="../svg/logo-${v}-favicon.svg" width="16"><img src="../svg/logo-${v}-favicon.svg" width="64"></div><span>favicon 32 · 16 · (64 zoom)</span></div>`;
+ h+=`</div>`;
+}
+document.getElementById("root").innerHTML=h;
+</script>

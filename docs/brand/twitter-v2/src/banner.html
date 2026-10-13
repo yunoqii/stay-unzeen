@@ -1,0 +1,73 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>unzeen header v2</title>
+<link rel="stylesheet" href="base.css"><script src="mark.js"></script>
+<style>
+  .canvas { width: 1500px; height: 500px; }
+  .ledger { position: absolute; inset: 0; background:
+      repeating-linear-gradient(to bottom, transparent 0 55px, var(--hair) 55px 56px),
+      repeating-linear-gradient(to right, transparent 0 249px, rgb(255 255 255 / .025) 249px 250px); }
+  .slogan { position: absolute; font-weight: 560; letter-spacing: -0.035em; line-height: .98; }
+  .slogan .dim { color: var(--fog-2); }
+  .cap { position: absolute; font-size: 13px; letter-spacing: .16em; text-transform: uppercase; color: var(--fog-2); }
+  .cap b { color: var(--zec); font-weight: 400; }
+
+  /* 1 · occultation: the feed runs behind the eclipse and goes dark there */
+  .fade { position: absolute; inset: 0; -webkit-mask-image: linear-gradient(to right, transparent 760px, #000 960px); }
+  .rows { position: absolute; left: 0; right: 0; top: 20px; display: flex; flex-direction: column;
+          -webkit-mask-image: radial-gradient(circle at 1145px 176px, transparent 0 196px, rgb(0 0 0 / .25) 214px, #000 330px); }
+  .row { height: 56px; display: flex; align-items: center; white-space: nowrap; font-size: 24px; color: var(--fog-3); letter-spacing: -0.01em; }
+  .row .who { color: var(--paper); }
+  .row .num { color: var(--paper); font-weight: 560; }
+  .row .b { color: var(--buy); font-weight: 560; } .row .s { color: var(--sell); font-weight: 560; }
+  .row .meta { font-family: "Geist Mono", monospace; font-size: 13px; color: var(--fog-2); margin-left: 14px; letter-spacing: 0; }
+  .eclipse { position: absolute; left: 1145px; top: 196px; transform: translate(-50%, -50%); }
+  .corona { position: absolute; left: 1145px; top: 200px; width: 760px; height: 760px; transform: translate(-50%, -50%); border-radius: 50%;
+            background: radial-gradient(closest-side, rgb(244 183 40 / .10), rgb(244 183 40 / .035) 55%, transparent 75%); }
+
+  /* 2 · redacted word: the brand behind the tape, still readable */
+  .tape { position: absolute; inset: 22px -10px 4px -8px; }
+  .huge { position: absolute; left: 420px; top: 88px; font-size: 112px; }
+  .wordwrap { position: relative; display: inline-block; }
+
+  /* 3 · anonymity set */
+  .set { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(30, 50px); grid-auto-rows: 50px; place-items: center;
+         -webkit-mask-image: radial-gradient(ellipse 470px 230px at 650px 250px, transparent 30%, #000 100%); }
+  .set span { display: block; width: 22px; height: 22px; }
+</style></head><body>
+<div class="canvas grain" id="c"></div>
+<script>
+const v = location.hash.slice(1) || "1", c = document.getElementById("c");
+const rows = [
+  ["bought", "1.2M", "$PEPE", "0.4", "b", "pump.fun · 12s"],
+  ["sold", "3.5M", "$VEIL", "0.95", "s", "Meteora · 19s"],
+  ["bought", "814.8K", "$NOX", "0.22", "b", "pump.fun · 29s"],
+  ["bought", "12.4M", "$UMBRA", "4.2", "b", "Meteora · 34s"],
+  ["sold", "2.7K", "$GHOST", "0.17", "s", "pump.fun · 41s"],
+  ["bought", "6.9M", "$MOTH", "0.44", "b", "pump.fun · 52s"],
+  ["bought", "402K", "$DUSK", "1.1", "b", "Meteora · 1m"],
+  ["sold", "9.1M", "$HUSH", "2.6", "s", "pump.fun · 1m"],
+];
+const row = (r, i) => `<div class="row" style="padding-left:${780 + (i % 3) * 56}px"><span class="who">unzeen</span>&nbsp;${r[0]}&nbsp;<span class="num">${r[1]} ${r[2]}</span>&nbsp;for&nbsp;<span class="${r[4]}">${r[3]}</span>&nbsp;SOL<span class="meta">${r[5]}</span>
+  &nbsp;&nbsp;&nbsp;&nbsp;<span class="who">unzeen</span>&nbsp;${rows[(i + 3) % 8][0]}&nbsp;<span class="num">${rows[(i + 3) % 8][1]} ${rows[(i + 3) % 8][2]}</span></div>`;
+
+if (v === "1") c.innerHTML = `<div class="ledger"></div><div class="corona"></div>
+  <div class="fade"><div class="rows">${rows.map(row).join("")}</div></div>
+  <div class="eclipse">${crescent({ size: 470, disc: "#0b0b0d", edge: "rgb(255 255 255 / .08)", glow: 1, id: "e", t: 1.4 })}</div>
+  <div class="slogan" style="left:410px;top:112px;font-size:66px;">Launch<br>anywhere.<br><span class="dim">Stay</span> unzeen.</div>
+  <div class="cap mono" style="left:412px;top:338px;line-height:1.7">Every trade is on-chain.<br><b>Who made it is not.</b></div>`;
+
+if (v === "2") c.innerHTML = `<div class="corona" style="left:1500px;top:520px;width:900px;height:900px"></div>
+  <div class="eclipse" style="left:1420px;top:350px">${crescent({ size: 380, disc: "#0b0b0d", edge: "rgb(255 255 255 / .07)", glow: .9, id: "e2", t: 1.6 })}</div>
+  <div class="slogan huge">Launch anywhere.<br><span class="dim">Stay</span> <span class="wordwrap">unzeen.<span class="tape redact-see"></span></span></div>
+  <div class="cap mono" style="left:424px;top:372px">Private trading for Solana launchpads <b>·</b> paid in shielded ZEC</div>`;
+
+if (v === "3") {
+  let cells = "";
+  for (let i = 0; i < 300; i++) {
+    const me = i === 202; // row 6, col 22: inside the safe zone, clear of the avatar and the mobile crop
+    cells += `<span${me ? ' style="filter:drop-shadow(0 0 6px rgb(244 183 40 / .55))"' : ""}>${crescent({ size: 22, id: "s" + i, t: 3.2, rim: me ? "#f4b728" : "#34343b", edge: me ? "rgb(244 183 40 / .3)" : "rgb(255 255 255 / .06)" })}</span>`;
+  }
+  c.innerHTML = `<div class="ledger" style="opacity:.6"></div><div class="set">${cells}</div>
+  <div class="slogan" style="left:420px;top:150px;font-size:72px;">Every trade<br>is <span style="color:var(--zec)">unzeen</span>.</div>
+  <div class="cap mono" style="left:423px;top:330px">Same name on every trade. <b>One of them is you.</b></div>`;
+}
+</script></body></html>

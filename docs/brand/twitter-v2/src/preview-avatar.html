@@ -1,0 +1,22 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Avatar crop preview</title>
+<link rel="stylesheet" href="base.css">
+<style>
+  body { width: 1560px; height: 820px; padding: 36px 40px; background: #000; }
+  h1 { font-size: 17px; font-weight: 500; margin-bottom: 4px; } p { font: 12px "Geist Mono", monospace; color: var(--fog-2); margin-bottom: 22px; }
+  .grid { display: grid; grid-template-columns: 150px 640px 640px; gap: 14px 24px; align-items: center; }
+  .lab { font: 12px "Geist Mono", monospace; color: var(--fog-3); }
+  .strip { display: flex; align-items: center; gap: 22px; padding: 16px 20px; border-radius: 12px; }
+  .dark { background: #000; outline: 1px solid #222; } .light { background: #fff; }
+  img { border-radius: 50%; display: block; }
+  .sq { border-radius: 0; outline: 1px dashed rgb(0 200 255 / .6); }
+</style></head><body>
+<h1>Avatar v2: X circle crop at real sizes</h1>
+<p>400 source (square, dashed) · 200 profile @2x · 133 profile · 48 timeline · 32 reply · on X dark and X light (Lights out / Default)</p>
+<div class="grid">
+<script>
+for (const v of ["1","2","3"]) {
+  const sizes = [133, 48, 32];
+  const strip = (cls) => `<div class="strip ${cls}"><img src="../avatar-${v}@2x.png" width="200">${sizes.map(s => `<img src="../avatar-${v}@2x.png" width="${s}">`).join("")}</div>`;
+  document.write(`<div class="lab">avatar-${v}<br><br><img class="sq" src="../avatar-${v}.png" width="120"></div>${strip("dark")}${strip("light")}`);
+}
+</script></div></body></html>

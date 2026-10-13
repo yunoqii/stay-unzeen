@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Header safe zones v2</title>
+<link rel="stylesheet" href="base.css">
+<style>
+  body { padding: 40px 50px; width: 1600px; height: 1760px; background: #000; }
+  h1 { font-size: 17px; font-weight: 500; margin-bottom: 6px; }
+  .note { font: 12px/1.6 "Geist Mono", monospace; color: var(--fog-2); margin-bottom: 26px; } .note span { padding: 1px 6px; border-radius: 3px; }
+  .b { position: relative; width: 1500px; height: 500px; margin-bottom: 44px; }
+  .b img { width: 1500px; height: 500px; display: block; }
+  .tag { position: absolute; top: -18px; left: 0; font: 12px "Geist Mono", monospace; color: var(--fog-3); }
+  .crop-v { position: absolute; left: 0; right: 0; height: 60px; background: rgb(255 64 129 / .2); }
+  .crop-h { position: absolute; top: 0; bottom: 0; width: 75px; background: rgb(255 64 129 / .2); }
+  .av { position: absolute; left: 40px; top: 333px; width: 335px; height: 335px; border-radius: 50%; background: rgb(0 200 255 / .25); outline: 2px dashed rgb(0 200 255 / .9); }
+  .safe { position: absolute; left: 400px; right: 175px; top: 60px; bottom: 60px; outline: 2px dashed rgb(120 255 120 / .85); }
+</style></head><body>
+<h1>Header v2: X safe zones (1500×500)</h1>
+<p class="note"><span style="background:rgb(0 200 255 / .35)">blue</span> desktop avatar overlap (≈335px circle at x40, y333) &nbsp;
+<span style="background:rgb(255 64 129 / .35)">pink</span> cropped on mobile / narrow (60px top and bottom, 5% sides) &nbsp;
+<span style="outline:1px dashed rgb(120 255 120)">green</span> all text and the key figure stay inside</p>
+<script>
+for (const v of ["1","2","3"]) document.write(`<div class="b"><div class="tag">banner-${v}.png</div><img src="../banner-${v}.png">
+  <div class="crop-v" style="top:0"></div><div class="crop-v" style="bottom:0"></div><div class="crop-h" style="left:0"></div><div class="crop-h" style="right:0"></div>
+  <div class="safe"></div><div class="av"></div></div>`);
+</script></body></html>

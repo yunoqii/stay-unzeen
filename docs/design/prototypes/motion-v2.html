@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unzeen motion v2 prototypes</title>
+<!-- Prototype for docs/design/motion-v2.md. Vanilla WAAPI, no network: fonts are local.
+     Production implementation is Motion (motion/react) per the spec; timings here are the same numbers. -->
+<style>
+@font-face { font-family: "Geist"; src: url("../../brand/twitter-v2/src/fonts/Geist-Variable.woff2") format("woff2"); font-weight: 100 900; }
+@font-face { font-family: "Geist Mono"; src: url("../../brand/twitter-v2/src/fonts/GeistMono-Variable.woff2") format("woff2"); font-weight: 100 900; }
+:root {
+  --ink-0: #060607; --ink-1: #0b0b0d; --ink-2: #111114; --ink-3: #18181c;
+  --fog-1: #3a3a41; --fog-2: #7c7c86; --fog-3: #8b8b95; --fog-4: #b9b9c1; --paper: #ededf0;
+  --zec: #f4b728; --zec-deep: #1a1405; --buy: #4fc98a; --sell: #ef6b73;
+  --hair: rgb(255 255 255 / .07);
+  --ease-shadow: cubic-bezier(0.16, 1, 0.3, 1);   /* = --uz-ease-expo-out */
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--ink-0); color: var(--paper); font-family: "Geist", sans-serif; -webkit-font-smoothing: antialiased; overflow-x: clip; }
+body { padding: 40px clamp(16px, 4vw, 56px) 80px; max-width: 1180px; margin: 0 auto; }
+.mono { font-family: "Geist Mono", monospace; }
+header { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 28px; flex-wrap: wrap; }
+h1 { font-size: 22px; font-weight: 560; letter-spacing: -0.02em; }
+header p { color: var(--fog-3); font-size: 14px; margin-top: 6px; max-width: 60ch; }
+.tools { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--fog-3); }
+button { font: inherit; color: var(--paper); background: var(--ink-3); border: 1px solid var(--hair); border-radius: 999px; padding: 7px 14px; cursor: pointer; white-space: nowrap; }
+button:hover { border-color: rgb(255 255 255 / .18); }
+button:focus-visible { outline: 2px solid rgb(244 183 40 / .7); outline-offset: 2px; }
+label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.demo { border: 1px solid var(--hair); border-radius: 14px; background: var(--ink-1); margin-bottom: 18px; overflow: hidden; }
+.demo > .bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--hair); }
+.demo h2 { font-size: 14px; font-weight: 520; } .demo h2 small { color: var(--fog-2); font: 12px "Geist Mono", monospace; margin-left: 8px; }
+.stage { position: relative; padding: 28px 24px; min-height: 160px; display: grid; place-items: center; }
+
+/* shared: redaction tape */
+.tape { position: absolute; inset: 0; border-radius: 3px; transform-origin: left center;
+  background: var(--zec-deep) repeating-linear-gradient(-45deg, var(--zec) 0 1.4px, transparent 1.4px 6px);
+  box-shadow: inset 0 0 0 1px rgb(244 183 40 / .7); }
+
+/* M1 shielding */
+.bal { display: grid; gap: 10px; width: min(460px, 100%); }
+.line { display: flex; justify-content: space-between; align-items: baseline; padding: 12px 14px; border: 1px solid var(--hair); border-radius: 10px; background: var(--ink-2); }
+.line .k { color: var(--fog-3); font-size: 13px; }
+.line .v { position: relative; font-size: 22px; font-weight: 560; font-variant-numeric: tabular-nums; padding: 0 2px; }
+.line .v .unit { color: var(--fog-3); font-weight: 400; font-size: 15px; margin-left: 4px; }
+.status { font: 12px "Geist Mono", monospace; color: var(--fog-2); }
+.status b { color: var(--zec); font-weight: 400; }
+
+/* M2 identity collapse */
+.feed { width: min(720px, 100%); }
+.row { display: flex; align-items: baseline; gap: 6px; padding: 12px 6px; border-bottom: 1px solid var(--hair); font-size: 20px; color: var(--fog-3); white-space: nowrap; overflow: hidden; }
+.row .who { position: relative; display: inline-block; min-width: 4.4em; color: var(--paper); font-family: "Geist Mono", monospace; font-size: 17px; }
+.row .who.done { font-family: "Geist", sans-serif; font-size: 20px; }
+.row .n { color: var(--paper); font-weight: 560; } .row .b { color: var(--buy); font-weight: 560; } .row .s { color: var(--sell); font-weight: 560; }
+.row .meta { font: 12px "Geist Mono", monospace; color: var(--fog-2); margin-left: 8px; }
+
+/* M3 eclipse contact */
+.sky { position: relative; width: 100%; height: 300px; overflow: hidden; background: radial-gradient(60% 80% at 70% 40%, #121216, var(--ink-0)); border-radius: 0 0 14px 14px; }
+.sky svg { position: absolute; left: 62%; top: 50%; width: 300px; height: 300px; transform: translate(-50%, -50%); overflow: visible; }
+.sky .copy { position: absolute; left: 8%; top: 50%; transform: translateY(-50%); }
+.sky .copy div { font-size: clamp(28px, 4.4vw, 48px); font-weight: 560; letter-spacing: -0.035em; line-height: 1; }
+.sky .copy .dim { color: var(--fog-2); }
+
+/* M4 withdraw split */
+.wd { position: relative; width: min(760px, 100%); height: 190px; }
+.wd .src { position: absolute; left: 0; top: 70px; padding: 10px 14px; border: 1px solid var(--hair); border-radius: 10px; background: var(--ink-2); font-variant-numeric: tabular-nums; font-weight: 560; }
+.wd .dst { position: absolute; right: 0; top: 66px; padding: 10px 14px; border: 1px dashed rgb(255 255 255 / .18); border-radius: 10px; font: 13px "Geist Mono", monospace; color: var(--fog-3); }
+.wd .part { position: absolute; left: 120px; top: 76px; padding: 4px 9px; border-radius: 999px; background: var(--ink-3); border: 1px solid rgb(244 183 40 / .35); font: 12px "Geist Mono", monospace; color: var(--paper); white-space: nowrap; }
+.wd .track { position: absolute; left: 130px; right: 190px; top: 92px; height: 1px; background: repeating-linear-gradient(to right, var(--fog-1) 0 4px, transparent 4px 9px); }
+.wd .clock { position: absolute; left: 130px; right: 190px; top: 140px; display: flex; justify-content: space-between; font: 11px "Geist Mono", monospace; color: var(--fog-2); }
+
+/* M5 verify path */
+.tree { width: min(640px, 100%); }
+.tree svg { width: 100%; height: auto; overflow: visible; }
+.tree .lbl { font: 11px "Geist Mono", monospace; fill: var(--fog-2); }
+
+/* M7 empty */
+.empty { width: min(520px, 100%); display: grid; gap: 14px; }
+.empty i { display: block; height: 1px; background: var(--hair); }
+.empty .hid { position: relative; height: 16px; border-radius: 2px;
+  background: repeating-linear-gradient(-45deg, rgb(244 183 40 / .5) 0 1.2px, transparent 1.2px 6px); background-size: 8.49px 8.49px;
+  animation: drift 14s linear infinite; }
+.empty .hid::before { content: ""; position: absolute; left: -12px; top: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--zec); }
+.empty p { color: var(--fog-3); font-size: 14px; text-align: center; margin-top: 6px; }
+@keyframes drift { to { background-position: 84.9px 0; } }
+
+@media (prefers-reduced-motion: reduce) { .empty .hid { animation: none; } }
+.reduced .empty .hid { animation: none; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Motion v2: prototypes</h1>
+    <p>Spec: docs/design/motion-v2.md. Every effect shows a state change. Numbers never overshoot. Toggle reduced motion to see each fallback.</p>
+  </div>
+  <div class="tools">
+    <label><input type="checkbox" id="rm"> reduced motion</label>
+    <button id="all">Play all</button>
+  </div>
+</header>
+
+<section class="demo"><div class="bar"><h2>M1 · Shielding tape <small>Top up → Credited</small></h2><button data-play="m1">Play</button></div>
+  <div class="stage"><div class="bal">
+    <div class="line"><span class="k">Incoming (shielded ZEC)</span><span class="v" id="m1in">1.40<span class="unit">ZEC</span></span></div>
+    <div class="line"><span class="k">Private balance</span><span class="v" id="m1bal">0.00<span class="unit">ZEC</span></span></div>
+    <div class="status" id="m1s">Waiting for payment</div>
+  </div></div></section>
+
+<section class="demo"><div class="bar"><h2>M2 · Identity collapse <small>feed, new row</small></h2><button data-play="m2">Play</button></div>
+  <div class="stage"><div class="feed" id="m2"></div></div></section>
+
+<section class="demo"><div class="bar"><h2>M3 · Contact <small>hero, first load (demo wow #1)</small></h2><button data-play="m3">Play</button></div>
+  <div class="sky" id="m3">
+    <div class="copy"><div>Launch anywhere.</div><div><span class="dim">Stay</span> unzeen.</div></div>
+    <svg viewBox="0 0 100 100">
+      <defs>
+        <radialGradient id="cor"><stop offset=".52" stop-color="#f4b728" stop-opacity=".0"/><stop offset=".56" stop-color="#f4b728" stop-opacity=".22"/><stop offset="1" stop-color="#f4b728" stop-opacity="0"/></radialGradient>
+        <radialGradient id="bd"><stop offset="0" stop-color="#fff6dc"/><stop offset=".25" stop-color="#f4b728" stop-opacity=".9"/><stop offset="1" stop-color="#f4b728" stop-opacity="0"/></radialGradient>
+      </defs>
+      <circle id="m3cor" cx="50" cy="50" r="48" fill="url(#cor)" opacity="0"/>
+      <circle cx="50" cy="50" r="36" fill="none" stroke="#f4b728" stroke-width=".9"/>
+      <circle id="m3disc" cx="50" cy="50" r="35.6" fill="#0b0b0d" stroke="rgb(255 255 255 / .08)" stroke-width=".3"/>
+      <circle id="m3bead" cx="75.5" cy="24.6" r="7" fill="url(#bd)" opacity="0"/>
+    </svg>
+  </div></section>
+
+<section class="demo"><div class="bar"><h2>M4 · Split and scatter <small>withdraw, Smart withdraw on</small></h2><button data-play="m4">Play</button></div>
+  <div class="stage"><div class="wd" id="m4">
+    <div class="src">2,400,000 $PEPE</div><div class="track"></div>
+    <div class="dst">fresh address · 9xQ…k2</div>
+    <div class="clock"><span>now</span><span>+2 min</span><span>+6 min</span><span>+11 min</span></div>
+  </div></div></section>
+
+<section class="demo"><div class="bar"><h2>M5 · Your leaf, nobody else's <small>Verify, Merkle path</small></h2><button data-play="m5">Play</button></div>
+  <div class="stage"><div class="tree"><svg id="m5" viewBox="0 0 640 230"></svg></div></div></section>
+
+<section class="demo"><div class="bar"><h2>M7 · Someone was here <small>empty states</small></h2><span class="status">ambient, 14 s loop</span></div>
+  <div class="stage"><div class="empty"><i></i><div class="hid"></div><i></i><p>No trades on this token yet.</p></div></div></section>
+
+<script>
+const EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
+const rmBox = document.getElementById("rm");
+const reduced = () => rmBox.checked || matchMedia("(prefers-reduced-motion: reduce)").matches;
+rmBox.addEventListener("change", () => document.body.classList.toggle("reduced", rmBox.checked));
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const anim = (el, kf, o) => el.animate(kf, { fill: "forwards", easing: EASE, ...o }).finished;
+const fmt = (n, d = 2) => n.toFixed(d);
+
+/* count-up without overshoot (FRONTEND.md: numbers bounce 0) */
+function countTo(el, to, ms, unit) {
+  if (reduced()) { el.innerHTML = fmt(to) + `<span class="unit">${unit}</span>`; return Promise.resolve(); }
+  return new Promise((res) => { const t0 = performance.now();
+    const step = (t) => { const p = Math.min(1, (t - t0) / ms), e = 1 - Math.pow(1 - p, 4);
+      el.innerHTML = fmt(to * e) + `<span class="unit">${unit}</span>`; p < 1 ? requestAnimationFrame(step) : res(); };
+    requestAnimationFrame(step); });
+}
+
+/* M1: the incoming line is taped over (shielded), then the private balance counts up */
+async function m1() {
+  const inn = document.getElementById("m1in"), bal = document.getElementById("m1bal"), s = document.getElementById("m1s");
+  inn.querySelectorAll(".tape").forEach((t) => t.remove()); bal.innerHTML = '0.00<span class="unit">ZEC</span>'; inn.style.opacity = 1;
+  s.innerHTML = "Waiting for payment"; await wait(500);
+  s.innerHTML = "Seen · 0 of 1 confirmations"; await wait(700);
+  const tape = document.createElement("span"); tape.className = "tape"; inn.appendChild(tape);
+  if (reduced()) { tape.style.opacity = 0; await anim(tape, [{ opacity: 0 }, { opacity: 1 }], { duration: 150 }); }
+  else await anim(tape, [{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], { duration: 420 });
+  s.innerHTML = "<b>Credited</b> · shielded, unlinkable";
+  await countTo(bal, 1.4, 600, "ZEC");
+  if (!reduced()) anim(bal, [{ color: "#f4b728" }, { color: "#ededf0" }], { duration: 900, easing: "linear" });
+}
+
+/* M2: a raw address resolves to shade glyphs, is taped, and comes back as "unzeen" */
+const SHADE = "░▒▓";
+const rows = [["7xKXa9…Qm2", "bought", "1.2M $PEPE", "0.4", "b", "pump.fun · now"], ["Fq3h1T…8vZ", "sold", "3.5M $VEIL", "0.95", "s", "Meteora · 2s"], ["9bWnc2…Lr4", "bought", "814.8K $NOX", "0.22", "b", "pump.fun · 4s"]];
+async function m2() {
+  const feed = document.getElementById("m2"); feed.innerHTML = "";
+  for (const [i, r] of rows.entries()) {
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = `<span class="who">${r[0]}</span> ${r[1]} <span class="n">${r[2]}</span> for <span class="${r[4]}">${r[3]}</span> SOL<span class="meta">${r[5]}</span>`;
+    feed.prepend(row);
+    const who = row.querySelector(".who");
+    if (reduced()) { who.textContent = "unzeen"; who.classList.add("done"); anim(row, [{ opacity: 0 }, { opacity: 1 }], { duration: 150 }); continue; }
+    anim(row, [{ opacity: 0, filter: "blur(12px)", transform: "translateY(-8px)" }, { opacity: 1, filter: "blur(0)", transform: "none" }], { duration: 500 });
+    await wait(260);
+    // 1) address -> shade glyphs, left to right (220 ms)
+    const src = r[0]; const t0 = performance.now();
+    await new Promise((res) => { const f = (t) => { const p = Math.min(1, (t - t0) / 220), k = Math.floor(p * src.length);
+      who.textContent = Array.from(src, (c, j) => (j < k ? SHADE[(j + Math.floor(t / 40)) % 3] : c)).join(""); p < 1 ? requestAnimationFrame(f) : res(); }; requestAnimationFrame(f); });
+    // 2) tape sweeps over (180 ms), word swaps underneath, tape lifts right (220 ms)
+    const tape = document.createElement("span"); tape.className = "tape"; who.appendChild(tape);
+    await anim(tape, [{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], { duration: 180 });
+    who.firstChild.textContent = "unzeen"; who.classList.add("done");
+    tape.style.transformOrigin = "right center";
+    await anim(tape, [{ transform: "scaleX(1)" }, { transform: "scaleX(0)" }], { duration: 220, easing: "cubic-bezier(0.7,0,0.84,0)" });
+    tape.remove(); await wait(380);
+  }
+}
+
+/* M3: the disc slides into contact, a bead of light flashes at the last point, the corona settles */
+async function m3() {
+  const disc = document.getElementById("m3disc"), bead = document.getElementById("m3bead"), cor = document.getElementById("m3cor");
+  [disc, bead, cor].forEach((e) => e.getAnimations().forEach((a) => a.cancel()));
+  if (reduced()) { anim(cor, [{ opacity: 0 }, { opacity: 1 }], { duration: 150 }); return; }
+  anim(disc, [{ transform: "translate(-9px, 6px)" }, { transform: "translate(0,0)" }], { duration: 1400, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
+  await wait(1050);
+  await anim(bead, [{ opacity: 0, transform: "scale(.6)" }, { opacity: 1, transform: "scale(1.15)", offset: .35 }, { opacity: 0, transform: "scale(1)" }],
+    { duration: 700, easing: "ease-out", transformOrigin: "75.5px 24.6px" });
+  anim(cor, [{ opacity: 0 }, { opacity: 1 }], { duration: 900 });
+}
+
+/* M4: the amount splits into parts that leave on their own random delays */
+async function m4() {
+  const box = document.getElementById("m4"); box.querySelectorAll(".part").forEach((p) => p.remove());
+  const parts = [["1,050,000", 0], ["620,000", .26], ["730,000", .66]];
+  const width = box.clientWidth, travel = width - 120 - 200;
+  await wait(250);
+  parts.forEach(([amt, at], i) => {
+    const p = document.createElement("span"); p.className = "part"; p.textContent = amt; box.appendChild(p);
+    const y = (i - 1) * 30;
+    if (reduced()) { p.style.transform = `translate(${travel}px, ${y}px)`; p.style.opacity = .9; return; }
+    p.animate([{ transform: "translate(0,0)", opacity: 0, filter: "blur(0px)" }, { transform: `translate(0, ${y}px)`, opacity: 1, filter: "blur(0px)", offset: .12 },
+      { transform: `translate(${travel * at}px, ${y}px)`, opacity: 1, filter: "blur(0px)", offset: .12 + at * .6 },
+      { transform: `translate(${travel * .85}px, ${y}px)`, opacity: 1, filter: "blur(0px)", offset: .9 },
+      { transform: `translate(${travel}px, ${y}px)`, opacity: 0, filter: "blur(6px)" }],
+      { duration: 3200 + i * 400, easing: "linear", fill: "forwards", delay: i * 120 });
+  });
+}
+
+/* M5: draw the path from your leaf to the root; sibling leaves stay redacted */
+function buildTree() {
+  const svg = document.getElementById("m5"); let h = "";
+  const leaves = 8, W = 640, y0 = 200; const xs = (n, i) => (W / n) * (i + .5);
+  const lv = [8, 4, 2, 1], ys = [200, 140, 80, 22]; const mine = 5;
+  for (let L = 0; L < 4; L++) for (let i = 0; i < lv[L]; i++) {
+    const x = xs(lv[L], i), y = ys[L];
+    if (L < 3) { const px = xs(lv[L + 1], i >> 1), py = ys[L + 1]; h += `<line x1="${x}" y1="${y}" x2="${px}" y2="${py}" stroke="#2a2a30" stroke-width="1"/>`; }
+  }
+  // path
+  let i = mine, pts = [];
+  for (let L = 0; L < 4; L++) { pts.push([xs(lv[L], i), ys[L]]); i >>= 1; }
+  h += `<polyline id="m5path" points="${pts.map((p) => p.join(",")).join(" ")}" fill="none" stroke="#f4b728" stroke-width="1.6" pathLength="1" stroke-dasharray="1" stroke-dashoffset="1"/>`;
+  for (let L = 0; L < 4; L++) for (let k = 0; k < lv[L]; k++) {
+    const x = xs(lv[L], k), y = ys[L];
+    if (L === 0 && k !== mine) h += `<rect x="${x - 26}" y="${y - 7}" width="52" height="14" rx="2" fill="#1a1405" stroke="rgb(244 183 40 / .35)"/><rect x="${x - 26}" y="${y - 7}" width="52" height="14" rx="2" fill="url(#hp)"/>`;
+    else h += `<circle class="node" data-l="${L}" data-k="${k}" cx="${x}" cy="${y}" r="${L === 3 ? 6 : 4.5}" fill="#18181c" stroke="#3a3a41"/>`;
+  }
+  h = `<defs><pattern id="hp" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)"><rect width="1.3" height="6" fill="rgb(244 183 40 / .55)"/></pattern></defs>` + h;
+  h += `<text class="lbl" x="${xs(8, mine)}" y="224" text-anchor="middle">your leaf</text><text class="lbl" x="${W / 2 + 14}" y="26">root #100</text>`;
+  svg.innerHTML = h;
+  return pts;
+}
+async function m5() {
+  const pts = buildTree(); const path = document.getElementById("m5path");
+  const nodes = pts.map(([x, y]) => [...document.querySelectorAll("#m5 .node")].find((n) => +n.getAttribute("cx") === x && +n.getAttribute("cy") === y));
+  const lit = (n) => { n.setAttribute("fill", "#f4b728"); n.setAttribute("stroke", "#f4b728"); };
+  if (reduced()) { path.style.strokeDashoffset = 0; nodes.forEach(lit); return; }
+  lit(nodes[0]);
+  const draw = anim(path, [{ strokeDashoffset: 1 }, { strokeDashoffset: 0 }], { duration: 900, easing: "cubic-bezier(0.65, 0, 0.35, 1)" });
+  for (let i = 1; i < nodes.length; i++) { await wait(300); lit(nodes[i]); anim(nodes[i], [{ transform: "scale(1.6)" }, { transform: "scale(1)" }], { duration: 300, transformOrigin: `${pts[i][0]}px ${pts[i][1]}px` }); }
+  await draw;
+}
+
+const runs = { m1, m2, m3, m4, m5 };
+document.querySelectorAll("[data-play]").forEach((b) => b.addEventListener("click", () => runs[b.dataset.play]()));
+document.getElementById("all").addEventListener("click", () => Object.values(runs).forEach((f) => f()));
+buildTree();
+</script>
+</body>
+</html>
