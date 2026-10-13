@@ -154,7 +154,7 @@ export function MyScenarios({ scenarios, names, tok, network, onBuild }: { scena
         <AnimatePresence initial={false}>
           {scenarios.map((s) => (
             <motion.li key={s.id} layout="position" initial={{ opacity: 0, filter: "blur(6px)" }} animate={{ opacity: 1, filter: "blur(0px)" }} exit={{ opacity: 0 }} transition={{ duration: 0.3, ease: EASE }}>
-              <Card s={s} name={names[s.id]?.name} tok={tok} now={now} busy={busy === s.id} onStart={() => void run(s.id, { op: "scenario_start", id: s.id }, "Started. The pool runs it from here.")} onCancel={() => void run(s.id, { op: "scenario_cancel", id: s.id }, "Scenario cancelled.")} />
+              <Card s={s} name={names[s.id]?.name} local={names[s.id]?.plan} tok={tok} now={now} busy={busy === s.id} onStart={() => void run(s.id, { op: "scenario_start", id: s.id }, "Started. The pool runs it from here.")} onCancel={() => void run(s.id, { op: "scenario_cancel", id: s.id }, "Scenario cancelled.")} />
             </motion.li>
           ))}
         </AnimatePresence>
@@ -166,13 +166,15 @@ export function MyScenarios({ scenarios, names, tok, network, onBuild }: { scena
   );
 }
 
-function Card({ s, name, tok, now, busy, onStart, onCancel }: { s: Scenario; name?: string; tok: TokenLookup; now: number; busy: boolean; onStart: () => void; onCancel: () => void }) {
+function Card({ s, name, local, tok, now, busy, onStart, onCancel }: { s: Scenario; name?: string; local?: Scenario["plan"]; tok: TokenLookup; now: number; busy: boolean; onStart: () => void; onCancel: () => void }) {
   const [open, setOpen] = useState(isLiveScenario(s));
   const live = isLiveScenario(s);
   const done = s.steps.filter((x) => x.status === "done" || x.status === "skipped").length;
   const current = s.steps[s.cursor];
   const next = current?.nextAt;
   const floors = useMemo(() => floorsOf(s.plan), [s.plan]);
+  // Sealed values come from this device's encrypted copy of the signed plan; elsewhere they read as sealed.
+  const plan = local && local.steps.length === s.plan.steps.length && local.steps.every((x, i) => x.block.type === s.plan.steps[i].block.type) ? local : s.plan;
   const [confirm, setConfirm] = useState(false);
   return (
     <div className="p-4 sm:p-5">
@@ -259,7 +261,7 @@ function Card({ s, name, tok, now, busy, onStart, onCancel }: { s: Scenario; nam
                       {stepTitle(p)}
                       {st && st.runs > 1 && <span className="text-faint-foreground">· ran {st.runs}×</span>}
                     </span>
-                    <span className="block truncate text-[11px] text-muted-foreground">{describeBlock(s.plan, p.block, tok, { sealed: true })}</span>
+                    <span className="block truncate text-[11px] text-muted-foreground">{describeBlock(plan, plan.steps[i].block, tok, { sealed: true })}</span>
                     {st?.error && <span className="block text-[11px] text-destructive">{stepErrorText(st.error)}</span>}
                     {tapes.length > 0 && (
                       <span className="mt-1 flex flex-col gap-0.5">

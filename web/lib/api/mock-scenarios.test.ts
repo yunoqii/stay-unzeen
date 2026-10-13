@@ -117,11 +117,12 @@ describe("mock v0.19 scenarios: API surface", () => {
     await expect(post({ op: "scenario_start", id: r.id })).rejects.toMatchObject({ code: "scenario_not_active", status: 409 });
   });
 
-  it("echoes addresses masked and drops them when the plan closes", async () => {
+  it("echoes no part of the address (\"sealed\")", async () => {
     const r = await createPlan([{ type: "manual_start" }, { type: "withdraw_zec", to: UA, amount: { pct: 100, of: "balance" }, exec: "max" }]);
     const s = await scenarioOf(r.id);
     const w = s.plan.steps[1].block as Extract<ScenarioBlock, { type: "withdraw_zec" }>;
-    expect(w.to).toBe(`${UA.slice(0, 4)}…${UA.slice(-4)}`);
+    // v0.19: not even a mask of the address stays in the server's echo.
+    expect(w.to).toBe("sealed");
     expect(JSON.stringify(await portfolio())).not.toContain(UA);
   });
 });

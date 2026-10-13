@@ -170,7 +170,7 @@ function Scenarios() {
     setSignError(null);
     try {
       const r = await api.postAction(signer, { op: "scenario_create", plan });
-      await rememberSigned(network, pubkey, r.id, { name: draft.name, template: draft.template, at: Date.now() }, draft.id);
+      await rememberSigned(network, pubkey, r.id, { name: draft.name, template: draft.template, at: Date.now(), plan }, draft.id);
       notifyAccepted();
       setSigned({ id: r.id, manual: r.status === "waiting_start" });
       setView("signed");

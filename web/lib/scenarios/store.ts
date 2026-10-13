@@ -11,6 +11,7 @@ import { getHistoryKey, useKeyState } from "@/lib/crypto/session";
 import { localKv, scenarioSlot } from "@/lib/history/store";
 import type { Network } from "@/lib/network";
 import type { Draft } from "./draft";
+import type { ScenarioPlan } from "@/lib/api/types";
 
 const V = 1;
 const MAX_DRAFTS = 12;
@@ -20,6 +21,11 @@ export interface SignedName {
   name: string;
   template?: string;
   at: number;
+  /**
+   * The signed plan with its sealed values (withdrawal addresses, chat text, launch name). The server keeps
+   * none of them in its echo (review-scenarios.md 2), so My scenarios shows them from here, on this device only.
+   */
+  plan?: ScenarioPlan;
 }
 
 export interface ScenarioFile {

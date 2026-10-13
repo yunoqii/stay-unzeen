@@ -511,10 +511,10 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
           // v0.19: the guaranteed waits along every path add up to ≥ 1 h.
           const shortest = tradesOf(plan, key).length ? shortestWaitTo(plan, i, key, P) : Infinity;
           if (shortest < F.withdrawAfterTradeMinSecs)
-            bad(i, "withdraw_too_soon", `Withdraw waits ≥${formatSecs(F.withdrawAfterTradeMinSecs)} after the trade. On some path (next step, a skip, a go-to or a repeat) the waits since a trade of this token add up to less — “bought → withdrew 40 s later” links your new address to the buy.`, "rule");
+            bad(i, "withdraw_too_soon", `Withdraw waits ≥${formatSecs(F.withdrawAfterTradeMinSecs)} after your last trade of this token. On some path (next step, a skip, a go-to or a repeat) the waits since a trade of this token add up to less — “bought → withdrew 40 s later” links your new address to the buy.`, "rule");
           else if (shortest !== Infinity) {
             if (shortest < 12 * H) warn(i, "withdraw_soon", "Less than 12 h between the trade and the withdrawal on some path. Longer is safer.");
-            floor(i, "withdraw_after_trade", `Withdraw waits ≥${formatSecs(F.withdrawAfterTradeMinSecs)} after the trade, plus random ${formatRange(...F.withdrawExtraSecs)}`);
+            floor(i, "withdraw_after_trade", `Withdraw waits ≥${formatSecs(F.withdrawAfterTradeMinSecs)} after your last trade of this token, plus random ${formatRange(...F.withdrawExtraSecs)}`);
           }
         }
         break;
@@ -562,20 +562,21 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
         const key = checkMint(b.mint);
         const t = checkChatText(b.text ?? "");
         if (!t.ok) bad(i, "bad_text", t.problem === "empty" ? `${label}: write the message.` : `${label}: the message has hidden characters or is too long.`);
-        if (key && steps.slice(0, i).some((x) => tradedKeys(plan, x).includes(key))) floor(i, "chat_after_trade", `After your trade: slow mode + random ${formatRange(...F.chatAfterTradeSecs)}`);
+        if (key && steps.slice(0, i).some((x) => tradedKeys(plan, x).includes(key))) floor(i, "chat_after_trade", `Slow mode + random ${formatRange(...F.chatAfterTradeSecs)} after your last trade of this token`);
         break;
       }
     }
 
     checkOnFail(s.onFail, i);
 
-    // P6: a buy funded by an earlier sale.
-    if (b.type === "buy" && b.zec && "of" in b.zec && isStepRef(b.zec.of)) {
-      const src = steps[b.zec.of.step];
-      if (src && ["sell", "sell_all", "swap"].includes(src.block.type)) floor(i, "mirror", `Pause ${formatRange(...F.swapGapSecs)} and amount shaved ${F.swapShaveBps[0] / 100}–${F.swapShaveBps[1] / 100} % after the sale`);
-    }
-    // P9: two trade steps back to back.
-    if (TRADE_TYPES.has(b.type) && i > 0 && TRADE_TYPES.has(steps[i - 1].block?.type)) floor(i, "trade_gap", `Runs ${F.tradeGapEpochs[0]}–${F.tradeGapEpochs[1]} batches after the previous trade`);
+    // The floors below are applied by the executor from the time of the plan's actual last trade, so they are
+    // shown on every step they can reach, not only right after the neighbouring one.
+    const lastTrade = [...steps.slice(0, i)].reverse().find((x) => TRADE_TYPES.has(x.block?.type));
+    // P6: a buy when the plan's last trade was a sale (any amount spec).
+    const sold = lastTrade && (["sell", "sell_all"].includes(lastTrade.block.type) || (lastTrade.block.type === "dca" && lastTrade.block.side === "sell"));
+    if (b.type === "buy" && sold) floor(i, "mirror", `After a sale: waits ${formatRange(...F.swapGapSecs)} and spends ${F.swapShaveBps[0] / 100}–${F.swapShaveBps[1] / 100} % less`);
+    // P9: any trade after an earlier trade of the plan.
+    if (TRADE_TYPES.has(b.type) && lastTrade) floor(i, "trade_gap", `At least ${F.tradeGapEpochs[0]}–${F.tradeGapEpochs[1]} batches after the plan's last trade`);
   }
 
   if (runs > P.maxRuns) bad(-1, "too_many_runs", `This plan would run ${runs} times (repeats, DCA slices and rotations count). The limit is ${P.maxRuns}.`);

@@ -79,7 +79,8 @@ const stepRef = (r: { step: number } | { orderId: string } | { actionId: string 
 /** One sentence per block. `sealed`: show addresses / text masked. */
 export function describeBlock(plan: ScenarioPlan, b: ScenarioBlock, tok: TokenLookup, opts: { sealed?: boolean } = {}): string {
   const m = (r: MintRef | undefined) => mintText(plan, r, tok);
-  const addr = (a: string) => (!a ? "an address" : opts.sealed ? shortAddr(a, 4, 4) : shortAddr(a, 6, 6));
+  // v0.19: the server echoes "sealed" instead of any part of the address; only the signing device knows it.
+  const addr = (a: string) => (!a ? "an address" : isSealedValue(a) ? "a sealed address (set on another device)" : opts.sealed ? shortAddr(a, 4, 4) : shortAddr(a, 6, 6));
   switch (b.type) {
     case "manual_start":
       return "Wait until you press Start.";
@@ -139,6 +140,9 @@ export function describeBlock(plan: ScenarioPlan, b: ScenarioBlock, tok: TokenLo
       return opts.sealed || !b.text ? `Post in ${m(b.mint)}'s chat.` : `Post in ${m(b.mint)}'s chat: “${b.text.length > 60 ? b.text.slice(0, 60) + "…" : b.text}”.`;
   }
 }
+
+/** An address the server no longer holds in its echo ("sealed"; older servers sent a mask "Ab3d…9xYz"). */
+export const isSealedValue = (a: string) => a === "sealed" || a.includes("…");
 
 export function onFailText(f: OnFail | undefined): string {
   const t = (x: unknown) => (x === "skip" ? "skip it" : x === "stop" || x === undefined ? "stop the plan" : `go to step ${(x as { goto: number }).goto + 1}`);

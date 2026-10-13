@@ -8,7 +8,6 @@
 
 import type { Network } from "@/lib/network";
 import { validatePlan, type ValidateCtx } from "@/lib/scenarios/validate";
-import { maskAddr } from "@/lib/scenarios/describe";
 import { ApiError } from "./errors";
 import type {
   ActionReceipt,
@@ -102,6 +101,10 @@ interface Run {
   rounds: Map<number, number>;
   iter: number;
   orders: Set<string>;
+  /** Time-based floors (review-scenarios.md 1, 3, 4, 6): last trade per mint and of the plan, real ms. */
+  lastTrade: Map<string, number>;
+  lastTradeAt?: number;
+  lastKind?: "buy" | "sell";
   closedAt?: number;
   error?: ScenarioStepError;
 }
@@ -160,6 +163,7 @@ export function createScenarioMock(host: ScenarioHost, params: (network: Network
       rounds: new Map(),
       iter: 0,
       orders: new Set(),
+      lastTrade: new Map(),
     };
     if (waiting) r.steps[0].status = "waiting";
     runs.set(id, r);
@@ -344,7 +348,7 @@ export function createScenarioMock(host: ScenarioHost, params: (network: Network
         return execute(r, s, rt, now);
       default: {
         // Trade-like steps: server floors first (P2, P4, P6, P9), then the ordinary action path.
-        const wait = floorSecs(r, s, F);
+        const wait = floorSecs(r, s, F, now);
         if (wait > 0) return timer(rt, now + ms(wait), "submit");
         return execute(r, s, rt, now);
       }
@@ -358,34 +362,56 @@ export function createScenarioMock(host: ScenarioHost, params: (network: Network
     return false;
   }
 
-  /** Seconds of server floors before a trade-like step (scenarios.md §4.1). */
-  function floorSecs(r: Run, s: ScenarioStep, F: ScenarioParams["floors"]): number {
+  /** Plan seconds since a real timestamp (compressed clock). */
+  const since = (t: number | undefined, now: number) => (t === undefined ? Infinity : ((now - t) * scale) / 1000);
+
+  /**
+   * Seconds of server floors before a trade-like step, measured from the time of the actual last trade (not
+   * from the neighbouring step): a gap after another step, a repeat or `of: "balance"` does not shorten it.
+   */
+  function floorSecs(r: Run, s: ScenarioStep, F: ScenarioParams["floors"], now: number): number {
     const b = s.block;
     let wait = 0;
-    const prev = r.plan.steps[s.id - 1];
     const tradeTypes = ["buy", "sell", "sell_all", "swap", "dca", "create"];
-    // P9: two trade steps back to back -> the second 1–3 batches later.
-    if (prev && tradeTypes.includes(prev.block.type) && tradeTypes.includes(b.type)) wait += U(F.tradeGapEpochs[0], F.tradeGapEpochs[1]) * EPOCH_SECS;
-    // P6: a buy paid with an earlier sale's proceeds.
-    if (b.type === "buy" && "of" in b.zec && typeof b.zec.of === "object") {
-      const src = r.plan.steps[b.zec.of.step];
-      if (src && ["sell", "sell_all", "swap"].includes(src.block.type)) wait += U(F.swapGapSecs[0], F.swapGapSecs[1]);
+    // P9: any trade step at least 1–3 batches after the plan's last trade.
+    if (tradeTypes.includes(b.type)) wait = Math.max(wait, U(F.tradeGapEpochs[0], F.tradeGapEpochs[1]) * EPOCH_SECS - since(r.lastTradeAt, now));
+    // P6: a buy after the plan's last trade was a sale, whatever its amount spec.
+    if (b.type === "buy" && r.lastKind === "sell") wait = Math.max(wait, U(F.swapGapSecs[0], F.swapGapSecs[1]) - since(r.lastTradeAt, now));
+    // P2: ≥ 1 h + U(0, 30 min) after the last trade of this mint (order fills included).
+    if (b.type === "withdraw_token") {
+      const m = mintOf(r, b.mint);
+      const last = m ? lastTradeOf(r, m) : undefined;
+      const extra = U(F.withdrawExtraSecs[0], F.withdrawExtraSecs[1]);
+      wait = Math.max(wait, last === undefined ? extra : F.withdrawAfterTradeMinSecs + extra - since(last, now));
     }
-    // P2: withdraw of tokens after a trade by that mint -> extra random on top of the plan's own wait.
-    if (b.type === "withdraw_token") wait += U(F.withdrawExtraSecs[0], F.withdrawExtraSecs[1]);
-    // P4: chat after own trade by the mint.
-    if (b.type === "chat" && tradedBefore(r, s.id, mintOf(r, b.mint))) wait += U(F.chatAfterTradeSecs[0], F.chatAfterTradeSecs[1]);
-    return wait;
+    // P4: chat after the plan's own trade of the mint: slow mode + U(10, 30 min) from that trade.
+    if (b.type === "chat") {
+      const m = mintOf(r, b.mint);
+      const last = m ? lastTradeOf(r, m) : undefined;
+      if (last !== undefined) wait = Math.max(wait, U(F.chatAfterTradeSecs[0], F.chatAfterTradeSecs[1]) - since(last, now));
+    }
+    return Math.max(0, wait);
   }
 
-  function tradedBefore(r: Run, upTo: number, mint: string | null): boolean {
-    if (!mint) return false;
-    return r.plan.steps.slice(0, upTo).some((x) => {
-      const b = x.block;
-      if (b.type === "swap") return mintOf(r, b.from) === mint || mintOf(r, b.to) === mint;
-      if (b.type === "create") return r.out.get(x.id)?.mint === mint;
-      return (b.type === "buy" || b.type === "sell" || b.type === "sell_all" || b.type === "dca") && mintOf(r, b.mint) === mint;
-    });
+  /** Last trade of a mint by this plan, including fills of the orders it placed. */
+  function lastTradeOf(r: Run, mint: string): number | undefined {
+    let t = r.lastTrade.get(mint);
+    for (const id of r.orders) {
+      const o = host.order(id);
+      if (!o || o.mint !== mint || !o.actionId) continue;
+      const a = host.action(o.actionId);
+      if (a?.status === "executed") {
+        const at = a.executedAt ?? Date.now();
+        t = t === undefined ? at : Math.max(t, at);
+      }
+    }
+    return t;
+  }
+
+  function noteTrade(r: Run, mint: string | null | undefined, kind: "buy" | "sell", now: number) {
+    if (mint) r.lastTrade.set(mint, now);
+    r.lastTradeAt = now;
+    r.lastKind = kind;
   }
 
   function mintOf(r: Run, ref: MintRef | undefined): string | null {
@@ -439,8 +465,7 @@ export function createScenarioMock(host: ScenarioHost, params: (network: Network
           const mint = need(mintOf(r, b.mint));
           let zat = amountOf(r, b.zec, "zat");
           // P6: proceeds of a sale are never re-spent one to one.
-          if ("of" in b.zec && typeof b.zec.of === "object" && ["sell", "sell_all", "swap"].includes(r.plan.steps[b.zec.of.step]?.block.type ?? ""))
-            zat = (zat * BigInt(10_000 - Math.round(U(F.swapShaveBps[0], F.swapShaveBps[1])))) / BigInt(10_000);
+          if (r.lastKind === "sell") zat = (zat * BigInt(10_000 - Math.round(U(F.swapShaveBps[0], F.swapShaveBps[1])))) / BigInt(10_000);
           return inflightOn(send({ op: "buy", venue: b.venue, mint, zecIn: zat.toString(), minOut: host.buyMinOut(mint, zat, b.guard).toString(), exec: execOf(b.exec) }));
         }
         case "sell":
@@ -501,7 +526,7 @@ export function createScenarioMock(host: ScenarioHost, params: (network: Network
         }
         case "chat": {
           const mint = need(mintOf(r, b.mint));
-          send({ op: "chat", mint, text: b.text, ...(b.showCreatorBadge ? { showCreatorBadge: true } : {}), ...(tradedBefore(r, s.id, mint) ? { slow: true } : {}) });
+          send({ op: "chat", mint, text: b.text, ...(b.showCreatorBadge ? { showCreatorBadge: true } : {}), ...(lastTradeOf(r, mint) !== undefined ? { slow: true } : {}) });
           unseal(r, s.id);
           complete(r, s.id, now);
           return true;
@@ -616,6 +641,12 @@ export function createScenarioMock(host: ScenarioHost, params: (network: Network
     const tokens = fill?.tokenAmount ? BigInt(fill.tokenAmount) : undefined;
     const zat = fill?.zecCredited ? BigInt(fill.zecCredited) : undefined;
     rt.attempt = 0;
+    // Record the trade for the time-based floors.
+    if (b.type === "buy") noteTrade(r, mintOf(r, b.mint), "buy", now);
+    else if (b.type === "sell" || b.type === "sell_all") noteTrade(r, mintOf(r, b.mint), "sell", now);
+    else if (b.type === "create") noteTrade(r, fill?.mint, "buy", now);
+    else if (b.type === "dca") noteTrade(r, mintOf(r, b.mint), b.side === "buy" ? "buy" : "sell", now);
+    else if (b.type === "swap") noteTrade(r, rt.swap?.leg === "sell" ? mintOf(r, b.from) : mintOf(r, b.to), rt.swap?.leg === "sell" ? "sell" : "buy", now);
     if (b.type === "swap" && rt.swap?.leg === "sell") {
       rt.swap = { leg: "pause", zat: zat ?? N0 };
       const F = params(r.network).floors;
@@ -778,13 +809,16 @@ function isSealed(b: ScenarioBlock): boolean {
   return b.type === "withdraw_zec" || b.type === "withdraw_token" || b.type === "chat" || b.type === "create";
 }
 
-/** Echo of a block for Portfolio: addresses masked, text / launch meta without content (§4.3, §4.4). */
+/**
+ * Echo of a block for Portfolio (v0.19, review-scenarios.md 2): no part of a withdrawal address is kept in the
+ * echo — "sealed" per destination — and text / launch meta are empty. The signing device shows its own copy.
+ */
 export function mask(b: ScenarioBlock): ScenarioBlock {
   switch (b.type) {
     case "withdraw_zec":
-      return { ...b, to: b.to.includes("…") ? b.to : maskAddr(b.to) };
+      return { ...b, to: "sealed" };
     case "withdraw_token":
-      return { ...b, to: Array.isArray(b.to) ? b.to.map((a) => (a.includes("…") ? a : maskAddr(a))) : b.to.includes("…") ? b.to : maskAddr(b.to) };
+      return { ...b, to: Array.isArray(b.to) ? b.to.map(() => "sealed") : "sealed" };
     case "chat":
       return { ...b, text: "" };
     case "create":

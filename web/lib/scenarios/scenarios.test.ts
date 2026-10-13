@@ -144,7 +144,7 @@ describe("privacy rules (422 scenario_rule)", () => {
     const wd: ScenarioBlock = { type: "withdraw_token", mint: PEPE, amount: { pct: 100, of: "balance" }, to: WALLET_A, exec: "max" };
     const r = validatePlan(plan([buy(), wait(600, 1200), wd]), ctx);
     expect(r.issues).toContainEqual(expect.objectContaining({ step: 2, code: "withdraw_too_soon", kind: "rule" }));
-    expect(r.issues.find((x) => x.code === "withdraw_too_soon")!.message).toMatch(/^Withdraw waits ≥1 h after the trade/);
+    expect(r.issues.find((x) => x.code === "withdraw_too_soon")!.message).toMatch(/^Withdraw waits ≥1 h after your last trade of this token/);
     const ok = validatePlan(plan([buy(), wait(H, 2 * H), wd]), ctx);
     expect(ok.issues).toEqual([]);
     expect(ok.floors).toContainEqual(expect.objectContaining({ step: 2, code: "withdraw_after_trade" }));
@@ -208,11 +208,13 @@ describe("floors on the chain", () => {
     expect(r.issues).toEqual([]);
     const f = Object.fromEntries(r.floors.map((x) => [x.code, x]));
     expect(f.after_deposit).toMatchObject({ step: 0, text: "After a deposit: random 10–40 min" });
-    expect(f.trade_gap).toMatchObject({ step: 2 });
+    // P9 reaches every later trade (step 2 right after a buy, and the rotation at 5 behind waits)
+    expect(r.floors.filter((x) => x.code === "trade_gap").map((x) => x.step)).toEqual([2, 5]);
+    expect(f.withdraw_after_trade).toBeUndefined();
     expect(f.fixed_jitter.step).toBe(3);
     expect(f.time_jitter.step).toBe(4);
     expect(f.swap_gap.step).toBe(5);
-    expect(f.chat_after_trade.step).toBe(6);
+    expect(f.chat_after_trade).toMatchObject({ step: 6, text: "Slow mode + random 10–30 min after your last trade of this token" });
   });
 
   it("marks Now after manual start", () => {
@@ -321,5 +323,15 @@ describe("draft model", () => {
     const b = defaultBlock("wait_random");
     expect(b).toEqual({ type: "wait_random", minSecs: 1200, maxSecs: 5400 });
     expect(defaultBlock("withdraw_zec")).toMatchObject({ exec: "max" });
+  });
+});
+
+describe("sealed values in the echo", () => {
+  it("reads a server echo without the address as sealed, and the local copy with it", async () => {
+    const { describeBlock } = await import("./describe");
+    const p = plan([{ type: "withdraw_zec", to: "sealed", amount: { pct: 100, of: "balance" }, exec: "max" }]);
+    expect(describeBlock(p, p.steps[0].block, () => null, { sealed: true })).toContain("a sealed address (set on another device)");
+    const local = plan([{ type: "withdraw_zec", to: UA, amount: { pct: 100, of: "balance" }, exec: "max" }]);
+    expect(describeBlock(local, local.steps[0].block, () => null, { sealed: true })).toContain(`${UA.slice(0, 4)}…${UA.slice(-4)}`);
   });
 });
