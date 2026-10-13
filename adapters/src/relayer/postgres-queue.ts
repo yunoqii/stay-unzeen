@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { Keypair } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import type { Pool, PoolClient } from "pg";
 import type { ApiErrorCode } from "../errors";
 import type { VenueId } from "../types";
@@ -42,7 +42,7 @@ export interface PostgresJobQueueOptions {
 
 const OPS = ["buy", "sell", "create", "transfer"] as const;
 /** RELAYER v3 (core 0008): taken only when relayer_jobs has the v3 columns. */
-const OPS_V3 = [...OPS, "fair_create", "attest"] as const;
+const OPS_V3 = [...OPS, "fair_create", "attest", "fund_vaults", "consolidate"] as const; // v7 ops: absent rows simply never match
 
 /** Row of relayer_jobs as returned by `claim` (pg returns BIGINT as string). */
 export interface JobRow {
@@ -408,6 +408,42 @@ export class PostgresJobQueue implements JobQueue {
       if (res.rowCount !== 1) throw new LeaseLostError(job.id);
       return;
     }
+    if (e.kind === "fund_vaults") {
+      // v7: lamports that reached the vaults; no feed rows (pool-internal).
+      const res = await this.pool.query(
+        `UPDATE relayer_jobs SET status = 'confirmed', slot = $2, out_lamports = $3, network_fee = $4, updated_at = now()
+          WHERE id = $1 AND status = 'sent' AND signature = $5 AND claimed_by = $6 AND settled_at IS NULL`,
+        [job.id, e.slot, e.lamports.toString(), e.networkFee.toString(), e.signature, job.leaseId],
+      );
+      if (res.rowCount !== 1) throw new LeaseLostError(job.id);
+      return;
+    }
+    if (e.kind === "consolidate") {
+      if (e.signature !== null) {
+        const res = await this.pool.query(
+          `UPDATE relayer_jobs SET status = 'confirmed', slot = $2, out_token_amount = $3, network_fee = $4, updated_at = now()
+            WHERE id = $1 AND status = 'sent' AND signature = $5 AND claimed_by = $6 AND settled_at IS NULL`,
+          [job.id, e.slot, e.tokenAmount.toString(), e.networkFee.toString(), e.signature, job.leaseId],
+        );
+        if (res.rowCount !== 1) throw new LeaseLostError(job.id);
+        return;
+      }
+      // Empty leg vault: nothing was sent, confirmed with 0 (RELAYER v7 B5).
+      try {
+        const res = await this.pool.query(
+          `UPDATE relayer_jobs SET status = 'confirmed', vault = $2, out_token_amount = 0, network_fee = 0, updated_at = now()
+            WHERE id = $1 AND status IN ('claimed', 'sent') AND claimed_by = $3 AND settled_at IS NULL`,
+          [job.id, e.vault, job.leaseId],
+        );
+        if (res.rowCount !== 1) throw new LeaseLostError(job.id);
+      } catch (err) {
+        // 0002 CHECK (confirmed => signature IS NOT NULL) until core relaxes it for consolidate:
+        // report the empty leg as failed/not_found (core retries, then alerts; nothing is lost).
+        if ((err as { code?: string }).code !== "23514") throw err;
+        await this.reportResult(job, { status: "failed", code: "not_found", message: "leg vault empty" });
+      }
+      return;
+    }
     // v6: exact launch-tx creator fee (create / fair_create), when known and the column exists.
     const fee = e.kind === "create" && e.creatorFee !== undefined && e.creatorFee !== null && (await this.hasCreatorFee()) ? e.creatorFee : null;
     const client = await this.pool.connect();
@@ -415,11 +451,20 @@ export class PostgresJobQueue implements JobQueue {
       await client.query("BEGIN");
       const outLamports = e.kind === "withdraw" ? 0n : e.solAmount;
       const params: unknown[] = [job.id, e.slot, e.mint, e.tokenAmount.toString(), outLamports.toString(), e.networkFee.toString(), e.signature, job.leaseId];
-      if (fee !== null) params.push(fee.toString());
+      let extra = "";
+      if (fee !== null) {
+        params.push(fee.toString());
+        extra += `, out_creator_fee = $${params.length}`;
+      }
+      // v7 B2: on confirmed, bundle_legs = exactly the legs that landed (NULL when none did).
+      if (e.kind === "create" && (await this.hasBundleLegs())) {
+        params.push(e.legs?.length ? JSON.stringify(e.legs.map((l) => ({ sig: l.signature, vault: l.vault }))) : null);
+        extra += `, bundle_legs = $${params.length}::jsonb`;
+      }
       const res = await client.query(
         `UPDATE relayer_jobs
             SET status = 'confirmed', slot = $2, out_mint = $3, out_token_amount = $4,
-                out_lamports = $5, network_fee = $6, updated_at = now()${fee !== null ? ", out_creator_fee = $9" : ""}
+                out_lamports = $5, network_fee = $6, updated_at = now()${extra}
           WHERE id = $1 AND status = 'sent' AND signature = $7 AND claimed_by = $8 AND settled_at IS NULL`,
         params,
       );
@@ -581,6 +626,19 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
       // F14: no marker -> the fair-launch key (never the public Verify key by accident).
       return { kind: "attest", memo: m.memo, purpose: m.purpose === "verify" ? "verify" : "fair" };
     }
+    case "fund_vaults": {
+      const lamports = big(row.lamports_in, "lamports_in");
+      if (lamports <= 0n) throw new Error(`job ${row.id}: lamports_in must be > 0`);
+      return { kind: "fund_vaults", lamports };
+    }
+    case "consolidate": {
+      const mint = needMint();
+      const from = (row.meta as { from?: unknown } | null | undefined)?.from;
+      if (typeof from !== "string" || !isPubkey(from)) throw new Error(`job ${row.id}: meta.from must be a vault address`);
+      if (!row.dest || !isPubkey(row.dest)) throw new Error(`job ${row.id}: dest missing`);
+      if (from === row.dest) throw new Error(`job ${row.id}: from = dest`);
+      return { kind: "consolidate", mint, from, to: row.dest };
+    }
     case "transfer": {
       const mint = needMint();
       if (!row.dest) throw new Error(`job ${row.id}: dest missing`);
@@ -595,6 +653,14 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
     }
     default:
       throw new Error(`job ${row.id}: op ${row.op} not supported by this relayer`);
+  }
+}
+
+function isPubkey(s: string): boolean {
+  try {
+    return new PublicKey(s).toBase58() === s;
+  } catch {
+    return false;
   }
 }
 

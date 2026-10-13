@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { Connection, type AccountInfo, type PublicKey } from "@solana/web3.js";
 import { rateLimitedFetch } from "./reader";
+import { getTransactionAnyVersion } from "../tx";
 import type { DiscoveryCandidate, DiscoveryChain, DiscoveryCommit, DiscoveryStore, DiscoveryVenue } from "./discovery";
 
 /**
@@ -103,18 +104,10 @@ export class RpcDiscoveryChain implements DiscoveryChain {
   async getMultipleAccounts(keys: readonly PublicKey[]): Promise<(AccountInfo<Buffer> | null)[]> {
     return this.conn.getMultipleAccountsInfo(keys as PublicKey[]);
   }
-  /**
-   * Logs only, via a raw getTransaction with maxSupportedTransactionVersion 1:
-   * web3.js 1.99 refuses v1 transactions (seen on mainnet 13.10), and the
-   * CreateEvent we need is in the logs anyway.
-   */
+  /** Logs of the create (CreateEvent is in "Program data:"); v1 transactions included. */
   async getLogs(signature: string): Promise<string[] | null> {
-    const rpc = (this.conn as unknown as { _rpcRequest(m: string, a: unknown[]): Promise<{ result?: { meta?: { err?: unknown; logMessages?: unknown } } | null; error?: unknown }> })._rpcRequest;
-    const r = await rpc
-      .call(this.conn, "getTransaction", [signature, { encoding: "json", commitment: "confirmed", maxSupportedTransactionVersion: 1 }])
-      .catch(() => null);
-    const meta = r?.result?.meta;
-    if (!meta || meta.err || !Array.isArray(meta.logMessages)) return null;
-    return meta.logMessages.filter((l): l is string => typeof l === "string");
+    const tx = await getTransactionAnyVersion(this.conn, signature).catch(() => null);
+    if (!tx?.meta || tx.meta.err) return null;
+    return tx.meta.logMessages ?? null;
   }
 }

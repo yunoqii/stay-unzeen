@@ -40,8 +40,8 @@ export const systemClock: Clock = {
  */
 export interface RelayerEvent {
   event: "executed" | "failed" | "retry" | "resend";
-  /** "bundle": a fair-launch Jito bundle was sent; "consolidate": leg tokens moved to the mint's vault. */
-  kind: JobSpec["kind"] | "bundle" | "consolidate";
+  /** "bundle": a fair-launch Jito bundle expired unlanded and is retried. */
+  kind: JobSpec["kind"] | "bundle";
   code?: ApiErrorCode;
 }
 
@@ -50,6 +50,10 @@ export interface Executors {
   withdraw: JobExecutor;
   /** RELAYER v3 attest; absent = attest jobs fail venue_unavailable (nothing signed). */
   attest?: JobExecutor;
+  /** RELAYER v7 fund_vaults (rebalance address -> vaults); absent = fail unsigned. */
+  fund?: JobExecutor;
+  /** RELAYER v7 consolidate (leg vault -> mint's vault); absent = fail unsigned. */
+  consolidate?: JobExecutor;
 }
 
 export interface RelayerOptions {
@@ -94,8 +98,6 @@ const TRANSIENT: ReadonlySet<ApiErrorCode> = new Set(["venue_unavailable", "pool
 export class Relayer {
   private readonly o: Required<Omit<RelayerOptions, "onEvent" | "mintVaults" | "fairBundler">> &
     Pick<RelayerOptions, "onEvent" | "mintVaults" | "fairBundler">;
-  /** Fair bundles whose leg tokens still sit on leg vaults (retried after each tick, best effort). */
-  private readonly strays: { mint: string; to: string; from: string; tries: number }[] = [];
 
   constructor(opts: RelayerOptions) {
     this.o = {
@@ -143,41 +145,7 @@ export class Relayer {
       if (!(e instanceof LeaseLostError)) throw e;
     }
     this.emit(job.spec.kind, result);
-    if (result.status === "executed" && result.execution.kind === "create" && result.execution.legs?.length) {
-      // D4: move the legs' tokens to the mint's vault right after the launch settles.
-      for (const l of result.execution.legs) this.strays.push({ mint: result.execution.mint, to: result.execution.vault, from: l.vault, tries: 0 });
-    }
-    await this.consolidateStrays();
     return true;
-  }
-
-  /**
-   * Fair-launch v2 consolidation (D4: one vault per mint): every leg vault
-   * sends its whole balance of the new mint to the create vault. Idempotent by
-   * balance (a repeat finds 0 or fails on insufficient funds, never doubles).
-   * Best effort: a busy vault is retried on the next tick; after 20 tries the
-   * stray stays where it is (still pool inventory, counted by Verify).
-   */
-  private async consolidateStrays(): Promise<void> {
-    const fb = this.o.fairBundler;
-    if (!fb || this.strays.length === 0) return;
-    for (const s of [...this.strays]) {
-      const signer = await this.o.pool.lockVault(s.from).catch(() => null);
-      if (!signer) {
-        if (++s.tries >= 20) this.strays.splice(this.strays.indexOf(s), 1);
-        continue;
-      }
-      try {
-        await fb.consolidate(s.mint, s.to, signer);
-        this.strays.splice(this.strays.indexOf(s), 1);
-        this.o.onEvent?.({ event: "executed", kind: "consolidate" });
-      } catch {
-        if (++s.tries >= 20) this.strays.splice(this.strays.indexOf(s), 1);
-        this.o.onEvent?.({ event: "retry", kind: "consolidate" });
-      } finally {
-        await this.o.pool.release(signer).catch(() => undefined);
-      }
-    }
   }
 
   /**
@@ -233,7 +201,9 @@ export class Relayer {
     const mv = this.o.mintVaults;
     if (!mv) return { req, pinFor: null };
     if (spec.kind === "create") return { req: { ...req, load: await mv.load() }, pinFor: null };
-    if (spec.kind === "attest") return { req, pinFor: null };
+    // attest / fund_vaults sign with their own key; consolidate is pinned to its leg vault
+    // (`only: from` from the executor), NOT to the mint's vault (that is the recipient).
+    if (spec.kind === "attest" || spec.kind === "fund_vaults" || spec.kind === "consolidate") return { req, pinFor: null };
     if (spec.kind === "fair_create") {
       // The mint is fixed by core and identical on every attempt: a retry must
       // use the vault the first attempt pinned (D4), like a buy of a known mint.
@@ -250,6 +220,14 @@ export class Relayer {
 
   private executor(spec: JobSpec): JobExecutor {
     if (spec.kind === "withdraw") return this.o.executors.withdraw;
+    if (spec.kind === "fund_vaults") {
+      if (!this.o.executors.fund) throw new AdapterError("venue_unavailable", "no rebalance key configured");
+      return this.o.executors.fund;
+    }
+    if (spec.kind === "consolidate") {
+      if (!this.o.executors.consolidate) throw new AdapterError("venue_unavailable", "consolidation not configured");
+      return this.o.executors.consolidate;
+    }
     if (spec.kind === "attest") {
       if (!this.o.executors.attest) throw new AdapterError("venue_unavailable", "no attestation key configured");
       return this.o.executors.attest;
@@ -311,6 +289,15 @@ export class Relayer {
           // First buy of a mint: pin it to this vault (another worker may have won the race).
           const winner = await this.o.mintVaults.assign(pinFor, vaultKey);
           if (winner !== vaultKey) return this.retry(job, "venue_unavailable", "mint pinned elsewhere", 500);
+        }
+        if (ex.noop) {
+          let done: Execution | null;
+          try {
+            done = await ex.noop(spec, vault);
+          } catch (e) {
+            return this.fromError(job, ex.classify(e));
+          }
+          if (done) return { status: "executed", execution: done };
         }
         let tx: SignedTx;
         try {

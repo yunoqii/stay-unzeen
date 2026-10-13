@@ -84,7 +84,27 @@ export interface AttestJobSpec {
   purpose: "verify" | "fair";
 }
 
-export type JobSpec = BuyJobSpec | SellJobSpec | CreateJobSpec | WithdrawJobSpec | FairCreateJobSpec | AttestJobSpec;
+/**
+ * RELAYER v7 `fund_vaults` (core 0015, `meta.purpose = "rebalance"`): ONE tx
+ * from the pool's rebalance address spreading up to `lamports` over the vaults.
+ */
+export interface FundVaultsJobSpec {
+  kind: "fund_vaults";
+  lamports: bigint;
+}
+
+/**
+ * RELAYER v7 `consolidate` (core 0017): move the WHOLE balance of `mint` from
+ * the fair-launch leg vault `from` (`meta.from`) to the mint's vault `to` (`dest`).
+ */
+export interface ConsolidateJobSpec {
+  kind: "consolidate";
+  mint: string;
+  from: string;
+  to: string;
+}
+
+export type JobSpec = BuyJobSpec | SellJobSpec | CreateJobSpec | WithdrawJobSpec | FairCreateJobSpec | AttestJobSpec | FundVaultsJobSpec | ConsolidateJobSpec;
 export type JobKind = JobSpec["kind"];
 
 /**
@@ -235,8 +255,34 @@ export interface AttestExecution {
   outSig?: string;
 }
 
+/** fund_vaults: lamports that reached the vaults (`out_lamports`); `vault` = rebalance address. */
+export interface FundExecution {
+  kind: "fund_vaults";
+  signature: string;
+  slot: number;
+  vault: string;
+  lamports: bigint;
+  networkFee: bigint;
+  blockTime: number | null;
+}
+
+/**
+ * consolidate: tokens moved (`out_token_amount`); `vault` = the leg vault.
+ * `signature` null = the vault held nothing (no tx was needed).
+ */
+export interface ConsolidateExecution {
+  kind: "consolidate";
+  signature: string | null;
+  slot: number | null;
+  vault: string;
+  mint: string;
+  to: string;
+  tokenAmount: bigint;
+  networkFee: bigint;
+}
+
 /** fair_create executes like create (same feed rows); `CreateExecution.mint` = pubkey of `mint_secret`. */
-export type Execution = TradeExecution | CreateExecution | WithdrawExecution | AttestExecution;
+export type Execution = TradeExecution | CreateExecution | WithdrawExecution | AttestExecution | FundExecution | ConsolidateExecution;
 
 export type JobResult =
   /** Done on chain; amounts are the executed ones. */

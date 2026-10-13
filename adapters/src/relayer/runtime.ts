@@ -19,8 +19,9 @@ import { txPipeline, type TxPipeline } from "../sender";
 import { TokenWithdrawer } from "../withdraw";
 import { jitoConfigFromEnv, type JitoConfig, type JitoTipCache } from "../jito";
 import { jitoFairBundler, type FairBundler } from "./fair-bundler";
+import { PoolSolInventoryWriter, VaultFunder, deriveRebalanceKeypair } from "../rebalance";
 import { Relayer, type RelayerEvent } from "./engine";
-import { AttestExecutor, RpcChainProbe, VenueTradeExecutor, WithdrawExecutor, type JobExecutor } from "./executors";
+import { AttestExecutor, ConsolidateExecutor, FundVaultsExecutor, RpcChainProbe, VenueTradeExecutor, WithdrawExecutor, type JobExecutor } from "./executors";
 import { LaunchCurveWriter, pumpLaunchCurve } from "./launch-curves";
 import { FileMintVaults, PgMintVaults, type MintVaults } from "./mint-vaults";
 import { PostgresJobQueue, type SolanaNetwork } from "./postgres-queue";
@@ -170,6 +171,10 @@ export interface RelayerRuntime {
   fairBundler: FairBundler | null;
   /** Background Jito tip floor: `await refresh(); start()` with the fee cache, `stop()` after. Null when off. */
   jitoTips: JitoTipCache | null;
+  /** RELAYER v7: rebalance address (own HD branch, m/44'/501'/2147483645'/4'). Public key only is ever printed. */
+  rebalanceAddress: PublicKey;
+  /** RELAYER v7 `pool_sol_inventory` writer; run it only when `poolSolInventoryWritable`. */
+  solInventory: PoolSolInventoryWriter;
 }
 
 /**
@@ -295,13 +300,20 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   const withdrawer = new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: fees, pipeline });
   // Fair-launch v2: Jito bundles over several vaults, mainnet only (decision 13.10: Jito ONLY here, never Now).
   const jito = o.jito !== undefined ? o.jito : jitoConfigFromEnv(o.cfg.cluster, env);
-  const fair = o.cfg.cluster === "mainnet-beta" && jito ? jitoFairBundler({ adapter, metadata, connection: o.connection, withdrawer, cfg: jito }) : null;
+  const fair = o.cfg.cluster === "mainnet-beta" && jito ? jitoFairBundler({ adapter, metadata, connection: o.connection, cfg: jito }) : null;
+  // RELAYER v7: rebalance address -> vaults (fund_vaults) and leg vault -> mint's vault (consolidate).
+  const rebalanceKey = deriveRebalanceKeypair(o.keys.creatorSeed);
+  const vaultKeys = vaults.map((v) => v.publicKey);
+  const funder = new VaultFunder({ connection: o.connection, key: rebalanceKey, vaults: vaultKeys, priorityMicroLamports: fees, pipeline });
+  const solInventory = new PoolSolInventoryWriter(o.db, o.network, verifyReadConnection(o.cfg, o.connection, env, () => undefined), vaultKeys, rebalanceKey.publicKey);
   const relayer = new Relayer({
     queue,
     pool,
     ...(fair ? { fairBundler: fair.bundler } : {}),
     executors: {
       trade,
+      fund: new FundVaultsExecutor(funder, rebalanceKey),
+      consolidate: new ConsolidateExecutor(withdrawer, new RpcVaultInventory(o.connection)),
       withdraw: new WithdrawExecutor(withdrawer, cryptoRng),
       attest: new AttestExecutor({ verify: attester, fair: fairAttester }),
     },
@@ -327,6 +339,8 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     snapshotter,
     fairBundler: fair?.bundler ?? null,
     jitoTips: fair?.tips ?? null,
+    rebalanceAddress: rebalanceKey.publicKey,
+    solInventory,
   };
 }
 

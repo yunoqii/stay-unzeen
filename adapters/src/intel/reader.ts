@@ -1,6 +1,7 @@
 import { PUMP_PROGRAM_ID } from "@pump-fun/pump-sdk";
 import { Connection, PublicKey, type AccountInfo, type Commitment } from "@solana/web3.js";
 import type { LargestAccount } from "./metrics";
+import { getTransactionAnyVersion } from "../tx";
 
 /**
  * Read side of the intel indexer. Reads go to the READ provider (Shyft,
@@ -82,7 +83,8 @@ export class RpcChainReader implements ChainReader {
     const picked = shuffle(ok).slice(0, sample);
     const mints = new Set<string>();
     for (const sig of picked) {
-      const tx = await this.read.getTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }).catch(() => null);
+      // v1 transactions (mainnet 13.10) are read too, not dropped.
+      const tx = await getTransactionAnyVersion(this.read, sig).catch(() => null);
       for (const b of tx?.meta?.postTokenBalances ?? []) {
         if (b.mint !== "So11111111111111111111111111111111111111112") mints.add(b.mint);
       }

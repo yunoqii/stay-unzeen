@@ -9,7 +9,8 @@ import type { MetadataStore } from "../metadata";
 import type { TokenWithdrawer } from "../withdraw";
 import { DEFAULT_GAS_DROP, pickGasDrop, type GasDropRange, type Rng } from "./random";
 import type { Execution, JobSpec, SentAttempt } from "./types";
-import type { VaultRequest } from "./vaults";
+import type { VaultInventory, VaultRequest } from "./vaults";
+import type { VaultFunder } from "../rebalance";
 
 /** Headroom on top of the traded lamports: ATA + accumulator rent + fees. */
 const BUY_SOL_HEADROOM = 5_000_000n;
@@ -34,6 +35,11 @@ export interface JobExecutor<S extends JobSpec = JobSpec> {
   ownSigner?(spec: S): Signer;
   /** RELAYER v6 §4: `out_sig` known before sending (Verify attest); recorded with the attempt. */
   earlyOutSig?(spec: S): string | null;
+  /**
+   * Called with the leased vault before `prepare`: a result here means nothing
+   * has to be sent (consolidate of an empty leg vault). null = go on.
+   */
+  noop?(spec: S, vault: Signer): Promise<Execution | null>;
 }
 
 /** Chain access used to resolve recorded attempts. */
@@ -297,5 +303,66 @@ export class AttestExecutor implements JobExecutor<Extract<JobSpec, { kind: "att
 
   classify(err: unknown, logs: readonly string[] | null = null): AdapterError {
     return this.by.verify.classify(err, logs);
+  }
+}
+
+/** RELAYER v7 `fund_vaults`: signed and paid by the rebalance address (no vault lease). */
+export class FundVaultsExecutor implements JobExecutor<Extract<JobSpec, { kind: "fund_vaults" }>> {
+  constructor(private readonly funder: Pick<VaultFunder, "prepare" | "submit" | "result" | "classify">, private readonly key: Signer) {}
+  vaultRequest(): VaultRequest {
+    return { minSol: 0n };
+  }
+  ownSigner(): Signer {
+    return this.key;
+  }
+  prepare(spec: Extract<JobSpec, { kind: "fund_vaults" }>): Promise<SignedTx> {
+    return this.funder.prepare(spec.lamports);
+  }
+  async submit(tx: SignedTx): Promise<void> {
+    await this.funder.submit(tx);
+  }
+  async result(_spec: Extract<JobSpec, { kind: "fund_vaults" }>, a: SentAttempt): Promise<Execution | null> {
+    const r = await this.funder.result(a.signature);
+    if (!r) return null;
+    return { kind: "fund_vaults", signature: r.signature, slot: r.slot, vault: a.vault, lamports: r.lamports, networkFee: r.networkFee, blockTime: r.blockTime };
+  }
+  classify(err: unknown, logs: readonly string[] | null = null): AdapterError {
+    return this.funder.classify(err, logs);
+  }
+}
+
+/**
+ * RELAYER v7 `consolidate`: whole balance of `mint` from the leg vault to the
+ * mint's vault (pool-internal transfer, no gas drop, recipient ATA created if
+ * needed, paid by the leg vault). Empty leg -> executed with 0, nothing sent.
+ */
+export class ConsolidateExecutor implements JobExecutor<Extract<JobSpec, { kind: "consolidate" }>> {
+  constructor(
+    private readonly withdrawer: Pick<TokenWithdrawer, "prepare" | "submit" | "result" | "classify">,
+    private readonly inventory: Pick<VaultInventory, "tokenBalance">,
+  ) {}
+  vaultRequest(spec: Extract<JobSpec, { kind: "consolidate" }>): VaultRequest {
+    return { minSol: ATA_RENT_HEADROOM + FEE_SOL_HEADROOM, only: spec.from };
+  }
+  async noop(spec: Extract<JobSpec, { kind: "consolidate" }>, vault: Signer): Promise<Execution | null> {
+    const held = await this.inventory.tokenBalance(vault.publicKey, spec.mint);
+    if (held > 0n) return null;
+    return { kind: "consolidate", signature: null, slot: null, vault: spec.from, mint: spec.mint, to: spec.to, tokenAmount: 0n, networkFee: 0n };
+  }
+  async prepare(spec: Extract<JobSpec, { kind: "consolidate" }>, vault: Signer): Promise<SignedTx> {
+    const held = await this.inventory.tokenBalance(vault.publicKey, spec.mint);
+    if (held <= 0n) throw new AdapterError("insufficient_tokens", "leg vault is empty");
+    return this.withdrawer.prepare({ vault, mint: spec.mint, to: spec.to, amount: held, gasDropLamports: 0n, internal: true });
+  }
+  async submit(tx: SignedTx): Promise<void> {
+    await this.withdrawer.submit(tx);
+  }
+  async result(spec: Extract<JobSpec, { kind: "consolidate" }>, a: SentAttempt): Promise<Execution | null> {
+    const r = await this.withdrawer.result(a.signature, { mint: spec.mint, vault: a.vault, to: spec.to });
+    if (!r) return null;
+    return { kind: "consolidate", signature: r.signature, slot: r.slot, vault: a.vault, mint: spec.mint, to: spec.to, tokenAmount: r.tokenAmount, networkFee: r.networkFee };
+  }
+  classify(err: unknown, logs: readonly string[] | null = null): AdapterError {
+    return this.withdrawer.classify(err, logs);
   }
 }

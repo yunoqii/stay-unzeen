@@ -1,19 +1,18 @@
-import { TOKEN_2022_PROGRAM_ID, getAssociatedTokenAddressSync, unpackAccount } from "@solana/spl-token";
+import { TOKEN_2022_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { PublicKey, VersionedTransaction, type Connection, type Signer } from "@solana/web3.js";
 import { AdapterError } from "../errors";
 import { DEFAULT_PLAN, type FairPlanConfig } from "../fair-bundle";
 import { JitoClient, JitoTipCache, jitoTip, type BundleSender, type JitoConfig } from "../jito";
 import type { MetadataStore } from "../metadata";
 import type { FairLegResult, PreparedFairBundle, PumpFunAdapter } from "../pumpfun";
-import type { SignedTx } from "../tx";
-import type { TokenWithdrawer } from "../withdraw";
 import type { BundleLeg, FairCreateJobSpec } from "./types";
 
 /**
  * Fair-launch v2 (mainnet only): what the engine needs to run a launch as a
  * Jito bundle over several vaults. The engine keeps the safety protocol
  * (record before send, resolve before resend, one mint keypair); this object
- * only signs, relays, reads and consolidates.
+ * only signs, relays and reads. Leg tokens are moved to vault A by core's
+ * `consolidate` jobs (RELAYER v7), not here.
  */
 export interface FairBundler {
   /** Planner limits (reserves include the tip and the consolidation tx). */
@@ -39,8 +38,6 @@ export interface FairBundler {
    * the first successful tx on each other vault's ATA of the new mint.
    */
   discoverLegs(mint: string, createVault: string, vaults: readonly string[]): Promise<BundleLeg[]>;
-  /** Moves the whole balance of `mint` from `from` to `to` (pool-internal, idempotent by balance). */
-  consolidate(mint: string, to: string, from: Signer): Promise<"moved" | "empty">;
   /** Public market snapshot after the last leg (tokens table); optional. */
   market?(mint: string): Promise<{ priceSol: string; marketCapSol: string; status: "curve" | "graduated" }>;
 }
@@ -53,8 +50,7 @@ export interface JitoFairBundlerOptions {
   adapter: Pick<PumpFunAdapter, "prepareFairBundle" | "freshQuote" | "fairLegResult" | "classify" | "market">;
   metadata: MetadataStore | null;
   /** Send-side RPC (Helius): it sees every pool tx anyway; never the read provider. */
-  connection: Pick<Connection, "getBlockHeight" | "getSignaturesForAddress" | "getAccountInfo" | "simulateTransaction">;
-  withdrawer: Pick<TokenWithdrawer, "prepare" | "submit">;
+  connection: Pick<Connection, "getBlockHeight" | "getSignaturesForAddress" | "simulateTransaction">;
   sender: BundleSender;
   tips: Pick<JitoTipCache, "current">;
   cfg: Pick<JitoConfig, "maxLegs" | "maxPerVaultLamports" | "bundleTries" | "maxTipLamports">;
@@ -157,15 +153,7 @@ export class JitoFairBundler implements FairBundler {
     return out;
   }
 
-  async consolidate(mint: string, to: string, from: Signer): Promise<"moved" | "empty"> {
-    const ata = getAssociatedTokenAddressSync(new PublicKey(mint), from.publicKey, true, TOKEN_2022_PROGRAM_ID);
-    const info = await this.o.connection.getAccountInfo(ata, "confirmed");
-    const held = info ? unpackAccount(ata, info, TOKEN_2022_PROGRAM_ID).amount : 0n;
-    if (held === 0n) return "empty";
-    const tx: SignedTx = await this.o.withdrawer.prepare({ vault: from, mint, to, amount: held, gasDropLamports: 0n, internal: true });
-    await this.o.withdrawer.submit(tx);
-    return "moved";
-  }
+
 }
 
 /** Mainnet runtime wiring: Jito client + background tip floor. Start/stop `tips` with the relayer. */

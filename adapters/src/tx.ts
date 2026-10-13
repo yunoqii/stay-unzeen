@@ -346,10 +346,7 @@ export async function fetchTx(
   attempts = 10,
 ): Promise<VersionedTransactionResponse | null> {
   for (let i = 0; i < attempts; i++) {
-    const tx = await connection.getTransaction(signature, {
-      commitment: "confirmed",
-      maxSupportedTransactionVersion: 0,
-    });
+    const tx = await getTransactionAnyVersion(connection, signature);
     if (tx) return tx;
     await new Promise((r) => setTimeout(r, 500 + i * 300));
   }
@@ -358,4 +355,17 @@ export async function fetchTx(
 
 export function isSendFailure(x: unknown): x is SendFailure {
   return typeof x === "object" && x !== null && "error" in x && "logs" in x;
+}
+
+/**
+ * getTransaction for ANY version our readers meet: legacy, v0 and v1 (v1 txs
+ * appear on mainnet since 2026; asking with maxSupportedTransactionVersion 0
+ * makes the RPC refuse them with "Transaction version (1) is not supported").
+ * web3.js 1.99 parses v1 (MessageV1).
+ */
+export function getTransactionAnyVersion(
+  connection: Pick<Connection, "getTransaction">,
+  signature: string,
+): Promise<VersionedTransactionResponse | null> {
+  return connection.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 1 });
 }

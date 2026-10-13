@@ -11,6 +11,7 @@
  * Logs: event kind + outcome code + duration class only. Never job ids,
  * signatures, mints, vaults, amounts or destinations (RELAYER.md "Приватность").
  */
+import { poolSolInventoryWritable } from "../src/rebalance";
 import { loadRepoEnv, redactSecrets } from "../src/env";
 import { describeConfig, loadConfig, makeConnection } from "../src/config";
 import { buildFeeSweeper } from "../src/relayer/fee-runtime";
@@ -42,7 +43,7 @@ async function main(): Promise<void> {
   }
 
   const connection = makeConnection(cfg);
-  const { relayer, fees, pipeline, pool, attester, fairAttester, launchCurves, snapshotter, jitoTips } = buildRelayer({
+  const { relayer, fees, pipeline, pool, attester, fairAttester, launchCurves, snapshotter, jitoTips, solInventory } = buildRelayer({
     cfg,
     connection,
     network,
@@ -78,6 +79,10 @@ async function main(): Promise<void> {
   const verify = (await verifySnapshotsWritable(db))
     ? snapshotter.run(ac.signal, (e) => warn(`verify snapshot: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 160)}`))
     : (warn("verify_vaults (core 0009) missing or not writable: Verify snapshots will time out on this network"), Promise.resolve());
+  // RELAYER v7: pool SOL inventory (vaults + rebalance address) at start and every ~5 min.
+  const inventory = (await poolSolInventoryWritable(db))
+    ? solInventory.run(ac.signal, (e) => warn(`pool_sol_inventory: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 160)}`))
+    : (warn("pool_sol_inventory (core 0015) missing or not writable: core will not plan rebalances"), Promise.resolve());
   // Attestation key pays its own memo fees (never topped up from a vault).
   for (const [name, k] of [["Verify", attester], ["fair-launch", fairAttester]] as const) {
     const bal = await connection.getBalance(k.publicKey, "confirmed").catch(() => null);
@@ -98,6 +103,7 @@ async function main(): Promise<void> {
     console.error(`[relayer] loop error: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 200)}`),
   );
   await sweep;
+  await inventory;
   await curves;
   await verify;
   fees.stop();

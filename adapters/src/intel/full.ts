@@ -1,6 +1,7 @@
 import { PUMP_PROGRAM_ID, bondingCurvePda } from "@pump-fun/pump-sdk";
 import type { Connection, PublicKey } from "@solana/web3.js";
 import { extractCreateEvents, extractTradeEvents } from "../events";
+import { getTransactionAnyVersion } from "../tx";
 import { pct } from "./metrics";
 import type { TokenSafety } from "./types";
 
@@ -107,7 +108,7 @@ export class RpcFullIntel implements FullIntel {
     const trades: FirstBlockTrade[] = [];
     let createUser: string | null = null;
     for (const s of window) {
-      const tx = await this.read.getTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }).catch(() => null);
+      const tx = await getTransactionAnyVersion(this.read, s.signature).catch(() => null); // v1 included
       if (!tx || tx.meta?.err) continue;
       for (const c of extractCreateEvents(tx, PUMP_PROGRAM_ID)) if (c.mint.equals(mint)) createUser = c.user.toBase58();
       for (const t of extractTradeEvents(tx, PUMP_PROGRAM_ID)) {

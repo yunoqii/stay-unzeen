@@ -24,7 +24,6 @@ class FakeBundler implements FairBundler {
   behaviors: SendBehavior[] = [];
   readonly prepared: { spec: FairCreateJobSpec; legs: { vault: string; lamports: bigint }[]; sigs: string[] }[] = [];
   readonly sent: string[][] = [];
-  readonly consolidated: { mint: string; to: string; from: string }[] = [];
   sentRecorded: (sigs: string[]) => boolean = () => true;
   orderViolations = 0;
   private n = 0;
@@ -92,10 +91,7 @@ class FakeBundler implements FairBundler {
   async discoverLegs(): Promise<BundleLeg[]> {
     return this.discovered;
   }
-  async consolidate(mint: string, to: string, from: Signer): Promise<"moved" | "empty"> {
-    this.consolidated.push({ mint, to, from: from.publicKey.toBase58() });
-    return "moved";
-  }
+
 }
 
 /** Records the spec of every single-tx prepare (capped fallback check). */
@@ -152,7 +148,7 @@ describe("fair-launch v2 engine (Jito bundle, mocked)", () => {
     expect(t.trade.specs[0]).toMatchObject({ kind: "fair_create", lamportsIn: 9n * SOL });
   });
 
-  it("bundle: every leg recorded before the send, mint pinned to leg 0, totals aggregated, legs consolidated", async () => {
+  it("bundle: every leg recorded before the send, mint pinned to leg 0, totals aggregated (consolidation = core's jobs, v7)", async () => {
     const t = setup([4n * SOL, 4n * SOL, 4n * SOL]);
     const id = t.add();
     const j = await t.run(id);
@@ -176,8 +172,6 @@ describe("fair-launch v2 engine (Jito bundle, mocked)", () => {
     expect(r.execution.networkFee).toBe(15_000n);
     expect(r.execution.signature).toBe(p.sigs[0]);
     expect(r.execution.legs!.map((l) => l.signature)).toEqual(p.sigs.slice(1));
-    expect(t.fb.consolidated.map((c) => c.from).sort()).toEqual(p.legs.slice(1).map((l) => l.vault).sort());
-    expect(t.fb.consolidated.every((c) => c.to === p.legs[0]!.vault && c.mint === t.mint.publicKey.toBase58())).toBe(true);
   });
 
   it("bundle not landing: resends the whole bundle (never leg 0 alone), new bundle only after expiry, same mint", async () => {
@@ -241,7 +235,6 @@ describe("fair-launch v2 engine (Jito bundle, mocked)", () => {
     if (r?.status !== "executed" || r.execution.kind !== "create") throw new Error("not executed");
     expect(r.execution.tokenAmount).toBe(1_000n);
     expect(r.execution.legs).toBeUndefined();
-    expect(t.fb.consolidated).toHaveLength(0);
   });
 
   it("restart without leg records (Postgres w/o bundle_legs): waits for expiry, then discovers legs on chain", async () => {

@@ -76,7 +76,8 @@ export class FakeExecutor implements JobExecutor {
 
   vaultRequest(spec: JobSpec) {
     if (spec.kind === "withdraw" || spec.kind === "sell") return { minSol: 1n, mint: spec.mint, minTokens: spec.amount };
-    if (spec.kind === "attest") return { minSol: 0n };
+    if (spec.kind === "attest" || spec.kind === "fund_vaults") return { minSol: 0n };
+    if (spec.kind === "consolidate") return { minSol: 1n, only: spec.from };
     return { minSol: spec.lamportsIn };
   }
 
@@ -141,6 +142,12 @@ export class FakeExecutor implements JobExecutor {
     }
     if (spec.kind === "attest") {
       return { kind: "attest", signature: a.signature, slot: 1, vault: a.vault, memo: spec.memo, networkFee: 5_000n, blockTime: 1 };
+    }
+    if (spec.kind === "fund_vaults") {
+      return { kind: "fund_vaults", signature: a.signature, slot: 1, vault: a.vault, lamports: spec.lamports, networkFee: 5_000n, blockTime: 1 };
+    }
+    if (spec.kind === "consolidate") {
+      return { kind: "consolidate", signature: a.signature, slot: 1, vault: a.vault, mint: spec.mint, to: spec.to, tokenAmount: 777n, networkFee: 5_000n };
     }
     if (spec.kind === "create" || spec.kind === "fair_create") {
       return {
