@@ -229,7 +229,7 @@ describe.skipIf(!DB)("v7 on Postgres (live, temp schema with core's 0015 / 0017 
       // 0017: bundle_legs + op list (only the relayer_jobs parts).
       for (const stmt of m17.replace(/--.*$/gm, "").split(";").map((x) => x.trim()).filter((x) => /^ALTER TABLE relayer_jobs/.test(x))) {
         if (/DROP CONSTRAINT relayer_jobs_op_check/.test(stmt)) continue;
-        await c.query(stmt);
+        await c.query(idempotent(stmt));
       }
     } finally {
       c.release();
@@ -271,7 +271,9 @@ describe.skipIf(!DB)("v7 on Postgres (live, temp schema with core's 0015 / 0017 
     await ins(V(2));
     const c2 = (await q.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000 }))!;
     await q.reportResult(c2, { status: "executed", execution: { kind: "consolidate", signature: null, slot: null, vault: V(2), mint: V(5), to: V(0), tokenAmount: 0n, networkFee: 0n } });
-    expect((await pool.query(`SELECT status, error_code FROM relayer_jobs WHERE id = $1`, [c2.id])).rows[0]).toEqual({ status: "failed", error_code: "not_found" });
+    // 0002's CHECK forbids confirmed without a signature -> failed/not_found; core 0018+ allows it for consolidate.
+    const relaxed = (await pool.query(`SELECT bool_or(pg_get_constraintdef(oid) LIKE '%consolidate%') AS ok FROM pg_constraint WHERE conrelid = 'relayer_jobs'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%signature IS NOT NULL%'`)).rows[0]?.ok === true;
+    expect((await pool.query(`SELECT status, error_code FROM relayer_jobs WHERE id = $1`, [c2.id])).rows[0]).toEqual(relaxed ? { status: "confirmed", error_code: null } : { status: "failed", error_code: "not_found" });
     expect((await pool.query(`SELECT count(*)::int n FROM trades`)).rows[0].n).toBe(0);
   });
 
@@ -294,3 +296,10 @@ describe.skipIf(!DB)("v7 on Postgres (live, temp schema with core's 0015 / 0017 
   });
 });
 
+
+/** Core DDL fragments re-applied on a LIKE copy of a NEWER public schema: make them idempotent. */
+function idempotent(sql: string): string {
+  return sql
+    .replace(/ADD COLUMN (?!IF NOT EXISTS)/g, "ADD COLUMN IF NOT EXISTS ")
+    .replace(/ALTER TABLE (\w+) ADD CONSTRAINT (\w+)/g, "ALTER TABLE $1 DROP CONSTRAINT IF EXISTS $2; ALTER TABLE $1 ADD CONSTRAINT $2");
+}

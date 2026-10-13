@@ -72,10 +72,11 @@ describe("quote pricing", () => {
 });
 
 describe("quote assets / stock policy", () => {
-  it("defaults per network; env overrides; USD1 has no pool A yet", () => {
+  it("defaults per network; env overrides; USD1 pool A is Raydium CLMM", () => {
     const m = quoteAssets("mainnet-beta", {});
     expect(m.find((a) => a.symbol === "USDC")!.poolA!.toBase58()).toBe("8Pm2kZpnxD3hoMmt4bjStX2Pw2Z9abpbHzZxMPqxPmie");
-    expect(m.find((a) => a.symbol === "USD1")!.poolA).toBeNull();
+    expect(m.find((a) => a.symbol === "USD1")).toMatchObject({ poolAType: "clmm" });
+    expect(m.find((a) => a.symbol === "USD1")!.poolA!.toBase58()).toBe("AQAGYQsdU853WAKhXM79CgNdoyhrRwXvYHX6qrDyC1FS");
     const d = quoteAssets("devnet", {});
     expect(d[0]!.mint.toBase58()).toBe("USDCoctVLVnvTXBEuP9s8hntucdJokbo17RwHuNXemT"); // Raydium's devnet USDC, not pump's 4zMMC9…
     const k = Keypair.generate().publicKey.toBase58();
@@ -171,6 +172,7 @@ describe("pump.fun quote pairs", () => {
     const z = quoteAssets("mainnet-beta", { PUMP_QUOTE_ZEC: "1" }, "pumpfun").find((a) => a.symbol === "ZEC")!;
     expect(z.mint.toBase58()).toBe("A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS");
     expect(z.decimals).toBe(8);
-    expect(z.poolA).toBeNull(); // no liquid SOL/ZEC DAMM v2 pool: ZEC trades refused until one is pinned
+    expect(z.poolA).toBeNull(); // stock-only by design (lead 13.10): no leg, amounts in ZEC units
+    expect(z.stockOnly).toBe(true);
   });
 });

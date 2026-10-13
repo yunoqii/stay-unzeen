@@ -136,4 +136,19 @@ describe("VenueTradeExecutor (any bonding-curve venue)", () => {
     const r = await ex.result({ kind: "buy", venue: "meteora-dbc", mint: MINT, lamportsIn: 1n, minOut: 1n }, { signature: "sigX", lastValidBlockHeight: 10, vault: "v", sentAt: 0 });
     expect(r).toBeNull();
   });
+
+  it("ZEC pair (stock-only): buy/sell carry quote units + lamportsByCore (out_lamports NULL), market carries priceQuote", async () => {
+    const ZEC = "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS";
+    const venue: TradeVenue = {
+      ...fakeVenue([]),
+      tradeResult: async (kind) => ({ venue: "raydium-launchlab", kind, signature: "sigZ", slot: 6, mint: MINT, vault: "v", tokenAmount: 1_000n, solAmount: 0n, networkFee: 5_000n, decimals: 6, amountsKnown: true, quoteMint: ZEC, quoteAmount: 30_000_000n, lamportsByCore: true }),
+      market: async () => ({ priceSol: "0", marketCapSol: "0", status: "curve", priceQuote: "0.0000002" }),
+    };
+    const ex = new VenueTradeExecutor(venue, null);
+    for (const kind of ["buy", "sell"] as const) {
+      const spec = kind === "buy" ? ({ kind, venue: "raydium-launchlab", mint: MINT, lamportsIn: 30_000_000n, minOut: 1n } as const) : ({ kind, venue: "raydium-launchlab", mint: MINT, amount: 1_000n, minLamports: 1n } as const);
+      const r = await ex.result(spec, { signature: "sigZ", lastValidBlockHeight: 10, vault: "v", sentAt: 0 });
+      expect(r).toMatchObject({ kind, solAmount: 0n, quoteMint: ZEC, quoteAmount: 30_000_000n, lamportsByCore: true, market: { priceQuote: "0.0000002" } });
+    }
+  });
 });

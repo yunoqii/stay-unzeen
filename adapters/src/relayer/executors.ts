@@ -1,4 +1,4 @@
-import type { Connection, Signer } from "@solana/web3.js";
+import { PublicKey, type Connection, type Signer } from "@solana/web3.js";
 import type { Attester } from "../attest";
 import { attestSigMessage, signDetached } from "../ed25519";
 import { AdapterError } from "../errors";
@@ -11,7 +11,7 @@ import { DEFAULT_GAS_DROP, pickGasDrop, type GasDropRange, type Rng } from "./ra
 import type { Execution, JobSpec, SentAttempt } from "./types";
 import type { VaultInventory, VaultRequest } from "./vaults";
 import type { VaultFunder } from "../rebalance";
-import type { QuoteStocker } from "./quote-stock";
+import { StockDistributor, type QuoteStocker } from "./quote-stock";
 
 /** Headroom on top of the traded lamports: ATA + accumulator rent + fees. */
 const BUY_SOL_HEADROOM = 5_000_000n;
@@ -33,7 +33,7 @@ export interface JobExecutor<S extends JobSpec = JobSpec> {
    * When set, the job is signed by this key instead of a pool vault (attest:
    * the attestation key of the job's purpose). The engine then takes no vault lease.
    */
-  ownSigner?(spec: S): Signer;
+  ownSigner?(spec: S): Signer | null;
   /** RELAYER v6 §4: `out_sig` known before sending (Verify attest); recorded with the attempt. */
   earlyOutSig?(spec: S): string | null;
   /**
@@ -94,7 +94,7 @@ export interface TradeVenue {
   submit(tx: SignedTx): Promise<unknown>;
   createResult(signature: string, vault: string): Promise<CreateResult | null>;
   tradeResult(kind: "buy" | "sell", signature: string, vault: string, mint: string): Promise<TxResult | null>;
-  market(mint: string): Promise<{ priceSol: string; marketCapSol: string; status: CurveStatus }>;
+  market(mint: string): Promise<{ priceSol: string; marketCapSol: string; status: CurveStatus; priceQuote?: string }>;
   tokenSymbol(mint: string): Promise<string | null>;
   classify(err: unknown, logs?: readonly string[] | null): AdapterError;
 }
@@ -136,6 +136,7 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
         return this.adapter.prepareCreate({ name: spec.meta.name, symbol: spec.meta.symbol, uri }, spec.lamportsIn, spec.minOut, {
           vault,
           ...(spec.quote ? { quote: spec.quote } : {}),
+          ...(spec.platform ? { platform: spec.platform } : {}),
         });
       }
       case "fair_create": {
@@ -183,6 +184,7 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
         market: await this.adapter.market(r.mint).catch(() => null),
         creatorFee: r.creatorFee ?? null,
         ...(r.quoteMint && r.quoteAmount !== undefined ? { quoteMint: r.quoteMint, quoteAmount: r.quoteAmount } : {}),
+        ...(r.lamportsByCore ? { lamportsByCore: true as const } : {}),
       };
     }
     const r = await this.adapter.tradeResult(spec.kind, a.signature, a.vault, spec.mint);
@@ -198,6 +200,8 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
       tokenAmount: r.tokenAmount,
       solAmount,
       ...(r.quoteMint && r.quoteAmount !== undefined ? { quoteMint: r.quoteMint, quoteAmount: r.quoteAmount } : {}),
+      // Stock-only quote (ZEC): out_lamports NULL, core values quoteAmount (RELAYER v8 A3).
+      ...(r.lamportsByCore ? { lamportsByCore: true as const } : {}),
       networkFee: r.networkFee,
       decimals: r.decimals,
       fromEvent: r.fromEvent === true,
@@ -375,14 +379,19 @@ export class ConsolidateExecutor implements JobExecutor<Extract<JobSpec, { kind:
   }
 }
 
-/** PROPOSED `fund_quote`: one pool-A swap keeping `vault`'s quote stock within policy. */
+/**
+ * PROPOSED `fund_quote`: keep `vault`'s quote stock within policy.
+ * - priced quotes (USDC, ...): ONE pool-A swap signed by the vault (vault lease on meta.vault);
+ * - stock-only quotes (ZEC SPL): a transfer from the rebalance address, signed by that key
+ *   (no vault lease: the vault only receives).
+ */
 export class FundQuoteExecutor implements JobExecutor<Extract<JobSpec, { kind: "fund_quote" }>> {
   /** By quote MINT: symbols are ambiguous (devnet USDC of pump.fun != DBC/LaunchLab's). */
-  private readonly by: Map<string, QuoteStocker>;
-  constructor(stockers: readonly QuoteStocker[]) {
+  private readonly by: Map<string, QuoteStocker | StockDistributor>;
+  constructor(stockers: readonly (QuoteStocker | StockDistributor)[]) {
     this.by = new Map(stockers.map((s) => [s.asset.mint.toBase58(), s]));
   }
-  private of(spec: Extract<JobSpec, { kind: "fund_quote" }>): QuoteStocker {
+  private of(spec: Extract<JobSpec, { kind: "fund_quote" }>): QuoteStocker | StockDistributor {
     const s = this.by.get(spec.quote) ?? (() => {
       const bySym = [...this.by.values()].filter((x) => x.asset.symbol === spec.quote);
       return bySym.length === 1 ? bySym[0] : undefined;
@@ -393,13 +402,20 @@ export class FundQuoteExecutor implements JobExecutor<Extract<JobSpec, { kind: "
   vaultRequest(spec: Extract<JobSpec, { kind: "fund_quote" }>): VaultRequest {
     return { minSol: FEE_SOL_HEADROOM, only: spec.vault };
   }
-  async noop(spec: Extract<JobSpec, { kind: "fund_quote" }>, vault: Signer): Promise<Execution | null> {
+  ownSigner(spec: Extract<JobSpec, { kind: "fund_quote" }>): Signer | null {
+    const s = this.of(spec);
+    return s instanceof StockDistributor ? s.source : null;
+  }
+  async noop(spec: Extract<JobSpec, { kind: "fund_quote" }>, signer: Signer): Promise<Execution | null> {
     const st = this.of(spec);
-    if (await st.action(vault.publicKey)) return null;
+    const vault = new PublicKey(spec.vault);
+    const todo = st instanceof StockDistributor ? (await st.need(vault)) > 0n : (await st.action(signer.publicKey)) !== null;
+    if (todo) return null;
     return { kind: "fund_quote", signature: null, slot: null, vault: spec.vault, quoteMint: st.asset.mint.toBase58(), quoteDelta: 0n, lamports: 0n, networkFee: 0n };
   }
-  async prepare(spec: Extract<JobSpec, { kind: "fund_quote" }>, vault: Signer): Promise<SignedTx> {
-    const p = await this.of(spec).prepare(vault);
+  async prepare(spec: Extract<JobSpec, { kind: "fund_quote" }>, signer: Signer): Promise<SignedTx> {
+    const st = this.of(spec);
+    const p = st instanceof StockDistributor ? await st.prepare(new PublicKey(spec.vault)) : await st.prepare(signer);
     if (!p) throw new AdapterError("bad_request", "stock within bounds");
     return p;
   }
@@ -409,12 +425,11 @@ export class FundQuoteExecutor implements JobExecutor<Extract<JobSpec, { kind: "
     await st.submit(tx); // sending does not depend on the quote
   }
   async result(spec: Extract<JobSpec, { kind: "fund_quote" }>, a: SentAttempt): Promise<Execution | null> {
-    const r = await this.of(spec).result(a.signature, a.vault);
+    const r = await this.of(spec).result(a.signature, spec.vault);
     if (!r) return null;
-    return { kind: "fund_quote", signature: r.signature, slot: r.slot, vault: r.vault, quoteMint: r.quoteMint, quoteDelta: r.quoteDelta, lamports: r.lamports, networkFee: r.networkFee };
+    return { kind: "fund_quote", signature: r.signature, slot: r.slot, vault: spec.vault, quoteMint: r.quoteMint, quoteDelta: r.quoteDelta, lamports: r.lamports, networkFee: r.networkFee };
   }
-  classify(err: unknown, logs: readonly string[] | null = null): AdapterError {
-    const st = [...this.by.values()][0];
-    return st ? st.classify(err, logs) : err instanceof AdapterError ? err : new AdapterError("internal", String(err));
+  classify(err: unknown): AdapterError {
+    return err instanceof AdapterError ? err : new AdapterError("internal", err instanceof Error ? err.message.slice(0, 120) : "error");
   }
 }

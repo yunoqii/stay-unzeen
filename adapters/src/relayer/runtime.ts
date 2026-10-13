@@ -6,7 +6,7 @@ import { Connection, type Keypair, type PublicKey } from "@solana/web3.js";
 import pg from "pg";
 import type { AdapterConfig } from "../config";
 import { CreatorKeyring, CreatorPubkeyFile, FileCreatorIndexCounter, deriveCreatorKeypair, type CreatorIndexCounter } from "../keys";
-import { FileMintSource, PgMintSource, creatorCount } from "./fee-sweeper";
+import { AllMintSources, FileMintSource, PgMintSource, PgPoolQuoteMintSource, creatorCount } from "./fee-sweeper";
 import { PgVerifySnapshotStore, RpcFinalizedReader, VaultSnapshotter, type SnapshotSigner } from "./verify-snapshot";
 import { priorityFeeCacheFromConfig, type PriorityFeeCache } from "../fees";
 import { KeyStore, ageCipher, resolveAgeIdentity } from "../keystore";
@@ -19,9 +19,11 @@ import { txPipeline, type TxPipeline } from "../sender";
 import { TokenWithdrawer } from "../withdraw";
 import { jitoConfigFromEnv, type JitoConfig, type JitoTipCache } from "../jito";
 import { jitoFairBundler, type FairBundler } from "./fair-bundler";
-import { PoolSolInventoryWriter, VaultFunder, deriveRebalanceKeypair } from "../rebalance";
+import { PoolQuoteInventoryWriter, PoolSolInventoryWriter, VaultFunder, deriveRebalanceKeypair } from "../rebalance";
 import { quoteAssets } from "../pool-a";
-import { QuoteStockRunner, QuoteStocker, stockPolicy } from "./quote-stock";
+import { LAUNCHLAB_PROGRAM, LaunchLabAdapter, launchLabCluster } from "../launchlab";
+import { getPdaPlatformId } from "@raydium-io/raydium-sdk-v2";
+import { QuoteStockRunner, QuoteStocker, StockDistributor, stockPolicy } from "./quote-stock";
 import { Relayer, type RelayerEvent } from "./engine";
 import { AttestExecutor, ConsolidateExecutor, FundQuoteExecutor, FundVaultsExecutor, RpcChainProbe, VenueTradeExecutor, WithdrawExecutor, type JobExecutor } from "./executors";
 import { LaunchCurveWriter, pumpLaunchCurve } from "./launch-curves";
@@ -177,8 +179,12 @@ export interface RelayerRuntime {
   rebalanceAddress: PublicKey;
   /** RELAYER v7 `pool_sol_inventory` writer; run it only when `poolSolInventoryWritable`. */
   solInventory: PoolSolInventoryWriter;
+  /** RELAYER v8 A7 (run inside solInventory's loop when writable). */
+  quoteInventory: PoolQuoteInventoryWriter;
   /** Quote stock of every vault (non-SOL pairs), relayer-local schedule; run only with RELAYER_QUOTE_STOCK=1. */
   quoteStock: QuoteStockRunner;
+  /** Raydium LaunchLab (null off mainnet/devnet): call `checkPlatforms()` once at start (RELAYER v8 A1). */
+  launchlab: LaunchLabAdapter | null;
 }
 
 /**
@@ -195,7 +201,8 @@ export function verifyReadConnection(cfg: AdapterConfig, main: Connection, env: 
 
 /**
  * Every address of the pool the relayer holds a key for (verify.md §4.1):
- * vaults, attestation key, DBC partner (when a config is served) — always;
+ * vaults, attestation key, rebalance address (RELAYER v7 A1 / v8 A6: it holds SOL and ZEC SPL
+ * stock of the pool), DBC partner (when a config is served) — always;
  * creators — only if they hold something at the snapshot slot.
  */
 export async function poolSnapshotSigners(o: {
@@ -209,6 +216,7 @@ export async function poolSnapshotSigners(o: {
   const out: SnapshotSigner[] = o.keys.vaults.map((key) => ({ key, always: true }));
   // Verify operator key only: the fair-launch key stays out of the public list (F14).
   out.push({ key: o.attester.key, always: true });
+  out.push({ key: deriveRebalanceKeypair(o.keys.creatorSeed), always: true });
   if (o.meteora) out.push({ key: derivePartnerKeypair(o.keys.creatorSeed), always: true });
   const fileNext = new FileCreatorIndexCounter(path.join(o.keysDir, "creator-counter.json")).peek();
   const n = await creatorCount(fileNext, o.db, o.network);
@@ -280,8 +288,27 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
         quotes: quoteAssets(o.cfg.cluster, env),
       })
     : null;
-  const trade: Partial<Record<"pumpfun" | "meteora-dbc" | "jupiter", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
+  const trade: Partial<Record<"pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
   if (meteora) trade["meteora-dbc"] = new VenueTradeExecutor(meteora, metadata);
+  // Raydium LaunchLab (stonk.fun, bonk.fun, Unzeen's own platform = PDA of the partner key).
+  const llCluster = launchLabCluster(o.cfg.cluster);
+  const launchlab = llCluster
+    ? new LaunchLabAdapter({
+        connection: o.connection,
+        cluster: llCluster,
+        defaultVault: vaults[0]!,
+        vaults,
+        creators,
+        stateDir: o.cfg.keysDir,
+        unzeenPlatform: getPdaPlatformId(LAUNCHLAB_PROGRAM[llCluster], derivePartnerKeypair(o.keys.creatorSeed).publicKey).publicKey,
+        // LaunchLab's quote set = the DBC one (devnet USDC = Raydium's USDCoct) + ZEC (stock-only, flag).
+        quotes: [...quoteAssets(o.cfg.cluster, env), ...quoteAssets(o.cfg.cluster, env, "pumpfun").filter((x) => x.stockOnly)],
+        priorityMicroLamports: fees,
+        pipeline,
+        lookupTables,
+      })
+    : null;
+  if (launchlab) trade["raydium-launchlab"] = new VenueTradeExecutor(launchlab, metadata);
   // Jupiter: mainnet only (no devnet deployment). Elsewhere the venue has no executor,
   // so its jobs fail `venue_unavailable` before anything is signed.
   const jupiter = o.cfg.cluster === "mainnet-beta" ? buildJupiter(o.cfg.cluster, o.connection, fees, pipeline, env) : null;
@@ -302,7 +329,11 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     signers: () =>
       poolSnapshotSigners({ keys: o.keys, attester, meteora: meteora !== null, keysDir: o.cfg.keysDir, db: o.db, network: o.network }),
     // Fail closed: a mint source error aborts the snapshot (never under-report assets).
-    mints: pinsInFile ? new FileMintSource(path.join(o.cfg.keysDir, "mint-vaults.json")) : new PgMintSource(o.db, o.network),
+    // + quote mints of the pool (RELAYER v8 A6: core's pool_quotes), read on every address. Both fail closed.
+    mints: new AllMintSources([
+      pinsInFile ? new FileMintSource(path.join(o.cfg.keysDir, "mint-vaults.json")) : new PgMintSource(o.db, o.network),
+      new PgPoolQuoteMintSource(o.db, o.network),
+    ]),
     ...(o.log ? { log: o.log } : {}),
   });
   const withdrawer = new TokenWithdrawer({ connection: o.connection, priorityMicroLamports: fees, pipeline });
@@ -314,11 +345,19 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   const vaultKeys = vaults.map((v) => v.publicKey);
   const funder = new VaultFunder({ connection: o.connection, key: rebalanceKey, vaults: vaultKeys, priorityMicroLamports: fees, pipeline });
   const solInventory = new PoolSolInventoryWriter(o.db, o.network, verifyReadConnection(o.cfg, o.connection, env, () => undefined), vaultKeys, rebalanceKey.publicKey);
+  const quoteInventory = new PoolQuoteInventoryWriter(o.db, o.network, verifyReadConnection(o.cfg, o.connection, env, () => undefined), vaultKeys, rebalanceKey.publicKey);
   // Non-SOL pairs: one stocker per quote with a pinned pool A (same CU price / tip as every pool tx).
   const seen = new Set<string>();
-  const stockers = [...quoteAssets(o.cfg.cluster, env), ...quoteAssets(o.cfg.cluster, env, "pumpfun")]
-    .filter((a) => a.poolA && !seen.has(a.mint.toBase58()) && seen.add(a.mint.toBase58()))
+  const assets = [...quoteAssets(o.cfg.cluster, env), ...quoteAssets(o.cfg.cluster, env, "pumpfun")].filter(
+    (a) => (a.poolA || a.stockOnly) && !seen.has(a.mint.toBase58()) && seen.add(a.mint.toBase58()),
+  );
+  const stockers = assets
+    .filter((a) => a.poolA)
     .map((a) => new QuoteStocker({ connection: o.connection, asset: a, policy: stockPolicy(a, o.cfg.cluster, env), priorityMicroLamports: fees, pipeline }));
+  // Stock-only quotes (ZEC SPL): spread from the rebalance address by fund_quote jobs (no swap).
+  const distributors = assets
+    .filter((a) => a.stockOnly)
+    .map((a) => new StockDistributor({ connection: o.connection, asset: a, policy: stockPolicy(a, o.cfg.cluster, env), source: rebalanceKey, priorityMicroLamports: fees, pipeline }));
   const quoteStock = new QuoteStockRunner({ stockers, pool, rng: cryptoRng, ...(o.log ? { log: o.log } : {}) });
   const relayer = new Relayer({
     queue,
@@ -328,7 +367,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
       trade,
       fund: new FundVaultsExecutor(funder, rebalanceKey),
       consolidate: new ConsolidateExecutor(withdrawer, new RpcVaultInventory(o.connection)),
-      ...(stockers.length ? { quoteStock: new FundQuoteExecutor(stockers) } : {}),
+      ...(stockers.length + distributors.length ? { quoteStock: new FundQuoteExecutor([...stockers, ...distributors]) } : {}),
       withdraw: new WithdrawExecutor(withdrawer, cryptoRng),
       attest: new AttestExecutor({ verify: attester, fair: fairAttester }),
     },
@@ -356,7 +395,9 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     jitoTips: fair?.tips ?? null,
     rebalanceAddress: rebalanceKey.publicKey,
     solInventory,
+    quoteInventory,
     quoteStock,
+    launchlab,
   };
 }
 

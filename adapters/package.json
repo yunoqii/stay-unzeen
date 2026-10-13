@@ -22,10 +22,14 @@
     "keys:creators-pub": "tsx scripts/creators-pub.ts",
     "keys:attest": "tsx scripts/attest-keys.ts",
     "meteora:config": "tsx scripts/meteora-config.ts",
+    "launchlab:platform": "tsx scripts/launchlab-platform.ts",
     "pool-a:probe": "tsx scripts/pool-a-probe.ts",
     "quote:devnet": "tsx scripts/quote-devnet.ts",
     "fees:sweep": "tsx scripts/fees-sweep.ts",
-    "fair:devnet": "tsx scripts/fair-devnet.ts"
+    "fair:devnet": "tsx scripts/fair-devnet.ts",
+    "launchlab:devnet": "tsx scripts/launchlab-devnet.ts",
+    "launchlab:probe": "tsx scripts/launchlab-probe.ts",
+    "launchlab:leg-local": "tsx scripts/launchlab-leg-local.ts"
   },
   "engines": {
     "node": ">=20"
@@ -34,6 +38,7 @@
     "@meteora-ag/cp-amm-sdk": "1.5.1",
     "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
     "@pump-fun/pump-sdk": "4.0.0",
+    "@raydium-io/raydium-sdk-v2": "0.2.74-alpha",
     "@solana/spl-token": "0.4.15",
     "@solana/web3.js": "1.99.0",
     "age-encryption": "0.3.1",

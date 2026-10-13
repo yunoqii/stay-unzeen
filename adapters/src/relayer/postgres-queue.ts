@@ -94,6 +94,8 @@ export class PostgresJobQueue implements JobQueue {
   private blockTimeCol: Promise<{ name: string; ts: boolean } | null> | null = null;
   private creatorFeeCol: Promise<boolean> | null = null;
   private bundleLegsCol: Promise<boolean> | null = null;
+  private quoteCols: Promise<boolean> | null = null;
+  private feedQuoteCols: Promise<boolean> | null = null;
 
   constructor(o: PostgresJobQueueOptions) {
     this.pool = o.pool;
@@ -226,6 +228,34 @@ export class PostgresJobQueue implements JobQueue {
         });
     }
     return this.bundleLegsCol;
+  }
+
+  /** PROPOSED (non-SOL pairs): relayer_jobs.out_quote_mint / out_quote_amount, writable. Cached. */
+  private hasQuoteCols(): Promise<boolean> {
+    this.quoteCols ??= this.pool
+      .query<{ ok: boolean }>(
+        `SELECT has_column_privilege(current_user, 'relayer_jobs', 'out_quote_amount', 'UPDATE')
+                AND has_column_privilege(current_user, 'relayer_jobs', 'out_quote_mint', 'UPDATE') AS ok`,
+      )
+      .then((r) => r.rows[0]?.ok === true)
+      .catch(() => false); // column missing -> has_column_privilege raises -> false
+    return this.quoteCols;
+  }
+
+  /** RELAYER v8 (0019): trades.quote_mint / quote_amount, tokens.quote_mint / price_quote / platform. Cached. */
+  private hasFeedQuoteCols(): Promise<boolean> {
+    this.feedQuoteCols ??= this.pool
+      .query<{ ok: boolean }>(
+        `SELECT has_column_privilege(current_user, 'trades', 'quote_mint', 'INSERT')
+                AND has_column_privilege(current_user, 'trades', 'quote_amount', 'INSERT')
+                AND has_column_privilege(current_user, 'tokens', 'quote_mint', 'INSERT')
+                AND has_column_privilege(current_user, 'tokens', 'platform', 'INSERT')
+                AND has_column_privilege(current_user, 'tokens', 'price_quote', 'INSERT')
+                AND has_column_privilege(current_user, 'tokens', 'price_quote', 'UPDATE') AS ok`,
+      )
+      .then((r) => r.rows[0]?.ok === true)
+      .catch(() => false);
+    return this.feedQuoteCols;
   }
 
   async claim(opts: { workerId: string; now: number; leaseMs: number; lane?: Lane }): Promise<ClaimedJob | null> {
@@ -474,8 +504,14 @@ export class PostgresJobQueue implements JobQueue {
     try {
       await client.query("BEGIN");
       const outLamports = e.kind === "withdraw" ? 0n : e.solAmount;
-      const params: unknown[] = [job.id, e.slot, e.mint, e.tokenAmount.toString(), outLamports.toString(), e.networkFee.toString(), e.signature, job.leaseId];
+      // Stock-only quote (ZEC): core books lamports at its own rate -> out_lamports NULL.
+      const byCore = (e.kind === "buy" || e.kind === "sell" || e.kind === "create") && e.lamportsByCore === true;
+      const params: unknown[] = [job.id, e.slot, e.mint, e.tokenAmount.toString(), byCore ? null : outLamports.toString(), e.networkFee.toString(), e.signature, job.leaseId];
       let extra = "";
+      if ((e.kind === "buy" || e.kind === "sell" || e.kind === "create") && e.quoteMint && e.quoteAmount !== undefined && (await this.hasQuoteCols())) {
+        params.push(e.quoteMint, e.quoteAmount.toString());
+        extra += `, out_quote_mint = $${params.length - 1}, out_quote_amount = $${params.length}`;
+      }
       if (fee !== null) {
         params.push(fee.toString());
         extra += `, out_creator_fee = $${params.length}`;
@@ -506,32 +542,54 @@ export class PostgresJobQueue implements JobQueue {
 
   /** New token row + 'create' event (+ 'buy' of the first buy, same signature). Public data only. */
   private async writeCreateFeed(client: PoolClient, job: { id: string }, e: CreateExecution): Promise<void> {
-    const venue = await client.query<{ venue: string }>(`SELECT venue FROM relayer_jobs WHERE id = $1`, [job.id]);
+    const venue = await client.query<{ venue: string; platform: string | null }>(`SELECT venue, meta->>'platform' AS platform FROM relayer_jobs WHERE id = $1`, [job.id]);
     const v = venue.rows[0]?.venue ?? "pumpfun";
-    await client.query(
-      `INSERT INTO tokens (mint, venue, symbol, name, image, decimals, status, price_sol, market_cap_sol)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric)
-       ON CONFLICT (mint) DO NOTHING`,
-      [e.mint, v, e.symbol, e.name, e.imageUrl, e.decimals, e.market?.status ?? "curve", e.market?.priceSol ?? "0", e.market?.marketCapSol ?? "0"],
-    );
-    const ts = e.blockTime;
-    const insert = (kind: "create" | "buy", tokens: bigint, sol: bigint) =>
-      client.query(
-        `INSERT INTO trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE(to_timestamp($10::double precision), now()))
-         ON CONFLICT (signature, kind, mint) DO NOTHING`,
-        [kind, v, e.mint, e.symbol, tokens.toString(), sol.toString(), e.decimals, e.signature, e.slot, ts],
+    // v8: pair columns (NULL = SOL), LaunchLab platform (adapter default "unzeen").
+    const q = await this.hasFeedQuoteCols();
+    const quoteMint = e.quoteMint ?? null;
+    const platform = v === "raydium-launchlab" ? (venue.rows[0]?.platform ?? "unzeen") : null;
+    if (q) {
+      await client.query(
+        `INSERT INTO tokens (mint, venue, symbol, name, image, decimals, status, price_sol, market_cap_sol, quote_mint, price_quote, platform)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, $10, $11::numeric, $12)
+         ON CONFLICT (mint) DO NOTHING`,
+        [e.mint, v, e.symbol, e.name, e.imageUrl, e.decimals, e.market?.status ?? "curve", e.market?.priceSol ?? "0", e.market?.marketCapSol ?? "0",
+          quoteMint, quoteMint ? (e.market?.priceQuote ?? null) : null, platform],
       );
-    await insert("create", 0n, 0n);
+    } else {
+      await client.query(
+        `INSERT INTO tokens (mint, venue, symbol, name, image, decimals, status, price_sol, market_cap_sol)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric)
+         ON CONFLICT (mint) DO NOTHING`,
+        [e.mint, v, e.symbol, e.name, e.imageUrl, e.decimals, e.market?.status ?? "curve", e.market?.priceSol ?? "0", e.market?.marketCapSol ?? "0"],
+      );
+    }
+    const ts = e.blockTime;
+    const insert = (kind: "create" | "buy", tokens: bigint, sol: bigint, quoteAmount: bigint | null) =>
+      q
+        ? client.query(
+            `INSERT INTO trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts, quote_mint, quote_amount)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE(to_timestamp($10::double precision), now()), $11, $12)
+             ON CONFLICT (signature, kind, mint) DO NOTHING`,
+            [kind, v, e.mint, e.symbol, tokens.toString(), sol.toString(), e.decimals, e.signature, e.slot, ts, quoteMint, quoteMint ? (quoteAmount ?? 0n).toString() : null],
+          )
+        : client.query(
+            `INSERT INTO trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE(to_timestamp($10::double precision), now()))
+             ON CONFLICT (signature, kind, mint) DO NOTHING`,
+            [kind, v, e.mint, e.symbol, tokens.toString(), sol.toString(), e.decimals, e.signature, e.slot, ts],
+          );
+    await insert("create", 0n, 0n, 0n);
     if (!e.legs?.length) {
-      if (e.tokenAmount > 0n) await insert("buy", e.tokenAmount, e.solAmount);
+      if (e.tokenAmount > 0n) await insert("buy", e.tokenAmount, e.solAmount, e.quoteAmount ?? null);
       return;
     }
+    // Fair-launch bundles are SOL-only (RELAYER v8 A1).
     // Fair-launch v2 bundle: one 'buy' per leg, each with its own signature (as on chain).
     // e.tokenAmount / e.solAmount are launch totals; leg 0 = totals minus the other legs.
     const restTok = e.legs.reduce((s, l) => s + l.tokenAmount, 0n);
     const restSol = e.legs.reduce((s, l) => s + l.solAmount, 0n);
-    if (e.tokenAmount - restTok > 0n) await insert("buy", e.tokenAmount - restTok, e.solAmount - restSol);
+    if (e.tokenAmount - restTok > 0n) await insert("buy", e.tokenAmount - restTok, e.solAmount - restSol, null);
     for (const l of e.legs) {
       await client.query(
         `INSERT INTO trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts)
@@ -550,12 +608,33 @@ export class PostgresJobQueue implements JobQueue {
   ): Promise<void> {
     const venue = await client.query<{ venue: string }>(`SELECT venue FROM relayer_jobs WHERE id = $1`, [job.id]);
     const v = venue.rows[0]?.venue ?? "pumpfun";
+    const q = await this.hasFeedQuoteCols();
+    const quoteMint = e.quoteMint && e.quoteAmount !== undefined ? e.quoteMint : null;
     if (e.market) {
+      if (q && e.market.priceQuote !== undefined) {
+        await client.query(
+          `UPDATE tokens SET price_sol = $2::numeric, market_cap_sol = $3::numeric, status = $4, price_quote = $5::numeric, updated_at = now()
+            WHERE mint = $1`,
+          [e.mint, e.market.priceSol, e.market.marketCapSol, e.market.status, e.market.priceQuote],
+        );
+      } else {
+        await client.query(
+          `UPDATE tokens SET price_sol = $2::numeric, market_cap_sol = $3::numeric, status = $4, updated_at = now()
+            WHERE mint = $1`,
+          [e.mint, e.market.priceSol, e.market.marketCapSol, e.market.status],
+        );
+      }
+    }
+    if (q) {
+      // v8: quote units exactly from the tx; sol_amount = SOL equivalent (ZEC: 0, core values it).
       await client.query(
-        `UPDATE tokens SET price_sol = $2::numeric, market_cap_sol = $3::numeric, status = $4, updated_at = now()
-          WHERE mint = $1`,
-        [e.mint, e.market.priceSol, e.market.marketCapSol, e.market.status],
+        `INSERT INTO trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts, quote_mint, quote_amount)
+         VALUES ($1, $2, $3, COALESCE((SELECT symbol FROM tokens WHERE mint = $3), $4), $5, $6, $7, $8, $9,
+                 COALESCE(to_timestamp($10::double precision), now()), $11, $12)
+         ON CONFLICT (signature, kind, mint) DO NOTHING`,
+        [e.kind, v, e.mint, e.symbol ?? "", e.tokenAmount.toString(), e.solAmount.toString(), e.decimals, e.signature, e.slot, e.blockTime, quoteMint, quoteMint ? e.quoteAmount!.toString() : null],
       );
+      return;
     }
     await client.query(
       `INSERT INTO trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, slot, ts)
@@ -611,6 +690,9 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
       // Non-SOL pair (proposed contract): meta.quote = "USDC" | "USD1"; absent / "SOL" = SOL.
       const q = (m as { quote?: unknown }).quote;
       if (q !== undefined && q !== null && (typeof q !== "string" || !/^[A-Z0-9]{2,10}$/.test(q))) throw new Error(`job ${row.id}: bad meta.quote`);
+      // LaunchLab (proposed): meta.platform = "stonk" | "bonk" | "unzeen".
+      const plat = (m as { platform?: unknown }).platform;
+      if (plat !== undefined && plat !== null && (typeof plat !== "string" || !/^[a-z]{2,16}$/.test(plat))) throw new Error(`job ${row.id}: bad meta.platform`);
       return {
         kind: "create",
         venue: venue(row),
@@ -618,6 +700,7 @@ export function rowToSpec(row: JobRow, network: SolanaNetwork): JobSpec {
         lamportsIn: row.lamports_in === null ? 0n : big(row.lamports_in, "lamports_in"),
         minOut: row.min_out === null ? 0n : big(row.min_out, "min_out"),
         ...(typeof q === "string" && q !== "SOL" ? { quote: q } : {}),
+        ...(typeof plat === "string" ? { platform: plat } : {}),
       };
     }
     case "fair_create": {
@@ -700,7 +783,7 @@ function isPubkey(s: string): boolean {
 }
 
 function venue(row: JobRow): VenueId {
-  if (row.venue === "pumpfun" || row.venue === "meteora-dbc" || row.venue === "jupiter") return row.venue;
+  if (row.venue === "pumpfun" || row.venue === "meteora-dbc" || row.venue === "jupiter" || row.venue === "raydium-launchlab") return row.venue;
   throw new Error(`job ${row.id}: bad venue`);
 }
 

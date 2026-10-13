@@ -1,8 +1,9 @@
 import { PublicKey, type Connection, type Signer } from "@solana/web3.js";
-import { getAssociatedTokenAddressSync, unpackAccount } from "@solana/spl-token";
+import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync, unpackAccount } from "@solana/spl-token";
 import { AdapterError, classifyError } from "../errors";
+import { tokenDelta } from "../events";
 import { fixedPrice, type PriorityPrice } from "../fees";
-import { CP_AMM_PROGRAM_ID, PoolA, poolASwapLegs, type QuoteAsset } from "../pool-a";
+import { CP_AMM_PROGRAM_ID, makeQuotePool, type QuoteAsset, type QuotePool } from "../pool-a";
 import type { TxPipeline } from "../sender";
 import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SendFailure, type SignedTx } from "../tx";
 import type { Rng } from "./random";
@@ -77,7 +78,7 @@ export interface StockResult {
 }
 
 export class QuoteStocker {
-  readonly poolA: PoolA;
+  readonly poolA: QuotePool;
   private readonly priority: PriorityPrice;
   constructor(
     private readonly o: {
@@ -89,7 +90,7 @@ export class QuoteStocker {
     },
   ) {
     if (!o.asset.poolA) throw new Error(`no pool A for ${o.asset.symbol}`);
-    this.poolA = new PoolA(o.connection, o.asset.poolA, o.asset);
+    this.poolA = makeQuotePool(o.connection, o.asset)!;
     const p = o.priorityMicroLamports ?? 0;
     this.priority = typeof p === "number" ? fixedPrice(p) : p;
   }
@@ -145,12 +146,10 @@ export class QuoteStocker {
   async result(signature: string, vault: string): Promise<StockResult | null> {
     const tx = await fetchTx(this.o.connection, signature, 10).catch(() => null);
     if (!tx) return null;
-    const leg = poolASwapLegs(tx, this.poolA.address)[0];
+    await this.poolA.load().catch(() => null); // A/B order for the leg's direction
+    const leg = this.poolA.legs(tx)[0];
     if (!leg) return null;
-    const s = await this.poolA.load().catch(() => null);
-    // trade_direction is relative to the pool's A/B order: SOL in = buy quote.
-    const solIsA = s?.solIsA ?? true;
-    const buy = (leg.tradeDirection === 0) === solIsA;
+    const buy = leg.buy;
     return {
       signature,
       slot: tx.slot,
@@ -253,4 +252,85 @@ function shuffle<T>(xs: readonly T[], rng: Rng): T[] {
     [a[i], a[j]] = [a[j]!, a[i]!];
   }
   return a;
+}
+
+/**
+ * Stock-only quotes (ZEC SPL, lead 13.10): no pool A. Core's rebalance brings
+ * ZEC SPL to the rebalance address (ZEC -> ZEC SPL via 1Click); `fund_quote`
+ * then TRANSFERS stock from the rebalance address to a vault below `low`
+ * (up to `target`), signed and paid by the rebalance key. An excess on a
+ * vault is left alone (it is spent by the next trades). No swap anywhere.
+ */
+export class StockDistributor {
+  private readonly priority: PriorityPrice;
+  constructor(
+    private readonly o: {
+      connection: Connection;
+      asset: QuoteAsset;
+      policy: StockPolicy;
+      /** Rebalance address key (src/rebalance.ts): holds the undistributed stock. */
+      source: Signer;
+      priorityMicroLamports?: number | PriorityPrice;
+      pipeline?: TxPipeline | null;
+    },
+  ) {
+    if (!o.asset.stockOnly) throw new Error(`${o.asset.symbol} is not a stock-only quote`);
+    const p = o.priorityMicroLamports ?? 0;
+    this.priority = typeof p === "number" ? fixedPrice(p) : p;
+  }
+
+  get asset(): QuoteAsset {
+    return this.o.asset;
+  }
+  get source(): Signer {
+    return this.o.source;
+  }
+
+  async stock(owner: PublicKey): Promise<bigint> {
+    const ata = getAssociatedTokenAddressSync(this.o.asset.mint, owner, true, this.o.asset.tokenProgram);
+    const info = await this.o.connection.getAccountInfo(ata, "confirmed");
+    return info ? unpackAccount(ata, info, this.o.asset.tokenProgram).amount : 0n;
+  }
+
+  /** Units `vault` should receive now (0 = within bounds or above). */
+  async need(vault: PublicKey): Promise<bigint> {
+    const a = stockAction(await this.stock(vault), this.o.policy);
+    return a?.kind === "buy" ? a.units : 0n;
+  }
+
+  /** Signs the transfer; null when nothing is needed. Short source -> pool_liquidity. */
+  async prepare(vault: PublicKey): Promise<(SignedTx & { units: bigint }) | null> {
+    const need = await this.need(vault);
+    if (need === 0n) return null;
+    const have = await this.stock(this.o.source.publicKey);
+    const units = have < need ? have : need;
+    if (units <= 0n) throw new AdapterError("insufficient_sol", `rebalance address holds no ${this.o.asset.symbol}`);
+    const { mint, tokenProgram, decimals } = this.o.asset;
+    const from = getAssociatedTokenAddressSync(mint, this.o.source.publicKey, true, tokenProgram);
+    const to = getAssociatedTokenAddressSync(mint, vault, true, tokenProgram);
+    const ixs = [
+      createAssociatedTokenAccountIdempotentInstruction(this.o.source.publicKey, to, vault, mint, tokenProgram),
+      createTransferCheckedInstruction(from, mint, to, this.o.source.publicKey, units, decimals, [], tokenProgram),
+    ];
+    const signed = await signTx(this.o.connection, ixs, this.o.source, [], { computeUnits: CU_STOCK, priorityMicroLamports: this.priority.microLamports(), tip: this.o.pipeline?.tip ?? null });
+    return { ...signed, units };
+  }
+
+  async submit(tx: SignedTx): Promise<void> {
+    try {
+      await broadcastAndConfirm(this.o.connection, tx, this.o.pipeline?.broadcaster);
+    } catch (e) {
+      if (!isSendFailure(e)) throw e;
+      const f: SendFailure = e;
+      throw new AdapterError("venue_unavailable", "stock transfer failed", { ...(f.stage ? { stage: f.stage } : {}), ...(f.landedErr ? { landedErr: true } : {}), cause: f.error });
+    }
+  }
+
+  /** Units that reached `vault` (token balance delta). */
+  async result(signature: string, vault: string): Promise<StockResult | null> {
+    const tx = await fetchTx(this.o.connection, signature, 10).catch(() => null);
+    if (!tx) return null;
+    const units = tokenDelta(tx, new PublicKey(vault), this.o.asset.mint);
+    return { signature, slot: tx.slot, vault, quoteMint: this.o.asset.mint.toBase58(), quoteDelta: units, lamports: 0n, networkFee: BigInt(tx.meta?.fee ?? 0) };
+  }
 }

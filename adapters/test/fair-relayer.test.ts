@@ -221,7 +221,7 @@ describe.skipIf(!DB)("PostgresJobQueue v3 + launch_curves (live Postgres, temp s
     try {
       await c.query(`SET search_path = ${schema}`);
       await c.query(`ALTER TABLE relayer_jobs DROP CONSTRAINT IF EXISTS relayer_jobs_op_check`);
-      await c.query(jobs.replace(/ALTER TABLE relayer_jobs DROP CONSTRAINT relayer_jobs_op_check;/, ""));
+      await c.query(idempotent(jobs.replace(/ALTER TABLE relayer_jobs DROP CONSTRAINT relayer_jobs_op_check;/, "")));
       await c.query(curves);
     } finally {
       c.release();
@@ -271,3 +271,10 @@ describe.skipIf(!DB)("PostgresJobQueue v3 + launch_curves (live Postgres, temp s
     expect(rows).toEqual([{ venue: "pumpfun", virtual_sol_lamports: "1000000000", token_total_supply: "1000000000000000" }]);
   });
 });
+
+/** Core DDL fragments re-applied on a LIKE copy of a NEWER public schema: make them idempotent. */
+function idempotent(sql: string): string {
+  return sql
+    .replace(/ADD COLUMN (?!IF NOT EXISTS)/g, "ADD COLUMN IF NOT EXISTS ")
+    .replace(/ALTER TABLE (\w+) ADD CONSTRAINT (\w+)/g, "ALTER TABLE $1 DROP CONSTRAINT IF EXISTS $2; ALTER TABLE $1 ADD CONSTRAINT $2");
+}

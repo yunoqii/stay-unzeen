@@ -49,7 +49,7 @@ import { fixedPrice, type PriorityPrice } from "./fees";
 import { slip10DerivePath, type CreatorKeyring } from "./keys";
 import { formatUnits, toBN, toBig } from "./math";
 import type { CreateResult, PreparedCreate, PreparedTrade } from "./pumpfun";
-import { PoolA, poolASwapLegs, type PoolAState, type QuoteAsset } from "./pool-a";
+import { makeQuotePool, type QuoteAsset, type QuotePool } from "./pool-a";
 import { parseMint, validateMeta } from "./pumpfun";
 import type { TxPipeline } from "./sender";
 import { broadcastAndConfirm, fetchTx, isSendFailure, signTx, type SendFailure, type SignedTx } from "./tx";
@@ -432,7 +432,7 @@ export interface MeteoraDbcAdapterOptions {
 interface QuoteRoute {
   asset: QuoteAsset;
   config: PublicKey;
-  poolA: PoolA;
+  poolA: QuotePool;
 }
 
 interface MintInfo {
@@ -481,7 +481,7 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     this.alts = o.lookupTables ?? new LookupTables(o.connection, o.stateDir, this.priority, this.pipeline);
     const routes = new Map<string, QuoteRoute>();
     for (const a of o.quotes ?? []) {
-      if (a.dbcConfig && a.poolA) routes.set(a.symbol, { asset: a, config: a.dbcConfig, poolA: new PoolA(o.connection, a.poolA, a) });
+      if (a.dbcConfig && a.poolA) routes.set(a.symbol, { asset: a, config: a.dbcConfig, poolA: makeQuotePool(o.connection, a)! });
     }
     this.routes = routes;
   }
@@ -544,7 +544,7 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
   }
 
   /** SOL price / cap of a pool (quote pairs: converted on pool A). */
-  private async marketOf(v: PoolView, s?: PoolAState): Promise<{ priceSol: string; marketCapSol: string; priceQuote?: string }> {
+  private async marketOf(v: PoolView, s?: unknown): Promise<{ priceSol: string; marketCapSol: string; priceQuote?: string }> {
     if (!v.route) return dbcPriceAndCap(v.pool.poolState.sqrtPrice, v.supply, v.decimals);
     const st = s ?? (await v.route.poolA.load());
     const qd = v.route.asset.decimals;
@@ -554,10 +554,10 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
   }
 
   /** Public price / market cap / status (tokens table). */
-  async market(mint: string): Promise<{ priceSol: string; marketCapSol: string; status: CurveStatus }> {
+  async market(mint: string): Promise<{ priceSol: string; marketCapSol: string; status: CurveStatus; priceQuote?: string }> {
     const v = await this.loadPool(parseMint(mint));
     const m = await this.marketOf(v);
-    return { priceSol: m.priceSol, marketCapSol: m.marketCapSol, status: dbcStatus(v.pool.poolState, v.config) };
+    return { priceSol: m.priceSol, marketCapSol: m.marketCapSol, status: dbcStatus(v.pool.poolState, v.config), ...(m.priceQuote ? { priceQuote: m.priceQuote } : {}) };
   }
 
   /** Curve progress for the indexer / UI. */
@@ -617,7 +617,7 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
 
     // Quote pair: the first buy is in quote units, converted from lamports on pool A.
     let buyUnits = initialBuyLamports;
-    let leg: { s: PoolAState; units: bigint } | null = null;
+    let leg: { s: unknown; units: bigint } | null = null;
     let quoteSource: "stock" | "leg" | undefined;
     if (route && initialBuyLamports > 0n) {
       const s = await route.poolA.load();
@@ -715,6 +715,8 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     } else {
       tokenAmount = tokenDelta(tx, vaultPk, mint);
       if (tokenAmount > 0n) return null; // a buy happened but its event is unreadable: never guess SOL
+      // No first buy: the pair is still the curve's (tokens.quote_mint, RELAYER v8), 0 units moved.
+      if (route) quote = { quoteMint: route.asset.mint.toBase58(), quoteAmount: 0n, quoteSource: "stock" };
     }
     return {
       venue: this.id,
@@ -961,7 +963,7 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
    */
   private async toLamports(tx: VersionedTransactionResponse, route: QuoteRoute, units: bigint, kind: "buy" | "sell"): Promise<{ lamports: bigint; source: "stock" | "leg" }> {
     if (kind === "buy") {
-      const leg = poolASwapLegs(tx, route.poolA.address).find((l) => l.outputAmount > 0n);
+      const leg = route.poolA.legs(tx).find((l) => l.buy && l.outputAmount > 0n);
       if (leg) {
         const lamports = leg.outputAmount > 0n ? (leg.inputAmount * units) / leg.outputAmount : leg.inputAmount;
         return { lamports, source: "leg" };
@@ -990,10 +992,12 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     ixs: TransactionInstruction[],
     build: (mint: PublicKey, payer: PublicKey, creator: PublicKey) => Promise<TransactionInstruction[]>,
   ): Promise<AddressLookupTableAccount> {
+    // Shared with a build for an unrelated mint / creator by the SAME vault (its own table: its ATAs
+    // belong in it), plus the Sender tip accounts (added by signTx, not in `ixs`).
     const r = () => Keypair.generate().publicKey;
-    const other = await build(r(), r(), r());
+    const other = await build(r(), vault.publicKey, r());
     try {
-      return await this.alts.ensure(vault, staticAccounts(ixs, other));
+      return await this.alts.ensure(vault, [...staticAccounts(ixs, other), ...(this.pipeline?.tip?.accounts ?? [])]);
     } catch (e) {
       throw this.classify(e);
     }

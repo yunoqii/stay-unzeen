@@ -1,4 +1,5 @@
 import { Keypair, PublicKey, SystemProgram, type Connection, type Signer } from "@solana/web3.js";
+import { getAssociatedTokenAddressSync, unpackAccount } from "@solana/spl-token";
 import type { Pool } from "pg";
 import { AdapterError, classifyError } from "./errors";
 import { lamportDelta } from "./events";
@@ -234,10 +235,14 @@ export class PoolSolInventoryWriter {
     return s;
   }
 
-  /** At start, then every 5 min ± 30 s until `signal` aborts. Errors go to `onError` (never thrown). */
-  async run(signal: AbortSignal, onError: (e: unknown) => void = () => undefined, everyMs = 300_000, jitterMs = 30_000): Promise<void> {
+  /**
+   * At start, then every 5 min ± 30 s until `signal` aborts. Errors go to `onError` (never thrown).
+   * `quotes` (RELAYER v8): the quote inventory is written in the same loop.
+   */
+  async run(signal: AbortSignal, onError: (e: unknown) => void = () => undefined, everyMs = 300_000, jitterMs = 30_000, quotes: PoolQuoteInventoryWriter | null = null): Promise<void> {
     while (!signal.aborted) {
       await this.writeOnce().catch(onError);
+      if (quotes) await quotes.writeOnce().catch(onError);
       const wait = everyMs + Math.floor((Math.random() * 2 - 1) * jitterMs);
       await new Promise<void>((resolve) => {
         const t = setTimeout(resolve, wait);
@@ -253,6 +258,87 @@ export async function poolSolInventoryWritable(db: Pool): Promise<boolean> {
     .query<{ ok: boolean }>(
       `SELECT to_regclass('pool_sol_inventory') IS NOT NULL
               AND has_table_privilege(current_user, 'pool_sol_inventory', 'INSERT,UPDATE,SELECT') AS ok`,
+    )
+    .catch(() => null);
+  return r?.rows[0]?.ok === true;
+}
+
+export interface QuoteInventoryRow {
+  quoteMint: string;
+  vaultAmount: bigint;
+  reserveAmount: bigint;
+  vaultCount: number;
+  slot: number;
+}
+
+/**
+ * RELAYER v8 A7: quote stock of the pool -> `pool_quote_inventory` (with pool_sol_inventory,
+ * every ~5 min). Quote mints = core's `pool_quotes` of this network; Σ of each mint's ATA on
+ * every vault (`vault_amount`) and on the rebalance address (`reserve_amount`). Pool level
+ * only (vaults and the rebalance address are public through Verify anyway).
+ */
+export class PoolQuoteInventoryWriter {
+  constructor(
+    private readonly db: Pool,
+    private readonly network: "devnet" | "mainnet-beta",
+    private readonly read: Pick<Connection, "getMultipleAccountsInfoAndContext">,
+    private readonly vaults: readonly PublicKey[],
+    private readonly rebalance: PublicKey,
+  ) {}
+
+  async snapshot(): Promise<QuoteInventoryRow[]> {
+    const q = await this.db.query<{ mint: string }>(`SELECT mint FROM pool_quotes WHERE network = $1 ORDER BY mint`, [this.network]);
+    const mints = q.rows.map((r) => new PublicKey(r.mint));
+    if (mints.length === 0) return [];
+    const m = await this.read.getMultipleAccountsInfoAndContext(mints, { commitment: "confirmed" });
+    const owners = [...this.vaults, this.rebalance];
+    const out: QuoteInventoryRow[] = [];
+    for (let i = 0; i < mints.length; i++) {
+      const mintAcc = m.value[i];
+      if (!mintAcc) throw new Error(`pool_quotes mint ${mints[i]!.toBase58()} not found on chain`);
+      const program = mintAcc.owner; // SPL Token or Token-2022
+      const atas = owners.map((o) => getAssociatedTokenAddressSync(mints[i]!, o, true, program));
+      let vaultAmount = 0n;
+      let reserveAmount = 0n;
+      let slot = m.context.slot;
+      for (let j = 0; j < atas.length; j += 100) {
+        const chunk = atas.slice(j, j + 100);
+        const r = await this.read.getMultipleAccountsInfoAndContext(chunk, { commitment: "confirmed" });
+        slot = Math.max(slot, r.context.slot);
+        r.value.forEach((acc, k) => {
+          if (!acc) return;
+          const amount = unpackAccount(chunk[k]!, acc, program).amount;
+          if (j + k === owners.length - 1) reserveAmount += amount;
+          else vaultAmount += amount;
+        });
+      }
+      out.push({ quoteMint: mints[i]!.toBase58(), vaultAmount, reserveAmount, vaultCount: this.vaults.length, slot });
+    }
+    return out;
+  }
+
+  async writeOnce(): Promise<QuoteInventoryRow[]> {
+    const rows = await this.snapshot();
+    for (const s of rows) {
+      await this.db.query(
+        `INSERT INTO pool_quote_inventory (network, quote_mint, vault_amount, reserve_amount, vault_count, slot, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, now())
+         ON CONFLICT (network, quote_mint) DO UPDATE SET vault_amount = EXCLUDED.vault_amount, reserve_amount = EXCLUDED.reserve_amount,
+           vault_count = EXCLUDED.vault_count, slot = EXCLUDED.slot, updated_at = now()`,
+        [this.network, s.quoteMint, s.vaultAmount.toString(), s.reserveAmount.toString(), s.vaultCount, s.slot],
+      );
+    }
+    return rows;
+  }
+}
+
+/** Whether core 0019 is there and this role may read pool_quotes and write the quote inventory. */
+export async function poolQuoteInventoryWritable(db: Pool): Promise<boolean> {
+  const r = await db
+    .query<{ ok: boolean }>(
+      `SELECT to_regclass('pool_quote_inventory') IS NOT NULL AND to_regclass('pool_quotes') IS NOT NULL
+              AND has_table_privilege(current_user, 'pool_quote_inventory', 'INSERT,UPDATE,SELECT')
+              AND has_table_privilege(current_user, 'pool_quotes', 'SELECT') AS ok`,
     )
     .catch(() => null);
   return r?.rows[0]?.ok === true;

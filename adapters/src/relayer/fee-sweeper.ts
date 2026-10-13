@@ -581,6 +581,29 @@ export class PgMintSource {
   }
 }
 
+/** RELAYER v8 A6: quote mints of the pool (core's `pool_quotes`); none before core 0019. Errors propagate. */
+export class PgPoolQuoteMintSource {
+  constructor(
+    private readonly pool: Pool,
+    private readonly network: SolanaNetwork,
+  ) {}
+  async mints(): Promise<string[]> {
+    const t = await this.pool.query<{ ok: boolean }>(`SELECT to_regclass('pool_quotes') IS NOT NULL AS ok`);
+    if (t.rows[0]?.ok !== true) return [];
+    const r = await this.pool.query<{ mint: string }>(`SELECT mint FROM pool_quotes WHERE network = $1`, [this.network]);
+    return r.rows.map((x) => x.mint);
+  }
+}
+
+/** Union that FAILS CLOSED (Verify: a source error aborts the snapshot, never under-report). */
+export class AllMintSources {
+  constructor(private readonly sources: readonly { mints(): Promise<string[]> }[]) {}
+  async mints(): Promise<string[]> {
+    const all = await Promise.all(this.sources.map((s) => s.mints()));
+    return [...new Set(all.flat())];
+  }
+}
+
 /** Mints pinned in the relayer's file (`mint-vaults.json`, RELAYER_MINT_VAULTS=file / older devnet runs). */
 export class FileMintSource {
   constructor(private readonly file: string) {}

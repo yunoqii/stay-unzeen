@@ -42,6 +42,8 @@ export interface CreateJobSpec {
   lamportsIn: bigint;
   /** Non-SOL pair (core `meta.quote`, e.g. "USDC"); absent = SOL. */
   quote?: string;
+  /** LaunchLab platform (core `meta.platform`: "stonk" | "bonk" | "unzeen"). */
+  platform?: string;
   /** Minimum tokens of the first buy. */
   minOut: bigint;
 }
@@ -202,10 +204,12 @@ export interface TradeExecution {
   /** Token symbol from on-chain metadata (feed fallback when `tokens` has no row); null if unknown. */
   symbol: string | null;
   /** Public market snapshot after the trade (tokens table); null if unreadable. */
-  market: { priceSol: string; marketCapSol: string; status: "curve" | "graduated" } | null;
+  market: { priceSol: string; marketCapSol: string; status: "curve" | "graduated"; /** Non-SOL pair: quote per 1 whole token (`tokens.price_quote`). */ priceQuote?: string } | null;
   /** Non-SOL pair: quote mint and units moved (feed only; `solAmount` stays lamports). */
   quoteMint?: string;
   quoteAmount?: bigint;
+  /** Stock-only quote (ZEC): `solAmount` is 0, core books lamports from `quoteAmount` (out_lamports NULL). */
+  lamportsByCore?: true;
 }
 
 export interface WithdrawExecution {
@@ -242,12 +246,13 @@ export interface CreateExecution {
   symbol: string;
   /** Sanitized image URL served by us / IPFS; null without image. */
   imageUrl: string | null;
-  market: { priceSol: string; marketCapSol: string; status: "curve" | "graduated" } | null;
+  market: { priceSol: string; marketCapSol: string; status: "curve" | "graduated"; /** Non-SOL pair: quote per 1 whole token (`tokens.price_quote`). */ priceQuote?: string } | null;
   /** RELAYER v6 `out_creator_fee` (0013): creator fee of this launch tx; null = unknown (core estimates). */
   creatorFee?: bigint | null;
   /** Non-SOL pair: quote mint and units of the first buy (feed only). */
   quoteMint?: string;
   quoteAmount?: bigint;
+  lamportsByCore?: true;
   /**
    * Fair-launch v2 bundle: the other legs that landed (each a buy with its own
    * signature, one feed row each). `tokenAmount` / `solAmount` / `networkFee` /

@@ -6,6 +6,7 @@ import type { SolanaCluster } from "./config";
 import { AdapterError } from "./errors";
 import { anchorEventPayloads } from "./events";
 import { toBN, toBig } from "./math";
+import { ClmmPoolA } from "./pool-a-clmm";
 
 /**
  * Non-SOL pairs (lead 13.10, docs/analysis/launchpads-b.md §7 + launchpads-a.md):
@@ -41,6 +42,15 @@ export interface QuoteAsset {
   poolA: PublicKey | null;
   /** Unzeen's DBC config for this quote (one config = one quote mint); null = not created yet. */
   dbcConfig: PublicKey | null;
+  /** Pool A program: Meteora DAMM v2 (default) or Raydium CLMM (USD1). */
+  poolAType?: "damm" | "clmm";
+  /**
+   * Stock-only quote (lead 13.10: ZEC SPL): no pool A, no swap leg. The stock is
+   * refilled by core's rebalance (ZEC -> ZEC SPL via 1Click) and spread by
+   * `fund_quote` from the rebalance address. Job amounts are QUOTE UNITS and
+   * core books lamports at its own ZEC/SOL rate; a short stock -> pool_liquidity.
+   */
+  stockOnly?: boolean;
 }
 
 interface Defaults {
@@ -48,12 +58,15 @@ interface Defaults {
   decimals: number;
   poolA: string | null;
   dbcConfig: string | null;
+  stockOnly?: boolean;
+  poolAType?: "damm" | "clmm";
 }
 
 export const QUOTE_DEFAULTS: Record<"mainnet-beta" | "devnet", Partial<Record<QuoteSymbol, Defaults>>> = {
   "mainnet-beta": {
     USDC: { mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6, poolA: "8Pm2kZpnxD3hoMmt4bjStX2Pw2Z9abpbHzZxMPqxPmie", dbcConfig: null },
-    USD1: { mint: "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB", decimals: 6, poolA: null, dbcConfig: null },
+    // USD1: deepest SOL/USD1 pool is Raydium CLMM (13.10: ~16 600 SOL / ~2.95M USD1), see pool-a-clmm.ts.
+    USD1: { mint: "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB", decimals: 6, poolA: "AQAGYQsdU853WAKhXM79CgNdoyhrRwXvYHX6qrDyC1FS", dbcConfig: null, poolAType: "clmm" },
   },
   devnet: {
     // Raydium's devnet USDC (LaunchLab's devnet quote), NOT pump.fun's devnet USDC 4zMMC9….
@@ -70,8 +83,8 @@ export const QUOTE_DEFAULTS: Record<"mainnet-beta" | "devnet", Partial<Record<Qu
 export const PUMP_QUOTE_DEFAULTS: Record<"mainnet-beta" | "devnet", Partial<Record<QuoteSymbol, Defaults>>> = {
   "mainnet-beta": {
     USDC: { mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6, poolA: "8Pm2kZpnxD3hoMmt4bjStX2Pw2Z9abpbHzZxMPqxPmie", dbcConfig: null },
-    // ZEC (SPL, 8 decimals, no freeze authority): no DAMM v2 pool with liquidity (13.10) -> no pool A yet.
-    ZEC: { mint: "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS", decimals: 8, poolA: null, dbcConfig: null },
+    // ZEC (SPL, 8 decimals, no freeze authority): stock-only (lead 13.10), no pool A by design.
+    ZEC: { mint: "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS", decimals: 8, poolA: null, dbcConfig: null, stockOnly: true },
   },
   devnet: {
     USDC: { mint: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", decimals: 6, poolA: "A7sYJqmWsqyKzkyEZg8fQrMWFKdrFpQA4E1Msa9Pnvur", dbcConfig: null },
@@ -115,6 +128,8 @@ export function quoteAssets(cluster: SolanaCluster, env: NodeJS.ProcessEnv = pro
       tokenProgram: TOKEN_PROGRAM_ID, // USDC / USD1 / devnet USDC are SPL Token (checked 13.10)
       poolA: pk(`${pre}POOL_A_${sym}_${net}`, d.poolA),
       dbcConfig: venue === "pumpfun" ? null : pk(`METEORA_DBC_CONFIG_${net}_${sym}`, d.dbcConfig),
+      ...(d.stockOnly ? { stockOnly: true } : {}),
+      ...(d.poolAType ? { poolAType: d.poolAType } : {}),
     });
   }
   return out;
@@ -124,6 +139,36 @@ export function quoteAssets(cluster: SolanaCluster, env: NodeJS.ProcessEnv = pro
 // pool A
 // ---------------------------------------------------------------------------
 
+/** One swap through pool A, normalized: `buy` = SOL in, quote out. */
+export interface PoolLeg {
+  buy: boolean;
+  inputAmount: bigint;
+  outputAmount: bigint;
+}
+
+/** SOL <-> quote pool A (DAMM v2 `PoolA`, Raydium CLMM `ClmmPoolA`). States are opaque per implementation. */
+export interface QuotePool {
+  readonly address: PublicKey;
+  load(): Promise<unknown>;
+  /** Quote units out for `lamports` in (ExactIn). */
+  quoteForSol(s: unknown, lamports: bigint): bigint;
+  /** Lamports in for exactly `units` quote out (ExactOut). */
+  solForExactQuote(s: unknown, units: bigint): bigint;
+  /** Lamports out for `units` quote in (ExactIn). */
+  solForQuote(s: unknown, units: bigint): bigint;
+  buyQuoteExactOut(payer: PublicKey, s: unknown, units: bigint, maxLamports: bigint): Promise<TransactionInstruction[]>;
+  sellQuoteExactIn(payer: PublicKey, s: unknown, units: bigint, minLamports: bigint): Promise<TransactionInstruction[]>;
+  /** This pool's swaps in a confirmed tx. */
+  legs(tx: VersionedTransactionResponse): PoolLeg[];
+}
+
+/** Pool A of an asset (null without one). */
+export function makeQuotePool(connection: Connection, asset: QuoteAsset): QuotePool | null {
+  if (!asset.poolA) return null;
+  if (asset.poolAType === "clmm") return new ClmmPoolA(connection, asset.poolA, asset);
+  return new PoolA(connection, asset.poolA, asset);
+}
+
 export interface PoolAState {
   address: PublicKey;
   pool: PoolState;
@@ -132,8 +177,10 @@ export interface PoolAState {
 }
 
 /** SOL <-> quote on a pinned DAMM v2 pool: local quotes + swap2 instructions. */
-export class PoolA {
+export class PoolA implements QuotePool {
   private readonly amm: CpAmm;
+  /** Known after the first load (DAMM v2 does not sort mints). */
+  private solIsA: boolean | null = null;
   constructor(
     private readonly connection: Connection,
     readonly address: PublicKey,
@@ -156,6 +203,7 @@ export class PoolA {
       throw new AdapterError("internal", "pool A is not SOL/quote");
     }
     const point = await getCurrentPoint(this.connection, pool.activationType);
+    this.solIsA = solIsA;
     return { address: this.address, pool, point, solIsA };
   }
 
@@ -185,6 +233,17 @@ export class PoolA {
   /** swap2 quote -> SOL, ExactIn `units`, at least `minLamports`. */
   async sellQuoteExactIn(payer: PublicKey, s: PoolAState, units: bigint, minLamports: bigint): Promise<TransactionInstruction[]> {
     return this.ixs(payer, s, this.quote.mint, NATIVE_MINT, { swapMode: SwapMode.ExactIn, amountIn: toBN(units), minimumAmountOut: toBN(minLamports) });
+  }
+
+  legs(tx: VersionedTransactionResponse): PoolLeg[] {
+    // trade_direction 0 = A->B. A/B order unknown (pool never loaded in this process): only trade
+    // txs ask without loading, and their single pool-A leg is always SOL -> quote, so it is a buy.
+    // Callers that need the direction of an arbitrary leg (stock swaps) load the pool first.
+    return poolASwapLegs(tx, this.address).map((l) => ({
+      buy: this.solIsA === null ? true : (l.tradeDirection === 0) === this.solIsA,
+      inputAmount: l.inputAmount,
+      outputAmount: l.outputAmount,
+    }));
   }
 
   private q(s: PoolAState, input: PublicKey, mode: { swapMode: SwapMode.ExactIn; amountIn: BN } | { swapMode: SwapMode.ExactOut; amountOut: BN }) {

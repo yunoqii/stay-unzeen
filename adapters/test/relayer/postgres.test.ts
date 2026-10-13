@@ -274,6 +274,50 @@ describe.skipIf(!DB)("PostgresJobQueue (live Postgres, temp schema)", () => {
     ]);
   });
 
+  it("v8 (0019): LaunchLab USD1 create + ZEC buy write the pair columns; ZEC leaves out_lamports NULL", async () => {
+    const has = (await pool.query(`SELECT to_regclass('public.pool_quotes') IS NOT NULL AS ok`)).rows[0]?.ok === true;
+    if (!has) return; // public schema before core 0019
+    const q = new PostgresJobQueue({ pool, network: "devnet" }); // fresh column caches
+    const claim = () => q.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000 });
+    await pool.query(`DELETE FROM relayer_jobs`);
+    const USD1 = "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB";
+    const ZEC = "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS";
+    // create (USD1 pair, stonk.fun)
+    const cid = await insert({ op: "create", venue: "raydium-launchlab", lamports_in: 50_000_000, min_out: 0, network: "devnet", meta: { name: "U", symbol: "U", quote: "USD1", platform: "stonk" } });
+    let c = (await claim())!;
+    expect(c.spec).toMatchObject({ kind: "create", quote: "USD1", platform: "stonk" });
+    await q.reportSent(c, { signature: "sigQ1", lastValidBlockHeight: 1, vault: "vQ", sentAt: Date.now() });
+    const mint = Keypair.generate().publicKey.toBase58();
+    await q.reportResult(c, {
+      status: "executed",
+      execution: {
+        kind: "create", signature: "sigQ1", slot: 9, vault: "vQ", mint, creator: "cr", tokenAmount: 1_000n, solAmount: 49_750_000n, networkFee: 10_000n, decimals: 6,
+        blockTime: 1_760_000_000, name: "U", symbol: "U", imageUrl: null, market: { priceSol: "0.00000003", marketCapSol: "30", status: "curve", priceQuote: "0.0000032" },
+        quoteMint: USD1, quoteAmount: 5_333_923n,
+      },
+    });
+    expect((await pool.query(`SELECT out_lamports, out_quote_mint, out_quote_amount FROM relayer_jobs WHERE id = $1`, [cid])).rows[0]).toEqual({ out_lamports: "49750000", out_quote_mint: USD1, out_quote_amount: "5333923" });
+    expect((await pool.query(`SELECT quote_mint, price_quote::text AS p, platform FROM tokens WHERE mint = $1`, [mint])).rows[0]).toEqual({ quote_mint: USD1, p: "0.0000032", platform: "stonk" });
+    expect((await pool.query(`SELECT kind, sol_amount, quote_mint, quote_amount FROM trades WHERE mint = $1 ORDER BY id`, [mint])).rows).toEqual([
+      { kind: "create", sol_amount: "0", quote_mint: USD1, quote_amount: "0" },
+      { kind: "buy", sol_amount: "49750000", quote_mint: USD1, quote_amount: "5333923" },
+    ]);
+    // buy on a ZEC curve: amounts in ZEC units, lamports by core
+    const bid = await insert({ op: "buy", venue: "raydium-launchlab", mint, lamports_in: 30_000_000, min_out: 1, network: "devnet" });
+    c = (await claim())!;
+    await q.reportSent(c, { signature: "sigQ2", lastValidBlockHeight: 1, vault: "vQ", sentAt: Date.now() });
+    await q.reportResult(c, {
+      status: "executed",
+      execution: {
+        kind: "buy", signature: "sigQ2", slot: 10, vault: "vQ", mint, tokenAmount: 500n, solAmount: 0n, networkFee: 5_000n, decimals: 6, fromEvent: true, blockTime: 1_760_000_001,
+        symbol: null, market: { priceSol: "0", marketCapSol: "0", status: "curve", priceQuote: "0.0000004" }, quoteMint: ZEC, quoteAmount: 30_000_000n, lamportsByCore: true,
+      },
+    });
+    expect((await pool.query(`SELECT status, out_lamports, out_quote_mint, out_quote_amount FROM relayer_jobs WHERE id = $1`, [bid])).rows[0]).toEqual({ status: "confirmed", out_lamports: null, out_quote_mint: ZEC, out_quote_amount: "30000000" });
+    expect((await pool.query(`SELECT sol_amount, quote_mint, quote_amount FROM trades WHERE signature = 'sigQ2'`)).rows[0]).toEqual({ sol_amount: "0", quote_mint: ZEC, quote_amount: "30000000" });
+    expect((await pool.query(`SELECT price_quote::text AS p FROM tokens WHERE mint = $1`, [mint])).rows[0]).toEqual({ p: "0.0000004" });
+  });
+
   it("v6: create writes out_creator_fee (0013) when the adapter knows it", async () => {
     // 0013 DDL in the temp schema (core may not have applied it locally yet)
     await pool.query(`ALTER TABLE relayer_jobs ADD COLUMN IF NOT EXISTS out_creator_fee BIGINT CHECK (out_creator_fee >= 0)`);

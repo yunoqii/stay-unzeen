@@ -1,7 +1,7 @@
 import type { Keypair, PublicKey, Signer } from "@solana/web3.js";
 
 /** Venue ids, same strings as `Venue` in docs/API.md. */
-export type VenueId = "pumpfun" | "meteora-dbc" | "jupiter";
+export type VenueId = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab";
 
 export type CurveStatus = "curve" | "graduated";
 
@@ -59,6 +59,11 @@ export interface TxResult {
   quoteAmount?: bigint;
   /** How the quote was sourced on a buy: the vault's stock or the in-tx swap leg (fallback). */
   quoteSource?: "stock" | "leg";
+  /**
+   * Stock-only quote (ZEC SPL): the relayer has no SOL rate for it, `solAmount`
+   * is 0 and core books lamports from `quoteAmount` at its own ZEC/SOL rate.
+   */
+  lamportsByCore?: true;
 }
 
 export interface Quote {
@@ -102,6 +107,8 @@ export interface CreateOptions extends TradeOptions {
   mintKeypair?: Keypair;
   /** Non-SOL pair: quote symbol of the launch (e.g. "USDC"); default SOL. */
   quote?: string;
+  /** LaunchLab: platform of the launch ("stonk" | "bonk" | "unzeen"); other venues ignore it. */
+  platform?: string;
 }
 
 /** docs/ARCHITECTURE.md "Адаптер", with an optional trailing options arg. */

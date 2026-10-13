@@ -11,7 +11,7 @@
  * Logs: event kind + outcome code + duration class only. Never job ids,
  * signatures, mints, vaults, amounts or destinations (RELAYER.md "Приватность").
  */
-import { poolSolInventoryWritable } from "../src/rebalance";
+import { poolQuoteInventoryWritable, poolSolInventoryWritable } from "../src/rebalance";
 import { loadRepoEnv, redactSecrets } from "../src/env";
 import { describeConfig, loadConfig, makeConnection } from "../src/config";
 import { buildFeeSweeper } from "../src/relayer/fee-runtime";
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   }
 
   const connection = makeConnection(cfg);
-  const { relayer, fees, pipeline, pool, attester, fairAttester, launchCurves, snapshotter, jitoTips, solInventory, quoteStock } = buildRelayer({
+  const { relayer, fees, pipeline, pool, attester, fairAttester, launchCurves, snapshotter, jitoTips, solInventory, quoteInventory, quoteStock, launchlab } = buildRelayer({
     cfg,
     connection,
     network,
@@ -54,6 +54,11 @@ async function main(): Promise<void> {
     onEvent: (e) => console.error(`[relayer] ${e.event} ${e.kind}${e.code ? ` ${e.code}` : ""}`),
     log: (m) => console.error(`[relayer] ${m}`),
   });
+
+  // RELAYER v8 A1: third-party LaunchLab platforms must still match their pins (claim wallet, fees).
+  if (launchlab) {
+    for (const w of await launchlab.checkPlatforms()) warn(redactSecrets(w));
+  }
 
   const ac = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => ac.abort());
@@ -80,8 +85,11 @@ async function main(): Promise<void> {
     ? snapshotter.run(ac.signal, (e) => warn(`verify snapshot: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 160)}`))
     : (warn("verify_vaults (core 0009) missing or not writable: Verify snapshots will time out on this network"), Promise.resolve());
   // RELAYER v7: pool SOL inventory (vaults + rebalance address) at start and every ~5 min.
+  // RELAYER v8 A7: pool_quote_inventory in the same loop (core plans ZEC SPL rebalances from it).
+  const quotesOk = await poolQuoteInventoryWritable(db);
+  if (!quotesOk) warn("pool_quote_inventory / pool_quotes (core 0019) missing or not writable: core will not plan ZEC SPL rebalances");
   const inventory = (await poolSolInventoryWritable(db))
-    ? solInventory.run(ac.signal, (e) => warn(`pool_sol_inventory: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 160)}`))
+    ? solInventory.run(ac.signal, (e) => warn(`pool inventory: ${redactSecrets(e instanceof Error ? e.message.split("\n", 1)[0]! : "unknown").slice(0, 160)}`), undefined, undefined, quotesOk ? quoteInventory : null)
     : (warn("pool_sol_inventory (core 0015) missing or not writable: core will not plan rebalances"), Promise.resolve());
   // Non-SOL pairs: quote stock per vault on a random 45-90 min schedule, until core schedules fund_quote.
   const stock = process.env.RELAYER_QUOTE_STOCK?.trim() === "1" ? quoteStock.run(ac.signal) : Promise.resolve();

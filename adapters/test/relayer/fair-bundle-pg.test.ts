@@ -68,7 +68,7 @@ describe.skipIf(!DB)("fair-launch v2 on PostgresJobQueue (live Postgres, temp sc
   });
 
   it("with bundle_legs (proposed 0015): legs recorded before the send and returned on the next claim", async () => {
-    await admin.query(`ALTER TABLE ${schema}.relayer_jobs ADD COLUMN bundle_legs JSONB`);
+    await admin.query(`ALTER TABLE ${schema}.relayer_jobs ADD COLUMN IF NOT EXISTS bundle_legs JSONB`);
     const { id } = await fairJob();
     const q = new PostgresJobQueue({ pool, network: "devnet" }); // fresh column cache
     const c = (await q.claim({ workerId: "w", now: Date.now(), leaseMs: 60_000 }))!;
