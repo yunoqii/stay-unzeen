@@ -14,3 +14,8 @@ design-refs/
 docs/screenshots/**/*.mp4
 docs/screenshots/**/*.webm
 docs/screenshots/design-review/10-key-reveal.png
+
+# third-party skill installed via `npx skills add nutlope/hallmark` (license unclear, keep local)
+.agents/
+.claude/skills/hallmark
+skills-lock.json

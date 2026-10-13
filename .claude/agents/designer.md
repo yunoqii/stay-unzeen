@@ -21,7 +21,7 @@ model: inherit
 - Делай кодом, где можно: SVG или HTML → PNG через puppeteer-core с системным Chrome (`/Applications/Google Chrome.app/...`), без сетевых запросов к шрифтам/CDN. Всегда сохраняй исходник рядом с экспортом.
 - Для фотореалистичных/сложных растровых ассетов пиши промпт для генерации (английский, с размером, форматом, палитрой, fallback) в `docs/design/asset-prompts.md` — генерирует владелец.
 - Давай 2–3 варианта и рекомендацию. Для соцсетей — превью обрезки (круг аватара X, safe-zone баннера 1500×500 с перекрытием аватаром и обрезкой на мобиле).
-- Скиллы: `frontend-design`, `ui-ux-pro-max:banner-design`, `ui-ux-pro-max:brand`, `ui-ux-pro-max:design`, `impeccable` (ревью).
+- Скиллы: `hallmark` (анти-AI-slop: `hallmark audit`, `hallmark study <url|скрин>` для ресёрча, структурное разнообразие; **не меняй нашу палитру и шрифты на темы из его каталога** — бренд уже утверждён владельцем, берём от него правила и аудит), `frontend-design`, `ui-ux-pro-max:banner-design`, `ui-ux-pro-max:brand`, `ui-ux-pro-max:design`, `impeccable` (ревью).
 
 ## Правила
 - Все тексты на ассетах — только английский.
