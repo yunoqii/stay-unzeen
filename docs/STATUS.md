@@ -40,6 +40,7 @@
 - —
 
 ## Решения
+- 13.10 (владелец): Bags — да. Регистрация (`pnpm bags:auth --register`) — при деплое, после генерации mainnet-ключей пула на VPS (ключ аттестации Bags выводится из creator-seed пула)
 - 13.10 (владелец): meme.fun не делаем (адаптер в коде, но площадка выключена; код удалить при следующей задаче adapters)
 - 13.10 (владелец): логотип A «crescent», X — avatar-1 + banner-1 (banner-2 запасной); все эффекты motion-v2 (M1–M10) внедряем; подготовку деплоя пока не начинаем
 - 13.10 (владелец): пары к ZEC SPL (`A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS`) на pump.fun/LaunchLab — да, ZEC SPL учитывается в Verify отдельным активом с пометкой «bridged», риск моста — в README; platform config LaunchLab называется «Unzeen» сразу; тестовые запуски в UI bonk.fun/stonk.fun — при mainnet-прогоне; Bags — да, после LaunchLab (ключ подписью отдельного ключа пула)
@@ -121,5 +122,6 @@
 - Публичный деплой до 28.10 собирать с `NEXT_PUBLIC_FAIR_LAUNCH_BUILD=0` и `UNZEEN_FAIR_LAUNCH=0` (кода fair-launch нет в бандле); 28.10 перед открытием репо — включить
 - Перед открытием: вынести внутренние доки (docs/analysis, docs/sessions, docs/STATUS.md, CLAUDE.md, .claude/, docs/screenshots/design-review) в приватный репо и добавить в .gitignore; переписать историю git без них (git filter-repo --path ... --invert-paths), сохранив даты author/committer; проверить даты в окне 28.09–28.10; force-push только после проверки и бэкапа приватного репо
 - Накопить TAZ на 3–5 demo-ключей судей
+- На VPS: сгенерировать mainnet-ключи пула (`pnpm keys:gen`, зашифрованы age, на зашифрованном томе), затем `pnpm bags:auth --register`, BAGS_API_KEY в .env, `pnpm bags:fund` (фондер — не с vault)
 - 28.10 в 20:00 UTC открыть репо, проверить в инкогнито, отправить форму; после отправки черновик не пересохранять
 - Копить TAZ заранее (фаусет 0.125/сутки) для demo-ключей
