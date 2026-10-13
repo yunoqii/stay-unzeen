@@ -36,6 +36,7 @@ import type {
   OrdersParams,
   PlatformStats,
   PoolInfo,
+  Rates,
   Portfolio,
   PendingResponse,
   LaunchPlatform,
@@ -527,6 +528,29 @@ const NOOP_ON = process.env.NEXT_PUBLIC_MOCK_NOOP !== "0";
 /** NEXT_PUBLIC_MOCK_DISCOVERY=1: the Discovery source on /tokens (off by default, like the backend flag). */
 const DISCOVERY_ON = process.env.NEXT_PUBLIC_MOCK_DISCOVERY === "1";
 const CHAT_FEATURES = { ...(CHAT_ON ? { chat: true as const } : {}), ...(NOOP_ON ? { noop: true as const } : {}), ...(DISCOVERY_ON ? { discovery: true as const } : {}) };
+
+/**
+ * DRAFT v0.18 display rates: one public answer per minute, the same for everyone. ZEC/SOL drifts within
+ * ±0.6% around the pool's mid rate so converted figures stay close to what trades actually pay.
+ */
+export function mockRates(now: number): Rates {
+  const minute = Math.floor(now / 60_000);
+  const wave = (k: number, amp: number) => 1 + amp * Math.sin(minute / k) * Math.cos(minute / (k * 2.7));
+  const solUsd = 141.37 * wave(23, 0.012);
+  const zecSol = (Number(MID_LAMPORTS_PER_ZEC) / 1e9) * wave(37, 0.006);
+  const zecUsd = solUsd * zecSol;
+  const ethUsd = 3_912.5 * wave(29, 0.01);
+  const fix = (n: number, d: number) => n.toFixed(d);
+  return {
+    zecUsd: fix(zecUsd, 2),
+    solUsd: fix(solUsd, 2),
+    ethUsd: fix(ethUsd, 2),
+    zecSol: fix(zecSol, 6),
+    zecEth: fix(zecUsd / ethUsd, 6),
+    approximate: true,
+    ts: minute * 60_000,
+  };
+}
 
 export function mockPool(network: Network): PoolInfo {
   const extra = {
@@ -1788,6 +1812,7 @@ export async function handle(
       return candles(s, tf, num("from"), num("to"), quote === "1");
     }
     if (p === "/api/pool") return mockPool(network);
+    if (p === "/api/rates") return mockRates(Date.now());
     if (process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1" && fair && (p === "/api/launches" || p.startsWith("/api/launches/"))) return fair.get(network, p, q);
     if ((m = p.match(/^\/api\/actions\/([^/]+)$/))) {
       const pub = authorize(network, method, pathWithQuery, body, headers);

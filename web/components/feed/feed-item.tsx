@@ -13,6 +13,7 @@ import { CollapseIdentity } from "@/components/motion/collapse-identity";
 import { QuoteBadge } from "@/components/tokens/quote-badge";
 import { VenueTag } from "@/components/tokens/venue-tag";
 import { eventQuote, formatQuote } from "@/lib/quotes";
+import { useDisplay } from "@/lib/display-store";
 
 const VERB: Record<FeedEvent["kind"], string> = {
   buy: "bought",
@@ -36,10 +37,14 @@ const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event
   // v0.13: a non-SOL pair reads in its own quote ("for 3.1 ZEC", "for 45 USDC"); solAmount is only the SOL
   // equivalent then (or "0"). ZEC pairs never show a SOL figure: paid in ZEC, priced in ZEC.
   const q = eventQuote(event);
-  const amount = q ? q.amount : solNum;
-  const unit = q ? q.quote : "SOL";
-  const solHint = q && q.quote !== "ZEC" && solNum > 0 ? solNum : null;
-  const silentCreate = event.kind === "create" && !(amount > 0);
+  // SOL trades read in the display unit (ZEC by default, "≈" when converted at the public rate).
+  const display = useDisplay();
+  const shownSol = display.sol(solNum);
+  const amount = q ? q.amount : shownSol;
+  const unit = q ? q.quote : display.unit;
+  const approxMark = !q && display.converted;
+  const solHint = q && q.quote !== "ZEC" && solNum > 0 ? display.sol(solNum) : null;
+  const silentCreate = event.kind === "create" && !(solNum > 0 || (q && q.amount > 0));
   const network = useNetwork();
   const isBuy = event.kind === "buy";
   const isSell = event.kind === "sell";
@@ -92,6 +97,7 @@ const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event
               <>
                 {" "}
                 {event.kind === "create" ? "with" : "for"}{" "}
+                {approxMark && <span className="text-faint-foreground">≈&nbsp;</span>}
                 <Num
                   fresh={fresh}
                   value={amount}
@@ -100,7 +106,7 @@ const FeedItemInner = forwardRef<HTMLLIElement, Props>(function FeedItem({ event
                 />{" "}
                 <span className={cn(unit === "ZEC" ? "text-zec/80" : "text-faint-foreground")}>{unit}</span>
                 {solHint !== null && (
-                  <span className="tabular ml-1.5 align-middle text-xs whitespace-nowrap text-faint-foreground">≈ {formatSol(solHint)} SOL</span>
+                  <span className="tabular ml-1.5 align-middle text-xs whitespace-nowrap text-faint-foreground">≈ {formatSol(solHint)} {display.unit}</span>
                 )}
               </>
             )}
@@ -147,10 +153,11 @@ function Num({
   className,
 }: {
   fresh: boolean;
-  value: number;
+  value: number | null;
   format: (n: number) => string;
   className?: string;
 }) {
+  if (value === null) return <span className={cn("tabular", className)}>—</span>;
   return fresh ? (
     <CountUp value={value} format={format} className={cn("tabular", className)} />
   ) : (

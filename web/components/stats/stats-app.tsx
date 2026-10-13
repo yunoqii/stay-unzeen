@@ -12,6 +12,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/layout/page-shell";
 import { TokenGlyph } from "@/components/tokens/token-glyph";
 import { VenueTag } from "@/components/tokens/venue-tag";
+import { SolAmount } from "@/components/layout/amount";
+import { useDisplay } from "@/lib/display-store";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 const VENUES: Venue[] = ["pumpfun", "meteora-dbc", "jupiter"];
@@ -41,6 +43,7 @@ export function StatsApp() {
   const network = useNetwork();
   const [st, setSt] = useState<Load & { network: string }>({ s: "loading", network });
   const reduce = useReducedMotion();
+  const display = useDisplay();
 
   useEffect(() => {
     let alive = true;
@@ -74,8 +77,14 @@ export function StatsApp() {
   if (load.s === "error") return <ErrorState error={load.message} title="Could not load the stats" />;
 
   const d = load.data;
+  // Volumes read in the display unit (ZEC by default, "≈" at the public rate); the snapshot itself is in SOL.
+  const vol = (n: number) => {
+    const v = display.sol(n);
+    return v === null ? "—" : sol(v);
+  };
+  const volUnit = `${display.converted ? "≈ " : ""}${display.unit}`;
   const cells: Array<[string, React.ReactNode, string]> = [
-    ["Volume", <K key="v" v={d.volumeSol} format={sol} />, "SOL"],
+    ["Volume", <K key="v" v={d.volumeSol} format={vol} />, volUnit],
     ["Trades", <K key="t" v={d.trades} />, "buys + sells"],
     ["Launches", <K key="l" v={d.launches} />, "through the pool"],
     ["Through the shielded pool", <K key="z" v={d.zecShielded} format={(n) => n.toLocaleString("en-US")} />, "ZEC deposited"],
@@ -105,7 +114,7 @@ export function StatsApp() {
         <div className="ledger">
           <div className="hidden grid-cols-[minmax(0,1.2fr)_repeat(3,minmax(0,1fr))] gap-4 px-4 py-2.5 font-mono text-[10px] tracking-wider text-faint-foreground uppercase sm:grid">
             <span>Venue</span>
-            <span className="text-right">Volume, SOL</span>
+            <span className="text-right">Volume, {display.unit}</span>
             <span className="text-right">Trades</span>
             <span className="text-right">Launches</span>
           </div>
@@ -114,8 +123,8 @@ export function StatsApp() {
             return (
               <div key={v} className="grid grid-cols-3 gap-x-4 gap-y-1 px-4 py-3 text-sm sm:grid-cols-[minmax(0,1.2fr)_repeat(3,minmax(0,1fr))]">
                 <VenueTag venue={v} className="col-span-3 sm:col-span-1" />
-                <Cell label="Volume, SOL">
-                  <K v={row.volumeSol} format={sol} />
+                <Cell label={`Volume, ${display.unit}`}>
+                  <K v={row.volumeSol} format={vol} />
                 </Cell>
                 <Cell label="Trades">
                   <K v={row.trades} />
@@ -159,10 +168,11 @@ export function StatsApp() {
                     </span>
                   </span>
                   <span className="tabular text-right text-sm">
-                    {sol(Number(t.volumeSol))} <span className="text-xs text-faint-foreground">SOL</span>
+                    {display.converted && <span className="text-faint-foreground">≈ </span>}
+                    {vol(Number(t.volumeSol))} <span className="text-xs text-faint-foreground">{display.unit}</span>
                   </span>
                   <span className="tabular hidden text-right text-sm text-muted-foreground sm:block">{t.trades.toLocaleString("en-US")} trades</span>
-                  <span className="tabular hidden text-right text-xs text-faint-foreground sm:block">{formatPrice(t.priceSol)} SOL</span>
+                  <span className="tabular hidden text-right text-xs text-faint-foreground sm:block"><SolAmount sol={Number(t.priceSol)} format={formatPrice} unitClassName="" /></span>
                 </Link>
               </li>
             ))}

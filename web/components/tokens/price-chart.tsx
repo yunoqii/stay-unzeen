@@ -31,13 +31,13 @@ const dayLabel = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeri
 const fullTime = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 
 /** v0.17: `volume` is a base-unit string (no i64 limit): lamports, or the pair quote's base units with quote=1. */
-const toBar = (c: Candle, decimals: number): Bar => ({
+const toBar = (c: Candle, decimals: number, k = 1): Bar => ({
   time: c.time,
-  open: Number(c.open),
-  high: Number(c.high),
-  low: Number(c.low),
-  close: Number(c.close),
-  volume: /^\d+$/.test(String(c.volume)) ? unitsToNumber(String(c.volume), decimals) : 0,
+  open: Number(c.open) * k,
+  high: Number(c.high) * k,
+  low: Number(c.low) * k,
+  close: Number(c.close) * k,
+  volume: /^\d+$/.test(String(c.volume)) ? unitsToNumber(String(c.volume), decimals) * k : 0,
 });
 
 /**
@@ -49,6 +49,11 @@ export interface ChartDenom {
   unit: string;
   /** Set for a pair drawn in its own quote: decimals of that quote (volume base units -> whole units). */
   pairDecimals?: number;
+  /**
+   * SOL bars shown in another display unit (ZEC by default): display units per SOL at the public reference
+   * rate. Applied to history, live trades and trigger lines alike, with the rate taken when the bars loaded.
+   */
+  solScale?: number;
 }
 
 function cssVar(name: string, fallback: string) {
@@ -93,6 +98,13 @@ export function PriceChart({
   const colors = useRef({ up: "#4fc98a", down: "#ef6b73" });
   const [readyTick, setReadyTick] = useState(0);
   const pair = denom.unit !== "SOL" && denom.pairDecimals !== undefined;
+  const solScale = pair ? 1 : (denom.solScale ?? 1);
+  // Latest scale for the next load; `loadedScale` is the one the bars on screen were drawn with.
+  const scaleRef = useRef(solScale);
+  useEffect(() => {
+    scaleRef.current = solScale;
+  }, [solScale]);
+  const [loadedScale, setLoadedScale] = useState(solScale);
   const [loadedAt, setLoadedAt] = useState(0);
 
   // Chart instance: once per mount.
@@ -208,12 +220,12 @@ export function PriceChart({
     if (!series || !showMarkers) return;
     const lines: IPriceLine[] = triggers
       .filter((t) => t.price > 0)
-      .map((t) => series.createPriceLine({ price: t.price, color: "rgba(244,183,40,0.55)", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: t.label }));
+      .map((t) => series.createPriceLine({ price: t.price * loadedScale, color: "rgba(244,183,40,0.55)", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: t.label }));
     // On unmount the chart is removed first (effect above): its series are disposed by then.
     return () => {
       if (chart.current) lines.forEach((l) => series.removePriceLine(l));
     };
-  }, [triggers, showMarkers, readyTick]);
+  }, [triggers, showMarkers, readyTick, loadedScale]);
 
   // History for the selected timeframe.
   useEffect(() => {
@@ -224,7 +236,9 @@ export function PriceChart({
       .getCandles(mint, { tf, ...(pair ? { quote: 1 as const } : {}) })
       .then((list) => {
         if (!alive || !candles.current || !volume.current) return;
-        const bars = list.map((c) => toBar(c, pair ? denom.pairDecimals! : 9));
+        const k = scaleRef.current;
+        const bars = list.map((c) => toBar(c, pair ? denom.pairDecimals! : 9, k));
+        setLoadedScale(k);
         const { up, down } = colors.current;
         candles.current.setData(bars.map((b) => ({ time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close })));
         volume.current.setData(bars.map((b) => volumeBar(b, up, down)));
@@ -239,6 +253,7 @@ export function PriceChart({
       alive = false;
     };
   }, [mint, tf, network, readyTick, denom.unit, pair, denom.pairDecimals]);
+  // A unit switch reloads above; a rate tick alone does not (the axis would jump every minute).
 
   // Live: fold new trades into the current bar (or open the next one).
   useEffect(() => {
@@ -253,7 +268,7 @@ export function PriceChart({
       const tokens = unitsToNumber(e.tokenAmount, e.decimals);
       // Pair view: only trades with a known quote amount (the server's quote=1 bars count the same ones).
       const q = pair ? eventQuote(e) : null;
-      const paid = pair ? (q && q.quote === denom.unit ? q.amount : 0) : lamportsToSol(e.solAmount);
+      const paid = pair ? (q && q.quote === denom.unit ? q.amount : 0) : lamportsToSol(e.solAmount) * loadedScale;
       if (!(tokens > 0) || !(paid > 0)) continue;
       const price = paid / tokens;
       const prev = last.current;
@@ -265,7 +280,7 @@ export function PriceChart({
       candles.current?.update({ time: bar.time as UTCTimestamp, open: bar.open, high: bar.high, low: bar.low, close: bar.close } satisfies CandlestickData);
       volume.current?.update(volumeBar(bar, colors.current.up, colors.current.down));
     }
-  }, [trades, tf, state, denom.unit, pair]);
+  }, [trades, tf, state, denom.unit, pair, loadedScale]);
 
   return (
     <section aria-labelledby="chart-title">

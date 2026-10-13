@@ -22,6 +22,7 @@ import type {
   PlatformStats,
   PoolInfo,
   Portfolio,
+  Rates,
   SignedAction,
   TokenListItem,
   TokenSafety,
@@ -101,6 +102,8 @@ export interface Api {
   getCandles(mint: string, q?: CandlesQuery): Promise<Candle[]>;
   /** Public pool info: UA, chain id, minimums, K. No pubkey, no cookies. */
   getPool(): Promise<PoolInfo>;
+  /** DRAFT v0.18: public display rates (ZEC/SOL/ETH in USD, ZEC/SOL, ZEC/ETH). Same for everyone; display only. */
+  getRates(): Promise<Rates>;
   getPortfolio(signer: Signer): Promise<Portfolio>;
   postAction(signer: Signer, action: SignedAction): Promise<ActionReceipt>;
   /** Owner only (header pubkey = action author), otherwise 404. */
@@ -220,6 +223,7 @@ function makeApi(rawSend: <T>(call: Call) => Promise<T>, subscribeFeed: Api["sub
     },
     getCandles: (mint, q = {}) => get(`/api/tokens/${enc(mint)}/candles${qs({ tf: q.tf, from: q.from, to: q.to, quote: q.quote })}`),
     getPool: () => get("/api/pool"),
+    getRates: () => get("/api/rates"),
     // The anon pubkey never goes into a URL path or query (access logs = IP <-> key). Header only.
     getPortfolio: (signer) => get("/api/portfolio", signer),
     // Padded to a fixed size bucket before signing: the length must not reveal the op or the mode.

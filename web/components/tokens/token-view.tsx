@@ -15,6 +15,7 @@ import { formatCompact, formatPrice, shortAddr, timeAgo } from "@/lib/format";
 import { eventQuote, quoteOfMint, quotePerSol, tokenQuote } from "@/lib/quotes";
 import type { Quote } from "@/lib/api/types";
 import { QuoteBadge } from "./quote-badge";
+import { useDisplay } from "@/lib/display-store";
 import { useLiveFeed } from "@/hooks/use-live-feed";
 import { useNow } from "@/hooks/use-now";
 import { usePending } from "@/hooks/use-pending";
@@ -97,17 +98,33 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
   // v0.13: non-SOL pairs read in their own quote by default; SOL is the comparable view (switchable).
   const [denomPick, setDenom] = useState<"quote" | "SOL">("quote");
   const scale = quotePerSol(token);
-  const quoteView = quote !== "SOL" && denomPick === "quote";
+  // SOL figures read in the display unit (ZEC by default, converted at the public rate with "≈").
+  const display = useDisplay();
+  // A ZEC pair with the ZEC display has nothing to switch to: its own quote is already ZEC.
+  const sameUnit = quote === display.unit;
+  const quoteView = quote !== "SOL" && (denomPick === "quote" || sameUnit);
   // v0.17: the chart of a pair comes from the server in the pair's own units (candles?quote=1).
   const pairDecimals = quoteOfMint(token.quoteMint)?.decimals;
+  const solScale = display.converted && display.rates?.zecSol ? 1 / display.rates.zecSol : null;
+  // The chart converts at the rate it loaded with (refreshed on a timeframe or unit change, not every minute).
+  const roundedScale = solScale === null ? null : Number(solScale.toPrecision(3));
   const chartDenom = useMemo(
-    () => (quoteView && pairDecimals !== undefined ? { unit: quote, pairDecimals } : { unit: "SOL" }),
-    [quoteView, quote, pairDecimals],
+    () =>
+      quoteView && pairDecimals !== undefined
+        ? { unit: quote, pairDecimals }
+        : roundedScale !== null
+          ? { unit: `≈ ${display.unit}`, solScale: roundedScale }
+          : { unit: "SOL" },
+    [quoteView, quote, pairDecimals, roundedScale, display.unit],
   );
-  const shownPrice = quoteView ? priceQuote : priceSol;
+  const solPrice = display.sol(Number(priceSol));
+  const shownPrice = quoteView ? priceQuote : Number(priceSol) > 0 && solPrice !== null ? solPrice : undefined;
   const mcapSol = Number(token.marketCapSol);
-  const shownMcap = !(mcapSol > 0) ? null : quoteView ? (scale !== null ? mcapSol * scale : null) : mcapSol;
-  const denomSwitch = quote !== "SOL" ? <DenomSwitch quote={quote} value={denomPick} onChange={setDenom} solAvailable={Number(priceSol) > 0} /> : null;
+  const shownMcap = !(mcapSol > 0) ? null : quoteView ? (scale !== null ? mcapSol * scale : null) : display.sol(mcapSol);
+  const statUnit = quoteView ? quote : display.unit;
+  const statApprox = !quoteView && display.converted;
+  const denomSwitch =
+    quote !== "SOL" && !sameUnit ? <DenomSwitch quote={quote} alt={display.unit} value={denomPick} onChange={setDenom} solAvailable={Number(priceSol) > 0} /> : null;
   const history = useHistory();
   const { shown } = usePeek();
   const safety = useSafety(token.mint);
@@ -166,8 +183,8 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
       {quote === "ZEC" && <ZecPairNote />}
 
       <dl className="ledger mt-8 grid-cols-3">
-        <Stat label="Price" value={shownPrice === undefined ? "—" : formatPrice(shownPrice)} unit={quoteView ? quote : "SOL"} />
-        <Stat label="Market cap" value={shownMcap === null ? "—" : formatCompact(shownMcap)} unit={quoteView ? quote : "SOL"} />
+        <Stat label="Price" value={shownPrice === undefined ? "—" : formatPrice(shownPrice)} unit={statUnit} approx={statApprox && shownPrice !== undefined} />
+        <Stat label="Market cap" value={shownMcap === null ? "—" : formatCompact(shownMcap)} unit={statUnit} approx={statApprox && shownMcap !== null} />
         <Stat label="Created" value={now === null ? "" : timeAgo(token.createdAt, now)} unit="ago" />
       </dl>
 
@@ -191,11 +208,12 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
   );
 }
 
-function Stat({ label, value, unit }: { label: string; value: string; unit: string }) {
+function Stat({ label, value, unit, approx }: { label: string; value: string; unit: string; approx?: boolean }) {
   return (
     <div className="bg-background px-4 py-4 sm:px-5">
       <dt className="text-xs text-faint-foreground">{label}</dt>
       <dd className="tabular mt-1 truncate text-lg sm:text-xl">
+        {approx && <span className="text-faint-foreground">≈ </span>}
         {value} <span className="text-sm text-faint-foreground">{unit}</span>
       </dd>
     </div>
@@ -258,7 +276,7 @@ function useLivePrice(token: TokenWithTrades, events: FeedEvent[]): { sol: strin
 }
 
 /** Price unit of a non-SOL pair: its quote (default) or the SOL equivalent. */
-function DenomSwitch({ quote, value, onChange, solAvailable }: { quote: Quote; value: "quote" | "SOL"; onChange: (v: "quote" | "SOL") => void; solAvailable: boolean }) {
+function DenomSwitch({ quote, alt, value, onChange, solAvailable }: { quote: Quote; alt: string; value: "quote" | "SOL"; onChange: (v: "quote" | "SOL") => void; solAvailable: boolean }) {
   return (
     <div role="radiogroup" aria-label="Price unit" className="flex gap-0.5 rounded-full border border-border p-0.5">
       {(["quote", "SOL"] as const).map((v) => {
@@ -271,14 +289,14 @@ function DenomSwitch({ quote, value, onChange, solAvailable }: { quote: Quote; v
             role="radio"
             aria-checked={on}
             disabled={off}
-            title={off ? "No SOL equivalent for this pair yet" : v === "SOL" ? "SOL equivalent at the pool's ZEC/SOL rate" : `Priced in ${quote}`}
+            title={off ? `No ${alt} equivalent for this pair yet` : v === "SOL" ? (alt === "SOL" ? "SOL equivalent of the pair's price" : `≈ ${alt} at the public reference rate`) : `Priced in ${quote}`}
             onClick={() => onChange(v)}
             className={cn(
               "hit rounded-full px-2 py-0.5 font-mono text-[11px] transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-40",
               on ? "bg-surface-3 text-foreground" : "text-faint-foreground hover:text-muted-foreground",
             )}
           >
-            {v === "quote" ? quote : "SOL"}
+            {v === "quote" ? quote : alt}
           </button>
         );
       })}

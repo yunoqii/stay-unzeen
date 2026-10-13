@@ -1,5 +1,6 @@
 "use client";
 
+import { SolAmount } from "@/components/layout/amount";
 import Link from "next/link";
 import { useMemo } from "react";
 import { motion } from "motion/react";
@@ -88,7 +89,7 @@ export function HotTokens({ tokens, events, now, limit = 6 }: Props) {
               <p className="tabular text-sm">
                 {Number(token.marketCapSol) > 0 ? (
                   <>
-                    {formatCompact(Number(token.marketCapSol))} <span className="text-faint-foreground">SOL</span>
+                    <SolAmount sol={Number(token.marketCapSol)} format={formatCompact} />
                   </>
                 ) : (
                   <span className="text-faint-foreground">—</span>

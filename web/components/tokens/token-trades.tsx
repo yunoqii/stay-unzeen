@@ -6,7 +6,7 @@ import { useEffect, useId, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { api, errorText } from "@/lib/api/client";
 import type { TokenTrade, TradeFilter } from "@/lib/api/types";
-import { formatCompact, formatSol, lamportsToSol, shortAddr, timeAgo, unitsToNumber } from "@/lib/format";
+import { formatCompact, lamportsToSol, shortAddr, timeAgo, unitsToNumber } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
 import { eventQuote, formatQuote } from "@/lib/quotes";
 import { cn } from "@/lib/utils";
@@ -16,6 +16,7 @@ import { usePool } from "@/hooks/use-pool";
 import { EmptyState } from "@/components/layout/page-shell";
 import { FeedStatusDot, LiveFeed } from "@/components/feed/live-feed";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SolAmount } from "@/components/layout/amount";
 
 const FILTERS: { id: TradeFilter; label: string; needsFull: boolean }[] = [
   { id: "all", label: "All", needsFull: false },
@@ -194,10 +195,15 @@ function TradeRow({ trade, now }: { trade: TokenTrade; now: number | null }) {
   );
 }
 
-/** Trade size in the pair's quote (v0.13), SOL otherwise. */
+/** Trade size in the pair's quote (v0.13), else the SOL size in the display unit. */
 function TradeAmount({ trade }: { trade: TokenTrade }) {
   const q = eventQuote(trade);
-  if (!q) return <span className="text-foreground/90">{formatSol(lamportsToSol(trade.solAmount))} SOL</span>;
+  if (!q)
+    return (
+      <span className="text-foreground/90">
+        <SolAmount sol={lamportsToSol(trade.solAmount)} unitClassName="" />
+      </span>
+    );
   return (
     <span className="text-foreground/90">
       {formatQuote(q.amount, q.quote)} {q.quote}

@@ -10,6 +10,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { TokenGlyph } from "@/components/tokens/token-glyph";
 import { VenueTag } from "@/components/tokens/venue-tag";
 import { Veiled } from "./peek";
+import { UsdHint } from "@/components/layout/amount";
+import { useDisplay } from "@/lib/display-store";
 
 export function HoldingsList({
   holdings,
@@ -21,6 +23,7 @@ export function HoldingsList({
   onWithdraw?: (mint: string) => void;
 }) {
   const bySymbol = new Map((tokens ?? []).map((t) => [t.mint, t]));
+  const display = useDisplay();
 
   return (
     <section aria-labelledby="tokens-title" className="rounded-2xl border border-border bg-card/60 p-5 sm:p-6">
@@ -58,6 +61,8 @@ export function HoldingsList({
             const t = bySymbol.get(h.mint);
             const amount = t ? unitsToNumber(h.amount, t.decimals) : null;
             const valueSol = t && amount !== null ? amount * Number(t.priceSol) : null;
+            // Valued in the display unit (ZEC by default), always approximate: a mark, not a quote.
+            const shownValue = valueSol === null ? null : display.sol(valueSol);
             const held = t && /^[1-9]\d*$/.test(h.held) ? unitsToNumber(h.held, t.decimals) : null;
             return (
               <motion.li
@@ -87,8 +92,13 @@ export function HoldingsList({
                       <Veiled>{amount === null ? "—" : formatCompact(amount)}</Veiled>
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      ≈ <Veiled>{valueSol === null ? "—" : formatSol(valueSol)}</Veiled> SOL
+                      ≈ <Veiled>{shownValue === null ? "—" : formatSol(shownValue)}</Veiled> {display.unit}
                     </p>
+                    {valueSol !== null && (
+                      <p>
+                        <UsdHint sol={valueSol} className="text-[11px]" />
+                      </p>
+                    )}
                     {held !== null && (
                       <p className="text-xs text-faint-foreground">
                         + <Veiled>{formatCompact(held)}</Veiled> held

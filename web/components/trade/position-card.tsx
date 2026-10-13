@@ -4,7 +4,9 @@ import { useId, useMemo } from "react";
 import { LockSimple } from "@phosphor-icons/react";
 import type { Token } from "@/lib/api/types";
 import { useKeyState } from "@/lib/crypto/session";
-import { formatCompact, formatPrice, formatZec, unitsToNumber } from "@/lib/format";
+import { formatCompact, formatPrice, formatSol, formatZec, unitsToNumber, zatToZec } from "@/lib/format";
+import { useDisplay } from "@/lib/display-store";
+import { UsdHint } from "@/components/layout/amount";
 import { expiredCount, fillsOf } from "@/lib/history/reduce";
 import { useHistory } from "@/lib/history/store";
 import { avgEntrySol, avgEntryZec, computePosition, unrealized, unrealizedZecPair } from "@/lib/pnl";
@@ -29,6 +31,7 @@ export function PositionCard({ token, priceSol, priceQuote }: { token: Token; pr
   const { portfolio } = usePortfolio();
   const { pool } = usePool();
   const network = useNetwork();
+  const display = useDisplay();
   const id = useId();
 
   const fills = useMemo(() => fillsOf(history.entries, token.mint), [history.entries, token.mint]);
@@ -54,6 +57,17 @@ export function PositionCard({ token, priceSol, priceQuote }: { token: Token; pr
   const incomplete = pos.incomplete || expired > 0 || (held !== null && held > pos.qty);
   const pnl = u ? u.pnlZat + pos.realizedZat : pos.realizedZat;
   const sign = pnl > ZERO ? "+" : "";
+  // Display unit (owner 13.10): ZEC by default; the native pick shows value and PnL as "≈ SOL" at the public
+  // rate. The ledger's own numbers stay ZEC; this is only how they are read.
+  const zecShown = (zat: bigint) => {
+    const v = display.zec(zatToZec(zat.toString()));
+    if (v === null) return "—";
+    return display.zecConverted ? formatSol(v) : formatZec(zat.toString());
+  };
+  const zecMark = display.zecConverted ? "≈ " : "";
+  const entryShown = entry === null ? null : zecPair ? entry : display.sol(entry);
+  const entryUnit = zecPair ? "ZEC" : display.unit;
+  const entryMark = !zecPair && display.converted ? "≈ " : "";
 
   return (
     <section aria-labelledby={`${id}-t`} className="p-4 sm:p-5">
@@ -74,15 +88,16 @@ export function PositionCard({ token, priceSol, priceQuote }: { token: Token; pr
             </Veiled>
           </Cell>
           <Cell label="Avg entry">
-            <Veiled>{entry === null ? "—" : `${formatPrice(entry)} ${zecPair ? "ZEC" : "SOL"}`}</Veiled>
+            <Veiled>{entryShown === null ? "—" : `${entryMark}${formatPrice(entryShown)} ${entryUnit}`}</Veiled>
           </Cell>
           <Cell label="Value">
-            <Veiled>{value ? `≈ ${formatZec(value.valueZat.toString())} ZEC` : "—"}</Veiled>
+            <Veiled>{value ? `≈ ${zecShown(value.valueZat)} ${display.zecUnit}` : "—"}</Veiled>
+            {value && <UsdHint zec={zatToZec(value.valueZat.toString())} className="ml-1.5" />}
           </Cell>
           <Cell label="PnL">
             <Veiled>
               <span className={cn(pnl > ZERO && "text-buy", pnl < ZERO && "text-sell")}>
-                {fills.length === 0 ? "—" : `${sign}${formatZec(pnl.toString())} ZEC`}
+                {fills.length === 0 ? "—" : `${zecMark}${sign}${zecShown(pnl)} ${display.zecUnit}`}
                 {u?.pnlPct !== null && u?.pnlPct !== undefined && fills.length > 0 && (
                   <span className="ml-1 text-xs">
                     ({u.pnlPct > 0 ? "+" : ""}

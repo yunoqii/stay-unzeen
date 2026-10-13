@@ -10,6 +10,7 @@ import { api, ApiError, errorText } from "@/lib/api/client";
 import type { CreatorToken, PoolInfo } from "@/lib/api/types";
 import { lastRate, submitAction } from "@/lib/activity";
 import { getSigner, useKeyState } from "@/lib/crypto/session";
+import { useDisplay } from "@/lib/display-store";
 import { formatCompact, formatSol, formatZec, lamportsToSol, unitsToNumber, VENUE_LABEL } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
 import { canClaim as canClaimFees, claimAmount, minClaimZat } from "@/lib/claim";
@@ -132,6 +133,7 @@ function Cabinet() {
 
 function TokenCard({ t, pool, index, onClaimed }: { t: CreatorToken; pool: PoolInfo | null; index: number; onClaimed: () => Promise<void> }) {
   const network = useNetwork();
+  const display = useDisplay();
   const reduce = useReducedMotion();
   const now = useNow(60_000);
   const [claiming, setClaiming] = useState(false);
@@ -239,7 +241,14 @@ function TokenCard({ t, pool, index, onClaimed }: { t: CreatorToken; pool: PoolI
         ) : (
           <Fact label="Claimed so far" value={<Veiled>{formatSol(lamportsToSol(t.fees.claimedLamports))}</Veiled>} unit={claimedZat > N0 ? `SOL + ${formatZec(claimedZat.toString())} ZEC` : "SOL"} />
         )}
-        <Fact label="Pool volume" value={formatSol(lamportsToSol(t.volumeLamports))} unit={zecFirst ? "SOL equivalent" : "SOL"} />
+        <Fact
+          label="Pool volume"
+          value={(() => {
+            const v = display.sol(lamportsToSol(t.volumeLamports));
+            return v === null ? "—" : formatSol(v);
+          })()}
+          unit={display.converted ? `≈ ${display.unit}` : zecFirst ? "SOL equivalent" : "SOL"}
+        />
         <Fact label="Pool trades" value={t.trades.toLocaleString("en-US")} />
         <Fact label="Holders" value={t.holders === null ? "—" : t.holders.toLocaleString("en-US")} unit={t.holders === null ? "not counted yet" : "from the last tick"} />
         <Fact

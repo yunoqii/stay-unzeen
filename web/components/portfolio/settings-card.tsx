@@ -7,6 +7,9 @@ import { EXEC_COPY, EXEC_MODES, NOW_WARNING, setDefaultExec, useDefaultExec, typ
 import { NETWORK_CONFIG, useNetwork, type Network } from "@/lib/network";
 import { DEFAULT_BUY_PRESETS, normalizePreset, updateTradeSettings, useTradeSettings } from "@/lib/trade-settings";
 import { cn } from "@/lib/utils";
+import { formatRate, NATIVE_COIN } from "@/lib/display";
+import { useRates } from "@/lib/display-store";
+import { DisplaySwitch } from "@/components/layout/display-switch";
 
 const ICON: Record<ExecMode, typeof Lightning> = { now: Lightning, delayed: Timer, max: ShieldCheck };
 
@@ -76,8 +79,11 @@ export function SettingsCard() {
 
       <QuickTrade network={network} />
 
+      <DisplayCurrency />
+
       <p className="mt-5 text-[11px] text-pretty text-faint-foreground">
-        Saved in this browser for {NETWORK_CONFIG[network].label} only. Never sent to the server — the pool only sees the orders you sign.
+        Execution and presets are saved in this browser for {NETWORK_CONFIG[network].label} only, the price unit for both networks. Never sent to the server — the
+        pool only sees the orders you sign.
       </p>
     </section>
   );
@@ -160,5 +166,26 @@ function PresetInput({ index, value, onCommit }: { index: number; value: string;
       />
       <span className="ml-1 text-xs text-faint-foreground">ZEC</span>
     </span>
+  );
+}
+
+/** ZEC (default) or the chain's native coin for prices, market caps, volumes and PnL. */
+function DisplayCurrency() {
+  const id = useId();
+  const { rates } = useRates();
+  return (
+    <div className="mt-5 border-t border-border/60 pt-5">
+      <div className="flex items-center justify-between gap-3">
+        <p id={`${id}-d`} className="text-sm">
+          Show prices in
+        </p>
+        <DisplaySwitch aria-labelledby={`${id}-d`} />
+      </div>
+      <p className="mt-1 text-xs text-pretty text-faint-foreground">
+        Prices, market caps, volumes and PnL read in ZEC, the currency of your account. {NATIVE_COIN} shows them in the chain&rsquo;s own coin. Converted figures
+        carry &ldquo;≈&rdquo; at a public rate{rates?.zecSol ? ` (1 ZEC ≈ ${formatRate(rates.zecSol, 4)} ${NATIVE_COIN})` : ""}; your trades always run at the
+        pool&rsquo;s own quote.
+      </p>
+    </div>
   );
 }

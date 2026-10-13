@@ -77,6 +77,9 @@ export const SECTIONS: DocSection[] = [
           pump.fun and Meteora DBC from your balance. The trades are made by the pool&rsquo;s shared Solana vaults, so the feed says &ldquo;unzeen bought 1.2M $PEPE&rdquo;. It never says who.
         </p>
         <List>
+          <li>
+            <Strong>Your account is shielded ZEC.</Strong> ZEC is the currency of this market: you top up in ZEC, trade from a ZEC balance and withdraw ZEC. Launch anywhere, the money stays Zcash.
+          </li>
           <li>No Solana wallet, no email, no sign-up. Your account is a 12-word anon key made and encrypted in your browser.</li>
           <li>The price stays public: the bonding curve and every trade are on-chain. The participants do not.</li>
           <li>The only Zcash transaction you make is the top up. Trades are signed requests from your balance, so your deposit is not tied to your trades in time.</li>
@@ -132,6 +135,24 @@ export const SECTIONS: DocSection[] = [
           <li>The deposit is credited after 3 confirmations plus a random 0 to 3 blocks. The page shows each step: seen, confirming, credited.</li>
           <li>Below the minimum deposit nothing is credited. The app shows the minimum before you pay.</li>
           <li>Top up in advance: trades are faster, and a trade right after a deposit is easier to guess.</li>
+        </List>
+      </>
+    ),
+  },
+  {
+    id: "prices",
+    title: "Prices in ZEC",
+    body: (
+      <>
+        <p>
+          Prices, market caps, volumes, trade sizes and PnL read in <Strong>ZEC</Strong> by default, because ZEC is what your account holds. One switch, in the footer or in{" "}
+          <A href="/portfolio#settings">Settings</A>, shows them in the native coin of the chain instead: SOL for tokens on Solana. The choice is saved in this browser only.
+        </p>
+        <List>
+          <li>A converted figure carries &ldquo;≈&rdquo;. It uses a public reference rate that the page refreshes in the background once a minute, the same request for every visitor.</li>
+          <li>Tokens paired with ZEC, USDC or USD1 keep their own pair: a ZEC pair is priced in ZEC with no rate in between.</li>
+          <li>The price of your own trade never comes from the reference rate. It comes from the pool&rsquo;s quote for that action, shown before you sign.</li>
+          <li>In your portfolio a small &ldquo;≈ $&rdquo; sits next to balances and positions, only while Peek is open.</li>
         </List>
       </>
     ),

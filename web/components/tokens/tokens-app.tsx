@@ -15,6 +15,7 @@ import { useNow } from "@/hooks/use-now";
 import { usePool } from "@/hooks/use-pool";
 import { useTokens } from "@/hooks/use-tokens";
 import { EmptyState } from "@/components/layout/page-shell";
+import { SolAmount } from "@/components/layout/amount";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/states";
 import { TokenGlyph } from "./token-glyph";
@@ -261,14 +262,14 @@ function Row({ t, now }: { t: ListedToken; now: number | null }) {
       <td className="tabular px-4 py-3 text-right">
         {Number(t.marketCapSol) > 0 ? (
           <>
-            {formatCompact(Number(t.marketCapSol))} <span className="text-xs text-faint-foreground">SOL</span>
+            <SolAmount sol={Number(t.marketCapSol)} format={formatCompact} unitClassName="text-xs text-faint-foreground" />
           </>
         ) : (
           <span className="text-faint-foreground">—</span>
         )}
         <RowPrice t={t} />
       </td>
-      <td className="tabular px-4 py-3 text-right">{t.volume24hSol === undefined ? <span className="text-faint-foreground">—</span> : <>{formatCompact(Number(t.volume24hSol))} <span className="text-xs text-faint-foreground">SOL</span></>}</td>
+      <td className="tabular px-4 py-3 text-right">{t.volume24hSol === undefined ? <span className="text-faint-foreground">—</span> : <SolAmount sol={Number(t.volume24hSol)} format={formatCompact} unitClassName="text-xs text-faint-foreground" />}</td>
       <td className="tabular px-4 py-3 text-right">{t.unzeenTrades24h === undefined ? <span className="text-faint-foreground">—</span> : t.unzeenTrades24h}</td>
       <td className="tabular px-4 py-3 text-right font-mono text-xs text-faint-foreground">{now === null ? "" : timeAgo(t.createdAt, now)}</td>
     </tr>
@@ -281,8 +282,15 @@ function RowPrice({ t }: { t: ListedToken }) {
   const inQuote = q !== "SOL" && Number(t.priceQuote) > 0;
   return (
     <span className="block text-[11px] text-faint-foreground">
-      {inQuote ? formatPrice(t.priceQuote!) : formatPrice(t.priceSol)}
-      {q !== "SOL" && (inQuote || Number(t.priceSol) > 0) && <span className="ml-1">{inQuote ? q : "SOL"}</span>}
+      {inQuote ? (
+        <>
+          {formatPrice(t.priceQuote!)} <span>{q}</span>
+        </>
+      ) : Number(t.priceSol) > 0 ? (
+        <SolAmount sol={Number(t.priceSol)} format={formatPrice} unitClassName="" />
+      ) : (
+        "—"
+      )}
     </span>
   );
 }

@@ -143,6 +143,28 @@ export interface Candle {
   volume: string;
 }
 
+/**
+ * DRAFT (API.md v0.18, not in the contract yet): public display rates, GET /api/rates or PoolInfo.rates.
+ * Same answer for every visitor, refreshed by a background job on the server. Display only: never the price
+ * of an action (that one comes from the action's own quote / receipt). All values are decimal strings.
+ */
+export interface Rates {
+  /** USD per 1 ZEC. */
+  zecUsd: DecimalString;
+  /** USD per 1 SOL. */
+  solUsd: DecimalString;
+  /** USD per 1 ETH. */
+  ethUsd: DecimalString;
+  /** SOL per 1 ZEC. */
+  zecSol: DecimalString;
+  /** ETH per 1 ZEC. */
+  zecEth: DecimalString;
+  /** Always true: an indicative public rate, shown with "≈". */
+  approximate: true;
+  /** Unix ms of the server's last refresh. */
+  ts: number;
+}
+
 /** GET /api/pool: public, no pubkey, no cookies. Same for every user. */
 export interface PoolInfo {
   /** Pool Unified Address (Orchard/Ironwood receiver only). */
@@ -202,6 +224,8 @@ export interface PoolInfo {
     /** v0.17: ZEC pairs: max first buy of `create` in ZEC SPL units (= zatoshis), step 0.0001 ZEC; only venues with the ZEC pair on (`{}` on devnet). */
     maxInitialBuyZecUnitsByVenue?: Record<string, string>;
   };
+  /** DRAFT v0.18: display rates (alternative to GET /api/rates). Absent on older servers. */
+  rates?: Rates;
   /** v0.4: public rate from the background cache. Absent = no rate (actions -> 503). */
   rate?: {
     lamportsPerZec: Lamports; // mid

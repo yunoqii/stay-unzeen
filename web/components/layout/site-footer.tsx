@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { RatesStrip } from "./rates-strip";
 
 const LINKS = [
   { href: "/docs", label: "Docs" },
@@ -10,6 +11,7 @@ const LINKS = [
 export function SiteFooter() {
   return (
     <footer className="mt-16 border-t border-border/60">
+      <RatesStrip />
       <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 py-6 text-sm sm:px-6">
         <p className="text-faint-foreground">
           Launch anywhere. <span className="text-muted-foreground">Stay unzeen.</span>

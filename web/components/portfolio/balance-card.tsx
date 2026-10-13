@@ -5,7 +5,8 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowDown, ArrowUpRight, Snowflake } from "@phosphor-icons/react";
 import type { Portfolio } from "@/lib/api/types";
-import { formatZec } from "@/lib/format";
+import { formatZec, zatToZec } from "@/lib/format";
+import { UsdHint } from "@/components/layout/amount";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PeekToggle, Veiled } from "./peek";
@@ -51,6 +52,7 @@ export function BalanceCard({ portfolio, onWithdraw }: { portfolio: Portfolio | 
           <p className="text-4xl font-medium tracking-tight tabular sm:text-5xl">
             <Veiled>{formatZec(portfolio.zecBalance)}</Veiled>
             <span className="ml-2 text-lg font-normal text-muted-foreground sm:text-xl">ZEC</span>
+            <UsdHint zec={zatToZec(portfolio.zecBalance)} className="ml-3 align-middle text-sm font-normal tracking-normal" />
           </p>
         ) : (
           <Skeleton className="h-12 w-48 rounded-lg bg-skeleton" />
@@ -79,6 +81,7 @@ export function BalanceCard({ portfolio, onWithdraw }: { portfolio: Portfolio | 
               <dt className="text-muted-foreground">Held by queued actions</dt>
               <dd className="tabular">
                 <Veiled>{formatZec(portfolio.zecHeld)}</Veiled> ZEC
+                <UsdHint zec={zatToZec(portfolio.zecHeld)} className="ml-2" />
               </dd>
             </div>
           )}

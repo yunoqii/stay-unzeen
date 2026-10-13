@@ -154,7 +154,7 @@ export function Hero({ onBuy, contact = false }: { onBuy?: () => void; contact?:
       <div className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-b from-transparent to-background" aria-hidden />
       <div className="relative mx-auto max-w-6xl px-4 pt-8 pb-8 sm:px-6 sm:pt-12 sm:pb-10">
         <p className="mb-4 font-mono text-xs tracking-wider text-faint-foreground uppercase">
-          Private trading for launchpads · paid in shielded ZEC
+          Private trading for launchpads · Your account is shielded ZEC
         </p>
         <h1 className="max-w-xl text-4xl leading-[1.05] font-medium tracking-tight text-balance sm:text-5xl lg:text-[3.5rem]">
           Launch anywhere.
@@ -176,7 +176,7 @@ export function Hero({ onBuy, contact = false }: { onBuy?: () => void; contact?:
           </span>
         </h1>
         <p className="mt-4 max-w-md text-base text-pretty text-muted-foreground">
-          Every trade below is real and on-chain. Who made it is not.
+          Every trade below is real and on-chain. Who made it is not. Priced in <span className="text-zec/90">ZEC</span>, the currency of this market.
         </p>
         <div className="mt-7 flex flex-wrap items-center gap-3">
           <Button asChild size="lg" className="h-11 rounded-full px-5 text-[15px]">
