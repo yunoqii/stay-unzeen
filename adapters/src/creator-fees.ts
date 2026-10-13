@@ -11,6 +11,17 @@ import {
   type BondingCurve,
 } from "@pump-fun/pump-sdk";
 import {
+  LaunchpadPool,
+  PlatformConfig,
+  claimCreatorFee,
+  claimPlatformFeeFromVault,
+  getPdaCreatorFeeVaultAuth,
+  getPdaCreatorVault,
+  getPdaLaunchpadPoolId,
+  getPdaPlatformFeeVaultAuth,
+  getPdaPlatformVault,
+} from "@raydium-io/raydium-sdk-v2";
+import {
   DynamicBondingCurveIdl,
   createDbcProgram,
   deriveDbcPoolAddress,
@@ -20,10 +31,12 @@ import {
   type VirtualPool,
 } from "@meteora-ag/dynamic-bonding-curve-sdk";
 import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
   NATIVE_MINT,
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountIdempotentInstruction,
   createCloseAccountInstruction,
+  createTransferCheckedInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 import {
@@ -35,7 +48,7 @@ import {
   type Keypair,
   type VersionedTransactionResponse,
 } from "@solana/web3.js";
-import { anchorEventPayloads } from "./events";
+import { anchorEventPayloads, tokenDelta } from "./events";
 import { deriveCreatorKeypair } from "./keys";
 import { toBig } from "./math";
 import { DBC_PROGRAM_ID, dbcCoder } from "./meteora";
@@ -65,7 +78,7 @@ import { DBC_PROGRAM_ID, dbcCoder } from "./meteora";
  *   receives, the authority never holds SOL.
  */
 
-export type FeeVenueId = "pumpfun" | "meteora-dbc";
+export type FeeVenueId = "pumpfun" | "meteora-dbc" | "raydium-launchlab";
 export type FeeKind = "creator" | "partner";
 
 /** Something claimable for one authority on one launch. */
@@ -81,6 +94,11 @@ export interface FeeTarget {
   lockedRent: bigint;
   /** Lamports the paying vault must front inside the tx (temporary token account rent), returned by the tx. */
   frontLamports: bigint;
+  /**
+   * Fee collected in a quote token (RELAYER v8 A8): `units` of `mint` would reach the vault's
+   * quote ATA (they become quote STOCK). `lamports` is then 0; the sweeper values `units`.
+   */
+  quote?: { mint: string; units: bigint };
 }
 
 /** One fee transaction for one target (the sweeper adds the pool prefix and signs). */
@@ -90,7 +108,7 @@ export interface FeeTxPlan {
   /** The only signer besides the paying vault. */
   authority: Keypair;
   computeUnits: number;
-  /** Lamports that reach the vault when the tx lands as built. */
+  /** Lamports that reach the vault when the tx lands as built (quote targets: quote units). */
   expectedLamports: bigint;
 }
 
@@ -104,7 +122,10 @@ export interface FeeVenue {
    * no longer owns the launch).
    */
   build(target: FeeTarget, vault: PublicKey): Promise<FeeTxPlan | null>;
-  /** Lamports this target's landed tx actually paid to the vault (from events); null = unreadable. */
+  /**
+   * What this target's landed tx actually paid to the vault: lamports, or quote units when
+   * `target.quote` is set. null = unreadable (never guessed).
+   */
   collected(tx: VersionedTransactionResponse, target: FeeTarget): bigint | null;
 }
 
@@ -177,6 +198,63 @@ export function sweepThreshold(cost: bigint, lockedRent: bigint, p: ThresholdPol
 }
 
 // ---------------------------------------------------------------------------
+// quote-token fees (RELAYER v8 A8)
+// ---------------------------------------------------------------------------
+
+/** Rent of a 165-byte SPL token account (the same on mainnet and devnet). */
+export const TOKEN_ACCOUNT_RENT = 2_039_280n;
+
+/** Amount of an SPL / Token-2022 token account (0 when missing). */
+export function tokenAccountAmount(acc: Pick<AccountInfo<Buffer>, "data"> | null | undefined): bigint {
+  if (!acc || acc.data.length < 72) return 0n;
+  return acc.data.readBigUInt64LE(64);
+}
+
+/** Decimals of a mint account (SPL / Token-2022 base layout). */
+export function mintDecimals(acc: Pick<AccountInfo<Buffer>, "data">): number {
+  if (acc.data.length < 45) throw new Error("not a mint account");
+  return acc.data.readUInt8(44);
+}
+
+/**
+ * Authority's quote ATA -> the paying vault's quote ATA (created when missing, the vault pays):
+ * the fee becomes the vault's quote STOCK. Signed by the authority (the tx's only fee authority).
+ */
+export function quoteToVaultIxs(o: { authority: PublicKey; vault: PublicKey; mint: PublicKey; program: PublicKey; units: bigint; decimals: number }): TransactionInstruction[] {
+  const from = getAssociatedTokenAddressSync(o.mint, o.authority, true, o.program);
+  const to = getAssociatedTokenAddressSync(o.mint, o.vault, true, o.program);
+  return [
+    createAssociatedTokenAccountIdempotentInstruction(o.vault, to, o.vault, o.mint, o.program),
+    createTransferCheckedInstruction(from, o.mint, to, o.authority, o.units, o.decimals, [], o.program),
+  ];
+}
+
+/** The fee payer of a landed tx (every fee tx is paid by the receiving vault). */
+export function feePayerOf(tx: VersionedTransactionResponse): PublicKey {
+  return tx.transaction.message.staticAccountKeys[0]!;
+}
+
+/** Quote units that reached the paying vault in a successful tx (balance delta of its ATAs). */
+export function quoteReceived(tx: VersionedTransactionResponse, mint: PublicKey): bigint | null {
+  if (tx.meta?.err) return null;
+  if (!tx.meta?.postTokenBalances) return null;
+  const d = tokenDelta(tx, feePayerOf(tx), mint);
+  return d >= 0n ? d : null;
+}
+
+/** Balance change (post - pre) of one token ACCOUNT of a tx; null when the account is not in its balances. */
+export function tokenAccountDelta(tx: VersionedTransactionResponse, account: PublicKey): bigint | null {
+  const keys = tx.transaction.message.getAccountKeys(tx.meta?.loadedAddresses ? { accountKeysFromLookups: tx.meta.loadedAddresses } : undefined);
+  let idx = -1;
+  for (let i = 0; i < keys.length; i++) if (keys.get(i)?.equals(account)) idx = i;
+  if (idx < 0) return null;
+  const pre = tx.meta?.preTokenBalances?.find((b) => b.accountIndex === idx);
+  const post = tx.meta?.postTokenBalances?.find((b) => b.accountIndex === idx);
+  if (!pre && !post) return null;
+  return BigInt(post?.uiTokenAmount.amount ?? "0") - BigInt(pre?.uiTokenAmount.amount ?? "0");
+}
+
+// ---------------------------------------------------------------------------
 // pump.fun
 // ---------------------------------------------------------------------------
 
@@ -207,6 +285,82 @@ export function collectCreatorFeeIx(creator: PublicKey): TransactionInstruction 
     ],
     data: COLLECT_CREATOR_FEE_DISC,
   });
+}
+
+const COLLECT_CREATOR_FEE_V2_DISC = Buffer.from(
+  (pumpIdl.instructions as ReadonlyArray<{ name: string; discriminator: number[] }>).find((i) => i.name === "collect_creator_fee_v2")!
+    .discriminator,
+);
+
+/**
+ * pump `collect_creator_fee_v2` (token quote): the creator vault's quote ATA -> the creator's
+ * quote ATA (which must exist). Permissionless (IDL 4.0.0: no signer).
+ */
+export function collectCreatorFeeV2Ix(creator: PublicKey, quoteMint: PublicKey, quoteProgram: PublicKey): TransactionInstruction {
+  const vault = creatorVaultPda(creator);
+  return new TransactionInstruction({
+    programId: PUMP_PROGRAM_ID,
+    keys: [
+      { pubkey: creator, isSigner: false, isWritable: true },
+      { pubkey: getAssociatedTokenAddressSync(quoteMint, creator, true, quoteProgram), isSigner: false, isWritable: true },
+      { pubkey: vault, isSigner: false, isWritable: true },
+      { pubkey: getAssociatedTokenAddressSync(quoteMint, vault, true, quoteProgram), isSigner: false, isWritable: true },
+      { pubkey: quoteMint, isSigner: false, isWritable: false },
+      { pubkey: quoteProgram, isSigner: false, isWritable: false },
+      { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: PUMP_EVENT_AUTHORITY_PDA, isSigner: false, isWritable: false },
+      { pubkey: PUMP_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data: COLLECT_CREATOR_FEE_V2_DISC,
+  });
+}
+
+/** Quote-curve creator fee of one pump creator: curve bucket + creator vault ATA + leftovers on its own ATA. */
+export interface PumpQuoteFeeState {
+  bucket: bigint;
+  vaultAta: bigint;
+  vaultAtaExists: boolean;
+  creatorAta: bigint;
+  creatorAtaExists: boolean;
+}
+
+export function pumpQuoteUnits(s: PumpQuoteFeeState): bigint {
+  return s.bucket + s.vaultAta + s.creatorAta;
+}
+
+/**
+ * sweep (bucket -> creator vault ATA) + the creator's quote ATA (vault pays, kept for good:
+ * a fee accrued between build and landing stays there for the next pass) + collect_v2 +
+ * creator ATA -> vault ATA for exactly the units known at build.
+ */
+export async function pumpQuoteFeeInstructions(o: {
+  mint: PublicKey;
+  creator: PublicKey;
+  quoteMint: PublicKey;
+  quoteProgram: PublicKey;
+  decimals: number;
+  vault: PublicKey;
+  state: PumpQuoteFeeState;
+}): Promise<TransactionInstruction[]> {
+  const ixs: TransactionInstruction[] = [];
+  if (o.state.bucket > 0n) {
+    ixs.push(await PUMP_SDK.sweepCreatorFeeInstruction({ payer: o.vault, mint: o.mint, creator: o.creator, quoteMint: o.quoteMint, quoteTokenProgram: o.quoteProgram }));
+  }
+  ixs.push(createAssociatedTokenAccountIdempotentInstruction(o.vault, getAssociatedTokenAddressSync(o.quoteMint, o.creator, true, o.quoteProgram), o.creator, o.quoteMint, o.quoteProgram));
+  if (o.state.bucket > 0n || o.state.vaultAta > 0n) ixs.push(collectCreatorFeeV2Ix(o.creator, o.quoteMint, o.quoteProgram));
+  ixs.push(...quoteToVaultIxs({ authority: o.creator, vault: o.vault, mint: o.quoteMint, program: o.quoteProgram, units: pumpQuoteUnits(o.state), decimals: o.decimals }));
+  return ixs;
+}
+
+export function pumpQuoteState(curve: Pick<BondingCurve, "creatorFee">, vaultAta: Pick<AccountInfo<Buffer>, "data"> | null, creatorAta: Pick<AccountInfo<Buffer>, "data"> | null): PumpQuoteFeeState {
+  return {
+    bucket: toBig(curve.creatorFee),
+    vaultAta: tokenAccountAmount(vaultAta),
+    vaultAtaExists: vaultAta !== null,
+    creatorAta: tokenAccountAmount(creatorAta),
+    creatorAtaExists: creatorAta !== null,
+  };
 }
 
 /** What one pump creator has waiting, from its curve, creator vault and wallet. */
@@ -355,6 +509,7 @@ export class PumpFeeVenue implements FeeVenue {
     const mints = [...new Set(await this.mints.mints())].map((m) => new PublicKey(m));
     const curves = await multi(this.rpc, mints.map((m) => bondingCurvePda(m)));
     const ours: { mint: PublicKey; curve: BondingCurve; creator: PublicKey }[] = [];
+    const quoted: { mint: PublicKey; curve: BondingCurve; creator: PublicKey; quoteMint: PublicKey }[] = [];
     this.lastSkipped = { graduated: 0, nonSol: 0 };
     curves.forEach((info, i) => {
       if (!info || !info.owner.equals(PUMP_PROGRAM_ID)) return;
@@ -365,26 +520,46 @@ export class PumpFeeVenue implements FeeVenue {
         return;
       }
       if (!this.creators.has(curve.creator.toBase58())) return;
-      if (!isLegacyQuoteMint(normalizeQuoteMint(curve.quoteMint))) {
+      const q = normalizeQuoteMint(curve.quoteMint);
+      if (!isLegacyQuoteMint(q)) {
+        // RELAYER v8 A8: quote-curve fees are collected in the quote (USDC / ZEC SPL).
         this.lastSkipped.nonSol++;
+        quoted.push({ mint: mints[i]!, curve, creator: curve.creator, quoteMint: q });
         return;
       }
       ours.push({ mint: mints[i]!, curve, creator: curve.creator });
     });
-    if (ours.length === 0) return [];
-    const accs = await multi(this.rpc, ours.flatMap((o) => [creatorVaultPda(o.creator), o.creator]));
-    const rent = await this.vaultRent();
-    return ours.map((o, i) => {
-      const vault = accs[2 * i] ?? null;
-      const wallet = BigInt(accs[2 * i + 1]?.lamports ?? 0);
-      if (o.curve.complete) this.lastSkipped.graduated++; // curve leg only; PumpSwap creator fees are not collected here
-      return this.target(o.mint, o.creator, pumpFeeState(o.curve, vault, rent, wallet), rent);
-    });
+    const out: FeeTarget[] = [];
+    if (ours.length > 0) {
+      const accs = await multi(this.rpc, ours.flatMap((o) => [creatorVaultPda(o.creator), o.creator]));
+      const rent = await this.vaultRent();
+      ours.forEach((o, i) => {
+        const vault = accs[2 * i] ?? null;
+        const wallet = BigInt(accs[2 * i + 1]?.lamports ?? 0);
+        if (o.curve.complete) this.lastSkipped.graduated++; // curve leg only; PumpSwap creator fees are not collected here
+        out.push(this.target(o.mint, o.creator, pumpFeeState(o.curve, vault, rent, wallet), rent));
+      });
+    }
+    if (quoted.length > 0) {
+      const qMints = [...new Map(quoted.map((q) => [q.quoteMint.toBase58(), q.quoteMint])).values()];
+      const programs = new Map((await multi(this.rpc, qMints)).map((a, i) => [qMints[i]!.toBase58(), a?.owner ?? null]));
+      const keys = quoted.flatMap((q) => {
+        const prog = programs.get(q.quoteMint.toBase58()) ?? TOKEN_PROGRAM_ID;
+        return [getAssociatedTokenAddressSync(q.quoteMint, creatorVaultPda(q.creator), true, prog), getAssociatedTokenAddressSync(q.quoteMint, q.creator, true, prog)];
+      });
+      const accs = await multi(this.rpc, keys);
+      quoted.forEach((q, i) => {
+        if (!programs.get(q.quoteMint.toBase58())) return; // quote mint unreadable: next run
+        out.push(this.quoteTarget(q.mint, q.creator, q.quoteMint, pumpQuoteState(q.curve, accs[2 * i] ?? null, accs[2 * i + 1] ?? null)));
+      });
+    }
+    return out;
   }
 
   async build(t: FeeTarget, vault: PublicKey): Promise<FeeTxPlan | null> {
     const kp = this.creators.get(t.authority);
     if (!kp) return null;
+    if (t.quote) return this.buildQuote(t, kp, vault);
     const mint = new PublicKey(t.mint);
     const creator = kp.publicKey;
     const [curveInfo, vaultInfo, walletInfo] = await this.rpc.getMultipleAccountsInfo(
@@ -402,7 +577,46 @@ export class PumpFeeVenue implements FeeVenue {
     return { target: fresh, instructions, authority: kp, computeUnits: PUMP_FEE_CU, expectedLamports: pumpTransferAmount(state) };
   }
 
+  /** Quote curve: re-read, rebuild for the units known now. */
+  private async buildQuote(t: FeeTarget, kp: Keypair, vault: PublicKey): Promise<FeeTxPlan | null> {
+    const mint = new PublicKey(t.mint);
+    const creator = kp.publicKey;
+    const [curveInfo] = await this.rpc.getMultipleAccountsInfo([bondingCurvePda(mint)], "confirmed");
+    if (!curveInfo) return null;
+    const curve = PUMP_SDK.decodeBondingCurve(curveInfo);
+    if (!curve.creator.equals(creator)) return null; // CTO: not ours any more
+    const quoteMint = normalizeQuoteMint(curve.quoteMint);
+    if (isLegacyQuoteMint(quoteMint) || quoteMint.toBase58() !== t.quote!.mint) return null;
+    const [mintInfo] = await this.rpc.getMultipleAccountsInfo([quoteMint], "confirmed");
+    if (!mintInfo) return null;
+    const prog = mintInfo.owner;
+    const [vAta, cAta] = await this.rpc.getMultipleAccountsInfo(
+      [getAssociatedTokenAddressSync(quoteMint, creatorVaultPda(creator), true, prog), getAssociatedTokenAddressSync(quoteMint, creator, true, prog)],
+      "confirmed",
+    );
+    const state = pumpQuoteState(curve, vAta ?? null, cAta ?? null);
+    const fresh = this.quoteTarget(mint, creator, quoteMint, state);
+    if (fresh.quote!.units <= 0n) return null;
+    const instructions = await pumpQuoteFeeInstructions({ mint, creator, quoteMint, quoteProgram: prog, decimals: mintDecimals(mintInfo), vault, state });
+    return { target: fresh, instructions, authority: kp, computeUnits: PUMP_FEE_CU, expectedLamports: fresh.quote!.units };
+  }
+
+  private quoteTarget(mint: PublicKey, creator: PublicKey, quoteMint: PublicKey, s: PumpQuoteFeeState): FeeTarget {
+    return {
+      venue: this.venue,
+      kind: "creator",
+      mint: mint.toBase58(),
+      authority: creator.toBase58(),
+      lamports: 0n,
+      // the creator's quote ATA stays (late accruals land there), the creator vault ATA when the sweep creates it
+      lockedRent: (s.creatorAtaExists ? 0n : TOKEN_ACCOUNT_RENT) + (!s.vaultAtaExists && s.bucket > 0n ? TOKEN_ACCOUNT_RENT : 0n),
+      frontLamports: 0n,
+      quote: { mint: quoteMint.toBase58(), units: pumpQuoteUnits(s) },
+    };
+  }
+
   collected(tx: VersionedTransactionResponse, t: FeeTarget): bigint | null {
+    if (t.quote) return quoteReceived(tx, new PublicKey(t.quote.mint));
     if (tx.meta?.err) return null;
     // E15: the creator wallet keeps its rent (+ any late accrual), so the vault got
     // exactly the creator -> vault system transfer of this (successful) tx.
@@ -478,14 +692,17 @@ export async function dbcFeeInstructions(o: {
   authority: PublicKey;
   vault: PublicKey;
   quoteAmount: bigint;
+  /** Non-SOL quote (RELAYER v8 A8): decimals of the quote mint. */
+  quoteDecimals?: number;
 }): Promise<TransactionInstruction[]> {
   const baseProgram = getTokenProgram(o.config.tokenType);
   const quoteProgram = getTokenProgram(o.config.quoteTokenFlag);
-  if (!o.config.quoteMint.equals(NATIVE_MINT) || !quoteProgram.equals(TOKEN_PROGRAM_ID)) {
-    throw new Error("DBC fee claim: only SOL-quoted pools are supported");
-  }
+  const sol = o.config.quoteMint.equals(NATIVE_MINT);
+  if (sol && !quoteProgram.equals(TOKEN_PROGRAM_ID)) throw new Error("DBC fee claim: unexpected wSOL program");
+  if (!sol && o.quoteDecimals === undefined) throw new Error("DBC fee claim: quote decimals needed for a token quote");
+  const quoteMint = o.config.quoteMint;
   const baseAta = getAssociatedTokenAddressSync(o.state.baseMint, o.authority, true, baseProgram);
-  const wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, o.authority, true, quoteProgram);
+  const wsolAta = getAssociatedTokenAddressSync(quoteMint, o.authority, true, quoteProgram);
   const accounts = {
     poolAuthority: deriveDbcPoolAuthority(),
     pool: o.pool,
@@ -494,7 +711,7 @@ export async function dbcFeeInstructions(o: {
     baseVault: o.state.baseVault,
     quoteVault: o.state.quoteVault,
     baseMint: o.state.baseMint,
-    quoteMint: NATIVE_MINT,
+    quoteMint,
     tokenBaseProgram: baseProgram,
     tokenQuoteProgram: quoteProgram,
   };
@@ -511,8 +728,11 @@ export async function dbcFeeInstructions(o: {
           .instruction();
   return [
     createAssociatedTokenAccountIdempotentInstruction(o.vault, baseAta, o.authority, o.state.baseMint, baseProgram),
-    createAssociatedTokenAccountIdempotentInstruction(o.vault, wsolAta, o.authority, NATIVE_MINT, quoteProgram),
+    createAssociatedTokenAccountIdempotentInstruction(o.vault, wsolAta, o.authority, quoteMint, quoteProgram),
     claim,
+    // Token quote: the claim pays exactly `quoteAmount` (fees only grow), so the temporary
+    // account is emptied into the vault's quote ATA and closed like the wSOL one.
+    ...(sol ? [] : quoteToVaultIxs({ authority: o.authority, vault: o.vault, mint: quoteMint, program: quoteProgram, units: o.quoteAmount, decimals: o.quoteDecimals! })),
     createCloseAccountInstruction(wsolAta, o.vault, o.authority, [], quoteProgram),
     createCloseAccountInstruction(baseAta, o.vault, o.authority, [], baseProgram),
   ];
@@ -578,28 +798,47 @@ export class RpcDbcPoolLister implements DbcPoolLister {
  * claimed only for pools whose creator is one of our derived addresses, the
  * partner side only when our partner key is the config's fee claimer.
  */
+/** One Unzeen DBC config: the SOL one, or a quote one (RELAYER v8 A8: fees in that quote). */
+export interface DbcFeeConfig {
+  address: PublicKey;
+  quoteMint: PublicKey;
+  /** Quote decimals (SOL: 9). */
+  decimals: number;
+}
+
 export class DbcFeeVenue implements FeeVenue {
   readonly venue = "meteora-dbc" as const;
-  private cfg: PoolConfig | null = null;
+  private readonly cfgs = new Map<string, PoolConfig>();
+  private readonly configs: DbcFeeConfig[];
 
   constructor(
     private readonly lister: DbcPoolLister,
-    private readonly configAddress: PublicKey,
+    /** SOL config only (historic form), or every Unzeen config with its quote. */
+    configs: PublicKey | readonly DbcFeeConfig[],
     private readonly creators: CreatorDirectory,
-    /** Partner key (fee claimer of the config); null = partner side not collected here. */
+    /** Partner key (fee claimer of the configs); null = partner side not collected here. */
     private readonly partner: Keypair | null,
-  ) {}
+  ) {
+    this.configs = configs instanceof PublicKey ? [{ address: configs, quoteMint: NATIVE_MINT, decimals: 9 }] : [...configs];
+  }
+
+  /** Historic accessor: the SOL config. */
+  get configAddress(): PublicKey {
+    return (this.configs.find((c) => c.quoteMint.equals(NATIVE_MINT)) ?? this.configs[0]!).address;
+  }
 
   async discover(): Promise<FeeTarget[]> {
-    const config = await this.config();
-    const partnerOk = this.partner !== null && config.feeClaimer.equals(this.partner.publicKey);
     const out: FeeTarget[] = [];
-    for (const { state } of await this.lister.pools(this.configAddress)) {
-      if (!state.config.equals(this.configAddress)) continue;
-      const mint = state.baseMint.toBase58();
-      const creator = state.creator.toBase58();
-      if (this.creators.has(creator)) out.push(this.target("creator", mint, creator, dbcClaimable(state, "creator")));
-      if (partnerOk) out.push(this.target("partner", mint, this.partner!.publicKey.toBase58(), dbcClaimable(state, "partner")));
+    for (const c of this.configs) {
+      const config = await this.config(c.address);
+      const partnerOk = this.partner !== null && config.feeClaimer.equals(this.partner.publicKey);
+      for (const { state } of await this.lister.pools(c.address)) {
+        if (!state.config.equals(c.address)) continue;
+        const mint = state.baseMint.toBase58();
+        const creator = state.creator.toBase58();
+        if (this.creators.has(creator)) out.push(this.target(c, "creator", mint, creator, dbcClaimable(state, "creator")));
+        if (partnerOk) out.push(this.target(c, "partner", mint, this.partner!.publicKey.toBase58(), dbcClaimable(state, "partner")));
+      }
     }
     return out;
   }
@@ -607,15 +846,18 @@ export class DbcFeeVenue implements FeeVenue {
   async build(t: FeeTarget, vault: PublicKey): Promise<FeeTxPlan | null> {
     const authority = t.kind === "creator" ? this.creators.get(t.authority) : this.partner;
     if (!authority || authority.publicKey.toBase58() !== t.authority) return null;
-    const config = await this.config();
+    const c = this.configOf(t);
+    if (!c) return null;
+    const config = await this.config(c.address);
     const mint = new PublicKey(t.mint);
-    const pool = this.poolAddress(mint);
+    const pool = this.poolAddress(mint, c);
     const state = await this.lister.pool(pool);
-    if (!state || !state.config.equals(this.configAddress)) return null;
+    if (!state || !state.config.equals(c.address)) return null;
     if (t.kind === "creator" && !state.creator.equals(authority.publicKey)) return null; // pool creator transferred
     if (t.kind === "partner" && !config.feeClaimer.equals(authority.publicKey)) return null;
     const amount = dbcClaimable(state, t.kind);
     if (amount <= 0n) return null;
+    const sol = c.quoteMint.equals(NATIVE_MINT);
     const instructions = await dbcFeeInstructions({
       kind: t.kind,
       pool,
@@ -624,9 +866,10 @@ export class DbcFeeVenue implements FeeVenue {
       authority: authority.publicKey,
       vault,
       quoteAmount: amount,
+      ...(sol ? {} : { quoteDecimals: c.decimals }),
     });
     return {
-      target: this.target(t.kind, t.mint, t.authority, amount),
+      target: this.target(c, t.kind, t.mint, t.authority, amount),
       instructions,
       authority,
       computeUnits: DBC_FEE_CU,
@@ -636,13 +879,16 @@ export class DbcFeeVenue implements FeeVenue {
 
   collected(tx: VersionedTransactionResponse, t: FeeTarget): bigint | null {
     if (tx.meta?.err) return null;
-    const pool = this.poolAddress(new PublicKey(t.mint));
+    const c = this.configOf(t);
+    if (!c) return null;
+    const pool = this.poolAddress(new PublicKey(t.mint), c);
     const disc = t.kind === "creator" ? EVT_CLAIM_CREATOR : EVT_CLAIM_PARTNER;
     const name = t.kind === "creator" ? "EvtClaimCreatorTradingFee" : "EvtClaimTradingFee";
     for (const p of anchorEventPayloads(tx, DBC_PROGRAM_ID, disc)) {
       try {
         const ev = dbcCoder().events.decode(Buffer.concat([disc, p]).toString("base64"));
-        if (ev?.name !== name) continue;
+        // The Anchor coder names events in camelCase ("evtClaimCreatorTradingFee"), the IDL in PascalCase.
+        if (ev?.name.toLowerCase() !== name.toLowerCase()) continue;
         const d = ev.data as { pool: PublicKey; tokenQuoteAmount: BN };
         if (d.pool.equals(pool)) return toBig(d.tokenQuoteAmount);
       } catch {
@@ -652,17 +898,174 @@ export class DbcFeeVenue implements FeeVenue {
     return null;
   }
 
-  poolAddress(mint: PublicKey): PublicKey {
-    // Same PDA as MeteoraDbcAdapter.poolAddress (SOL quote, Unzeen config).
-    return deriveDbcPoolAddress(NATIVE_MINT, mint, this.configAddress);
+  poolAddress(mint: PublicKey, c: DbcFeeConfig = this.configs.find((x) => x.address.equals(this.configAddress))!): PublicKey {
+    // Same PDA as MeteoraDbcAdapter.poolAddress (quote mint + Unzeen config).
+    return deriveDbcPoolAddress(c.quoteMint, mint, c.address);
   }
 
-  private target(kind: FeeKind, mint: string, authority: string, lamports: bigint): FeeTarget {
-    return { venue: this.venue, kind, mint, authority, lamports, lockedRent: 0n, frontLamports: DBC_FRONT_LAMPORTS };
+  /** Config of a target: by its quote (SOL targets: the SOL config). */
+  private configOf(t: FeeTarget): DbcFeeConfig | undefined {
+    const q = t.quote ? new PublicKey(t.quote.mint) : NATIVE_MINT;
+    return this.configs.find((c) => c.quoteMint.equals(q));
   }
 
-  private async config(): Promise<PoolConfig> {
-    this.cfg ??= await this.lister.config(this.configAddress);
-    return this.cfg;
+  private target(c: DbcFeeConfig, kind: FeeKind, mint: string, authority: string, amount: bigint): FeeTarget {
+    const base = { venue: this.venue, kind, mint, authority, lockedRent: 0n, frontLamports: DBC_FRONT_LAMPORTS };
+    return c.quoteMint.equals(NATIVE_MINT) ? { ...base, lamports: amount } : { ...base, lamports: 0n, quote: { mint: c.quoteMint.toBase58(), units: amount } };
+  }
+
+  private async config(address: PublicKey): Promise<PoolConfig> {
+    const k = address.toBase58();
+    let c = this.cfgs.get(k);
+    if (!c) {
+      c = await this.lister.config(address);
+      this.cfgs.set(k, c);
+    }
+    return c;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Raydium LaunchLab (RELAYER v8 A8)
+// ---------------------------------------------------------------------------
+
+/** Compute limit of a LaunchLab fee claim with its token accounts. */
+export const LL_FEE_CU = 150_000;
+
+/**
+ * Raydium LaunchLab fees of the pool's launches:
+ * - creator side: every launch's creator fee vault (PDA per creator + quote mint, filled on
+ *   each trade); `claim_creator_fee` (the fresh creator signs) pays it to the creator's quote
+ *   ATA, which the vault creates; SOL (wSOL) is unwrapped straight to the vault by closing
+ *   that ATA, a token quote is transferred to the vault's quote ATA (stock).
+ * - partner side: Unzeen's own platform only (stonk / bonk fees are theirs); its fee vault per
+ *   quote mint (all launches of the platform together), claimed by the platform claim wallet
+ *   (= the partner key) with `claim_platform_fee_from_vault`. Pool income: `mint` of the
+ *   target is the QUOTE mint (there is no single launch).
+ * Candidate launches come from the mint source (pins); a pool is ours when its creator is.
+ */
+export class LaunchLabFeeVenue implements FeeVenue {
+  readonly venue = "raydium-launchlab" as const;
+
+  constructor(
+    private readonly rpc: Rpc,
+    private readonly program: PublicKey,
+    /** Quote mints served (wSOL first), with decimals. */
+    private readonly quotes: readonly { mint: PublicKey; decimals: number }[],
+    private readonly creators: CreatorDirectory,
+    private readonly mints: MintSource,
+    /** Partner key = Unzeen platform claim wallet; null = partner side off. */
+    private readonly partner: Keypair | null,
+    /** Unzeen's platform id; null = not created on this network. */
+    private readonly platform: PublicKey | null,
+  ) {}
+
+  async discover(): Promise<FeeTarget[]> {
+    const out: FeeTarget[] = [];
+    const mints = [...new Set(await this.mints.mints())].map((m) => new PublicKey(m));
+    const pairs = mints.flatMap((m) => this.quotes.map((q) => ({ mint: m, quote: q.mint })));
+    const pools = await multi(this.rpc, pairs.map((p) => getPdaLaunchpadPoolId(this.program, p.mint, p.quote).publicKey));
+    const ours: { mint: PublicKey; quote: PublicKey; creator: PublicKey }[] = [];
+    pools.forEach((acc, i) => {
+      if (!acc || !acc.owner.equals(this.program)) return;
+      let creator: PublicKey;
+      try {
+        creator = LaunchpadPool.decode(acc.data).creator;
+      } catch {
+        return;
+      }
+      if (this.creators.has(creator.toBase58())) ours.push({ ...pairs[i]!, creator });
+    });
+    if (ours.length > 0) {
+      const accs = await multi(this.rpc, ours.flatMap((o) => [this.creatorVault(o.creator, o.quote), getAssociatedTokenAddressSync(o.quote, o.creator, true)]));
+      ours.forEach((o, i) => out.push(this.target("creator", o.mint.toBase58(), o.creator, o.quote, accs[2 * i] ?? null, accs[2 * i + 1] ?? null)));
+    }
+    if (this.partner && this.platform && (await this.partnerOk())) {
+      const accs = await multi(this.rpc, this.quotes.flatMap((q) => [this.platformVault(q.mint), getAssociatedTokenAddressSync(q.mint, this.partner!.publicKey, true)]));
+      this.quotes.forEach((q, i) => out.push(this.target("partner", q.mint.toBase58(), this.partner!.publicKey, q.mint, accs[2 * i] ?? null, accs[2 * i + 1] ?? null)));
+    }
+    return out;
+  }
+
+  async build(t: FeeTarget, vault: PublicKey): Promise<FeeTxPlan | null> {
+    const quote = t.quote ? new PublicKey(t.quote.mint) : NATIVE_MINT;
+    const q = this.quotes.find((x) => x.mint.equals(quote));
+    if (!q) return null;
+    let authority: Keypair | undefined;
+    let feeVault: PublicKey;
+    let claim: (recipient: PublicKey) => TransactionInstruction;
+    if (t.kind === "creator") {
+      authority = this.creators.get(t.authority);
+      if (!authority) return null;
+      const [poolAcc] = await this.rpc.getMultipleAccountsInfo([getPdaLaunchpadPoolId(this.program, new PublicKey(t.mint), quote).publicKey], "confirmed");
+      if (!poolAcc || !LaunchpadPool.decode(poolAcc.data).creator.equals(authority.publicKey)) return null;
+      feeVault = this.creatorVault(authority.publicKey, quote);
+      const a = authority.publicKey;
+      claim = (r) => claimCreatorFee(this.program, a, getPdaCreatorFeeVaultAuth(this.program).publicKey, feeVault, r, quote, TOKEN_PROGRAM_ID);
+    } else {
+      if (!this.partner || !this.platform || this.partner.publicKey.toBase58() !== t.authority || !(await this.partnerOk())) return null;
+      authority = this.partner;
+      feeVault = this.platformVault(quote);
+      const a = authority.publicKey;
+      const platform = this.platform;
+      claim = (r) => claimPlatformFeeFromVault(this.program, platform, a, getPdaPlatformFeeVaultAuth(this.program).publicKey, feeVault, r, quote, TOKEN_PROGRAM_ID);
+    }
+    const ata = getAssociatedTokenAddressSync(quote, authority.publicKey, true);
+    const [fv, own] = await this.rpc.getMultipleAccountsInfo([feeVault, ata], "confirmed");
+    const fresh = this.target(t.kind, t.mint, authority.publicKey, quote, fv ?? null, own ?? null);
+    const amount = fresh.quote ? fresh.quote.units : fresh.lamports;
+    if (amount <= 0n) return null;
+    const ixs: TransactionInstruction[] = [createAssociatedTokenAccountIdempotentInstruction(vault, ata, authority.publicKey, quote, TOKEN_PROGRAM_ID)];
+    if (tokenAccountAmount(fv) > 0n) ixs.push(claim(ata));
+    if (quote.equals(NATIVE_MINT)) {
+      // wSOL: closing pays everything (claimed + rent) to the vault, whatever accrued late.
+      ixs.push(createCloseAccountInstruction(ata, vault, authority.publicKey, [], TOKEN_PROGRAM_ID));
+    } else {
+      // Token quote: exactly the units known now; a late accrual stays on the kept ATA (next pass).
+      ixs.push(...quoteToVaultIxs({ authority: authority.publicKey, vault, mint: quote, program: TOKEN_PROGRAM_ID, units: amount, decimals: q.decimals }));
+    }
+    return { target: fresh, instructions: ixs, authority, computeUnits: LL_FEE_CU, expectedLamports: amount };
+  }
+
+  collected(tx: VersionedTransactionResponse, t: FeeTarget): bigint | null {
+    if (tx.meta?.err) return null;
+    if (t.quote) return quoteReceived(tx, new PublicKey(t.quote.mint));
+    // SOL: what left the program's fee vault (the closed wSOL account pays it to the vault).
+    const feeVault = t.kind === "creator" ? this.creatorVault(new PublicKey(t.authority), NATIVE_MINT) : this.platform ? this.platformVault(NATIVE_MINT) : null;
+    if (!feeVault) return null;
+    const d = tokenAccountDelta(tx, feeVault);
+    return d === null ? 0n : -d; // fee vault not touched: nothing claimed (leftover-only pass)
+  }
+
+  private creatorVault(creator: PublicKey, quote: PublicKey): PublicKey {
+    return getPdaCreatorVault(this.program, creator, quote).publicKey;
+  }
+
+  private platformVault(quote: PublicKey): PublicKey {
+    return getPdaPlatformVault(this.program, this.platform!, quote).publicKey;
+  }
+
+  private partnerChecked: boolean | null = null;
+  /** Unzeen's platform must name our partner key as its claim wallet. */
+  private async partnerOk(): Promise<boolean> {
+    if (this.partnerChecked !== null) return this.partnerChecked;
+    const [acc] = await this.rpc.getMultipleAccountsInfo([this.platform!], "confirmed");
+    this.partnerChecked = !!acc && acc.owner.equals(this.program) && PlatformConfig.decode(acc.data).platformClaimFeeWallet.equals(this.partner!.publicKey);
+    return this.partnerChecked;
+  }
+
+  private target(kind: FeeKind, mint: string, authority: PublicKey, quote: PublicKey, feeVault: Pick<AccountInfo<Buffer>, "data"> | null, own: Pick<AccountInfo<Buffer>, "data"> | null): FeeTarget {
+    const base = { venue: this.venue, kind, mint, authority: authority.toBase58() };
+    if (quote.equals(NATIVE_MINT)) {
+      // wSOL ATA created and closed in the tx: rent fronted, returned.
+      return { ...base, lamports: tokenAccountAmount(feeVault) + tokenAccountAmount(own), lockedRent: 0n, frontLamports: TOKEN_ACCOUNT_RENT };
+    }
+    return {
+      ...base,
+      lamports: 0n,
+      lockedRent: own ? 0n : TOKEN_ACCOUNT_RENT, // the authority's quote ATA stays
+      frontLamports: 0n,
+      quote: { mint: quote.toBase58(), units: tokenAccountAmount(feeVault) + tokenAccountAmount(own) },
+    };
   }
 }

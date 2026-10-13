@@ -610,7 +610,14 @@ export class PostgresJobQueue implements JobQueue {
     const v = venue.rows[0]?.venue ?? "pumpfun";
     const q = await this.hasFeedQuoteCols();
     const quoteMint = e.quoteMint && e.quoteAmount !== undefined ? e.quoteMint : null;
-    if (e.market) {
+    if (e.market && e.lamportsByCore) {
+      // RELAYER v9 §3: a ZEC pair's price_sol / market_cap_sol (and trades.sol_amount) are core's: never touched here.
+      if (q && e.market.priceQuote !== undefined) {
+        await client.query(`UPDATE tokens SET status = $2, price_quote = $3::numeric, updated_at = now() WHERE mint = $1`, [e.mint, e.market.status, e.market.priceQuote]);
+      } else {
+        await client.query(`UPDATE tokens SET status = $2, updated_at = now() WHERE mint = $1`, [e.mint, e.market.status]);
+      }
+    } else if (e.market) {
       if (q && e.market.priceQuote !== undefined) {
         await client.query(
           `UPDATE tokens SET price_sol = $2::numeric, market_cap_sol = $3::numeric, status = $4, price_quote = $5::numeric, updated_at = now()

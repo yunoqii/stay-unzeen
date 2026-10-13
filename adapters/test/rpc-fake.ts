@@ -87,6 +87,9 @@ export class FakeRpc {
       case "getLatestBlockhash":
         result = { ...ctx, value: { blockhash: "GHtXQBsoZHVnNFa9YevAzFr17DJjgHXk3ycTKD5xD3Zi", lastValidBlockHeight: 1_000 } };
         break;
+      case "getMinimumBalanceForRentExemption":
+        result = Number(p[0]) === 165 ? 2_039_280 : 890_880 + Number(p[0]) * 6_960;
+        break;
       case "getTransaction":
         result = this.txs.get(String(p[0])) ?? null;
         break;

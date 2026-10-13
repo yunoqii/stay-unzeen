@@ -346,6 +346,17 @@ export class LaunchLabAdapter {
     return { id: ids[i]!, mintAProgram: m.owner, pool, config: LaunchpadConfig.decode(c.data), platform: PlatformConfig.decode(p.data), route };
   }
 
+  /** Quote pair of a mint's pool (null = SOL), for the relayer's vault choice. */
+  async quotePairOf(mint: string): Promise<{ quoteMint: string; stockOnly: boolean } | null> {
+    const v = await this.loadPool(parseMint(mint));
+    return v.route ? { quoteMint: v.route.asset.mint.toBase58(), stockOnly: !v.route.poolA } : null;
+  }
+
+  quotePairFor(symbol: string): { quoteMint: string; stockOnly: boolean } | null {
+    const r = this.routesBySymbol.get(symbol.toUpperCase()) ?? null;
+    return r ? { quoteMint: r.asset.mint.toBase58(), stockOnly: !r.poolA } : null;
+  }
+
   async status(mint: string): Promise<CurveStatus> {
     return llStatus((await this.loadPool(parseMint(mint))).pool);
   }
@@ -664,7 +675,8 @@ export class LaunchLabAdapter {
       if (route) {
         const conv = await this.toLamports(tx, route, units, "buy").catch(() => null);
         if (!conv) return null;
-        creatorFee = units > 0n ? (conv.lamports * creatorFee) / units : 0n;
+        // RELAYER v9 §4: ZEC launch -> creator fee in ZEC SPL units as is; USDC/USD1 -> lamport equivalent.
+        if (!conv.byCore) creatorFee = units > 0n ? (conv.lamports * creatorFee) / units : 0n;
         solAmount = conv.lamports;
         quote = { quoteMint: route.asset.mint.toBase58(), quoteAmount: units, quoteSource: conv.source, ...(conv.byCore ? { lamportsByCore: true as const } : {}) };
       } else solAmount = units;

@@ -4,7 +4,8 @@
  *   pnpm fees:sweep                    # one run now ("by command", devnet)
  *   pnpm fees:sweep --dry-run          # plan only: what is claimable, nothing signed
  *   pnpm fees:sweep --daemon           # random 6-12 h between runs, until SIGINT
- *   options: --pause 2000-8000 (ms between targets), --min-lamports N, --mint <addr> (repeatable)
+ *   options: --pause 2000-8000 (ms between targets), --min-lamports N, --mint <addr> (repeatable),
+ *            --quote-any (devnet only: quote-token fees of any size pass the threshold)
  *
  * Inside the relayer instead: RELAYER_FEE_SWEEP=1 pnpm relayer:run.
  * Env: UNZEEN_SOLANA_CLUSTER, SOLANA_RPC_URL_*, SOLANA_KEYS_AGE_KEY_FILE,
@@ -71,6 +72,8 @@ async function main(): Promise<void> {
     log,
     extraMints: args("--mint"),
     ...(min ? { minLamports: BigInt(min) } : {}),
+    // --quote-any (devnet only): any non-zero quote fee passes the threshold (path checks with tiny fees).
+    ...(flag("--quote-any") ? { quoteValuer: devnetQuoteAny(network) } : {}),
     ...(pause && pause.length === 2 ? { schedule: { pauseMinMs: pause[0]!, pauseMaxMs: pause[1]! } } : {}),
     ...(verbose
       ? {
@@ -90,7 +93,10 @@ async function main(): Promise<void> {
       log(`plan: ${considered} claimable target(s), ${belowThreshold} below threshold, ${targets.length} to sweep`);
       if (verbose) {
         const all = (await Promise.all(venues.map((v) => v.discover()))).flat();
-        for (const t of all) log(`  ${t.venue}/${t.kind} mint=${t.mint} claimable=${t.lamports} threshold=${sweeper.thresholdOf(t)}`);
+        for (const t of all) {
+          const q = t.quote ? ` quote=${t.quote.mint.slice(0, 6)}… units=${t.quote.units}` : ` claimable=${t.lamports}`;
+          log(`  ${t.venue}/${t.kind} mint=${t.mint}${q} threshold=${sweeper.thresholdOf(t)} sweep=${await sweeper.eligible(t)}`);
+        }
       }
     } else if (daemon) {
       const ac = new AbortController();
@@ -99,6 +105,7 @@ async function main(): Promise<void> {
     } else {
       const r = await sweeper.runOnce();
       if (verbose) for (const m of r.byMint) log(`  collected ${m.venue}/${m.kind} ${m.mint}: ${m.lamports} lamports`);
+      if (verbose) for (const q of r.quote) log(`  collected quote ${q.mint}: ${q.units} units (vault quote stock)`);
       if (verbose) for (const m of await store.totals(network)) log(`  total ${m.venue}/${m.kind} ${m.mint}: ${m.lamports} lamports`);
     }
   } finally {
@@ -114,3 +121,8 @@ main()
     console.error(`[fees] fatal: ${redactSecrets(e instanceof Error ? e.message : String(e))}`);
     process.exit(1);
   });
+
+function devnetQuoteAny(network: string) {
+  if (network !== "devnet") throw new Error("--quote-any is devnet only");
+  return { lamports: async () => null, minUnits: () => 1n };
+}

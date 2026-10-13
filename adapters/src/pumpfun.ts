@@ -248,6 +248,19 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     return r;
   }
 
+  /** Quote pair of a curve (null = SOL), for the relayer's vault choice. */
+  async quotePairOf(mint: string): Promise<{ quoteMint: string; stockOnly: boolean } | null> {
+    const info = await this.rpc(() => this.connection.getAccountInfo(bondingCurvePda(parseMint(mint)), "confirmed"));
+    if (!info) return null;
+    const r = this.routeOfQuote(PUMP_SDK.decodeBondingCurve(info).quoteMint);
+    return r ? { quoteMint: r.asset.mint.toBase58(), stockOnly: !r.poolA } : null;
+  }
+
+  quotePairFor(symbol: string): { quoteMint: string; stockOnly: boolean } | null {
+    const r = symbol.toUpperCase() === "SOL" ? null : (this.routesBySymbol.get(symbol.toUpperCase()) ?? null);
+    return r ? { quoteMint: r.asset.mint.toBase58(), stockOnly: !r.poolA } : null;
+  }
+
   // -------------------------------------------------------------------------
   // read side
   // -------------------------------------------------------------------------
@@ -580,7 +593,8 @@ export class PumpFunAdapter implements LaunchpadAdapter {
         const units = this.quoteUnitsMoved(tx, vaultPk, route, "buy");
         const conv = await this.toLamports(tx, route, units, "buy").catch(() => null);
         if (!conv) return null;
-        if (creatorFee !== null) creatorFee = units > 0n ? (conv.lamports * creatorFee) / units : 0n;
+        // RELAYER v9 §4: ZEC launch -> creator fee in ZEC SPL units as is; USDC/USD1 -> lamport equivalent.
+        if (creatorFee !== null && !conv.byCore) creatorFee = units > 0n ? (conv.lamports * creatorFee) / units : 0n;
         quote = { quoteMint: route.asset.mint.toBase58(), quoteAmount: units, quoteSource: conv.source, ...(conv.byCore ? { lamportsByCore: true as const } : {}) };
         solAmount = conv.lamports;
       }
@@ -588,6 +602,12 @@ export class PumpFunAdapter implements LaunchpadAdapter {
       // No first buy, or the event did not decode: tokens from the vault's balance.
       tokenAmount = tokenDelta(tx, vaultPk, mint);
       if (tokenAmount > 0n) return null; // a buy happened but its amounts are unknown: never guess SOL
+      // The pair is a create parameter stored on the curve (no TradeEvent to read it from):
+      // tokens.quote_mint must not fall back to SOL (RELAYER v8 A5). 0 quote units moved.
+      const curve = await this.rpc(() => this.connection.getAccountInfo(bondingCurvePda(mint), "confirmed")).catch(() => null);
+      if (!curve) return null; // re-read later
+      const route = this.routeOfQuote(PUMP_SDK.decodeBondingCurve(curve).quoteMint);
+      if (route) quote = { quoteMint: route.asset.mint.toBase58(), quoteAmount: 0n, quoteSource: "stock", ...(route.poolA ? {} : { lamportsByCore: true as const }) };
     }
     return {
       venue: this.id,

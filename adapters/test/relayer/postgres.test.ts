@@ -315,7 +315,8 @@ describe.skipIf(!DB)("PostgresJobQueue (live Postgres, temp schema)", () => {
     });
     expect((await pool.query(`SELECT status, out_lamports, out_quote_mint, out_quote_amount FROM relayer_jobs WHERE id = $1`, [bid])).rows[0]).toEqual({ status: "confirmed", out_lamports: null, out_quote_mint: ZEC, out_quote_amount: "30000000" });
     expect((await pool.query(`SELECT sol_amount, quote_mint, quote_amount FROM trades WHERE signature = 'sigQ2'`)).rows[0]).toEqual({ sol_amount: "0", quote_mint: ZEC, quote_amount: "30000000" });
-    expect((await pool.query(`SELECT price_quote::text AS p FROM tokens WHERE mint = $1`, [mint])).rows[0]).toEqual({ p: "0.0000004" });
+    // v9 §3: price_sol / market_cap_sol of a ZEC pair are core's: the trade leaves them alone
+    expect((await pool.query(`SELECT price_quote::text AS p, price_sol::text AS s, market_cap_sol::text AS m FROM tokens WHERE mint = $1`, [mint])).rows[0]).toEqual({ p: "0.0000004", s: "0.00000003", m: "30" });
   });
 
   it("v6: create writes out_creator_fee (0013) when the adapter knows it", async () => {

@@ -22,6 +22,11 @@ const ATA_RENT_HEADROOM = 2_500_000n;
 /** Per-kind executor: everything the engine needs from a venue / transfer module. */
 export interface JobExecutor<S extends JobSpec = JobSpec> {
   vaultRequest(spec: S): VaultRequest;
+  /**
+   * When it returns a request, the engine uses it instead of `vaultRequest` (it may
+   * read chain: stock-only quote pairs choose the vault by quote STOCK, not SOL).
+   */
+  vaultRequestAsync?(spec: S): Promise<VaultRequest | null>;
   /** Pre-checks and signs. Never broadcasts. Throws AdapterError. */
   prepare(spec: S, vault: Signer): Promise<SignedTx>;
   /** Broadcasts and confirms. Throws AdapterError with `stage`. */
@@ -97,6 +102,16 @@ export interface TradeVenue {
   market(mint: string): Promise<{ priceSol: string; marketCapSol: string; status: CurveStatus; priceQuote?: string }>;
   tokenSymbol(mint: string): Promise<string | null>;
   classify(err: unknown, logs?: readonly string[] | null): AdapterError;
+  /** Quote pair of a mint's curve (null = SOL); venues with stock-only quotes implement it. */
+  quotePairOf?(mint: string): Promise<QuotePair | null>;
+  /** Quote pair a create with `meta.quote = symbol` would use (null = SOL / not served). */
+  quotePairFor?(symbol: string): QuotePair | null;
+}
+
+export interface QuotePair {
+  quoteMint: string;
+  /** Stock-only quote (ZEC SPL): amounts are quote units, no swap leg. */
+  stockOnly: boolean;
 }
 
 /**
@@ -110,6 +125,23 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
     /** Publishes create metadata (sanitized image + JSON). Without it, create jobs fail `venue_unavailable`. */
     private readonly metadata: MetadataStore | null = null,
   ) {}
+
+  /**
+   * Stock-only quote pairs (ZEC SPL, RELAYER v8 A3): `lamportsIn` is quote units and there is
+   * no swap leg, so the vault is chosen by its quote STOCK (>= lamportsIn), SOL only for fees /
+   * rent. A pinned mint keeps its vault (D4): short stock there -> pool_liquidity.
+   */
+  async vaultRequestAsync(spec: PumpSpec): Promise<VaultRequest | null> {
+    if (spec.kind === "buy" && this.adapter.quotePairOf) {
+      const pair = await this.adapter.quotePairOf(spec.mint).catch(() => null);
+      if (pair?.stockOnly) return { minSol: BUY_SOL_HEADROOM, quote: { mint: pair.quoteMint, minUnits: spec.lamportsIn } };
+    }
+    if (spec.kind === "create" && spec.quote && this.adapter.quotePairFor) {
+      const pair = this.adapter.quotePairFor(spec.quote);
+      if (pair?.stockOnly) return { minSol: CREATE_SOL_HEADROOM, quote: { mint: pair.quoteMint, minUnits: spec.lamportsIn } };
+    }
+    return null;
+  }
 
   vaultRequest(spec: PumpSpec): VaultRequest {
     switch (spec.kind) {

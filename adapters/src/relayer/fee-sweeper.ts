@@ -4,6 +4,7 @@ import { PublicKey, type Connection, type Signer, type TransactionInstruction, t
 import type { Pool } from "pg";
 import {
   DBC_FEE_CU,
+  LL_FEE_CU,
   PUMP_FEE_CU,
   feeTxCost,
   sweepThreshold,
@@ -60,12 +61,18 @@ export interface FeeSweepRow {
   slot: number | null;
   /** Block time (unix seconds) of the landed tx. */
   sweptAt: number | null;
+  /** RELAYER v8 A8: fee collected in a quote token (then `lamports` = 0). */
+  quoteMint?: string | null;
+  quoteAmount?: bigint | null;
 }
 
 export interface FeeSweepStore {
   /** Before broadcast. Idempotent by signature. */
-  recordSent(r: Omit<FeeSweepRow, "status" | "lamports" | "slot" | "sweptAt">): Promise<void>;
-  confirm(signature: string, lamports: bigint, slot: number, sweptAt: number | null): Promise<void>;
+  recordSent(r: Omit<FeeSweepRow, "status" | "lamports" | "slot" | "sweptAt" | "quoteAmount">): Promise<void>;
+  /** `quoteAmount`: units of the row's quote mint (quote rows; `lamports` is then 0). */
+  confirm(signature: string, lamports: bigint, slot: number, sweptAt: number | null, quoteAmount?: bigint | null): Promise<void>;
+  /** Whether quote rows can be recorded (core 0019 columns); quote targets are skipped otherwise. */
+  supportsQuote(): Promise<boolean>;
   fail(signature: string): Promise<void>;
   /** Rows still `sent` (outcome unknown) of this network. */
   pending(network: SolanaNetwork): Promise<FeeSweepRow[]>;
@@ -76,13 +83,16 @@ export interface FeeSweepStore {
 export class MemoryFeeSweepStore implements FeeSweepStore {
   readonly rows: FeeSweepRow[] = [];
 
-  async recordSent(r: Omit<FeeSweepRow, "status" | "lamports" | "slot" | "sweptAt">): Promise<void> {
+  async recordSent(r: Omit<FeeSweepRow, "status" | "lamports" | "slot" | "sweptAt" | "quoteAmount">): Promise<void> {
     if (this.rows.some((x) => x.signature === r.signature)) return;
-    this.rows.push({ ...r, status: "sent", lamports: null, slot: null, sweptAt: null });
+    this.rows.push({ ...r, status: "sent", lamports: null, slot: null, sweptAt: null, quoteMint: r.quoteMint ?? null, quoteAmount: null });
   }
-  async confirm(signature: string, lamports: bigint, slot: number, sweptAt: number | null): Promise<void> {
+  async confirm(signature: string, lamports: bigint, slot: number, sweptAt: number | null, quoteAmount: bigint | null = null): Promise<void> {
     const r = this.rows.find((x) => x.signature === signature);
-    if (r && r.status === "sent") Object.assign(r, { status: "confirmed", lamports, slot, sweptAt });
+    if (r && r.status === "sent") Object.assign(r, { status: "confirmed", lamports, slot, sweptAt, quoteAmount });
+  }
+  async supportsQuote(): Promise<boolean> {
+    return true;
   }
   async fail(signature: string): Promise<void> {
     const r = this.rows.find((x) => x.signature === signature);
@@ -118,16 +128,17 @@ export class FileFeeSweepStore extends MemoryFeeSweepStore {
         this.rows.push({
           ...(r as unknown as FeeSweepRow),
           lamports: r.lamports === null || r.lamports === undefined ? null : BigInt(r.lamports as string),
+          quoteAmount: r.quoteAmount === null || r.quoteAmount === undefined ? null : BigInt(r.quoteAmount as string),
         });
       }
     }
   }
-  override async recordSent(r: Omit<FeeSweepRow, "status" | "lamports" | "slot" | "sweptAt">): Promise<void> {
+  override async recordSent(r: Omit<FeeSweepRow, "status" | "lamports" | "slot" | "sweptAt" | "quoteAmount">): Promise<void> {
     await super.recordSent(r);
     this.save();
   }
-  override async confirm(signature: string, lamports: bigint, slot: number, sweptAt: number | null): Promise<void> {
-    await super.confirm(signature, lamports, slot, sweptAt);
+  override async confirm(signature: string, lamports: bigint, slot: number, sweptAt: number | null, quoteAmount: bigint | null = null): Promise<void> {
+    await super.confirm(signature, lamports, slot, sweptAt, quoteAmount);
     this.save();
   }
   override async fail(signature: string): Promise<void> {
@@ -137,7 +148,11 @@ export class FileFeeSweepStore extends MemoryFeeSweepStore {
   private save(): void {
     fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const tmp = `${this.file}.${process.pid}.tmp`;
-    const rows = this.rows.map((r) => ({ ...r, lamports: r.lamports === null ? null : r.lamports.toString() }));
+    const rows = this.rows.map((r) => ({
+      ...r,
+      lamports: r.lamports === null ? null : r.lamports.toString(),
+      quoteAmount: r.quoteAmount === null || r.quoteAmount === undefined ? null : r.quoteAmount.toString(),
+    }));
     fs.writeFileSync(tmp, JSON.stringify({ rows }, null, 1), { mode: 0o600 });
     fs.renameSync(tmp, this.file);
   }
@@ -185,16 +200,48 @@ GRANT USAGE ON SEQUENCE creator_fee_sweeps_id_seq TO unzeen_relayer;
 
 /** Store over the proposed `creator_fee_sweeps` (FEE_SWEEP_STORE=postgres once core has it). */
 export class PgFeeSweepStore implements FeeSweepStore {
+  private quoteCols: Promise<boolean> | null = null;
   constructor(private readonly pool: Pool) {}
 
-  async recordSent(r: Omit<FeeSweepRow, "status" | "lamports" | "slot" | "sweptAt">): Promise<void> {
+  /** core 0019: quote_mint (INSERT, SELECT) / quote_amount (UPDATE). Cached. */
+  supportsQuote(): Promise<boolean> {
+    this.quoteCols ??= this.pool
+      .query<{ ok: boolean }>(
+        `SELECT has_column_privilege(current_user, 'creator_fee_sweeps', 'quote_mint', 'INSERT')
+                AND has_column_privilege(current_user, 'creator_fee_sweeps', 'quote_mint', 'SELECT')
+                AND has_column_privilege(current_user, 'creator_fee_sweeps', 'quote_amount', 'UPDATE') AS ok`,
+      )
+      .then((r) => r.rows[0]?.ok === true)
+      .catch(() => false);
+    return this.quoteCols;
+  }
+
+  async recordSent(r: Omit<FeeSweepRow, "status" | "lamports" | "slot" | "sweptAt" | "quoteAmount">): Promise<void> {
+    if (r.quoteMint) {
+      if (!(await this.supportsQuote())) throw new Error("creator_fee_sweeps has no quote columns (core 0019)");
+      await this.pool.query(
+        `INSERT INTO creator_fee_sweeps (network, venue, kind, mint, authority, signature, last_valid_block_height, quote_mint)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (signature) DO NOTHING`,
+        [r.network, r.venue, r.kind, r.mint, r.authority, r.signature, r.lastValidBlockHeight, r.quoteMint],
+      );
+      return;
+    }
     await this.pool.query(
       `INSERT INTO creator_fee_sweeps (network, venue, kind, mint, authority, signature, last_valid_block_height)
        VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (signature) DO NOTHING`,
       [r.network, r.venue, r.kind, r.mint, r.authority, r.signature, r.lastValidBlockHeight],
     );
   }
-  async confirm(signature: string, lamports: bigint, slot: number, sweptAt: number | null): Promise<void> {
+  async confirm(signature: string, lamports: bigint, slot: number, sweptAt: number | null, quoteAmount: bigint | null = null): Promise<void> {
+    if (quoteAmount !== null) {
+      await this.pool.query(
+        `UPDATE creator_fee_sweeps SET status = 'confirmed', lamports = $2, slot = $3, quote_amount = $5,
+                swept_at = CASE WHEN $4::bigint IS NULL THEN NULL ELSE to_timestamp($4::bigint) END
+          WHERE signature = $1 AND status = 'sent'`,
+        [signature, lamports.toString(), slot, sweptAt, quoteAmount.toString()],
+      );
+      return;
+    }
     await this.pool.query(
       `UPDATE creator_fee_sweeps SET status = 'confirmed', lamports = $2, slot = $3,
               swept_at = CASE WHEN $4::bigint IS NULL THEN NULL ELSE to_timestamp($4::bigint) END
@@ -206,12 +253,14 @@ export class PgFeeSweepStore implements FeeSweepStore {
     await this.pool.query(`UPDATE creator_fee_sweeps SET status = 'failed' WHERE signature = $1 AND status = 'sent'`, [signature]);
   }
   async pending(network: SolanaNetwork): Promise<FeeSweepRow[]> {
-    const r = await this.pool.query<{ venue: FeeVenueId; kind: FeeKind; mint: string; authority: string; signature: string; lvbh: string }>(
-      `SELECT venue, kind, mint, authority, signature, last_valid_block_height AS lvbh
+    const q = await this.supportsQuote();
+    const r = await this.pool.query<{ venue: FeeVenueId; kind: FeeKind; mint: string; authority: string; signature: string; lvbh: string; quote_mint: string | null }>(
+      `SELECT venue, kind, mint, authority, signature, last_valid_block_height AS lvbh, ${q ? "quote_mint" : "NULL::text AS quote_mint"}
          FROM creator_fee_sweeps WHERE network = $1 AND status = 'sent'`,
       [network],
     );
     return r.rows.map((x) => ({
+      quoteMint: x.quote_mint,
       network,
       venue: x.venue,
       kind: x.kind,
@@ -326,6 +375,20 @@ export class RpcSweepChain implements SweepChain {
   }
 }
 
+/**
+ * Values quote-token fees for the threshold (RELAYER v8 A8). Priced quotes (USDC / USD1): SOL
+ * value on pool A. Stock-only quotes (ZEC SPL): no SOL value here -> a minimum in units.
+ */
+export interface QuoteValuer {
+  /**
+   * SOL value of `units` of `mint` (pool A, now); null = no price by design (stock-only ZEC SPL).
+   * Throws when a priced quote cannot be valued right now.
+   */
+  lamports(mint: string, units: bigint): Promise<bigint | null>;
+  /** Minimum units worth a tx when there is no price; null = never collect. */
+  minUnits(mint: string): bigint | null;
+}
+
 export interface FeeSweeperOptions {
   network: SolanaNetwork;
   venues: readonly FeeVenue[];
@@ -350,6 +413,8 @@ export interface FeeSweeperOptions {
   paused?: () => Promise<boolean>;
   /** Detail sink for devnet scripts (explorer links); not used by the daemon. */
   onTx?: (e: { target: FeeTarget; signature: string; lamports: bigint | null; vault: string; ok: boolean; error?: string }) => void;
+  /** Quote-token fees: valuation for the threshold; without it quote targets are never collected. */
+  quoteValuer?: QuoteValuer;
 }
 
 export interface SweepReport {
@@ -362,13 +427,15 @@ export interface SweepReport {
   lamports: bigint;
   /** Lamports per mint collected in this run (creator + partner kinds separately). */
   byMint: { venue: FeeVenueId; kind: FeeKind; mint: string; lamports: bigint }[];
+  /** Quote units collected in this run, per quote mint (they became vault quote stock). */
+  quote: { mint: string; units: bigint }[];
   resolvedPending: number;
 }
 
 const SIGNATURES_PER_FEE_TX = 2; // vault + one authority
 
 export class FeeSweeper {
-  private readonly o: Required<Omit<FeeSweeperOptions, "onTx" | "paused">> & Pick<FeeSweeperOptions, "onTx" | "paused">;
+  private readonly o: Required<Omit<FeeSweeperOptions, "onTx" | "paused" | "quoteValuer">> & Pick<FeeSweeperOptions, "onTx" | "paused" | "quoteValuer">;
 
   constructor(o: FeeSweeperOptions) {
     this.o = {
@@ -386,13 +453,29 @@ export class FeeSweeper {
     const all: FeeTarget[] = [];
     for (const v of this.o.venues) all.push(...(await v.discover()));
     const price = this.o.price.microLamports();
-    const keep = all.filter((t) => t.lamports >= this.thresholdOf(t, price));
+    const quoteOk = all.some((t) => t.quote) ? await this.o.store.supportsQuote().catch(() => false) : false;
+    const keep: FeeTarget[] = [];
+    for (const t of all) {
+      if (t.quote && !quoteOk) continue; // core 0019 missing: never sweep what core cannot see
+      if (await this.eligible(t, price)) keep.push(t);
+    }
     return { targets: shuffle(keep, this.o.rng), considered: all.length, belowThreshold: all.length - keep.length };
+  }
+
+  /** Worth a tx: SOL above its threshold; quote units valued on pool A, or above the unit minimum. */
+  async eligible(t: FeeTarget, microLamports: number = this.o.price.microLamports()): Promise<boolean> {
+    const threshold = this.thresholdOf(t, microLamports);
+    if (!t.quote) return t.lamports >= threshold;
+    if (t.quote.units <= 0n || !this.o.quoteValuer) return false;
+    const value = await this.o.quoteValuer.lamports(t.quote.mint, t.quote.units).catch(() => null);
+    if (value !== null) return value >= threshold;
+    const min = this.o.quoteValuer.minUnits(t.quote.mint);
+    return min !== null && t.quote.units >= min;
   }
 
   thresholdOf(t: FeeTarget, microLamports: number = this.o.price.microLamports()): bigint {
     const venue = this.venueOf(t);
-    const cu = venue.venue === "pumpfun" ? PUMP_FEE_CU : DBC_FEE_CU;
+    const cu = venue.venue === "pumpfun" ? PUMP_FEE_CU : venue.venue === "raydium-launchlab" ? LL_FEE_CU : DBC_FEE_CU;
     const cost = feeTxCost({ signatures: SIGNATURES_PER_FEE_TX, computeUnits: cu, microLamportsPerCu: microLamports, tipLamports: this.o.tipLamports });
     return sweepThreshold(cost, t.lockedRent, this.o.threshold);
   }
@@ -401,8 +484,9 @@ export class FeeSweeper {
   async runOnce(signal?: AbortSignal): Promise<SweepReport> {
     const resolvedPending = await this.resolvePending();
     const { targets, considered, belowThreshold } = await this.plan();
-    const report: SweepReport = { considered, belowThreshold, sent: 0, confirmed: 0, failed: 0, skipped: 0, lamports: 0n, byMint: [], resolvedPending };
+    const report: SweepReport = { considered, belowThreshold, sent: 0, confirmed: 0, failed: 0, skipped: 0, lamports: 0n, byMint: [], quote: [], resolvedPending };
     const by = new Map<string, { venue: FeeVenueId; kind: FeeKind; mint: string; lamports: bigint }>();
+    const byQuote = new Map<string, bigint>();
     for (let i = 0; i < targets.length; i++) {
       if (signal?.aborted) break;
       if (i > 0) await this.o.sleep(this.o.rng.int(this.o.schedule.pauseMinMs, this.o.schedule.pauseMaxMs), signal);
@@ -419,7 +503,10 @@ export class FeeSweeper {
       report.sent++;
       if (r.ok) {
         report.confirmed++;
-        if (r.lamports !== null) {
+        const qt = targets[i]!.quote;
+        if (qt && r.lamports !== null) {
+          byQuote.set(qt.mint, (byQuote.get(qt.mint) ?? 0n) + r.lamports);
+        } else if (r.lamports !== null) {
           report.lamports += r.lamports;
           const t = targets[i]!;
           const k = `${t.venue}|${t.kind}|${t.mint}`;
@@ -432,9 +519,11 @@ export class FeeSweeper {
       }
     }
     report.byMint = [...by.values()];
+    report.quote = [...byQuote].map(([mint, units]) => ({ mint, units }));
     this.o.log(
       `fee sweep: ${report.considered} considered, ${report.belowThreshold} below threshold, ${report.sent} sent, ` +
-        `${report.confirmed} confirmed, ${report.failed} failed, ${report.skipped} skipped, ${report.lamports} lamports`,
+        `${report.confirmed} confirmed, ${report.failed} failed, ${report.skipped} skipped, ${report.lamports} lamports` +
+        (report.quote.length ? `, quote in ${report.quote.length} mint(s)` : ""),
     );
     return report;
   }
@@ -467,7 +556,7 @@ export class FeeSweeper {
     let signed: SignedTx | null = null;
     try {
       const plan: FeeTxPlan | null = await venue.build(t, vault.publicKey);
-      if (!plan || plan.target.lamports < this.thresholdOf(plan.target)) return "skipped";
+      if (!plan || !(await this.eligible(plan.target))) return "skipped";
       assertSingleAuthority(plan.instructions, vault.publicKey, plan.authority.publicKey);
       if (plan.authority.publicKey.toBase58() !== t.authority) throw new Error("plan authority differs from target");
       signed = await this.o.chain.sign(plan.instructions, vault, plan.authority, plan.computeUnits);
@@ -479,6 +568,7 @@ export class FeeSweeper {
         authority: t.authority,
         signature: signed.signature,
         lastValidBlockHeight: signed.lastValidBlockHeight,
+        ...(plan.target.quote ? { quoteMint: plan.target.quote.mint } : {}),
       });
       await this.o.pool.markUsed(vaultKey, this.o.now());
       let slot: number;
@@ -494,8 +584,13 @@ export class FeeSweeper {
         return { ok: false, lamports: null };
       }
       const tx = await this.o.chain.fetch(signed.signature).catch(() => null);
+      // Quote targets: `lamports` here are quote units (row: quote_amount = units, lamports = their value).
       const lamports = (tx ? venue.collected(tx, plan.target) : null) ?? plan.expectedLamports;
-      await this.o.store.confirm(signed.signature, lamports, slot, tx?.blockTime ?? null);
+      if (plan.target.quote) {
+        const value = await this.quoteLamports(plan.target.quote.mint, lamports);
+        // Not valuable now: the row stays `sent`, the next run's resolvePending values and confirms it.
+        if (value !== null) await this.o.store.confirm(signed.signature, value, slot, tx?.blockTime ?? null, lamports);
+      } else await this.o.store.confirm(signed.signature, lamports, slot, tx?.blockTime ?? null);
       this.o.onTx?.({ target: plan.target, signature: signed.signature, lamports, vault: vaultKey, ok: true });
       return { ok: true, lamports };
     } catch (e) {
@@ -523,13 +618,35 @@ export class FeeSweeper {
       }
       const tx = await this.o.chain.fetch(row.signature).catch(() => null);
       const venue = this.o.venues.find((v) => v.venue === row.venue);
-      const target: FeeTarget = { venue: row.venue, kind: row.kind, mint: row.mint, authority: row.authority, lamports: 0n, lockedRent: 0n, frontLamports: 0n };
+      const target: FeeTarget = {
+        venue: row.venue, kind: row.kind, mint: row.mint, authority: row.authority, lamports: 0n, lockedRent: 0n, frontLamports: 0n,
+        ...(row.quoteMint ? { quote: { mint: row.quoteMint, units: 0n } } : {}),
+      };
       const lamports = tx && venue ? venue.collected(tx, target) : null;
       if (lamports === null) continue; // landed but unreadable yet: retry next run, never guess
-      await this.o.store.confirm(row.signature, lamports, st.slot, tx?.blockTime ?? null);
+      if (row.quoteMint) {
+        const value = await this.quoteLamports(row.quoteMint, lamports);
+        if (value === null) continue; // priced quote not valuable now: next run
+        await this.o.store.confirm(row.signature, value, st.slot, tx?.blockTime ?? null, lamports);
+      } else await this.o.store.confirm(row.signature, lamports, st.slot, tx?.blockTime ?? null);
       n++;
     }
     return n;
+  }
+
+  /**
+   * RELAYER v9 §2: `lamports` of a quote row. USDC / USD1: SOL value of the units on pool A at
+   * collection (core credits exactly this; 0 would never be credited). ZEC SPL: 0 (core credits
+   * the units 1:1 in zat). null = a priced quote that cannot be valued right now.
+   */
+  private async quoteLamports(mint: string, units: bigint): Promise<bigint | null> {
+    if (!this.o.quoteValuer) return null;
+    try {
+      return (await this.o.quoteValuer.lamports(mint, units)) ?? 0n;
+    } catch {
+      this.o.log("fee sweep: quote valuation unavailable, row left for the next run");
+      return null;
+    }
   }
 
   private venueOf(t: FeeTarget): FeeVenue {

@@ -92,6 +92,8 @@ export interface VaultRequest {
   /** When set, the vault must hold at least `minTokens` of this mint. */
   mint?: string;
   minTokens?: bigint;
+  /** Stock-only quote pairs (ZEC SPL): the vault must hold at least `minUnits` of quote `mint`. */
+  quote?: { mint: string; minUnits: bigint };
   /**
    * The only vault allowed: the vault the mint is pinned to (D4: one position
    * per mint on one vault). Busy -> VaultsBusyError (retry), short of SOL /
@@ -209,14 +211,20 @@ export class VaultPool {
     const balances = await Promise.all(
       candidates.map(async (k) => {
         const pk = new PublicKey(k);
-        const [sol, tok] = await Promise.all([
+        const [sol, tok, quote] = await Promise.all([
           this.inventory.solBalance(pk),
           needTokens ? this.inventory.tokenBalance(pk, req.mint!) : 0n,
+          req.quote ? this.inventory.tokenBalance(pk, req.quote.mint) : 0n,
         ]);
-        return { key: k, sol, tok };
+        return { key: k, sol, tok, quote };
       }),
     );
-    const withTokens = needTokens ? balances.filter((b) => b.tok >= req.minTokens!) : balances;
+    const withQuote = req.quote ? balances.filter((b) => b.quote >= req.quote!.minUnits) : balances;
+    if (withQuote.length === 0) {
+      // API: pool_liquidity (core refills by fund_quote after a ZEC SPL rebalance).
+      throw new AdapterError("insufficient_sol", "no vault holds enough quote stock");
+    }
+    const withTokens = needTokens ? withQuote.filter((b) => b.tok >= req.minTokens!) : withQuote;
     if (withTokens.length === 0) {
       throw new AdapterError("insufficient_tokens", "no vault holds enough of this token");
     }

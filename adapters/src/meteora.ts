@@ -709,7 +709,8 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
         const conv = await this.toLamports(tx, route, solAmount, "buy").catch(() => null);
         if (!conv) return null;
         quote = { quoteMint: route.asset.mint.toBase58(), quoteAmount: solAmount, quoteSource: conv.source };
-        if (creatorFee !== null) creatorFee = solAmount > 0n ? (conv.lamports * creatorFee) / solAmount : 0n;
+        // RELAYER v9 §4: stock-only quote -> creator fee in quote units as is; priced -> lamport equivalent.
+        if (creatorFee !== null && !("byCore" in conv && conv.byCore)) creatorFee = solAmount > 0n ? (conv.lamports * creatorFee) / solAmount : 0n;
         solAmount = conv.lamports;
       }
     } else {

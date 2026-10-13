@@ -199,7 +199,7 @@ export class Relayer {
    *   any vault holding enough.
    */
   private async vaultRequest(spec: JobSpec, ex: JobExecutor): Promise<{ req: VaultRequest; pinFor: string | null }> {
-    const req = ex.vaultRequest(spec);
+    const req = (ex.vaultRequestAsync ? await ex.vaultRequestAsync(spec) : null) ?? ex.vaultRequest(spec);
     const mv = this.o.mintVaults;
     if (!mv) return { req, pinFor: null };
     if (spec.kind === "create") return { req: { ...req, load: await mv.load() }, pinFor: null };
