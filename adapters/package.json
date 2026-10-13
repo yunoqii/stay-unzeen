@@ -29,7 +29,10 @@
     "fair:devnet": "tsx scripts/fair-devnet.ts",
     "launchlab:devnet": "tsx scripts/launchlab-devnet.ts",
     "launchlab:probe": "tsx scripts/launchlab-probe.ts",
-    "launchlab:leg-local": "tsx scripts/launchlab-leg-local.ts"
+    "launchlab:leg-local": "tsx scripts/launchlab-leg-local.ts",
+    "memefun:devnet": "tsx scripts/memefun-devnet.ts",
+    "bags:auth": "tsx scripts/bags-auth.ts",
+    "bags:fund": "tsx scripts/bags-fund.ts"
   },
   "engines": {
     "node": ">=20"

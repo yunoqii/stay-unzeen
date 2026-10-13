@@ -1,7 +1,7 @@
 import type { Keypair, PublicKey, Signer } from "@solana/web3.js";
 
 /** Venue ids, same strings as `Venue` in docs/API.md. */
-export type VenueId = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab";
+export type VenueId = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "memefun" | "bags";
 
 export type CurveStatus = "curve" | "graduated";
 

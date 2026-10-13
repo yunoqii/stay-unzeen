@@ -52,6 +52,7 @@ import { anchorEventPayloads, tokenDelta } from "./events";
 import { deriveCreatorKeypair } from "./keys";
 import { toBig } from "./math";
 import { DBC_PROGRAM_ID, dbcCoder } from "./meteora";
+import { MEMEFUN_EVENTS, MEMEFUN_PROGRAM_ID, claimCreatorFeesIx, curvePda as memeCurvePda, decodeCurve as decodeMemeCurve, type MemeCurve } from "./memefun";
 
 /**
  * Creator / partner fee collection of the pool's launches (docs/ARCHITECTURE.md
@@ -78,7 +79,7 @@ import { DBC_PROGRAM_ID, dbcCoder } from "./meteora";
  *   receives, the authority never holds SOL.
  */
 
-export type FeeVenueId = "pumpfun" | "meteora-dbc" | "raydium-launchlab";
+export type FeeVenueId = "pumpfun" | "meteora-dbc" | "raydium-launchlab" | "memefun";
 export type FeeKind = "creator" | "partner";
 
 /** Something claimable for one authority on one launch. */
@@ -1067,5 +1068,75 @@ export class LaunchLabFeeVenue implements FeeVenue {
       frontLamports: 0n,
       quote: { mint: quote.toBase58(), units: tokenAccountAmount(feeVault) + tokenAccountAmount(own) },
     };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// meme.fun
+// ---------------------------------------------------------------------------
+
+/** Compute limit of a meme.fun creator-fee claim (ATA + claim + close). */
+export const MEME_FEE_CU = 100_000;
+
+/**
+ * meme.fun creator fees: accrued in the curve's WSOL vault (`creator_fees_owed`), paid by
+ * `claim_creator_fees` (the fresh creator signs) into the creator's WSOL ATA, which the vault
+ * creates and which is closed to the vault in the same tx (fees + rent back). SOL only.
+ */
+export class MemeFunFeeVenue implements FeeVenue {
+  readonly venue = "memefun" as const;
+
+  constructor(
+    private readonly rpc: Rpc,
+    private readonly creators: CreatorDirectory,
+    private readonly mints: MintSource,
+  ) {}
+
+  async discover(): Promise<FeeTarget[]> {
+    const mints = [...new Set(await this.mints.mints())].map((m) => new PublicKey(m));
+    const accs = await multi(this.rpc, mints.map((m) => memeCurvePda(m)));
+    const out: FeeTarget[] = [];
+    accs.forEach((a, i) => {
+      if (!a || !a.owner.equals(MEMEFUN_PROGRAM_ID)) return;
+      let c: MemeCurve;
+      try {
+        c = decodeMemeCurve(a.data);
+      } catch {
+        return;
+      }
+      if (this.creators.has(c.creator.toBase58())) out.push(this.target(mints[i]!, c));
+    });
+    return out;
+  }
+
+  async build(t: FeeTarget, vault: PublicKey): Promise<FeeTxPlan | null> {
+    const kp = this.creators.get(t.authority);
+    if (!kp) return null;
+    const mint = new PublicKey(t.mint);
+    const [a] = await this.rpc.getMultipleAccountsInfo([memeCurvePda(mint)], "confirmed");
+    if (!a || !a.owner.equals(MEMEFUN_PROGRAM_ID)) return null;
+    const c = decodeMemeCurve(a.data);
+    if (!c.creator.equals(kp.publicKey) || c.creatorFeesOwed <= 0n) return null;
+    const wsol = getAssociatedTokenAddressSync(NATIVE_MINT, kp.publicKey, true);
+    const instructions = [
+      createAssociatedTokenAccountIdempotentInstruction(vault, wsol, kp.publicKey, NATIVE_MINT),
+      claimCreatorFeesIx(mint, c.solVault, kp.publicKey, wsol),
+      createCloseAccountInstruction(wsol, vault, kp.publicKey),
+    ];
+    return { target: this.target(mint, c), instructions, authority: kp, computeUnits: MEME_FEE_CU, expectedLamports: c.creatorFeesOwed };
+  }
+
+  collected(tx: VersionedTransactionResponse, t: FeeTarget): bigint | null {
+    if (tx.meta?.err) return null;
+    for (const p of anchorEventPayloads(tx, MEMEFUN_PROGRAM_ID, MEMEFUN_EVENTS.ClaimEvent)) {
+      // ClaimEvent: mint 32 | user 32 | amount u64 | ts i64
+      if (p.length < 72) continue;
+      if (new PublicKey(p.subarray(0, 32)).toBase58() === t.mint && new PublicKey(p.subarray(32, 64)).toBase58() === t.authority) return p.readBigUInt64LE(64);
+    }
+    return null;
+  }
+
+  private target(mint: PublicKey, c: MemeCurve): FeeTarget {
+    return { venue: this.venue, kind: "creator", mint: mint.toBase58(), authority: c.creator.toBase58(), lamports: c.creatorFeesOwed, lockedRent: 0n, frontLamports: TOKEN_ACCOUNT_RENT };
   }
 }

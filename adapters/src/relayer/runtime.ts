@@ -13,7 +13,8 @@ import { KeyStore, ageCipher, resolveAgeIdentity } from "../keystore";
 import { metadataStoreFromEnv, type MetadataStore } from "../metadata";
 import { LookupTables } from "../alt";
 import { JUPITER_PROGRAM_ID, JupiterAdapter, JupiterClient, jupiterOptionsFromEnv } from "../jupiter";
-import { DBC_PROGRAM_ID, MeteoraDbcAdapter, dbcConfigAddress, derivePartnerKeypair } from "../meteora";
+import { DBC_PROGRAM_ID, MeteoraDbcAdapter, dbcConfigAddress, dbcPoolByBaseMint, derivePartnerKeypair } from "../meteora";
+import { BagsAdapter, BagsApi, BagsWalletStore, deriveBagsFunderKeypair } from "../bags";
 import { PumpFunAdapter } from "../pumpfun";
 import { txPipeline, type TxPipeline } from "../sender";
 import { TokenWithdrawer } from "../withdraw";
@@ -22,6 +23,7 @@ import { jitoFairBundler, type FairBundler } from "./fair-bundler";
 import { PoolQuoteInventoryWriter, PoolSolInventoryWriter, VaultFunder, deriveRebalanceKeypair } from "../rebalance";
 import { quoteAssets } from "../pool-a";
 import { LAUNCHLAB_PROGRAM, LaunchLabAdapter, launchLabCluster } from "../launchlab";
+import { MemeFunAdapter } from "../memefun";
 import { getPdaPlatformId } from "@raydium-io/raydium-sdk-v2";
 import { QuoteStockRunner, QuoteStocker, StockDistributor, stockPolicy } from "./quote-stock";
 import { Relayer, type RelayerEvent } from "./engine";
@@ -217,6 +219,8 @@ export async function poolSnapshotSigners(o: {
   // Verify operator key only: the fair-launch key stays out of the public list (F14).
   out.push({ key: o.attester.key, always: true });
   out.push({ key: deriveRebalanceKeypair(o.keys.creatorSeed), always: true });
+  // Bags launch-wallet funder: holds pool SOL (its link to the launch wallets is public anyway).
+  out.push({ key: deriveBagsFunderKeypair(o.keys.creatorSeed), always: true });
   if (o.meteora) out.push({ key: derivePartnerKeypair(o.keys.creatorSeed), always: true });
   const fileNext = new FileCreatorIndexCounter(path.join(o.keysDir, "creator-counter.json")).peek();
   const n = await creatorCount(fileNext, o.db, o.network);
@@ -288,7 +292,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
         quotes: quoteAssets(o.cfg.cluster, env),
       })
     : null;
-  const trade: Partial<Record<"pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
+  const trade: Partial<Record<"pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "memefun" | "bags", JobExecutor>> = { pumpfun: new VenueTradeExecutor(adapter, metadata) };
   if (meteora) trade["meteora-dbc"] = new VenueTradeExecutor(meteora, metadata);
   // Raydium LaunchLab (stonk.fun, bonk.fun, Unzeen's own platform = PDA of the partner key).
   const llCluster = launchLabCluster(o.cfg.cluster);
@@ -309,10 +313,46 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
       })
     : null;
   if (launchlab) trade["raydium-launchlab"] = new VenueTradeExecutor(launchlab, metadata);
+  // meme.fun: SOL only, same program on mainnet and devnet (creates need IPFS metadata: PINATA_JWT).
+  if (o.cfg.cluster === "mainnet-beta" || o.cfg.cluster === "devnet") {
+    trade.memefun = new VenueTradeExecutor(
+      new MemeFunAdapter({ connection: o.connection, defaultVault: vaults[0]!, vaults, creators, stateDir: o.cfg.keysDir, priorityMicroLamports: fees, pipeline, lookupTables }),
+      metadata,
+    );
+  }
   // Jupiter: mainnet only (no devnet deployment). Elsewhere the venue has no executor,
   // so its jobs fail `venue_unavailable` before anything is signed.
   const jupiter = o.cfg.cluster === "mainnet-beta" ? buildJupiter(o.cfg.cluster, o.connection, fees, pipeline, env) : null;
   if (jupiter) trade.jupiter = new VenueTradeExecutor(jupiter, null);
+  // Bags: mainnet only, and only with an API key (owner decision: pnpm bags:auth --register).
+  const bagsKey = env.BAGS_API_KEY?.trim();
+  if (o.cfg.cluster === "mainnet-beta" && bagsKey) {
+    const dbcForBags = new MeteoraDbcAdapter({
+      connection: o.connection,
+      config: meteoraConfig ?? DBC_PROGRAM_ID, // only foreign pools are traded through this instance
+      defaultVault: vaults[0]!,
+      vaults,
+      creators,
+      stateDir: o.cfg.keysDir,
+      priorityMicroLamports: fees,
+      pipeline,
+      lookupTables,
+      findPool: dbcPoolByBaseMint(o.connection),
+    });
+    trade.bags = new VenueTradeExecutor(
+      new BagsAdapter({
+        connection: o.connection,
+        api: new BagsApi(bagsKey),
+        creators,
+        wallets: new BagsWalletStore(path.join(o.cfg.keysDir, "bags-wallets.json")),
+        dbc: dbcForBags,
+        jupiter,
+        metadataOf: fetchMetadataJson,
+        ...(env.BAGS_CONFIG_TYPE?.trim() ? { configType: env.BAGS_CONFIG_TYPE.trim() } : {}),
+      }),
+      metadata,
+    );
+  }
   const attester = new Attester(o.connection, deriveAttestKeypair(o.keys.creatorSeed, "verify"), fees, pipeline);
   const fairAttester = new Attester(o.connection, deriveAttestKeypair(o.keys.creatorSeed, "fair"), fees, pipeline);
   const online = new OnlinePumpSdk(o.connection);
@@ -423,4 +463,14 @@ export function makePools(url: string, vaultCount: number, schema?: string): { d
   db.on("error", () => undefined);
   lockDb.on("error", () => undefined);
   return { db, lockDb };
+}
+
+/** Image URL + description of OUR published metadata JSON (Bags create needs them); 64 KB cap, 10 s. */
+export async function fetchMetadataJson(uri: string): Promise<{ image: string; description: string }> {
+  const r = await fetch(uri, { signal: AbortSignal.timeout(10_000), redirect: "error" });
+  if (!r.ok) throw new Error(`metadata HTTP ${r.status}`);
+  const text = await r.text();
+  if (text.length > 65_536) throw new Error("metadata too large");
+  const j = JSON.parse(text) as { image?: unknown; description?: unknown };
+  return { image: typeof j.image === "string" ? j.image : "", description: typeof j.description === "string" ? j.description : "" };
 }

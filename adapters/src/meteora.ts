@@ -427,6 +427,27 @@ export interface MeteoraDbcAdapterOptions {
    * (src/pool-a.ts). Only assets with BOTH are served; others are ignored.
    */
   quotes?: readonly QuoteAsset[];
+  /**
+   * Pools under configs that are NOT Unzeen's (Bags): looked up when the mint has no pool under
+   * our configs. SOL-quoted only. Trading, quotes and results then run on that pool unchanged.
+   */
+  findPool?: (mint: PublicKey) => Promise<{ address: PublicKey; config: PublicKey } | null>;
+}
+
+/** VirtualPool (DBC 1.5.x): 424 bytes, base_mint @ 136 (checked on a mainnet Bags pool 13.10). */
+export const DBC_POOL_SIZE = 424;
+export const DBC_POOL_BASE_MINT_OFFSET = 136;
+
+/** A DBC pool by base mint under ANY config (getProgramAccounts, memcmp base_mint); read-only RPC. */
+export function dbcPoolByBaseMint(connection: Pick<Connection, "getProgramAccounts">): (mint: PublicKey) => Promise<{ address: PublicKey; config: PublicKey } | null> {
+  return async (mint) => {
+    const r = await connection.getProgramAccounts(DBC_PROGRAM_ID, {
+      commitment: "confirmed",
+      filters: [{ dataSize: DBC_POOL_SIZE }, { memcmp: { offset: DBC_POOL_BASE_MINT_OFFSET, bytes: mint.toBase58() } }],
+    });
+    if (r.length !== 1) return null; // none, or ambiguous (two quotes): never guess
+    return { address: r[0]!.pubkey, config: new PublicKey(r[0]!.account.data.subarray(72, 104)) };
+  };
 }
 
 interface QuoteRoute {
@@ -467,7 +488,10 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
   /** Served quote routes (config + pool A) by symbol. */
   readonly routes: ReadonlyMap<string, QuoteRoute>;
 
+  private readonly findPool: MeteoraDbcAdapterOptions["findPool"] | null;
+
   constructor(o: MeteoraDbcAdapterOptions) {
+    this.findPool = o.findPool ?? null;
     this.connection = o.connection;
     this.configAddress = o.config;
     this.client = new DynamicBondingCurveClient(o.connection, "confirmed");
@@ -879,7 +903,13 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     if (!tx) return null;
     const fee = BigInt(tx.meta?.fee ?? 0);
     const evs = dbcSwap2Events(tx);
-    const cand = this.poolCandidates(mi.mint).find((c) => evs.some((e) => e.pool.equals(c.address))) ?? { address: this.poolAddress(mi.mint), route: null };
+    let cand: { address: PublicKey; route: QuoteRoute | null } | undefined = this.poolCandidates(mi.mint).find((c) => evs.some((e) => e.pool.equals(c.address)));
+    if (!cand && this.findPool) {
+      // Foreign-config pool (Bags): the swap event names it.
+      const f = await this.findPool(mi.mint).catch(() => null);
+      if (f && evs.some((e) => e.pool.equals(f.address))) cand = { address: f.address, route: null };
+    }
+    cand ??= { address: this.poolAddress(mi.mint), route: null };
     const pool = cand.address;
     const ev = evs.find((e) => e.pool.equals(pool));
     if (cand.route) {
@@ -949,6 +979,18 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     const mi = mintInfo(mint, mintAcc);
     const i = cands.findIndex((_, k) => accs[k + 1]?.owner.equals(DBC_PROGRAM_ID));
     const c = cands[i];
+    if (!c && this.findPool) {
+      // A pool under a foreign config (Bags): SOL-quoted only.
+      const f = await this.rpc(() => this.findPool!(mint));
+      if (!f) throw new AdapterError("not_found", `no Meteora DBC pool for ${mint.toBase58()}`);
+      const acc = await this.rpc(() => this.connection.getAccountInfo(f.address, "confirmed"));
+      if (!acc || !acc.owner.equals(DBC_PROGRAM_ID)) throw new AdapterError("not_found", `no Meteora DBC pool for ${mint.toBase58()}`);
+      const pool = this.coder.accounts.decode("virtualPool", acc.data) as VirtualPool;
+      const config = await this.poolConfig(f.config);
+      if (!config.quoteMint.equals(NATIVE_MINT)) throw new AdapterError("bad_request", "foreign DBC pool is not SOL-quoted");
+      if (!f.address.equals(deriveDbcPoolAddress(NATIVE_MINT, mint, f.config))) throw new AdapterError("internal", "foreign DBC pool address mismatch");
+      return { ...mi, address: f.address, pool, config, configAddress: f.config, route: null };
+    }
     if (!c) throw new AdapterError("not_found", `no Unzeen Meteora DBC pool for ${mint.toBase58()}`);
     const pool = this.coder.accounts.decode("virtualPool", accs[i + 1]!.data) as VirtualPool;
     const config = await this.poolConfig(c.config);
