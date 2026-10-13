@@ -92,7 +92,7 @@ export interface EvmQuote {
   /** buy only: wei actually spent (< amountIn when clamped at graduation) and refund. */
   spent?: bigint;
   refund?: bigint;
-  /** Snipe tax the buy recipient (default: the default vault) pays at this block (bps). */
+  /** Snipe tax the buy recipient pays at this block (bps); no recipient = a non-exempt buyer. */
   snipeTaxBps: bigint;
   /** Spot ETH per 1 whole token before the trade (decimal string). */
   priceEth: string;
@@ -105,8 +105,18 @@ export interface EvmQuote {
 }
 
 export interface EvmTradeOptions {
-  /** Vault account (one vault per token); default the adapter's default vault. */
-  vault?: LocalAccount;
+  /**
+   * Relayer hook for the operation's MAIN tx (launch / trade): called after
+   * signing, BEFORE broadcast (record hash + nonce). Side txs (fund, approve)
+   * are idempotent and not reported.
+   */
+  onSigned?: (tx: { hash: Hex; nonce: number; from: Address }) => Promise<void>;
+  /**
+   * Vault account of the token (one vault per mint, the relayer's pin). REQUIRED:
+   * no default, so a forgotten pin can never send every trade from one address
+   * (review-numeric-hood §10).
+   */
+  vault: LocalAccount;
   /**
    * buy: what to do inside the snipe-tax window (first `snipeTaxSeconds` after a
    * launch, up to 99%): "wait" (default) until it is 0, "fail" -> venue_unavailable.
@@ -127,6 +137,8 @@ export interface EvmCreateOptions extends EvmTradeOptions {
   creatorIndex?: number;
   /** Creator tax, bps (0..maxCreatorTaxBps). Default 0. */
   creatorTaxBps?: number;
+  /** Core's minimum tokens of the first buy (`min_out`); expected below it -> slippage before anything is sent. */
+  minOut?: bigint;
   /** Slippage on the first buy. It is priced exactly (same tx), default 0. */
   slippageBps?: number;
 }
@@ -134,9 +146,9 @@ export interface EvmCreateOptions extends EvmTradeOptions {
 /** docs/ARCHITECTURE.md "Адаптер" for EVM launchpads. */
 export interface EvmLaunchpadAdapter {
   id: EvmVenueId;
-  create(meta: EvmTokenMeta, initialBuyWei: bigint, opts?: EvmCreateOptions): Promise<EvmTxResult>;
-  buy(token: Address, weiIn: bigint, minOut: bigint, opts?: EvmTradeOptions): Promise<EvmTxResult>;
-  sell(token: Address, amount: bigint, minWei: bigint, opts?: EvmTradeOptions): Promise<EvmTxResult>;
+  create(meta: EvmTokenMeta, initialBuyWei: bigint, opts: EvmCreateOptions): Promise<EvmTxResult>;
+  buy(token: Address, weiIn: bigint, minOut: bigint, opts: EvmTradeOptions): Promise<EvmTxResult>;
+  sell(token: Address, amount: bigint, minWei: bigint, opts: EvmTradeOptions): Promise<EvmTxResult>;
   quote(token: Address, side: "buy" | "sell", amount: bigint, opts?: { recipient?: Address }): Promise<EvmQuote>;
   status(token: Address): Promise<CurveStatus>;
 }

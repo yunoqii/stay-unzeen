@@ -1,6 +1,6 @@
 import { encodeFunctionData, getAddress, parseEventLogs, type Address, type Hex, type LocalAccount } from "viem";
 import { AdapterError } from "../errors";
-import type { EvmExecutor } from "./executor";
+import type { EvmExecutor, OnSigned } from "./executor";
 import { ponsV2TokenAbi } from "./pons/abi/token";
 
 /**
@@ -9,10 +9,16 @@ import { ponsV2TokenAbi } from "./pons/abi/token";
  * - one part = one call here; core already cut 0.5-2 % and rounded each part
  *   down to 3 significant digits; `requireRounded` (default on) refuses an
  *   exact, unrounded amount as defence in depth;
- * - ERC-20 parts always come with an ETH gas drop to the recipient, paid by the
- *   FUNDER key (never by a vault), in its own tx before the token transfer and
- *   skipped when the recipient already holds the drop (a retried part never
- *   drops twice);
+ * - ERC-20 parts always come with an ETH gas drop to the recipient, in its own
+ *   tx before the token transfer, skipped when the recipient already holds the
+ *   drop (a retried part never drops twice). Source (`dropFrom`):
+ *     "vault" (default) = the SAME vault that sends the token, like Solana
+ *       (src/withdraw.ts: SystemProgram.transfer from the vault in the same tx).
+ *       The recipient is linked to that vault by the token transfer anyway, so
+ *       the drop adds no new on-chain link. EVM cannot put both into one EOA
+ *       tx, so they are two txs from the same address.
+ *     "funder" = the funder key: an EXTRA public link funder -> recipient (the
+ *       funder also funds every creator); kept only as an explicit option.
  * - the token goes from the vault that holds the mint (one vault per mint);
  * - recipients: valid EVM address (EIP-55 checked when mixed-case), not zero,
  *   not a contract (eth_getCode empty), not one of the pool's own addresses.
@@ -64,7 +70,10 @@ export interface EvmWithdrawPart {
 
 export interface EvmWithdrawerOptions {
   executor: EvmExecutor;
-  funder: LocalAccount;
+  /** Needed only with dropFrom = "funder". */
+  funder?: LocalAccount;
+  /** Who pays the recipient's gas drop. Default "vault" (Solana parity, no extra link). */
+  dropFrom?: "vault" | "funder";
   gasDropWei?: bigint;
   /** Pool addresses (vaults, creators, funder, ...): never valid recipients. */
   isPoolAddress?: (a: Address) => boolean;
@@ -73,14 +82,17 @@ export interface EvmWithdrawerOptions {
 
 export class EvmWithdrawer {
   private readonly ex: EvmExecutor;
-  private readonly funder: LocalAccount;
+  private readonly funder: LocalAccount | null;
+  readonly dropFrom: "vault" | "funder";
   readonly gasDropWei: bigint;
   private readonly isPool: (a: Address) => boolean;
   private readonly requireRounded: boolean;
 
   constructor(o: EvmWithdrawerOptions) {
     this.ex = o.executor;
-    this.funder = o.funder;
+    this.funder = o.funder ?? null;
+    this.dropFrom = o.dropFrom ?? "vault";
+    if (this.dropFrom === "funder" && !this.funder) throw new Error("dropFrom=funder needs a funder account");
     this.gasDropWei = o.gasDropWei ?? MIN_EVM_GAS_DROP;
     if (this.gasDropWei < MIN_EVM_GAS_DROP) throw new RangeError(`gas drop must be >= ${MIN_EVM_GAS_DROP} wei`);
     this.isPool = o.isPoolAddress ?? (() => false);
@@ -89,7 +101,7 @@ export class EvmWithdrawer {
 
   private async checkRecipient(toRaw: string, vault: LocalAccount): Promise<Address> {
     const to = parseEvmRecipient(toRaw);
-    if (to === getAddress(vault.address) || to === getAddress(this.funder.address) || this.isPool(to)) {
+    if (to === getAddress(vault.address) || (this.funder && to === getAddress(this.funder.address)) || this.isPool(to)) {
       throw new AdapterError("bad_request", "recipient is a pool address");
     }
     const code = await this.ex.read.getCode({ address: to });
@@ -104,8 +116,16 @@ export class EvmWithdrawer {
     }
   }
 
-  /** One ERC-20 part: funder gas drop (if missing) then vault -> recipient transfer. */
-  async withdrawToken(p: { vault: LocalAccount; token: Address; to: string; amount: bigint }): Promise<EvmWithdrawPart> {
+  /** One ERC-20 part: gas drop (if missing) then vault -> recipient transfer. `onSigned` = the token transfer (main tx). */
+  async withdrawToken(p: {
+    vault: LocalAccount;
+    token: Address;
+    to: string;
+    amount: bigint;
+    /** Per-part drop (core `gas_lamports`, wei here); >= MIN_EVM_GAS_DROP. Default the withdrawer's. */
+    gasDropWei?: bigint;
+    onSigned?: OnSigned;
+  }): Promise<EvmWithdrawPart> {
     if (!this.ex.allowSend) throw new AdapterError("venue_unavailable", "EVM sends are disabled on this network (read-only)", { stage: "build" });
     this.checkAmount(p.amount);
     const token = getAddress(p.token);
@@ -113,16 +133,20 @@ export class EvmWithdrawer {
     const held = await this.ex.read.readContract({ address: token, abi: ponsV2TokenAbi, functionName: "balanceOf", args: [p.vault.address] });
     if (held < p.amount) throw new AdapterError("insufficient_tokens", "vault does not hold enough tokens");
 
+    const dropWei = p.gasDropWei ?? this.gasDropWei;
+    if (dropWei < MIN_EVM_GAS_DROP) throw new AdapterError("bad_request", `gas drop must be >= ${MIN_EVM_GAS_DROP} wei`);
     let drop: EvmWithdrawPart["drop"] = null;
     const has = await this.ex.balance(to);
-    if (has < this.gasDropWei) {
-      const d = await this.ex.transfer(this.funder, to, this.gasDropWei);
-      drop = { hash: d.hash, value: this.gasDropWei, networkFee: d.networkFee };
+    if (has < dropWei) {
+      const payer = this.dropFrom === "funder" ? this.funder! : p.vault;
+      const d = await this.ex.transfer(payer, to, dropWei);
+      drop = { hash: d.hash, value: dropWei, networkFee: d.networkFee };
     }
-    const sent = await this.ex.send(p.vault, {
-      to: token,
-      data: encodeFunctionData({ abi: ponsV2TokenAbi, functionName: "transfer", args: [to, p.amount] }),
-    });
+    const sent = await this.ex.send(
+      p.vault,
+      { to: token, data: encodeFunctionData({ abi: ponsV2TokenAbi, functionName: "transfer", args: [to, p.amount] }) },
+      p.onSigned ? { onSigned: p.onSigned } : {},
+    );
     const received = parseEventLogs({ abi: ponsV2TokenAbi, logs: sent.receipt.logs, eventName: "Transfer" })
       .filter((l) => getAddress(l.address) === token && getAddress(l.args.to) === to)
       .reduce((a, l) => a + l.args.value, 0n);

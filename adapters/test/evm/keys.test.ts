@@ -79,6 +79,16 @@ describe("EVM key store (age)", () => {
     expect(kr.vault(0).address).toMatch(/^0x[0-9a-fA-F]{40}$/);
   });
 
+  it("refuses a seed file wider than 0600", async () => {
+    const dir = path.join(tmpDir(), "evm");
+    const st = EvmKeyStore.open(dir, { cipher: null });
+    await st.mnemonic();
+    fs.chmodSync(path.join(dir, "evm-seed.txt"), 0o644);
+    await expect(EvmKeyStore.open(dir, { cipher: null }).mnemonic()).rejects.toThrow(/too wide/);
+    fs.chmodSync(path.join(dir, "evm-seed.txt"), 0o600);
+    await expect(EvmKeyStore.open(dir, { cipher: null }).mnemonic()).resolves.toMatch(/ /);
+  });
+
   it("mainnet requires encryption; mixed plaintext/encrypted states are refused", async () => {
     const dir = path.join(tmpDir(), "evm");
     expect(() => EvmKeyStore.open(dir, { cipher: null, requireEncryption: true })).toThrow(/encrypted/);

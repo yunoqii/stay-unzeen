@@ -20,6 +20,7 @@ import { ponsV2TokenAbi } from "../../src/evm/pons/abi/token";
 import { PonsAdapter, PONS_ERROR_ABI } from "../../src/evm/pons/adapter";
 import { freshCurveState, quoteBuy } from "../../src/evm/pons/math";
 import { PonsFeeSweeper, reconcileCreator } from "../../src/evm/pons/creator";
+import { FunderPool } from "../../src/evm/funders";
 import { EvmWithdrawer, roundDownSig } from "../../src/evm/withdraw";
 import { LifiClient } from "../../src/evm/lifi";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
@@ -33,6 +34,7 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
   let anvil: ChildProcess;
   let client: PublicClient;
   let adapter: PonsAdapter;
+  let funders: FunderPool;
   let ex: EvmExecutor;
   let kr: EvmKeyring;
   let fees: EvmFeeCache;
@@ -60,10 +62,11 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
     ex = new EvmExecutor({ read: client, chainId: 4663, fees, allowSend: true, errorAbi: PONS_ERROR_ABI, pollingIntervalMs: 50 });
     // Fresh random seed per run: no collision with real mainnet state of well-known test addresses.
     kr = new EvmKeyring(generateMnemonic(english, 256), new MemoryCreatorIndexCounter());
-    for (const a of [kr.funder().address, kr.vault(0).address, kr.vault(1).address]) {
+    for (const a of [kr.funder(0).address, kr.funder(1).address, kr.funder(2).address, kr.vault(0).address, kr.vault(1).address, kr.rebalance(0).address]) {
       await client.request({ method: "anvil_setBalance" as never, params: [a, `0x${parseEther("20").toString(16)}`] as never });
     }
-    adapter = new PonsAdapter({ executor: ex, keyring: kr, vault: kr.vault(0) });
+    funders = new FunderPool({ executor: ex, keyring: kr, count: 3 });
+    adapter = new PonsAdapter({ executor: ex, keyring: kr, funders });
   }, 60_000);
 
   afterAll(() => {
@@ -77,7 +80,7 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
   it("create: fresh funded creator, launchAndBuy in one tx, exact first-buy amount", async () => {
     const terms = await adapter.factoryTerms();
     const initialBuy = parseEther("0.05");
-    const res = await adapter.create({ name: "Fork Test", symbol: "FORK" }, initialBuy);
+    const res = await adapter.create({ name: "Fork Test", symbol: "FORK" }, initialBuy, { vault: kr.vault(0) });
     token = res.token;
     curve = res.curve;
     const creator = kr.account("creator", 0).address;
@@ -94,7 +97,7 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
     const fund = res.sideTxs.find((t) => t.kind === "fund")!;
     expect(fund.value! % parseEther("0.01")).toBe(0n);
     const fundTx = await client.getTransaction({ hash: fund.hash });
-    expect(getAddress(fundTx.from)).toBe(getAddress(kr.funder().address));
+    expect(funders.accounts().map((a) => getAddress(a.address))).toContain(getAddress(fundTx.from)); // a rotating funder, never a vault
     expect(getAddress(fundTx.to!)).toBe(getAddress(creator));
     // Approve right after the buy.
     expect(res.sideTxs.some((t) => t.kind === "approve")).toBe(true);
@@ -114,7 +117,7 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
   }, 120_000);
 
   it("create refuses to reuse a creator that already launched", async () => {
-    await expect(adapter.create({ name: "Again", symbol: "AGN" }, parseEther("0.01"), { creatorIndex: 0 })).rejects.toMatchObject({ code: "internal" });
+    await expect(adapter.create({ name: "Again", symbol: "AGN" }, parseEther("0.01"), { creatorIndex: 0, vault: kr.vault(0) })).rejects.toMatchObject({ code: "internal" });
   });
 
   it("buy by a non-exempt vault waits out the snipe tax and matches the quote exactly", async () => {
@@ -131,26 +134,26 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
   }, 60_000);
 
   it("buy / sell amounts equal the local quote", async () => {
-    const qb = await adapter.quote(token, "buy", parseEther("0.01"));
-    const b = await adapter.buy(token, parseEther("0.01"), qb.amountOut);
+    const qb = await adapter.quote(token, "buy", parseEther("0.01"), { recipient: kr.vault(0).address });
+    const b = await adapter.buy(token, parseEther("0.01"), qb.amountOut, { vault: kr.vault(0) });
     expect(b.tokenAmount).toBe(qb.amountOut);
     expect(b.quoteAmount).toBe(parseEther("0.01"));
     const half = b.tokenAmount / 2n;
     const qs = await adapter.quote(token, "sell", half);
-    const s = await adapter.sell(token, half, qs.amountOut);
+    const s = await adapter.sell(token, half, qs.amountOut, { vault: kr.vault(0) });
     expect(s.quoteAmount).toBe(qs.amountOut);
     expect(s.tokenAmount).toBe(half);
     expect(s.sideTxs).toEqual([]); // approved right after the buy
   }, 60_000);
 
   it("maps reverts to API codes", async () => {
-    const qb = await adapter.quote(token, "buy", parseEther("0.01"));
-    const e1 = await adapter.buy(token, parseEther("0.01"), qb.amountOut * 2n).catch((e) => e);
+    const qb = await adapter.quote(token, "buy", parseEther("0.01"), { recipient: kr.vault(0).address });
+    const e1 = await adapter.buy(token, parseEther("0.01"), qb.amountOut * 2n, { vault: kr.vault(0) }).catch((e) => e);
     expect(e1).toBeInstanceOf(AdapterError);
     expect(e1.code).toBe("slippage");
     expect(e1.apiCode).toBe("slippage");
     expect(e1.stage).toBe("preflight");
-    const e2 = await adapter.sell(token, 10n ** 30n, 0n).catch((e) => e);
+    const e2 = await adapter.sell(token, 10n ** 30n, 0n, { vault: kr.vault(0) }).catch((e) => e);
     expect(e2.code).toBe("insufficient_tokens");
     expect(e2.apiCode).toBe("pool_liquidity");
     const e3 = await adapter.status("0x000000000000000000000000000000000000dEaD").catch((e) => e);
@@ -159,16 +162,16 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
 
   it("parallel sends from one vault are serialized by the nonce mutex", async () => {
     const [a, b] = await Promise.all([
-      adapter.buy(token, parseEther("0.001"), 1n),
-      adapter.buy(token, parseEther("0.001"), 1n),
+      adapter.buy(token, parseEther("0.001"), 1n, { vault: kr.vault(0) }),
+      adapter.buy(token, parseEther("0.001"), 1n, { vault: kr.vault(0) }),
     ]);
     expect(a.hash).not.toBe(b.hash);
   }, 60_000);
 
   it("a buy past the threshold is clamped with a refund, then the token is graduated", async () => {
-    const q = await adapter.quote(token, "buy", parseEther("8"));
+    const q = await adapter.quote(token, "buy", parseEther("8"), { recipient: kr.vault(0).address });
     expect(q.refund! > 0n).toBe(true);
-    const res = await adapter.buy(token, parseEther("8"), 1n);
+    const res = await adapter.buy(token, parseEther("8"), 1n, { vault: kr.vault(0) });
     expect(res.refund).toBe(q.refund);
     expect(res.tokenAmount).toBe(q.amountOut);
     expect(await adapter.status(token)).toBe("graduated");
@@ -177,7 +180,7 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
   it("graduated: v4 pool pending -> venue_unavailable; seeded -> sell and buy through Uniswap v4", async () => {
     let info = await adapter.launchInfo(token);
     if (info.phase === 1) {
-      const e = await adapter.buy(token, parseEther("0.01"), 1n).catch((x) => x);
+      const e = await adapter.buy(token, parseEther("0.01"), 1n, { vault: kr.vault(0) }).catch((x) => x);
       expect(e.code).toBe("venue_unavailable");
       await adapter.seedGraduatedPool(token, kr.vault(1));
       info = await adapter.launchInfo(token);
@@ -189,7 +192,7 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
     const qs = await adapter.quote(token, "sell", amount);
     expect(qs.route).toBe("uniswap-v4");
     const ethBefore = await client.getBalance({ address: vault });
-    const s = await adapter.sell(token, amount, qs.amountOut);
+    const s = await adapter.sell(token, amount, qs.amountOut, { vault: kr.vault(0) });
     expect(s.route).toBe("uniswap-v4");
     expect(s.quoteAmount).toBe(qs.amountOut);
     expect(s.tokenAmount).toBe(amount);
@@ -198,18 +201,18 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
     const fees = s.networkFee + s.sideTxs.reduce((a, t) => a + t.networkFee, 0n);
     expect(ethAfter - ethBefore + fees).toBe(s.quoteAmount); // event-derived ETH == balance delta
     // second sell: no approvals any more
-    const s2 = await adapter.sell(token, amount / 2n, 1n);
+    const s2 = await adapter.sell(token, amount / 2n, 1n, { vault: kr.vault(0) });
     expect(s2.sideTxs).toEqual([]);
-    const qb = await adapter.quote(token, "buy", parseEther("0.05"));
-    const b = await adapter.buy(token, parseEther("0.05"), qb.amountOut);
+    const qb = await adapter.quote(token, "buy", parseEther("0.05"), { recipient: kr.vault(0).address });
+    const b = await adapter.buy(token, parseEther("0.05"), qb.amountOut, { vault: kr.vault(0) });
     expect(b.route).toBe("uniswap-v4");
     expect(b.tokenAmount).toBe(qb.amountOut);
     expect(b.feeInToken).toBe(true);
-    const e2 = await adapter.sell(token, amount / 4n, 10n ** 30n).catch((x) => x);
+    const e2 = await adapter.sell(token, amount / 4n, 10n ** 30n, { vault: kr.vault(0) }).catch((x) => x);
     expect(e2.code).toBe("slippage");
   }, 180_000);
 
-  it("withdraw: funder gas drop + vault ERC-20 transfer to a fresh address, rounded parts, no double drop", async () => {
+  it("withdraw: vault gas drop (Solana parity) + vault ERC-20 transfer to a fresh address, rounded parts, no double drop", async () => {
     const w = new EvmWithdrawer({ executor: ex, funder: kr.funder(), isPoolAddress: (a) => a === getAddress(kr.vault(1).address) });
     const to = privateKeyToAccount(generatePrivateKey()).address;
     const held = await client.readContract({ address: token, abi: ponsV2TokenAbi, functionName: "balanceOf", args: [kr.vault(0).address] });
@@ -218,7 +221,7 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
     expect(r1.received).toBe(part);
     expect(r1.drop?.value).toBe(w.gasDropWei);
     const dropTx = await client.getTransaction({ hash: r1.drop!.hash });
-    expect(getAddress(dropTx.from)).toBe(getAddress(kr.funder().address)); // never the vault
+    expect(getAddress(dropTx.from)).toBe(getAddress(kr.vault(0).address)); // the same vault: no new link
     expect(await client.getBalance({ address: to })).toBe(w.gasDropWei);
     const r2 = await w.withdrawToken({ vault: kr.vault(0), token, to, amount: part });
     expect(r2.drop).toBeNull();
@@ -242,7 +245,7 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
     expect(o0.collected % 100_000_000_000_000n).toBe(0n);
     expect((await vb()) - v0).toBe(o0.collected); // vaults only received here
     // A second, still-curve launch with some volume.
-    const c = await adapter.create({ name: "Fees", symbol: "FEES" }, parseEther("0.02"), { creatorTaxBps: 300 });
+    const c = await adapter.create({ name: "Fees", symbol: "FEES" }, parseEther("0.02"), { creatorTaxBps: 300, vault: kr.vault(0) });
     const b = await adapter.buy(c.token, parseEther("0.3"), 1n, { vault: kr.vault(1) });
     await adapter.sell(c.token, b.tokenAmount / 2n, 1n, { vault: kr.vault(1) });
     const t1 = await sweeper.inspect({ creatorIndex: c.creatorIndex!, token: c.token });
@@ -269,21 +272,21 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
     expect(u.status).toBe("unused");
     // Stuck: funded, sent a tx, no launch.
     const stuck = kr.account("creator", 51);
-    await ex.transfer(kr.funder(), stuck.address, parseEther("0.01"));
+    await ex.transfer(kr.funder(1), stuck.address, parseEther("0.01"));
     await ex.transfer(stuck, stuck.address, 0n);
-    const fBefore = await client.getBalance({ address: kr.funder().address });
+    const fBefore = await client.getBalance({ address: kr.rebalance(0).address });
     const r = await reconcileCreator({ adapter, executor: ex, keyring: kr }, 51, { fromBlock });
     expect(r.status).toBe("refunded");
     if (r.status === "refunded") {
       const tx = await client.getTransaction({ hash: r.hash });
-      expect(getAddress(tx.to!)).toBe(getAddress(kr.funder().address));
-      expect((await client.getBalance({ address: kr.funder().address })) - fBefore).toBe(r.value);
+      expect(getAddress(tx.to!)).toBe(getAddress(kr.rebalance(0).address)); // back to the source, not to one funder
+      expect((await client.getBalance({ address: kr.rebalance(0).address })) - fBefore).toBe(r.value);
     }
     expect((await reconcileCreator({ adapter, executor: ex, keyring: kr }, 51, { fromBlock })).status).toBe("empty");
   }, 120_000);
 
   it.skipIf(process.env.HOOD_FORK_LIFI !== "1")("LI.FI fallback route executes on the fork (only the vault address is sent)", async () => {
-    const lifiAdapter = new PonsAdapter({ executor: ex, keyring: kr, vault: kr.vault(1), lifi: new LifiClient() });
+    const lifiAdapter = new PonsAdapter({ executor: ex, keyring: kr, funders, lifi: new LifiClient() });
     const live = process.env.HOOD_FORK_LIFI_TOKEN ?? "0xcd70E319F13D4611F2e5f5D603C52724bCea3300";
     const info = await lifiAdapter.launchInfo(live as `0x${string}`);
     const r = await (lifiAdapter as unknown as { tradeLifi: (...a: unknown[]) => Promise<{ route: string; tokenAmount: bigint; amountsKnown: boolean }> }).tradeLifi(info, "buy", parseEther("0.001"), 1n, kr.vault(1));

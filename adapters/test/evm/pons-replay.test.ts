@@ -24,7 +24,8 @@ import { ponsV2LaunchAndBuyAbi } from "../../src/evm/pons/abi/launch-and-buy.gen
 import { ponsV2LaunchFactoryAbi } from "../../src/evm/pons/abi/factory.generated";
 import { ponsV2TokenAbi, TOKEN_FUNCTIONS_IN_BYTECODE } from "../../src/evm/pons/abi/token";
 import { PONS_V2_MAINNET } from "../../src/evm/pons/addresses";
-import { priceRealBuy, priceRealSell, readOnlyAdapter, type RealBuyCase, type RealSellCase } from "./cases";
+import { priceRealBuy, priceRealSell, readOnlyAdapter, TEST_MNEMONIC, type RealBuyCase, type RealSellCase } from "./cases";
+import { EvmKeyring } from "../../src/evm/keys";
 import { replayClient, type RpcFixture } from "./replay";
 
 interface Fixture {
@@ -135,10 +136,13 @@ describe("pons adapter reads (replay)", () => {
   });
 
   it("sends are refused on a read-only (mainnet) executor before any RPC", async () => {
-    const e = await adapter.buy(fx.live.token, 1n, 1n).catch((x) => x);
+    const vault = new EvmKeyring(TEST_MNEMONIC).vault(0);
+    const e = await adapter.buy(fx.live.token, 1n, 1n, { vault }).catch((x) => x);
     expect(e.code).toBe("venue_unavailable");
     expect(e.stage).toBe("build");
-    const e2 = await adapter.create({ name: "x", symbol: "X" }, 1n).catch((x) => x);
+    const e2 = await adapter.create({ name: "x", symbol: "X" }, 1n, { vault }).catch((x) => x);
+    const e3 = await adapter.buy(fx.live.token, 1n, 1n, undefined as never).catch((x) => x);
+    expect(e3.code).toBe("venue_unavailable"); // read-only check comes first; vault is checked before any send too
     expect(e2.code).toBe("venue_unavailable");
   });
 });

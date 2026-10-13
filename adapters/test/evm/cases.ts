@@ -19,7 +19,7 @@ export function readOnlyAdapter(client: PublicClient): PonsAdapter {
     errorAbi: PONS_ERROR_ABI,
   });
   const kr = new EvmKeyring(TEST_MNEMONIC, new MemoryCreatorIndexCounter());
-  return new PonsAdapter({ executor: ex, keyring: kr, vault: kr.vault(0) });
+  return new PonsAdapter({ executor: ex, keyring: kr, funders: { pick: async () => kr.funder(0) } });
 }
 
 export interface RealBuyCase {

@@ -26,6 +26,16 @@ export interface SentEvmTx {
   networkFee: bigint;
 }
 
+/** A signed tx, BEFORE broadcast (relayer: record hash + nonce durably first). */
+export interface SignedEvmTx {
+  hash: Hex;
+  nonce: number;
+  from: Address;
+}
+
+/** Called after signing, before broadcast. Throwing aborts the send (nothing is broadcast). */
+export type OnSigned = (tx: SignedEvmTx) => Promise<void>;
+
 export interface EvmExecutorOptions {
   /** Reads: eth_call, estimateGas, nonce, receipts. */
   read: PublicClient;
@@ -102,7 +112,7 @@ export class EvmExecutor {
    * send -> wait receipt. Throws AdapterError; a landed revert has
    * `landedErr: true` and the hash in `signature`.
    */
-  async send(account: LocalAccount, call: EvmCall, opts: { gasLimit?: bigint } = {}): Promise<SentEvmTx> {
+  async send(account: LocalAccount, call: EvmCall, opts: { gasLimit?: bigint; onSigned?: OnSigned } = {}): Promise<SentEvmTx> {
     if (!this.o.allowSend) {
       throw new AdapterError("venue_unavailable", "EVM sends are disabled on this network (read-only)", { stage: "build" });
     }
@@ -125,6 +135,8 @@ export class EvmExecutor {
           maxPriorityFeePerGas: 0n,
         });
         const h = keccak256(signed);
+        // Not recorded -> never broadcast (a throw here leaves the nonce free).
+        if (opts.onSigned) await opts.onSigned({ hash: h, nonce, from: account.address });
         try {
           await this.sendClient.sendRawTransaction({ serializedTransaction: signed });
           return { value: h, broadcast: true };
@@ -172,8 +184,36 @@ export class EvmExecutor {
   }
 
   /** Plain ETH transfer (funder -> creator), same fee profile. */
-  async transfer(from: LocalAccount, to: Address, value: bigint): Promise<SentEvmTx> {
-    return this.send(from, { to, data: "0x", value });
+  async transfer(from: LocalAccount, to: Address, value: bigint, opts: { onSigned?: OnSigned } = {}): Promise<SentEvmTx> {
+    return this.send(from, { to, data: "0x", value }, opts);
+  }
+
+  /** Re-reads a landed tx: receipt (null = unknown to the node) and, if pending, the tx itself. */
+  async lookup(hash: Hex): Promise<{ state: "landed"; receipt: TransactionReceipt } | { state: "pending" } | { state: "unknown" }> {
+    try {
+      const receipt = await this.read.getTransactionReceipt({ hash });
+      return { state: "landed", receipt };
+    } catch {
+      // not mined (or not found)
+    }
+    try {
+      await this.read.getTransaction({ hash });
+      return { state: "pending" };
+    } catch {
+      return { state: "unknown" };
+    }
+  }
+
+  /** Why a landed tx reverted: replays it (eth_call) one block earlier. */
+  async explainRevert(receipt: TransactionReceipt): Promise<AdapterError> {
+    try {
+      const tx = await this.read.getTransaction({ hash: receipt.transactionHash });
+      await this.read.call({ account: tx.from, to: tx.to ?? undefined, data: tx.input, value: tx.value, blockNumber: receipt.blockNumber - 1n });
+      return new AdapterError("internal", "tx reverted", { signature: receipt.transactionHash, landedErr: true, stage: "confirm" });
+    } catch (e) {
+      const c = classifyEvmError(e, "confirm", receipt.transactionHash, this.o.errorAbi);
+      return new AdapterError(c.code, `tx reverted: ${c.message}`, { signature: receipt.transactionHash, landedErr: true, stage: "confirm" });
+    }
   }
 
   async balance(addr: Address): Promise<bigint> {

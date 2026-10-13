@@ -1,6 +1,6 @@
 /**
  * Creates (on first run) the pool's EVM seed for Robinhood Chain and prints
- * ADDRESSES ONLY: vaults, funder, rebalance, Verify attest key.
+ * ADDRESSES ONLY: vaults, rotating funders (HOOD_FUNDERS, default 8), rebalance, Verify attest key.
  *   pnpm evm:keys [vaultCount=2]
  *
  * Network: HOOD_NETWORK (testnet default). Dir: HOOD_KEYS_DIR or
@@ -25,7 +25,8 @@ async function main(): Promise<void> {
   const kr = await store.keyring({ registry: null });
   console.log(`keys dir: ${cfg.keysDir} (${store.encrypted ? "age-encrypted" : "PLAINTEXT"})`);
   kr.vaultAddresses(count).forEach((a, i) => console.log(`vault-${i}:     ${a}`));
-  console.log(`funder:      ${kr.funder().address}`);
+  const funders = Number(process.env.HOOD_FUNDERS ?? 8);
+  for (let i = 0; i < funders; i++) console.log(`funder-${i}:    ${kr.funder(i).address}`);
   console.log(`rebalance-0: ${kr.rebalance(0).address}`);
   console.log(`attest:      ${kr.attest("verify").address}  (Verify, EIP-712)`);
   const counter = path.join(cfg.keysDir, "creator-counter.json");

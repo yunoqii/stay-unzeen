@@ -1,6 +1,6 @@
 import { encodeFunctionData, getAddress, type Address, type Hex, type LocalAccount } from "viem";
 import { AdapterError } from "../../errors";
-import type { EvmExecutor } from "../executor";
+import type { EvmExecutor, SignedEvmTx } from "../executor";
 import { quantizeGasLimit } from "../fees";
 import type { EvmKeyring } from "../keys";
 import { ponsV2CurveAbi } from "./abi/curve";
@@ -85,10 +85,16 @@ export interface PonsFeeSweeperOptions {
   jitterMs?: [number, number];
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
+  /**
+   * Bookkeeping hook (creator_fee_sweeps `sent` row): the creator -> vault
+   * transfer was signed, not broadcast yet. Throwing aborts it.
+   */
+  onTransferSigned?: (t: PonsFeeTarget, tx: SignedEvmTx, value: bigint, vault: Address) => Promise<void>;
 }
 
 export class PonsFeeSweeper {
-  private readonly o: Required<Omit<PonsFeeSweeperOptions, "sleep" | "random" | "jitterMs">> & {
+  private readonly o: Required<Omit<PonsFeeSweeperOptions, "sleep" | "random" | "jitterMs" | "onTransferSigned">> & {
+    onTransferSigned?: PonsFeeSweeperOptions["onTransferSigned"];
     sleep: (ms: number) => Promise<void>;
     random: () => number;
     jitterMs: [number, number];
@@ -202,7 +208,9 @@ export class PonsFeeSweeper {
     let vault: LocalAccount | null = null;
     if (value > 0n) {
       vault = this.o.pickVault();
-      const s = await ex.transfer(creator, vault.address, value);
+      const v = vault;
+      const hook = this.o.onTransferSigned;
+      const s = await ex.transfer(creator, v.address, value, hook ? { onSigned: (tx) => hook(t0, tx, value, getAddress(v.address)) } : {});
       steps.push({ kind: "to_vault", hash: s.hash, networkFee: s.networkFee, value });
     }
     return { target: t0, steps, collected: value, vault: vault ? getAddress(vault.address) : null };
@@ -247,8 +255,9 @@ export type ReconcileResult =
  * Finds out what happened to creator `index`: launched (TokenLaunched with
  * deployer = creator since `fromBlock`), unused (nonce 0, the launch can be
  * retried with the same index), or stuck (nonce > 0 without a launch: a
- * reverted / dropped attempt, or `abandon`ed) -> its ETH goes back to the FUNDER,
- * never to a vault. Logs are scanned in chunks (public RPCs cap the range).
+ * reverted / dropped attempt, or `abandon`ed) -> its ETH goes back to the
+ * REBALANCE address (the source of all funder money), never to a vault and
+ * never to one funder (that would chain funders together). Logs are scanned in chunks (public RPCs cap the range).
  */
 export async function reconcileCreator(
   o: { adapter: PonsAdapter; executor: EvmExecutor; keyring: EvmKeyring },
@@ -281,6 +290,6 @@ export async function reconcileCreator(
   const gasCost = quantizeGasLimit(21_000n) * ex.fees.maxFeePerGas;
   if (balance <= gasCost) return { status: "empty", creator: addr, balance };
   const value = balance - gasCost;
-  const s = await ex.transfer(creator, o.keyring.funder().address, value);
+  const s = await ex.transfer(creator, o.keyring.rebalance(0).address, value);
   return { status: "refunded", creator: addr, hash: s.hash, value };
 }

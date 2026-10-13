@@ -14,7 +14,7 @@ import {
 import { AdapterError } from "../../errors";
 import type { CurveStatus } from "../../types";
 import { ceilToStep } from "../fees";
-import type { EvmExecutor, SentEvmTx } from "../executor";
+import type { EvmExecutor, OnSigned, SentEvmTx } from "../executor";
 import type { EvmKeyring } from "../keys";
 import type {
   EvmCreateOptions,
@@ -75,6 +75,15 @@ export const PONS_ERROR_ABI = [
   ...V4_EVENTS_ABI,
 ].filter((x) => x.type === "error") as Abi;
 
+function requireVault(opts: { vault?: LocalAccount } | undefined): LocalAccount {
+  if (!opts?.vault) throw new AdapterError("bad_request", "vault is required (the mint's pinned vault)");
+  return opts.vault;
+}
+
+function sendOpts(opts: { onSigned?: OnSigned }): { onSigned?: OnSigned } {
+  return opts.onSigned ? { onSigned: opts.onSigned } : {};
+}
+
 /** GraduationPhase enum of ILaunchpadV2.sol. */
 export const PHASE = { NotGraduated: 0, Swept: 1, PoolCreated: 2, Rescued: 3 } as const;
 
@@ -105,8 +114,8 @@ export interface PonsAdapterOptions {
   executor: EvmExecutor;
   /** Creator (branch 1) and funder (branch 4) keys. */
   keyring: EvmKeyring;
-  /** Default vault when a call does not pass one. */
-  vault: LocalAccount;
+  /** Rotating funders of creator addresses (src/evm/funders.ts FunderPool). */
+  funders: { pick(value: bigint): Promise<LocalAccount> };
   deployment?: PonsDeployment;
   /** Uniswap v4 contracts for graduated tokens. Default: Robinhood Chain mainnet. */
   uniswap?: UniswapV4Deployment;
@@ -150,7 +159,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
   private readonly lifi: LifiClient | null;
   private readonly ex: EvmExecutor;
   private readonly keyring: EvmKeyring;
-  private readonly defaultVault: LocalAccount;
+  private readonly funders: { pick(value: bigint): Promise<LocalAccount> };
   private readonly creatorGasReserveWei: bigint;
   private readonly fundStepWei: bigint;
   private readonly maxSnipeWaitSec: number;
@@ -161,7 +170,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
   constructor(o: PonsAdapterOptions) {
     this.ex = o.executor;
     this.keyring = o.keyring;
-    this.defaultVault = o.vault;
+    this.funders = o.funders;
     this.deployment = o.deployment ?? PONS_V2_MAINNET;
     this.uniswap = o.uniswap ?? UNISWAP_V4_4663;
     this.swapDeadlineSec = o.swapDeadlineSec ?? 300;
@@ -334,8 +343,8 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
 
   /**
    * Local quote over one block's curve state. A buy is priced for `recipient`
-   * (default: the default vault, the address our buys go to): it pays the snipe
-   * tax only if it is not exempt and the window is open at that block.
+   * (pass the job's vault): it pays the snipe tax only if it is not exempt and
+   * the window is open at that block; no recipient = a non-exempt buyer.
    */
   async quote(token: Address, side: "buy" | "sell", amount: bigint, opts: { recipient?: Address } = {}): Promise<EvmQuote> {
     if (amount <= 0n) throw new AdapterError("bad_request", "amount must be > 0");
@@ -344,11 +353,11 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     const { state, blockNumber, timestamp } = await this.curveState(info.curve);
     let sb = 0n;
     if (side === "buy" && snipeTaxBps(state, false, timestamp) > 0n) {
-      const exempt = await this.ex.read.readContract({
+      const exempt = opts.recipient === undefined ? false : await this.ex.read.readContract({
         address: info.curve,
         abi: ponsV2CurveAbi,
         functionName: "snipeTaxExempt",
-        args: [opts.recipient ?? this.defaultVault.address],
+        args: [opts.recipient],
         blockNumber,
       });
       sb = snipeTaxBps(state, exempt, timestamp);
@@ -374,12 +383,13 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     }
   }
 
-  async create(meta: EvmTokenMeta, initialBuyWei: bigint, opts: EvmCreateOptions = {}): Promise<EvmTxResult> {
+  async create(meta: EvmTokenMeta, initialBuyWei: bigint, opts: EvmCreateOptions): Promise<EvmTxResult> {
     const name = meta.name.trim();
     const symbol = meta.symbol.trim();
     if (!name || !symbol) throw new AdapterError("bad_request", "name and symbol are required");
     if (initialBuyWei < 0n) throw new AdapterError("bad_request", "initial buy must be >= 0");
     this.requireSend();
+    requireVault(opts);
     const creatorTaxBps = BigInt(opts.creatorTaxBps ?? 0);
     await this.verifyDeployment();
     const terms = await this.factoryTerms();
@@ -388,7 +398,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
       throw new AdapterError("bad_request", "creator tax out of range");
     }
 
-    const vault = opts.vault ?? this.defaultVault;
+    const vault = requireVault(opts);
     const creatorIndex = opts.creatorIndex ?? (await this.keyring.allocateCreator());
     const creator = this.keyring.creator(creatorIndex);
     if (!terms.launchEnabled) {
@@ -435,7 +445,9 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
         snipeTaxSeconds: terms.snipeTaxSeconds,
       });
       expectedOut = quoteBuy(fresh, initialBuyWei, 0n).tokensOut; // recipient is exempt
-      const minOut = minOutWithSlippage(expectedOut, BigInt(opts.slippageBps ?? 0));
+      if (opts.minOut !== undefined && expectedOut < opts.minOut) throw new AdapterError("slippage", "first buy below min_out");
+      const own = minOutWithSlippage(expectedOut, BigInt(opts.slippageBps ?? 0));
+      const minOut = opts.minOut !== undefined && opts.minOut > own ? opts.minOut : own;
       call = {
         to: this.deployment.launchAndBuy,
         data: encodeFunctionData({
@@ -463,7 +475,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
 
     let sent: SentEvmTx;
     try {
-      sent = await this.ex.send(creator, call);
+      sent = await this.ex.send(creator, call, sendOpts(opts));
     } catch (e) {
       throw e instanceof AdapterError ? e : new AdapterError("internal", String(e), { cause: e });
     }
@@ -498,13 +510,14 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     };
   }
 
-  async buy(token: Address, weiIn: bigint, minOut: bigint, opts: EvmTradeOptions = {}): Promise<EvmTxResult> {
+  async buy(token: Address, weiIn: bigint, minOut: bigint, opts: EvmTradeOptions): Promise<EvmTxResult> {
     if (weiIn <= 0n) throw new AdapterError("bad_request", "amount must be > 0");
     if (minOut < 0n) throw new AdapterError("bad_request", "minOut must be >= 0");
     this.requireSend();
+    requireVault(opts);
     await this.verifyDeployment();
     const info = await this.launchInfo(token);
-    const vault = opts.vault ?? this.defaultVault;
+    const vault = requireVault(opts);
     if (info.phase !== PHASE.NotGraduated) return this.tradeV4(info, "buy", weiIn, minOut, vault, opts);
 
     await this.waitSnipeTax(info.curve, vault.address, opts.snipeTax ?? "wait");
@@ -515,7 +528,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
       to: info.curve,
       data: encodeFunctionData({ abi: ponsV2CurveAbi, functionName: "buy", args: [weiIn, minOut, vault.address] }),
       value: weiIn,
-    });
+    }, sendOpts(opts));
     const trade = this.buyFromLogs(sent.receipt.logs, info.curve);
     if (!trade) throw new AdapterError("internal", "buy landed but CurveBuy not found", { signature: sent.hash });
 
@@ -535,13 +548,14 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     };
   }
 
-  async sell(token: Address, amount: bigint, minWei: bigint, opts: EvmTradeOptions = {}): Promise<EvmTxResult> {
+  async sell(token: Address, amount: bigint, minWei: bigint, opts: EvmTradeOptions): Promise<EvmTxResult> {
     if (amount <= 0n) throw new AdapterError("bad_request", "amount must be > 0");
     if (minWei < 0n) throw new AdapterError("bad_request", "minOut must be >= 0");
     this.requireSend();
+    requireVault(opts);
     await this.verifyDeployment();
     const info = await this.launchInfo(token);
-    const vault = opts.vault ?? this.defaultVault;
+    const vault = requireVault(opts);
     if (info.phase !== PHASE.NotGraduated) return this.tradeV4(info, "sell", amount, minWei, vault, opts);
     const bal = await this.ex.read.readContract({ address: info.token, abi: ponsV2TokenAbi, functionName: "balanceOf", args: [vault.address] });
     if (bal < amount) throw new AdapterError("insufficient_tokens", "vault does not hold enough tokens");
@@ -553,7 +567,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     const sent = await this.ex.send(vault, {
       to: info.curve,
       data: encodeFunctionData({ abi: ponsV2CurveAbi, functionName: "sell", args: [amount, minWei, vault.address] }),
-    });
+    }, sendOpts(opts));
     const ev = parseEventLogs({ abi: ponsV2CurveAbi, logs: sent.receipt.logs, eventName: "CurveSell" }).find(
       (l) => getAddress(l.address) === info.curve,
     );
@@ -579,7 +593,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     const have = await this.ex.balance(creator);
     if (have >= need) return null;
     const value = ceilToStep(need - have, this.fundStepWei);
-    const sent = await this.ex.transfer(this.keyring.funder(), creator, value);
+    const sent = await this.ex.transfer(await this.funders.pick(value), creator, value);
     return { kind: "fund", hash: sent.hash, networkFee: sent.networkFee, value };
   }
 
@@ -702,7 +716,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
   }
 
   /** Permissionless phase 2 of graduation: seed the v4 pool (any account; we use the vault). */
-  async seedGraduatedPool(token: Address, from: LocalAccount = this.defaultVault): Promise<SentEvmTx> {
+  async seedGraduatedPool(token: Address, from: LocalAccount): Promise<SentEvmTx> {
     this.requireSend();
     return this.ex.send(from, {
       to: this.deployment.factory,
@@ -728,7 +742,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     try {
       key = await this.liveV4Pool(info);
     } catch (e) {
-      if (this.lifi && e instanceof AdapterError && e.code === "venue_unavailable") return this.tradeLifi(info, side, amountIn, minOut, vault);
+      if (this.lifi && e instanceof AdapterError && e.code === "venue_unavailable") return this.tradeLifi(info, side, amountIn, minOut, vault, opts);
       throw e;
     }
     if (side === "sell") {
@@ -741,7 +755,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
       to: this.uniswap.universalRouter,
       data: encodeV4ExactInSingle({ key, zeroForOne: side === "buy", amountIn, minOut, deadline }),
       value: side === "buy" ? amountIn : 0n,
-    });
+    }, sendOpts(opts));
     const logs = sent.receipt.logs;
     const id = poolIdOf(key);
     const swap = parseEventLogs({ abi: V4_EVENTS_ABI, logs, eventName: "Swap" }).find(
@@ -782,7 +796,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
   }
 
   /** LI.FI fallback: exact-amount approval to the pinned Diamond, then its validated calldata. */
-  private async tradeLifi(info: LaunchInfo, side: "buy" | "sell", amountIn: bigint, minOut: bigint, vault: LocalAccount): Promise<EvmTxResult> {
+  private async tradeLifi(info: LaunchInfo, side: "buy" | "sell", amountIn: bigint, minOut: bigint, vault: LocalAccount, opts: Partial<EvmTradeOptions> = {}): Promise<EvmTxResult> {
     const lifi = this.lifi!;
     const fromToken = side === "buy" ? NATIVE_QUOTE : info.token;
     const toToken = side === "buy" ? info.token : NATIVE_QUOTE;
@@ -802,7 +816,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
         sideTxs.push({ kind: "approve", hash: ap.hash, networkFee: ap.networkFee });
       }
     }
-    const sent = await this.ex.send(vault, { to: route.to, data: route.data, value: route.value });
+    const sent = await this.ex.send(vault, { to: route.to, data: route.data, value: route.value }, sendOpts(opts));
     const done = parseEventLogs({ abi: LIFI_EVENTS_ABI, logs: sent.receipt.logs, eventName: "LiFiGenericSwapCompleted" }).find(
       (l) => getAddress(l.address) === route.to && getAddress(l.args.receiver) === getAddress(vault.address),
     );
@@ -842,5 +856,84 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
       out.push({ kind: "approve", hash: sent.hash, networkFee: sent.networkFee });
     }
     return out;
+  }
+
+  // -------------------------------------------------------------------------
+  // Recovery: the result of a tx that landed while the relayer was down
+  // -------------------------------------------------------------------------
+
+  /**
+   * Rebuilds the result of a LANDED main tx from its receipt (relayer restart:
+   * the hash was recorded before broadcast). Route is detected from the logs
+   * (curve / Uniswap v4 / LI.FI); `amountsKnown = false` when they cannot be read.
+   */
+  async resultFromReceipt(
+    kind: "buy" | "sell" | "create",
+    receipt: SentEvmTx["receipt"],
+    ctx: { vault: Address; token?: Address; creatorIndex?: number },
+  ): Promise<EvmTxResult> {
+    const logs = receipt.logs;
+    const sent: SentEvmTx = { hash: receipt.transactionHash, receipt, gasLimit: 0n, networkFee: receipt.gasUsed * receipt.effectiveGasPrice };
+    const vault = getAddress(ctx.vault);
+    const zero = { venueFee: 0n, creatorTax: 0n, snipeTax: 0n, refund: 0n };
+    if (kind === "create") {
+      const launched = parseEventLogs({ abi: ponsV2LaunchFactoryAbi, logs, eventName: "TokenLaunched" }).find(
+        (l) => getAddress(l.address) === getAddress(this.deployment.factory),
+      );
+      if (!launched) throw new AdapterError("internal", "launch receipt without TokenLaunched", { signature: receipt.transactionHash });
+      const token = getAddress(launched.args.token);
+      const curve = getAddress(launched.args.curve);
+      const trade = this.buyFromLogs(logs, curve);
+      const tx = await this.ex.read.getTransaction({ hash: receipt.transactionHash });
+      const spentOnBuy = trade ? trade.spent + trade.refund : 0n;
+      return {
+        ...(await this.baseResult("create", sent, token, curve, vault, [])),
+        tokenAmount: trade?.tokensOut ?? 0n,
+        quoteAmount: trade?.spent ?? 0n,
+        venueFee: trade?.fee ?? 0n,
+        creatorTax: trade?.tax ?? 0n,
+        snipeTax: trade?.snipeTax ?? 0n,
+        refund: trade?.refund ?? 0n,
+        launchFee: tx.value - spentOnBuy,
+        creator: getAddress(tx.from),
+        ...(ctx.creatorIndex !== undefined ? { creatorIndex: ctx.creatorIndex } : {}),
+      };
+    }
+    if (!ctx.token) throw new AdapterError("internal", "token required");
+    const info = await this.launchInfo(ctx.token);
+    const base = await this.baseResult(kind, sent, info.token, info.curve, vault, []);
+    const curveLogs = logs.filter((l) => getAddress(l.address) === info.curve);
+    if (kind === "buy") {
+      const t = this.buyFromLogs(curveLogs, info.curve);
+      if (t) return { ...base, tokenAmount: t.tokensOut, quoteAmount: t.spent, venueFee: t.fee, creatorTax: t.tax, snipeTax: t.snipeTax, refund: t.refund };
+    } else {
+      const ev = parseEventLogs({ abi: ponsV2CurveAbi, logs: curveLogs, eventName: "CurveSell" })[0];
+      if (ev) return { ...base, tokenAmount: ev.args.tokensIn, quoteAmount: ev.args.quoteOut, venueFee: ev.args.fee, creatorTax: ev.args.tax, snipeTax: 0n, refund: 0n };
+    }
+    const transfers = parseEventLogs({ abi: ponsV2TokenAbi, logs, eventName: "Transfer" }).filter((l) => getAddress(l.address) === info.token);
+    const toVault = transfers.filter((l) => getAddress(l.args.to) === vault).reduce((a, l) => a + l.args.value, 0n);
+    const fromVault = transfers.filter((l) => getAddress(l.args.from) === vault).reduce((a, l) => a + l.args.value, 0n);
+    if (info.phase === PHASE.PoolCreated) {
+      const id = poolIdOf(this.poolKey(info));
+      const swap = parseEventLogs({ abi: V4_EVENTS_ABI, logs, eventName: "Swap" }).find(
+        (l) => getAddress(l.address) === this.uniswap.poolManager && l.args.id === id,
+      );
+      if (swap) {
+        const skim = parseEventLogs({ abi: V4_EVENTS_ABI, logs, eventName: "HookFeeCollected" }).find((l) => l.args.poolId === id);
+        const fee = skim?.args.feeAmount ?? 0n;
+        const tax = skim?.args.taxAmount ?? 0n;
+        const tx = await this.ex.read.getTransaction({ hash: receipt.transactionHash });
+        return kind === "buy"
+          ? { ...base, ...zero, route: "uniswap-v4", tokenAmount: toVault, quoteAmount: tx.value, venueFee: fee, creatorTax: tax, feeInToken: true }
+          : { ...base, ...zero, route: "uniswap-v4", tokenAmount: fromVault, quoteAmount: swap.args.amount0 - fee - tax, venueFee: fee, creatorTax: tax };
+      }
+    }
+    const done = parseEventLogs({ abi: LIFI_EVENTS_ABI, logs, eventName: "LiFiGenericSwapCompleted" }).find((l) => getAddress(l.args.receiver) === vault);
+    if (done) {
+      return kind === "buy"
+        ? { ...base, ...zero, route: "lifi", tokenAmount: done.args.toAmount, quoteAmount: done.args.fromAmount }
+        : { ...base, ...zero, route: "lifi", tokenAmount: done.args.fromAmount, quoteAmount: done.args.toAmount };
+    }
+    return { ...base, ...zero, tokenAmount: 0n, quoteAmount: 0n, amountsKnown: false, fromEvent: false };
   }
 }

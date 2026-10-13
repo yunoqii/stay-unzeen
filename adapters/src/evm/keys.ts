@@ -179,6 +179,9 @@ export class EvmKeyStore {
       const data = this.cipher ? await this.cipher.encrypt(plain) : plain;
       fs.writeFileSync(this.seedPath, data, { mode: 0o600, flag: "wx" });
     }
+    // Refuse a seed file readable/writable by group or others (copied with a wide umask, chmod'ed by hand...).
+    const mode = fs.statSync(this.seedPath).mode & 0o777;
+    if ((mode & 0o077) !== 0) throw new Error(`EVM seed file mode ${mode.toString(8)} is too wide; chmod 600 it`);
     const raw = fs.readFileSync(this.seedPath);
     const plain = this.cipher ? Buffer.from(await this.cipher.decrypt(raw)) : raw;
     return parseMnemonic(plain.toString("utf8"));

@@ -1,4 +1,5 @@
-import { createPublicClient, type LocalAccount, type PublicClient } from "viem";
+import { createPublicClient, type PublicClient } from "viem";
+import { FunderPool } from "./funders";
 import { hoodChain, hoodTransport, RateLimiter, type HoodConfig } from "./chain";
 import { EvmExecutor } from "./executor";
 import { EvmFeeCache } from "./fees";
@@ -46,9 +47,9 @@ export function hoodPonsAdapter(
   cfg: HoodConfig,
   executor: EvmExecutor,
   keyring: EvmKeyring,
-  vault: LocalAccount = keyring.vault(0),
+  funders: FunderPool = new FunderPool({ executor, keyring }),
   deployment: PonsDeployment = PONS_V2_MAINNET,
 ): PonsAdapter | null {
   if (cfg.chainId !== deployment.chainId) return null;
-  return new PonsAdapter({ executor, keyring, vault, deployment });
+  return new PonsAdapter({ executor, keyring, funders, deployment });
 }
