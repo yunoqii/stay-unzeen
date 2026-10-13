@@ -136,4 +136,31 @@ impl Ledger {
         tx.commit().await?;
         Ok(ids.len())
     }
+
+    /// v0.14: SOL equivalent of ZEC-pair trades (stock-only quote, the relayer writes
+    /// `sol_amount = 0`): `floor(quote_amount × lamports_per_zec / 1e8)` at the pool's mid rate,
+    /// only for trades younger than `max_age_secs` (rate "at the time of the trade"; older ones
+    /// stay 0 rather than being valued at today's rate). Also refreshes `tokens.price_sol` of
+    /// ZEC-pair tokens from `price_quote`. Public market data only. Returns trades valued.
+    pub async fn value_zec_pair(&self, zec_mint: &str, lamports_per_zec: u64, max_age_secs: i64) -> Result<u64> {
+        let l = crate::to_i64(lamports_per_zec)?;
+        let c = self.pool.get().await?;
+        let n = c
+            .execute(
+                "UPDATE trades SET sol_amount = floor(quote_amount * $2::bigint / 100000000)::bigint
+                 WHERE quote_mint = $1 AND sol_amount = 0 AND quote_amount > 0
+                   AND quote_amount * $2::bigint / 100000000 < 9223372036854775807
+                   AND ts > now() - make_interval(secs => $3::bigint::float8)",
+                &[&zec_mint, &l, &max_age_secs],
+            )
+            .await?;
+        c.execute(
+            "UPDATE tokens SET price_sol = round(price_quote * $2::bigint / 1000000000, 18)
+             WHERE quote_mint = $1 AND price_quote IS NOT NULL
+               AND price_sol IS DISTINCT FROM round(price_quote * $2::bigint / 1000000000, 18)",
+            &[&zec_mint, &l],
+        )
+        .await?;
+        Ok(n)
+    }
 }

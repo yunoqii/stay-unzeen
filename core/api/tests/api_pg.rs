@@ -328,7 +328,10 @@ async fn pool_info() {
                               "maxInitialBuyLamportsByVenue":{"pumpfun":"1466000000"}},
                "fees":{"createFeeZat":"100000","withdrawZecFeeZat":"15000",
                        "withdrawTokenGasLamports":"2000000","withdrawTokenCostLamports":"2100000",
-                       "nowFeeZat":"500"}})
+                       "nowFeeZat":"500"},
+               // v0.13: devnet default UNZEEN_QUOTES = USDC (pump.fun devnet mint).
+               "quotes":[{"quote":"USDC","mint":"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+                          "decimals":6,"bridged":false,"venues":["pumpfun"]}]})
     );
     assert!(r.headers.get("set-cookie").is_none());
     // A pool published for another network is never served.
@@ -2437,7 +2440,10 @@ async fn creator_fee_sweeps_credit_and_claim() {
         "idempotent"
     );
     let pf = e.signed(&user(4), "GET", "/api/portfolio", "").await.body;
-    assert_eq!(pf["claimable"], json!([{"mint": MINT, "solAmount": "50000000"}]));
+    assert_eq!(
+        pf["claimable"],
+        json!([{"mint": MINT, "solAmount": "50000000", "zecAmount": "0"}])
+    );
     // claim: 0.05 SOL at 10 SOL/ZEC (spread 0) = 0.005 ZEC.
     let r = e.signed(&user(4), "POST", "/api/actions", &claim).await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
@@ -2451,6 +2457,69 @@ async fn creator_fee_sweeps_credit_and_claim() {
         code(&e.signed(&user(4), "POST", "/api/actions", &claim).await),
         "below_minimum"
     );
+    e.drop_schema().await;
+}
+
+/// v0.14: quote-token creator fees. ZEC SPL → zat 1:1 (after the launch fee in zat); USDC →
+/// the sweeper's pool-A lamports, waiting while they are missing; claim pays both.
+#[tokio::test]
+async fn quote_creator_fees_zec_and_usdc() {
+    let Some(e) = setup().await else { return };
+    let s = e.schema.clone();
+    let pk = hex::encode(user(4).verifying_key().to_bytes());
+    let usdc = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+    e.sql(&format!(
+        "INSERT INTO {s}.creator_tokens (mint, anon_pubkey, launch_fee_zat, launch_fee_zat_left,
+                                         launch_fee_lamports, launch_fee_left)
+           VALUES ('{MINT}', '\\x{pk}', 100000, 100000, 0, 0),
+                  ('{MINT2}', '\\x{pk}', 0, 0, 1000000, 1000000);
+         INSERT INTO {s}.creator_fee_sweeps (network, venue, kind, mint, authority, signature, last_valid_block_height,
+                                             status, lamports, slot, quote_mint, quote_amount)
+         VALUES ('devnet', 'pumpfun', 'creator', '{MINT}', 'A', 'Z1', 1, 'confirmed', 0, 5, '{ZEC_SPL}', 300000),
+                ('devnet', 'pumpfun', 'creator', '{MINT2}', 'A', 'U1', 1, 'confirmed', 0, 6, '{usdc}', 5000000),
+                ('devnet', 'pumpfun', 'creator', '{MINT2}', 'A', 'U2', 1, 'confirmed', 4000000, 7, '{usdc}', 2000000);"
+    ))
+    .await;
+    let r = e.ledger.credit_fee_sweeps("devnet").await.unwrap();
+    assert_eq!((r.credited, r.withheld_lamports), (2, 1_000_000));
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.creator_fee_sweeps WHERE credited_at IS NULL AND signature = 'U1'"
+        ))
+        .await,
+        1,
+        "USDC sweep without its pool-A lamports waits"
+    );
+    let pf = e.signed(&user(4), "GET", "/api/portfolio", "").await.body;
+    let mut cl = pf["claimable"].as_array().unwrap().clone();
+    cl.sort_by_key(|v| v["mint"].as_str().unwrap().to_string());
+    let mut want = vec![
+        json!({"mint": MINT, "solAmount": "0", "zecAmount": "200000"}),
+        json!({"mint": MINT2, "solAmount": "3000000", "zecAmount": "0"}),
+    ];
+    want.sort_by_key(|v| v["mint"].as_str().unwrap().to_string());
+    assert_eq!(cl, want);
+    // claim: 0.003 SOL at 10 SOL/ZEC = 30 000 zat + 200 000 zat owed 1:1.
+    let r = e
+        .signed(&user(4), "POST", "/api/actions", &json!({"op":"claim"}).to_string())
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let pf = e.signed(&user(4), "GET", "/api/portfolio", "").await.body;
+    assert_eq!(pf["zecBalance"], "230000");
+    assert_eq!(pf["claimable"], json!([]));
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT claimed_zat FROM {s}.creator_claimable WHERE mint = '{MINT}'"
+        ))
+        .await,
+        200_000
+    );
+    // The sweeper fills the equivalent later → credited then.
+    e.sql(&format!(
+        "UPDATE {s}.creator_fee_sweeps SET lamports = 10000000 WHERE signature = 'U1'"
+    ))
+    .await;
+    assert_eq!(e.ledger.credit_fee_sweeps("devnet").await.unwrap().credited, 1);
     e.drop_schema().await;
 }
 
@@ -2831,7 +2900,10 @@ async fn launch_fee_to_pool_and_creator_cabinet() {
         0
     );
     let pf = e.signed(&user(me), "GET", "/api/portfolio", "").await.body;
-    assert_eq!(pf["claimable"], json!([{"mint": MINT, "solAmount": "19999000"}]));
+    assert_eq!(
+        pf["claimable"],
+        json!([{"mint": MINT, "solAmount": "19999000", "zecAmount": "0"}])
+    );
 
     // Cabinet: own token only, owner-only figures, padded.
     let cab = e.signed(&user(me), "GET", "/api/creator", "").await;
@@ -2846,7 +2918,7 @@ async fn launch_fee_to_pool_and_creator_cabinet() {
     );
     assert_eq!(
         t["fees"],
-        json!({"claimableLamports": "19999000", "claimedLamports": "0"})
+        json!({"claimableLamports": "19999000", "claimedLamports": "0", "claimableZat": "0", "claimedZat": "0"})
     );
     assert_eq!(t["volumeLamports"], (paid + 500_000_000).to_string());
     assert_eq!(t["trades"], 2);
@@ -2890,7 +2962,7 @@ async fn launch_fee_to_pool_and_creator_cabinet() {
     let t = e.signed(&user(me), "GET", "/api/creator", "").await.body["tokens"][0].clone();
     assert_eq!(
         t["fees"],
-        json!({"claimableLamports": "0", "claimedLamports": "19999000"})
+        json!({"claimableLamports": "0", "claimedLamports": "19999000", "claimableZat": "0", "claimedZat": "0"})
     );
     e.drop_schema().await;
 }
@@ -3416,9 +3488,36 @@ async fn quote_pairs_zec_spl_and_usdc() {
         "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol, quote_mint, price_quote)
            VALUES ('{MINT}', 'pumpfun', 'ZPEPE', 'Z Pepe', 6, 0, 0, '{ZEC_SPL}', 0.00001);
          INSERT INTO {s}.trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, ts, quote_mint, quote_amount)
-           VALUES ('buy', 'pumpfun', '{MINT}', 'ZPEPE', 1000, 0, 6, 'QS1', now(), '{ZEC_SPL}', 300000);"
+           VALUES ('buy', 'pumpfun', '{MINT}', 'ZPEPE', 1000, 0, 6, 'QS0', now() - interval '1 hour', '{ZEC_SPL}', 300000),
+                  ('buy', 'pumpfun', '{MINT}', 'ZPEPE', 1000, 0, 6, 'QS1', now(), '{ZEC_SPL}', 300000);"
     ))
     .await;
+    // v0.14: the feed poller values fresh ZEC-pair trades at the pool rate (10 SOL/ZEC here):
+    // 0.003 ZEC → 0.03 SOL; an hour-old one stays 0; price_sol follows price_quote.
+    let mut valued = 0;
+    for _ in 0..50 {
+        valued = e
+            .one_i64(&format!("SELECT sol_amount FROM {s}.trades WHERE signature = 'QS1'"))
+            .await;
+        if valued > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(valued, 30_000_000);
+    assert_eq!(
+        e.one_i64(&format!("SELECT sol_amount FROM {s}.trades WHERE signature = 'QS0'"))
+            .await,
+        0
+    );
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT (price_sol * 100000000)::bigint FROM {s}.tokens WHERE mint = '{MINT}'"
+        ))
+        .await,
+        10_000,
+        "0.00001 ZEC × 10 SOL/ZEC = 0.0001 SOL"
+    );
     // Token and feed carry the pair.
     let t = e.get(&format!("/api/tokens/{MINT}")).await.body;
     assert_eq!(

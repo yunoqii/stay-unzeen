@@ -524,11 +524,24 @@ pub async fn candles(
 }
 
 /// Poll `trades` for new rows every second and broadcast them to WS subscribers.
+/// ZEC-pair trades older than this keep `sol_amount = 0` (never valued at a much later rate).
+pub const ZEC_VALUE_MAX_AGE_SECS: i64 = 900;
+
 pub async fn poll_trades(st: AppState) {
     let mut last: Option<i64> = None;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tick.tick().await;
+        // v0.14: ZEC-pair trades get their SOL equivalent before they reach the feed.
+        if let Some(q) = st.cfg.quotes.list.iter().find(|q| q.is_zec())
+            && let Ok(rate) = st.rate.get().await
+            && let Err(e) = st
+                .ledger
+                .value_zec_pair(q.mint, rate.lamports_per_zec, ZEC_VALUE_MAX_AGE_SECS)
+                .await
+        {
+            tracing::warn!(error = %e, "ZEC-pair valuation failed");
+        }
         let res: ApiResult<()> = async {
             let c = client(&st).await?;
             let from = match last {

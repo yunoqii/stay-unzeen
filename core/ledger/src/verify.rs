@@ -367,13 +367,14 @@ impl Ledger {
 
         // Liabilities: (asset, decimals, granule) -> [(pk, value)]. ZEC: one value per key =
         // balance + held + creator fees owed (claimable lamports of all its mints, summed per
-        // key, at the buy rate, rounded up). One entry per key → piece numbers unique (E6).
+        // key, at the buy rate, rounded up; v0.14: + zat owed for ZEC-pair fees, 1:1). One entry
+        // per key → piece numbers unique (E6).
         let zec_rows = tx
             .query(
                 "SELECT anon_pubkey, sum(z)::bigint, sum(l)::bigint FROM (
                      SELECT anon_pubkey, available_zat + held_zat AS z, 0::bigint AS l FROM balances
                      UNION ALL
-                     SELECT anon_pubkey, 0, lamports FROM creator_claimable WHERE lamports > 0
+                     SELECT anon_pubkey, zat, lamports FROM creator_claimable WHERE lamports > 0 OR zat > 0
                  ) x GROUP BY anon_pubkey HAVING sum(z) > 0 OR sum(l) > 0 ORDER BY anon_pubkey",
                 &[],
             )

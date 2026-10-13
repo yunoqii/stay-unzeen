@@ -439,7 +439,7 @@ async fn portfolio(State(st): State<AppState>, method: Method, uri: Uri, headers
             "held": h.held.to_string(),
         })).collect::<Vec<_>>(),
         "orders": own_orders.iter().map(orders::order_json).collect::<Vec<_>>(),
-        "claimable": claimable.iter().map(|(m, l)| json!({ "mint": m, "solAmount": l.to_string() })).collect::<Vec<_>>(),
+        "claimable": claimable.iter().map(|(m, l, z)| json!({ "mint": m, "solAmount": l.to_string(), "zecAmount": z.to_string() })).collect::<Vec<_>>(),
         "deposits": deposits.iter().map(|d| json!({
             "id": hex::encode(d.id),
             "amountZat": d.amount_zat.to_string(),

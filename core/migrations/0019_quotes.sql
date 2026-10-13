@@ -6,17 +6,18 @@
 -- Unnamed CHECKs listing the venues are replaced wherever they allowed 'meteora-dbc'
 -- (fair-launch launches and orders stay pump.fun-only on purpose).
 DO $$
-DECLARE r record;
+DECLARE t text; c text;
 BEGIN
-    FOR r IN SELECT c.conrelid::regclass AS tbl, c.conname
-               FROM pg_constraint c
-              WHERE c.contype = 'c'
-                AND c.conrelid::regclass::text IN ('relayer_jobs', 'tokens', 'trades', 'intel_tokens',
-                                                  'market_trades', 'intel_discovery', 'launch_curves',
-                                                  'creator_fee_sweeps')
-                AND pg_get_constraintdef(c.oid) LIKE '%venue%meteora-dbc%'
+    -- Per table via a search_path regclass (as in 0018): never casts other schemas' oids.
+    FOREACH t IN ARRAY ARRAY['relayer_jobs', 'tokens', 'trades', 'intel_tokens', 'market_trades',
+                             'intel_discovery', 'launch_curves', 'creator_fee_sweeps']
     LOOP
-        EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', r.tbl, r.conname);
+        FOR c IN SELECT conname FROM pg_constraint
+                  WHERE conrelid = to_regclass(t) AND contype = 'c'
+                    AND pg_get_constraintdef(oid) LIKE '%venue%meteora-dbc%'
+        LOOP
+            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', t, c);
+        END LOOP;
     END LOOP;
 END $$;
 ALTER TABLE relayer_jobs ADD CONSTRAINT relayer_jobs_venue_check

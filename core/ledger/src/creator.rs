@@ -26,6 +26,9 @@ pub struct CreatorTokenRow {
     /// Creator fees credited and not yet claimed / already claimed (lamports).
     pub claimable: u64,
     pub claimed: u64,
+    /// v0.14: the same for ZEC-pair fees, zat.
+    pub claimable_zat: u64,
+    pub claimed_zat: u64,
     /// Pool trades of the mint (public, as in the feed): lamports and count.
     pub volume_lamports: u64,
     pub trades: u64,
@@ -58,7 +61,8 @@ impl Ledger {
                         (COALESCE(tb.available + tb.held, 0)
                          + COALESCE((SELECT sum(gain_est) FROM actions
                                       WHERE anon_pubkey = $1 AND gain_mint = ct.mint AND status = 'queued'), 0))::bigint,
-                        ts.data, (extract(epoch FROM ts.as_of) * 1000)::bigint
+                        ts.data, (extract(epoch FROM ts.as_of) * 1000)::bigint,
+                        COALESCE(cc.zat, 0), COALESCE(cc.claimed_zat, 0)
                  FROM creator_tokens ct
                  LEFT JOIN tokens t ON t.mint = ct.mint
                  LEFT JOIN intel_tokens it ON it.mint = ct.mint
@@ -86,6 +90,8 @@ impl Ledger {
                 created_at_ms: r.get(7),
                 claimable: to_u64(r.get(8)),
                 claimed: to_u64(r.get(9)),
+                claimable_zat: to_u64(r.get(17)),
+                claimed_zat: to_u64(r.get(18)),
                 volume_lamports: to_u64(r.get(10)),
                 trades: to_u64(r.get(11)),
                 locked_amount: to_u64(r.get(12)),

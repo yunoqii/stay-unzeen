@@ -2,7 +2,8 @@
 //! sweeps in `creator_fee_sweeps`; core credits `kind = 'creator'` rows to the creator's anon key
 //! (`creator_tokens`) as claimable lamports, on an epoch boundary (never at the moment a sweep
 //! lands). `partner` rows and mints without an Unzeen creator are pool revenue. `claim` is a
-//! ledger-only operation: claimable lamports → ZEC balance at the sell rate.
+//! ledger-only operation: claimable lamports → ZEC balance at the sell rate (v0.14: plus the
+//! zat owed for ZEC-pair fees, 1:1).
 //!
 //! Privacy (D1): `credited_at` is hour-coarse, claimable rows carry day-coarse times, the
 //! journal lives 48 h, claim amounts are scrubbed with the action after 24–48 h.
@@ -51,49 +52,73 @@ pub struct CreditReport {
 
 impl Ledger {
     /// Credit every confirmed, uncredited creator sweep of `network` (one transaction).
+    ///
+    /// v0.14 (RELAYER v9): a ZEC SPL sweep (`quote_mint` = ZEC SPL) is owed 1:1 in zat
+    /// (`creator_claimable.zat`, launch fee withheld from `launch_fee_zat_left`); a USDC/USD1
+    /// sweep is credited by its `lamports` (pool-A equivalent from the sweeper) like a SOL one,
+    /// and waits uncredited while that equivalent is missing.
     pub async fn credit_fee_sweeps(&self, network: &str) -> Result<CreditReport> {
         let mut c = self.pool.get().await?;
         let tx = c.transaction().await?;
+        let zec = crate::rebalance::ZEC_SPL_MINT;
         let rows = tx
             .query(
-                "SELECT s.id, s.mint, s.lamports, ct.anon_pubkey
+                "SELECT s.id, s.mint, s.lamports, ct.anon_pubkey, s.quote_mint = $2,
+                        CASE WHEN s.quote_amount <= 9223372036854775807 THEN s.quote_amount::bigint END
                  FROM creator_fee_sweeps s LEFT JOIN creator_tokens ct ON ct.mint = s.mint
                  WHERE s.network = $1 AND s.status = 'confirmed' AND s.kind = 'creator' AND s.credited_at IS NULL
-                   AND s.quote_mint IS NULL   -- v0.13: quote-token fees wait for v0.14 (kept, not lost)
+                   AND (s.quote_mint IS NULL OR s.quote_mint = $2
+                        OR COALESCE(s.lamports, 0) > 0 OR COALESCE(s.quote_amount, 0) = 0)
                  FOR UPDATE OF s SKIP LOCKED",
-                &[&network],
+                &[&network, &zec],
             )
             .await?;
         let mut rep = CreditReport::default();
         for r in &rows {
             let (id, mint, lamports, pk): (i64, String, Option<i64>, Option<Vec<u8>>) =
                 (r.get(0), r.get(1), r.get(2), r.get(3));
-            let lamports = lamports.unwrap_or(0).max(0);
+            let is_zec = r.get::<_, Option<bool>>(4).unwrap_or(false);
+            if is_zec && r.get::<_, Option<i64>>(5).is_none() {
+                continue; // > i64::MAX ZEC SPL units: not a real sweep, leave it to the operator
+            }
+            let amount = if is_zec { r.get::<_, Option<i64>>(5) } else { lamports }
+                .unwrap_or(0)
+                .max(0);
+            let (left_col, claim_col) = if is_zec {
+                ("launch_fee_zat_left", "zat")
+            } else {
+                ("launch_fee_left", "lamports")
+            };
             let pool_part: i64 = match pk {
-                Some(pk) if lamports > 0 => {
+                Some(pk) if amount > 0 => {
                     // Launch-tx fee first: the pool's share comes out of the earliest sweeps.
                     let left: i64 = tx
                         .query_one(
-                            "SELECT launch_fee_left FROM creator_tokens WHERE mint = $1 FOR UPDATE",
+                            &format!("SELECT {left_col} FROM creator_tokens WHERE mint = $1 FOR UPDATE"),
                             &[&mint],
                         )
                         .await?
                         .get(0);
-                    let pool_part = left.clamp(0, lamports);
+                    let pool_part = left.clamp(0, amount);
                     if pool_part > 0 {
                         tx.execute(
-                            "UPDATE creator_tokens SET launch_fee_left = launch_fee_left - $2 WHERE mint = $1",
+                            &format!("UPDATE creator_tokens SET {left_col} = {left_col} - $2 WHERE mint = $1"),
                             &[&mint, &pool_part],
                         )
                         .await?;
-                        rep.withheld_lamports += to_u64(pool_part);
+                        if !is_zec {
+                            rep.withheld_lamports += to_u64(pool_part);
+                        }
                     }
-                    let to_creator = lamports - pool_part;
+                    let to_creator = amount - pool_part;
                     if to_creator > 0 {
                         tx.execute(
-                            "INSERT INTO creator_claimable (anon_pubkey, mint, lamports) VALUES ($1, $2, $3)
-                             ON CONFLICT (anon_pubkey, mint) DO UPDATE
-                               SET lamports = creator_claimable.lamports + EXCLUDED.lamports, updated_at = now()",
+                            &format!(
+                                "INSERT INTO creator_claimable (anon_pubkey, mint, {claim_col}) VALUES ($1, $2, $3)
+                                 ON CONFLICT (anon_pubkey, mint) DO UPDATE
+                                   SET {claim_col} = creator_claimable.{claim_col} + EXCLUDED.{claim_col},
+                                       updated_at = now()"
+                            ),
                             &[&pk, &mint, &to_creator],
                         )
                         .await?;
@@ -105,31 +130,43 @@ impl Ledger {
                 }
                 _ => {
                     rep.pool_revenue += 1;
-                    lamports
+                    amount
                 }
             };
-            tx.execute(
-                "UPDATE creator_fee_sweeps SET credited_at = date_trunc('hour', now()), pool_lamports = $2
-                 WHERE id = $1",
-                &[&id, &pool_part],
-            )
-            .await?;
+            if is_zec {
+                tx.execute(
+                    "UPDATE creator_fee_sweeps SET credited_at = date_trunc('hour', now()),
+                            pool_quote_amount = $2::bigint::numeric
+                     WHERE id = $1",
+                    &[&id, &pool_part],
+                )
+                .await?;
+            } else {
+                tx.execute(
+                    "UPDATE creator_fee_sweeps SET credited_at = date_trunc('hour', now()), pool_lamports = $2
+                     WHERE id = $1",
+                    &[&id, &pool_part],
+                )
+                .await?;
+            }
         }
         tx.commit().await?;
         Ok(rep)
     }
 
-    /// `Portfolio.claimable`: (mint, lamports) with a positive amount.
-    pub async fn claimable(&self, pk: &[u8; 32]) -> Result<Vec<(String, u64)>> {
+    /// `Portfolio.claimable`: (mint, lamports, zat) with a positive amount (v0.14: zat of
+    /// ZEC-pair fees).
+    pub async fn claimable(&self, pk: &[u8; 32]) -> Result<Vec<(String, u64, u64)>> {
         let pk_s: &[u8] = pk;
         let c = self.pool.get().await?;
         Ok(c.query(
-            "SELECT mint, lamports FROM creator_claimable WHERE anon_pubkey = $1 AND lamports > 0 ORDER BY mint",
+            "SELECT mint, lamports, zat FROM creator_claimable
+             WHERE anon_pubkey = $1 AND (lamports > 0 OR zat > 0) ORDER BY mint",
             &[&pk_s],
         )
         .await?
         .into_iter()
-        .map(|r| (r.get(0), to_u64(r.get(1))))
+        .map(|r| (r.get(0), to_u64(r.get(1)), to_u64(r.get(2))))
         .collect())
     }
 
@@ -158,13 +195,17 @@ impl Ledger {
         }
         let rows = tx
             .query(
-                "SELECT mint, lamports FROM creator_claimable
-                 WHERE anon_pubkey = $1 AND lamports > 0 AND ($2::text IS NULL OR mint = $2) FOR UPDATE",
+                "SELECT mint, lamports, zat FROM creator_claimable
+                 WHERE anon_pubkey = $1 AND (lamports > 0 OR zat > 0) AND ($2::text IS NULL OR mint = $2)
+                 FOR UPDATE",
                 &[&pk_s, &mint],
             )
             .await?;
         let lamports: u64 = rows.iter().map(|r| to_u64(r.get(1))).sum();
+        // v0.14: ZEC-pair fees are owed in zat already (1:1, no rate).
+        let fee_zat: u64 = rows.iter().map(|r| to_u64(r.get(2))).sum();
         let zat = ((lamports as u128) * ZAT_PER_ZEC / (rate.lamports_per_zec.max(1) as u128)) as u64;
+        let zat = zat.saturating_add(fee_zat);
         if rows.is_empty() || zat < self.rules.min_claim_zat.max(1) {
             return Err(LedgerError::BelowMinimum);
         }
@@ -172,7 +213,7 @@ impl Ledger {
             let m: String = r.get(0);
             tx.execute(
                 "UPDATE creator_claimable SET claimed_lamports = claimed_lamports + lamports, lamports = 0,
-                        updated_at = now()
+                        claimed_zat = claimed_zat + zat, zat = 0, updated_at = now()
                  WHERE anon_pubkey = $1 AND mint = $2",
                 &[&pk_s, &m],
             )

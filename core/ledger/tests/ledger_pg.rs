@@ -846,3 +846,79 @@ async fn database_is_bound_to_one_network() {
     assert!(l.check_pool_network("test", "mainnet-beta").await.unwrap().is_err());
     db.drop_schema().await;
 }
+
+/// v0.14 / RELAYER v9: a ZEC-pair job reports `out_lamports = NULL` and the amount in
+/// `out_quote_amount`; without either it is never settled against zero. The launch fee of a
+/// ZEC launch is kept in zat (a 0 fact is ignored there) and withheld from ZEC sweeps 1:1.
+#[tokio::test]
+async fn zec_pair_settle_needs_amount_and_fees_in_zat() {
+    let Some(db) = setup().await else { return };
+    let l = &db.ledger;
+    let zec = unzeen_ledger::rebalance::ZEC_SPL_MINT;
+    fund(l, 1, 0, 1_000_000).await;
+    let me = pk(1);
+    let mut a = action(
+        "create",
+        500_000,
+        0,
+        None,
+        vec![NewJob {
+            venue: Some("pumpfun".into()),
+            lamports_in: Some(400_000),
+            min_out: Some(1),
+            meta: Some(json!({"name": "Z", "symbol": "Z", "quote": "ZEC"})),
+            ..NewJob::new(JobOp::Create, 0.0)
+        }],
+    );
+    a.quote_mint = Some(zec.into());
+    let r = l.submit(&me, &[7; 16], &[7; 32], &a).await.unwrap();
+    // Confirmed without any amount: left for the operator, nothing refunded or credited.
+    db.sql(
+        "UPDATE relayer_jobs SET status = 'confirmed', signature = 'ZC1', out_mint = 'ZM1',
+                out_token_amount = 1000, out_lamports = NULL, out_creator_fee = 0",
+    )
+    .await;
+    assert_eq!(l.settle_ready(10).await.unwrap(), 0);
+    assert_eq!(
+        db.scalar_i64("SELECT count(*) FROM relayer_jobs WHERE settled_at IS NULL")
+            .await,
+        1
+    );
+    assert_eq!(
+        l.action_view(&me, &r.id).await.unwrap().unwrap().status,
+        "sent",
+        "still in flight"
+    );
+    // The relayer's v8 fact: ZEC SPL units in out_quote_amount.
+    db.sql(&format!(
+        "UPDATE relayer_jobs SET out_quote_mint = '{zec}', out_quote_amount = 400000"
+    ))
+    .await;
+    assert_eq!(l.settle_ready(10).await.unwrap(), 1);
+    assert_eq!(l.action_view(&me, &r.id).await.unwrap().unwrap().status, "executed");
+    // Fact 0 ignored for a ZEC launch → estimate ceil(400 000 × 30 bps) = 1 200, in zat columns.
+    assert_eq!(
+        db.scalar_i64(
+            "SELECT launch_fee_zat * 1000000 + launch_fee_zat_left + launch_fee_lamports + launch_fee_left
+               FROM creator_tokens WHERE mint = 'ZM1'"
+        )
+        .await,
+        1_200 * 1_000_000 + 1_200
+    );
+    // A ZEC SPL sweep: launch fee withheld first, the rest owed 1:1 in zat.
+    db.sql(&format!(
+        "INSERT INTO creator_fee_sweeps (network, venue, kind, mint, authority, signature, last_valid_block_height,
+                                         status, lamports, slot, quote_mint, quote_amount)
+         VALUES ('devnet', 'pumpfun', 'creator', 'ZM1', 'A', 'FZ1', 1, 'confirmed', 0, 5, '{zec}', 300000)"
+    ))
+    .await;
+    let rep = l.credit_fee_sweeps("devnet").await.unwrap();
+    assert_eq!((rep.credited, rep.withheld_lamports), (1, 0));
+    assert_eq!(l.claimable(&me).await.unwrap(), vec![("ZM1".to_string(), 0, 298_800)]);
+    assert_eq!(
+        db.scalar_i64("SELECT pool_quote_amount::bigint FROM creator_fee_sweeps WHERE signature = 'FZ1'")
+            .await,
+        1_200
+    );
+    db.drop_schema().await;
+}

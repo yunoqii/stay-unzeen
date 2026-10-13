@@ -48,6 +48,8 @@ pub fn token_json(r: &CreatorTokenRow, cap_bps: u64, cap_tokens: u64) -> Value {
         "fees": {
             "claimableLamports": r.claimable.to_string(),
             "claimedLamports": r.claimed.to_string(),
+            "claimableZat": r.claimable_zat.to_string(),
+            "claimedZat": r.claimed_zat.to_string(),
         },
         "volumeLamports": r.volume_lamports.to_string(),
         "trades": r.trades,
@@ -98,6 +100,8 @@ mod tests {
             status: Some("curve".into()),
             created_at_ms: Some(1),
             claimable: 7,
+            claimable_zat: 5,
+            claimed_zat: 0,
             claimed: 3,
             volume_lamports: 100,
             trades: 2,
@@ -114,7 +118,10 @@ mod tests {
         let v = token_json(&row(), 500, 50);
         assert_eq!(v["holders"], Value::Null);
         assert!(v.get("holdersAsOf").is_none() && v.get("curveProgressPct").is_none());
-        assert_eq!(v["fees"], json!({"claimableLamports": "7", "claimedLamports": "3"}));
+        assert_eq!(
+            v["fees"],
+            json!({"claimableLamports": "7", "claimedLamports": "3", "claimableZat": "5", "claimedZat": "0"})
+        );
         assert_eq!(v["lock"], json!({"lockedAmount": "0", "until": null}));
         assert_eq!(
             v["cap"],

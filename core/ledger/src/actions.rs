@@ -677,20 +677,27 @@ impl Ledger {
                                 (0, 0.0)
                             };
                             // v0.9: the creator fee of this very tx is the pool's.
+                            // v0.14: a ZEC-pair launch (`quote_mint` set) pays in ZEC SPL units
+                            // (= zat): its launch fee is kept in zat; a 0 fact there is the
+                            // relayer's lamport conversion of a stock-only quote, not a figure.
+                            let zec_pair = quote_mint.is_some();
+                            let fact = j.get::<_, Option<i64>>(11).filter(|f| !zec_pair || *f > 0);
                             let launch_fee = crate::creator_fees::launch_creator_fee(
                                 &self.rules,
                                 j.get::<_, Option<&str>>(10),
                                 out_lamports,
-                                j.get::<_, Option<i64>>(11),
+                                fact,
                             );
+                            let (fee_lamports, fee_zat) = if zec_pair { (0, launch_fee) } else { (launch_fee, 0) };
                             tx.execute(
                                 "INSERT INTO creator_tokens (mint, anon_pubkey, locked_amount, locked_until,
-                                                             launch_fee_lamports, launch_fee_left)
+                                                             launch_fee_lamports, launch_fee_left,
+                                                             launch_fee_zat, launch_fee_zat_left)
                                  VALUES ($1, $2, $3::bigint, CASE WHEN $3::bigint > 0
                                      THEN date_trunc('hour', now() + make_interval(secs => $4::float8))
-                                          + interval '1 hour' END, $5, $5)
+                                          + interval '1 hour' END, $5, $5, $6, $6)
                                  ON CONFLICT (mint) DO NOTHING",
-                                &[m, &pk, &locked, &lock_secs, &launch_fee],
+                                &[m, &pk, &locked, &lock_secs, &fee_lamports, &fee_zat],
                             )
                             .await?;
                             fill.insert("mint".into(), json!(m));

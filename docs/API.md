@@ -2,12 +2,18 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.13** (13.10; миграция `0019_quotes.sql`; RELAYER.md v8). Изменения против v0.12:
+Статус: **v0.14** (13.10; миграция `0020_quote_fees.sql`; RELAYER.md v9). Изменения против v0.13:
+- **Creator fees пар не к SOL зачисляются.** Комиссии создателя токена в паре к **ZEC** приходят в ZEC SPL и зачисляются **1:1 в зат** (без курса SOL и без спреда): новое поле `Portfolio.claimable[].zecAmount` (строка зат, `"0"`, если нет). Комиссии в **USDC/USD1** зачисляются в лампорты (`solAmount`) по курсу пула A на момент сбора — как у SOL-пар. `claim` переводит в ZEC и то, и другое: `floor(solAmount × 1e8 / lamportsPerZecSell) + zecAmount`; порог `minClaimZat` — к сумме. Кабинет создателя: `fees` += `claimableZat`, `claimedZat`. Кнопку «Claim» активировать, если `claimableZat + эквивалент claimableLamports ≥ minClaimZat`.
+- **Creator fee самой launch-tx для ZEC-запусков** удерживается в единицах ZEC (зат), а не в лампортах; правило «первые сборы mint — пулу» не меняется.
+- **Объём и свечи ZEC-пар.** У сделок в паре к ZEC `FeedEvent.solAmount` теперь SOL-эквивалент по курсу ZEC/SOL пула **на момент сделки** (core проставляет его до того, как событие уходит в ленту; сделки старше 15 мин без курса остаются `"0"`). Поэтому `volume24hSol`, свечи, статистика и объём в кабинете учитывают ZEC-пары. `Token.priceSol` ZEC-пары = `priceQuote × курс ZEC/SOL` (обновляется вместе с курсом); `marketCapSol` пока может быть `"0"`.
+- Verify: ZEC-лист ключа += `Σ claimable zecAmount` (без пересчёта).
+
+Изменения v0.13 против v0.12 (13.10; миграция `0019_quotes.sql`; RELAYER.md v8):
 - **Пары не к SOL (решения владельца и лида 13.10, `docs/analysis/launchpads-a.md`, `-b.md`).** Quote-активы: **ZEC SPL** `A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS` (мостовой, `bridged`), **USDC**, **USD1** (выкл., пока нет пула A). Список включённых на сети и площадке — `PoolInfo.quotes` (нет записи → пара недоступна).
   - `create` += `quote?: "SOL" | "USDC" | "USD1" | "ZEC"` (по умолчанию `"SOL"`). Площадка должна поддерживать пару (`PoolInfo.quotes[].venues`), иначе `400 bad_request`; выключенная пара → `503 venue_unavailable`.
   - `buy`/`sell` пары определяются по токену (`Token.quote`), отдельного поля нет. Пользователь всегда платит и получает **ZEC** с баланса.
   - **ZEC SPL:** 1:1 к ZEC без курса SOL: `buy` тратит `zecIn × (1 − s)` ZEC SPL, `sell` зачисляет `ZEC SPL × 1/(1 + s)` зат, `s` = `PoolInfo.quotes[ZEC].spreadBps` (env `UNZEEN_ZEC_SPL_SPREAD_BPS`, по умолчанию 30 б.п. — стоимость пополнения через 1Click). `RateUsed` таких действий: `{ quote: "ZEC", quotePerZec, source: "parity", ts }` (нет `lamportsPerZec`). `fill.quoteAmount` вместо `fill.solAmount`.
-  - **USDC/USD1:** реестр в лампортах как у SOL-пар (курс ZEC/SOL), релейер пересчитывает лампорты в quote по закреплённому пулу A (DAMM v2 SOL/USDC) и тратит запас quote на vault; `RateUsed`/`fill` как у SOL.
+  - **USDC/USD1:** реестр в лампортах как у SOL-пар (курс ZEC/SOL), релейер пересчитывает лампорты в quote по закреплённому пулу A (USDC — Meteora DAMM v2 SOL/USDC, USD1 — Raydium CLMM SOL/USD1) и тратит запас quote на vault; `RateUsed`/`fill` как у SOL.
   - Ордера и fair-launch — только SOL-пары (`order_create` на не-SOL токен → `422 order_unsupported_mint`). `venue: "jupiter"` на ZEC-паре → `400 bad_request`.
 - **`Token`** += `quote` (`"SOL" | "USDC" | "USD1" | "ZEC"`), `quoteMint?` (нет у SOL), `priceQuote?` (десятичная строка: quote за 1 целый токен, UI-единицы), `platform?` (у `raydium-launchlab`). `priceSol`/`marketCapSol` остаются SOL-эквивалентом (для пар не к SOL — оценка релейера, может быть `"0"`).
 - **`FeedEvent`** += `quoteMint?`, `quoteAmount?` (базовые единицы quote, целая строка; только у пар не к SOL). `solAmount` у таких событий — SOL-эквивалент или `"0"`.
@@ -275,7 +281,7 @@ interface Portfolio {
   zecHeld: string;          // затоши, зарезервировано действиями в очереди
   frozen: boolean;          // true — баланс заморожен до ручной проверки (reorg); снимается автоматически, если депозит снова в цепочке с K подтверждениями
   holdings: { mint: string; amount: string; held: string }[];  // amount — доступно; held — зарезервировано sell/withdraw_token в очереди
-  claimable: { mint: string; solAmount: string }[];            // v0.7: creator fees к выплате (лампорты) по mint, созданным этим ключом; claim → ZEC
+  claimable: { mint: string; solAmount: string; zecAmount: string }[]; // v0.7: creator fees к выплате по mint, созданным этим ключом: лампорты (SOL/USDC/USD1-пары) и v0.14 зат (ZEC-пары); claim → ZEC
   deposits: DepositInfo[];  // последние 20, новые первыми
   actions: (ActionStatus & {  // v0.4: последние 20 действий владельца (queued первыми)
     id: string;
@@ -414,6 +420,8 @@ interface CreatorToken {
   fees: {
     claimableLamports: string;     // = Portfolio.claimable[mint].solAmount ("0", если нечего); claim → ZEC
     claimedLamports: string;       // всего переведено claim по этому mint (с v0.9; более ранние claim не учтены)
+    claimableZat: string;          // v0.14: = Portfolio.claimable[mint].zecAmount (ZEC-пары; иначе "0")
+    claimedZat: string;            // v0.14: всего переведено claim в зат по этому mint
   };
   volumeLamports: string;          // объём сделок пула по mint (buy+sell, как в ленте), всё время, лампорты
   trades: number;                  // число этих сделок
