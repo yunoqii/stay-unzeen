@@ -222,7 +222,7 @@ impl Env {
     }
 
     async fn one_i64(&self, q: &str) -> i64 {
-        self.admin.query_one(q, &[]).await.unwrap().get(0)
+        gi(&self.admin.query_one(q, &[]).await.unwrap(), 0)
     }
 
     async fn raw(&self, method: &str, path: &str, body: &str, headers: Option<&api_auth::SignedHeaders>) -> Resp {
@@ -321,6 +321,8 @@ async fn pool_info() {
     assert_eq!(
         b,
         json!({"address":"utest1example","network":"test","chainId":"0202",
+               // v0.18: the chain of this origin.
+               "chain":{"id":"solana","network":"devnet","mainnet":false,"native":{"symbol":"SOL","decimals":9}},
                "minDepositZat":"100000","minActionZat":"100000","minClaimZat":"100000","confirmations":3,
                "createEnabled":true,
                "orders": unzeen_api::orders::pool_block(),
@@ -678,11 +680,11 @@ async fn withdrawals_and_create() {
         .await
         .unwrap()
         .iter()
-        .map(|r| r.get(0))
+        .map(|r| gi(r, 0))
         .collect();
     let total: i64 = parts.iter().sum();
     assert!((970..1000).contains(&total), "{parts:?}");
-    assert!(parts.iter().all(|p| quantize_min_out(*p as u64) as i64 == *p));
+    assert!(parts.iter().all(|p| quantize_min_out(*p as u128) as i64 == *p));
     assert_eq!(
         e.one_i64(&format!(
             "SELECT available FROM {}.token_balances WHERE mint = '{MINT2}'",
@@ -1620,7 +1622,7 @@ mod fair {
             )
             .await
             .unwrap();
-        let lamports_in = job.get::<_, i64>(0) as u64;
+        let lamports_in = gi(&job, 0) as u64;
         let secret: Vec<u8> = job.get(2);
         assert_eq!(lamports_in % alloc::LAMPORTS_STEP, 0);
         assert!(lamports_in <= max_total);
@@ -1662,7 +1664,7 @@ mod fair {
         // min_out) is accepted and shared pro rata; the unspent part of every hold is released.
         let spent = lamports_in * 8 / 10;
         let t = alloc::curve_tokens_out(VS, VT, spent) * 99 / 100;
-        assert!(t < job.get::<_, i64>(1) as u64, "below min_out");
+        assert!(t < gi(&job, 1) as u64, "below min_out");
         e.sql(&format!(
             "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGFAIR', out_mint = '{mint}',
                     out_token_amount = {t}, out_lamports = {spent}, vault = 'VaultA',
@@ -2718,12 +2720,12 @@ mod orders_v08 {
             )
             .await
             .unwrap();
-        let lamports = job.get::<_, i64>(1) as u64;
+        let lamports = gi(&job, 1) as u64;
         assert_eq!(job.get::<_, String>(0), "buy");
         assert!((990_000_000..=1_000_000_000).contains(&lamports) && lamports.is_multiple_of(1_000_000));
         // E4: min_out from the tick price (0.9e-6), not the trigger, quantized to 3 digits.
         assert_eq!(
-            job.get::<_, i64>(2) as u64,
+            gi(&job, 2) as u128,
             quantize_min_out(buy_min_out(lamports, parse_e18("0.0000009").unwrap(), 6, 500).unwrap())
         );
         assert_eq!(
@@ -2731,7 +2733,7 @@ mod orders_v08 {
             ("delayed".into(), true),
             "next epoch"
         );
-        let held = job.get::<_, i64>(5);
+        let held = gi(&job, 5);
         assert_eq!(
             e.avail(1).await,
             (100_000_000 - held, held),
@@ -2770,7 +2772,7 @@ mod orders_v08 {
                 "SELECT min_out FROM {s}.relayer_jobs WHERE action_id = '\\x{said}' AND op = 'sell'
                    AND token_amount = 500000000000"
             ))
-            .await as u64;
+            .await as u128;
         assert_eq!(
             min_out,
             quantize_min_out(sell_min_out(500_000_000_000, parse_e18("0.00000095").unwrap(), 6, 1_500).unwrap()),
@@ -2894,7 +2896,7 @@ mod orders_v08 {
                 )
                 .await
                 .unwrap();
-            (r.get(0), r.get(1))
+            (gi(&r, 0), gi(&r, 1))
         }
 
         async fn sells_of(&self, n: u8) -> i64 {
@@ -3039,9 +3041,9 @@ mod orders_v08 {
             )
             .await
             .unwrap();
-        assert_eq!(job.get::<_, Option<i64>>(0), Some(500_000_000_000));
+        assert_eq!(goi(&job, 0), Some(500_000_000_000));
         assert_eq!(
-            job.get::<_, i64>(1) as u64,
+            gi(&job, 1) as u128,
             quantize_min_out(sell_min_out(500_000_000_000, parse_e18("0.0000021").unwrap(), 6, 500).unwrap()),
             "TP leg: tick price, TP slippage"
         );
@@ -3056,7 +3058,7 @@ mod orders_v08 {
             e.one_i64(&format!(
                 "SELECT min_out FROM {s}.relayer_jobs WHERE action_id = '\\x{bid}'"
             ))
-            .await as u64,
+            .await as u128,
             quantize_min_out(sell_min_out(500_000_000_000, parse_e18("0.00000075").unwrap(), 6, 1_500).unwrap()),
             "SL leg: tick price, SL slippage"
         );
@@ -3178,7 +3180,7 @@ mod orders_v08 {
             ))
             .await;
         assert!((490_000_000_000..500_000_000_000).contains(&t2), "{t2}");
-        assert_eq!(quantize_min_out(t2 as u64) as i64, t2);
+        assert_eq!(quantize_min_out(t2 as u128) as i64, t2);
         assert_eq!(e.order(5, &ls).await["amount"], t2.to_string());
         assert_eq!(e.tokens(5).await, (1_000_000_000_000 - t2, t2));
         e.sql(&format!(
@@ -3333,7 +3335,7 @@ async fn launch_fee_to_pool_and_creator_cabinet() {
     let rep = e.ledger.credit_fee_sweeps("devnet").await.unwrap();
     assert_eq!(
         (rep.credited, rep.pool_revenue, rep.withheld_lamports),
-        (0, 1, (fee - 1_000) as u64)
+        (0, 1, (fee - 1_000) as u128)
     );
     e.sql(&format!(
         "INSERT INTO {s}.creator_fee_sweeps (network, venue, kind, mint, authority, signature,
@@ -4283,7 +4285,7 @@ async fn bags_first_buy_is_a_separate_held_job() {
         .await
         .unwrap();
     assert_eq!(
-        (ct.get::<_, i64>(0), ct.get::<_, i64>(1)),
+        (gi(&ct, 0), gi(&ct, 1)),
         (5_000_000, 0),
         "first-buy tokens locked; Bags launch fee is not ours"
     );
@@ -4423,5 +4425,57 @@ async fn full_feed_filters_and_quote_candles() {
         e.get(&format!("/api/tokens/{MINT}/candles?tf=1h&quote=1")).await.status,
         StatusCode::OK
     );
+    e.drop_schema().await;
+}
+
+/// Integer column of either type (BIGINT or NUMERIC(78,0) since migration 0026) as i64.
+fn gi(r: &unzeen_ledger::tokio_postgres::Row, i: usize) -> i64 {
+    i64::try_from(r.get::<_, unzeen_ledger::Num>(i).0).expect("fits i64 in tests")
+}
+
+fn goi(r: &unzeen_ledger::tokio_postgres::Row, i: usize) -> Option<i64> {
+    r.get::<_, Option<unzeen_ledger::Num>>(i)
+        .map(|n| i64::try_from(n.0).expect("fits i64 in tests"))
+}
+
+/// v0.18: display-only rates from the timer cache (503 until the first refresh) and the
+/// Robinhood Chain venue refused on a Solana server before any hold.
+#[tokio::test]
+async fn public_rates_and_hood_venue() {
+    let Some(e) = setup().await else { return };
+    let r = e.get("/api/rates").await;
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{:?}", r.body);
+    e.state
+        .public_rates
+        .set(unzeen_api::rates::Snapshot {
+            zec_usd: 1218.79,
+            sol_usd: 107.79,
+            eth_usd: 2506.85,
+            ts_ms: 1_791_763_200_000,
+        })
+        .await;
+    let r = e.get("/api/rates").await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        r.body,
+        json!({"usd":{"ZEC":"1218.79","SOL":"107.79","ETH":"2506.85"},
+               "pairs":{"ZEC/SOL":"11.3071","ZEC/ETH":"0.486184"},
+               "approximate":true,"source":"near-1click","ts":1_791_763_200_000u64})
+    );
+    assert_eq!(r.headers["cache-control"], "public, max-age=60");
+
+    e.fund(1, 0, 5_000_000).await;
+    let body = json!({"op":"sell","venue":"pons","mint":MINT,"amount":"1000000000000000000000000000",
+                      "minZecOut":"1","exec":"delayed"})
+    .to_string();
+    let r = e.signed(&user(1), "POST", "/api/actions", &body).await;
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{:?}", r.body);
+    assert_eq!(r.body["error"]["code"], "venue_unavailable");
+    // A 1e27 sell on a Solana venue parses (u128) and fails only on the balance.
+    let body = json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":"1000000000000000000000000000",
+                      "minZecOut":"200000","exec":"delayed"})
+    .to_string();
+    let r = e.signed(&user(1), "POST", "/api/actions", &body).await;
+    assert_eq!(r.body["error"]["code"], "insufficient_balance", "{:?}", r.body);
     e.drop_schema().await;
 }

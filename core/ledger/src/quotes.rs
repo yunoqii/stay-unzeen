@@ -147,9 +147,8 @@ impl Ledger {
         let c = self.pool.get().await?;
         let n = c
             .execute(
-                "UPDATE trades SET sol_amount = floor(quote_amount * $2::bigint / 100000000)::bigint
+                "UPDATE trades SET sol_amount = floor(quote_amount * $2::bigint / 100000000)
                  WHERE quote_mint = $1 AND sol_amount = 0 AND quote_amount > 0
-                   AND quote_amount * $2::bigint / 100000000 < 9223372036854775807
                    AND ts > now() - make_interval(secs => $3::bigint::float8)",
                 &[&zec_mint, &l, &max_age_secs],
             )

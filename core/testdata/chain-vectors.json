@@ -1,0 +1,78 @@
+{
+  "cases": [
+    {
+      "anonKeyPath": "m/44'/133'/0'/0'",
+      "chain": "solana",
+      "chainIdHex": "0101",
+      "evmChainId": null,
+      "network": "mainnet-beta",
+      "pubkey": "3aY2SvoAGX6pYdFfUwqaj8LVn499hDrrQ1w8bJVWbN1E",
+      "request": {
+        "body": "{\"op\":\"noop\"}",
+        "method": "POST",
+        "nonce": "07070707070707070707070707070707",
+        "pathQuery": "/api/actions",
+        "sig": "67kvte2XncV3rBGDKgQvigoarf9kbnjHt4vUyBdJ92bauwcijPExphTcKQ9DEBkuybxtJ2T2QEPGf5EhGkdfR7wS",
+        "ts": "1791763200000"
+      }
+    },
+    {
+      "anonKeyPath": "m/44'/133'/1'/0'",
+      "chain": "solana",
+      "chainIdHex": "0202",
+      "evmChainId": null,
+      "network": "devnet",
+      "pubkey": "BvSbw1qy4VG3xgvss1kERnc6tY2cAEmouMiBUDhhU8j7",
+      "request": {
+        "body": "{\"op\":\"noop\"}",
+        "method": "POST",
+        "nonce": "07070707070707070707070707070707",
+        "pathQuery": "/api/actions",
+        "sig": "4pLDJCkSazQsN2rCJMznjJKoCrNYPxuB3yAn5utB7efCYBV3bktq85sFFSR2vNUVJTTX8b2P8Q9RS1ta2RDcLMEX",
+        "ts": "1791763200000"
+      }
+    },
+    {
+      "anonKeyPath": "m/44'/133'/2'/0'",
+      "chain": "hood",
+      "chainIdHex": "0111",
+      "evmChainId": 4663,
+      "network": "hood",
+      "pubkey": "C9eLGFj5uRSB2gfh4rDZB6XwVr2Y3nRhnwFgzXSQj7ui",
+      "request": {
+        "body": "{\"op\":\"noop\"}",
+        "method": "POST",
+        "nonce": "07070707070707070707070707070707",
+        "pathQuery": "/api/actions",
+        "sig": "Fr5mCgh2nkkShX2VpttfgLR427v4mKMmGbihxyBZxuShU2Kzc4s3qsHmuKcmBvUyKt6UMAf9Wr4zR6PQ9Lv2kPp",
+        "ts": "1791763200000"
+      }
+    },
+    {
+      "anonKeyPath": "m/44'/133'/3'/0'",
+      "chain": "hood",
+      "chainIdHex": "0212",
+      "evmChainId": 46630,
+      "network": "hood-testnet",
+      "pubkey": "3WKghd7FTjypyTmh68jVVAQ8g94xDy3d1sNLKMQ4nVtx",
+      "request": {
+        "body": "{\"op\":\"noop\"}",
+        "method": "POST",
+        "nonce": "07070707070707070707070707070707",
+        "pathQuery": "/api/actions",
+        "sig": "32sjJXsS57n42zLSCjtDgh11oUfT535rcGnxyBe2wEV5XK5MMaCP83v313G6VsYihdGt8EVdR2CPbNKiYXWpxQYZ",
+        "ts": "1791763200000"
+      }
+    }
+  ],
+  "description": "API v0.18 chain ids: byte 0 = Zcash (1 main, 2 test); byte 1 = trading chain (0x01 Solana mainnet-beta, 0x02 devnet, 0x11 Robinhood Chain 4663, 0x12 Robinhood Chain testnet 46630). Only 0101, 0202, 0111, 0212 are valid.",
+  "invalid": [
+    "0102",
+    "0201",
+    "0112",
+    "0211",
+    "0103",
+    "0113"
+  ],
+  "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+}

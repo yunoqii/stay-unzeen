@@ -26,7 +26,9 @@ use crate::{
     ActionReceipt, Ledger, LedgerError, Result,
     actions::{NewAction, RateUsed, ZAT_PER_ZEC, token_journal},
     fair::is_replay,
-    journal, to_i64, to_u64,
+    journal,
+    num::Num,
+    to_i64, to_u64,
 };
 
 pub const MAX_OPEN_PER_KEY: i64 = 10;
@@ -43,12 +45,13 @@ pub struct NewOrder {
     pub mint: String,
     /// Canonical decimal string (validated by the API: > 0, ≤ 18 fractional digits).
     pub trigger: String,
-    pub amount: u64,
+    /// zat (limit_buy, must fit i64) or token base units (sell kinds; NUMERIC(78,0)).
+    pub amount: u128,
     pub slippage_bps: u32,
     pub exec_mode: String,
     pub ttl_secs: u64,
     /// limit_buy: upper-bound token estimate for the creator cap (ignored for non-creators).
-    pub gain: Option<u64>,
+    pub gain: Option<u128>,
     /// v0.15 bracket only: the stop-loss leg (canonical decimal, < `trigger`) and its slippage.
     /// `trigger` / `slippage_bps` are the take-profit leg.
     pub sl_trigger: Option<String>,
@@ -70,7 +73,7 @@ pub struct OrderRow {
     pub mint: String,
     pub kind: String,
     pub trigger: String,
-    pub amount: u64,
+    pub amount: u128,
     pub slippage_bps: i32,
     pub exec_mode: String,
     pub status: String,
@@ -145,7 +148,7 @@ pub fn parse_e18(s: &str) -> Option<u128> {
 }
 
 /// buy: min tokens (base units) for `lamports` at `trigger × (1 + slippage)`.
-pub fn buy_min_out(lamports: u64, trigger_e18: u128, decimals: u32, slippage_bps: u32) -> Option<u64> {
+pub fn buy_min_out(lamports: u64, trigger_e18: u128, decimals: u32, slippage_bps: u32) -> Option<u128> {
     // tokens_whole = lamports / (trigger · 1e9 · (1 + s)); base = · 10^dec
     let num = (lamports as u128)
         .checked_mul(10u128.checked_pow(decimals)?)?
@@ -155,20 +158,20 @@ pub fn buy_min_out(lamports: u64, trigger_e18: u128, decimals: u32, slippage_bps
     if den == 0 {
         return None;
     }
-    Some((num / den).min(u64::MAX as u128) as u64)
+    Some(num / den)
 }
 
 /// sell: min lamports for `amount` base units at `trigger × (1 − slippage)`.
-pub fn sell_min_out(amount: u64, trigger_e18: u128, decimals: u32, slippage_bps: u32) -> Option<u64> {
+pub fn sell_min_out(amount: u128, trigger_e18: u128, decimals: u32, slippage_bps: u32) -> Option<u128> {
     // lamports = amount / 10^dec · trigger · 1e9 = amount · trigger_e18 / (10^dec · 1e9)
-    let num = (amount as u128)
+    let num = amount
         .checked_mul(trigger_e18)?
         .checked_mul(10_000 - slippage_bps.min(10_000) as u128)?;
     let den = 10u128
         .checked_pow(decimals)?
         .checked_mul(1_000_000_000)?
         .checked_mul(10_000)?;
-    Some((num / den).min(u64::MAX as u128) as u64)
+    Some(num / den)
 }
 
 fn id16(v: Vec<u8>) -> [u8; 16] {
@@ -185,7 +188,8 @@ async fn close_order<C: GenericClient>(tx: &C, order_id: &[u8], status: &str, er
         )
         .await?
     {
-        let (pk, hold, tmint, thold): (Vec<u8>, i64, Option<String>, i64) = (a.get(0), a.get(1), a.get(2), a.get(3));
+        let (pk, hold, tmint): (Vec<u8>, i64, Option<String>) = (a.get(0), a.get(1), a.get(2));
+        let thold: i128 = a.get::<_, Num>(3).0;
         if hold > 0 {
             tx.execute(
                 "UPDATE balances SET held_zat = held_zat - $2, available_zat = available_zat + $2, updated_at = now()
@@ -199,7 +203,7 @@ async fn close_order<C: GenericClient>(tx: &C, order_id: &[u8], status: &str, er
             tx.execute(
                 "UPDATE token_balances SET held = held - $3, available = available + $3, updated_at = now()
                  WHERE anon_pubkey = $1 AND mint = $2",
-                &[&pk, m, &thold],
+                &[&pk, m, &Num(thold)],
             )
             .await?;
             token_journal(tx, &pk, m, "release", thold, -thold, order_id).await?;
@@ -243,7 +247,7 @@ pub(crate) async fn rearm_on_slippage<C: GenericClient>(tx: &C, action_id: &[u8]
             &[&action_id],
         )
         .await?;
-    let (hold, thold, gmint, gest): (i64, i64, Option<String>, Option<i64>) = (a.get(0), a.get(1), a.get(2), a.get(3));
+    let (hold, thold, gmint, gest): (i64, Num, Option<String>, Option<Num>) = (a.get(0), a.get(1), a.get(2), a.get(3));
     let n = tx
         .execute(
             "UPDATE actions SET status = 'queued', error = NULL, hold_zat = $2, token_hold = $3, gain_mint = $4,
@@ -257,7 +261,7 @@ pub(crate) async fn rearm_on_slippage<C: GenericClient>(tx: &C, action_id: &[u8]
     }
     tx.execute(
         "UPDATE orders SET status = 'open', action_id = NULL, leg = NULL, sl_armed_tick = NULL,
-                rearms = rearms + 1, amount = CASE WHEN kind = 'limit_buy' THEN $2::bigint ELSE $3::bigint END
+                rearms = rearms + 1, amount = CASE WHEN kind = 'limit_buy' THEN $2::bigint ELSE $3::numeric END
          WHERE id = $1",
         &[&oid, &hold, &thold],
     )
@@ -279,7 +283,11 @@ impl Ledger {
         let tx = c.transaction().await?;
         let a = NewAction {
             kind: "order_create".into(),
-            amount_zat: if o.is_buy() { o.amount } else { 0 },
+            amount_zat: if o.is_buy() {
+                u64::try_from(o.amount).map_err(|_| LedgerError::Range)?
+            } else {
+                0
+            },
             token_hold: (!o.is_buy()).then(|| (o.mint.clone(), o.amount)),
             gain: o.gain.map(|g| (o.mint.clone(), g)),
             ..NewAction::default()
@@ -327,7 +335,7 @@ impl Ledger {
                 &o.mint,
                 &o.kind,
                 &o.trigger,
-                &to_i64(o.amount)?,
+                &Num::from_u128(o.amount)?,
                 &(o.slippage_bps as i32),
                 &o.exec_mode,
                 &(o.ttl_secs as f64),
@@ -410,7 +418,7 @@ impl Ledger {
                 mint: r.get(2),
                 kind: r.get(3),
                 trigger: r.get::<_, Option<String>>(4).unwrap_or_default(),
-                amount: to_u64(r.get(5)),
+                amount: r.get::<_, Num>(5).u128_or_zero(),
                 slippage_bps: r.get::<_, Option<i32>>(6).unwrap_or(0),
                 exec_mode: r.get(7),
                 status: r.get(8),
@@ -539,7 +547,7 @@ impl Ledger {
         let pk: Vec<u8> = r.get(1);
         let kind: String = r.get(2);
         let mint: String = r.get(3);
-        let amount = to_u64(r.get(4));
+        let amount: u128 = r.get::<_, Num>(4).u128_or_zero();
         let slip = r.get::<_, Option<i32>>(5).unwrap_or(500).max(0) as u32;
         let exec: String = r.get(6);
         let armed: Option<i64> = r.get(7);
@@ -631,7 +639,7 @@ impl Ledger {
                 &[&id],
             )
             .await?;
-        let (hold, gain_mint, gain_est): (i64, Option<String>, Option<i64>) = (a.get(0), a.get(1), a.get(2));
+        let (hold, gain_mint, gain_est): (i64, Option<String>, Option<Num>) = (a.get(0), a.get(1), a.get(2));
         // E4: min_out from the PUBLIC tick price (like a manual trade from a public price),
         // never from the trigger; quantized at job insertion.
         // A5 / A6 (final audit): a sell never repeats the amount of its failed attempt nor
@@ -645,16 +653,19 @@ impl Ledger {
                 rep.failed += 1;
                 return Ok(());
             }
-            let back = to_i64(amount - a2)?;
+            let back = Num::from_u128(amount - a2)?;
             tx.execute(
                 "UPDATE token_balances SET held = held - $3, available = available + $3, updated_at = now()
                  WHERE anon_pubkey = $1 AND mint = $2",
                 &[&pk, &mint, &back],
             )
             .await?;
-            token_journal(tx, &pk, &mint, "release", back, -back, &id).await?;
-            tx.execute("UPDATE orders SET amount = $2 WHERE id = $1", &[&id, &to_i64(a2)?])
-                .await?;
+            token_journal(tx, &pk, &mint, "release", back.0, -back.0, &id).await?;
+            tx.execute(
+                "UPDATE orders SET amount = $2 WHERE id = $1",
+                &[&id, &Num::from_u128(a2)?],
+            )
+            .await?;
             a2
         } else {
             amount
@@ -692,10 +703,10 @@ impl Ledger {
         let rh: [u8; 32] = rand::random();
         let (aid_s, nonce_s, rh_s): (&[u8], &[u8], &[u8]) = (&aid, &nonce, &rh);
         let zat_i = to_i64(zat)?;
-        let (tmint, thold): (Option<&str>, i64) = if buy {
-            (None, 0)
+        let (tmint, thold): (Option<&str>, Num) = if buy {
+            (None, Num::ZERO)
         } else {
-            (Some(mint.as_str()), to_i64(amount)?)
+            (Some(mint.as_str()), Num::from_u128(amount)?)
         };
         tx.execute(
             "INSERT INTO actions (id, anon_pubkey, nonce, request_hash, kind, hold_zat, status, amount_zat, fee_zat,
@@ -728,9 +739,9 @@ impl Ledger {
                 &aid_s,
                 &(if buy { "buy" } else { "sell" }),
                 &mint,
-                &(if buy { Some(to_i64(lamports)?) } else { None }),
-                &(if buy { None } else { Some(to_i64(amount)?) }),
-                &to_i64(min_out)?,
+                &(if buy { Some(Num::from(lamports)) } else { None }),
+                &(if buy { None } else { Some(Num::from_u128(amount)?) }),
+                &Num::from_u128(min_out)?,
                 &network,
                 &delay.max(0.0),
                 &exec,

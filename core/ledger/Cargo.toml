@@ -7,6 +7,7 @@ publish.workspace = true
 description = "Unzeen private ledger (Postgres): deposits, balances, holds, journal, nonces"
 
 [dependencies]
+bytes = "1"
 hex = "0.4"
 hmac = "0.13"
 rand = "0.10"

@@ -616,7 +616,11 @@ async fn run() -> anyhow::Result<()> {
 async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd, target: &str) -> anyhow::Result<()> {
     use rebalance::{RebalanceCfg, Trigger};
     let policy = service::policy_from_env(c)?;
-    let cfg = RebalanceCfg::from_env(c, policy.chain.solana)?;
+    let solana = policy
+        .chain
+        .solana()
+        .ok_or_else(|| anyhow::anyhow!("rebalance: Solana pools only (Robinhood Chain is the next step)"))?;
+    let cfg = RebalanceCfg::from_env(c, solana)?;
     let cfg = match target {
         "sol" => cfg,
         "zec-spl" | "zec_spl" => cfg.zec_spl()?,

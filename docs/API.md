@@ -2,7 +2,20 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.17** (13.10; миграции `0023_payout_review.sql`, `0024_intel_creates.sql`, `0025_verify_digest_v2.sql`; RELAYER.md v11). Изменения против v0.16 (финальный аудит `docs/analysis/final-audit.md`, решения лида в STATUS.md):
+Статус: **v0.19** (13.10; контракт сценариев, реализация — этапы S2–S7, до них `features.scenarios` нет и `scenario_*` → `400 bad_request`). Изменения против v0.18:
+- **Сценарии** (план из ≤ 12 блоков, одна подпись): раздел «Сценарии (v0.19)» ниже, спека `docs/analysis/scenarios.md`, решения владельца 13.10. Векторы валидации: `core/testdata/scenario-vectors.json` (фронт и core проверяют по одному файлу).
+- **`Portfolio` выравнивается до кратного 8192 байт** (было 4096) — для всех, со сценариями и без: размер ответа не выдаёт их наличие. Вступает вместе с S3.
+- **`pad` тела `POST /api/actions`**: до 16384 байт (было 8192), чтобы `scenario_create` дополнялся до 16 КиБ. Вступает вместе с S3.
+- Новые коды ошибок: `scenario_invalid` (400), `scenario_rule` (422), `scenario_limit` (422), `scenario_not_active` (409).
+
+v0.18 (13.10; миграция `0026_amounts_numeric.sql`; RELAYER.md v12). Robinhood Chain, этап 0: всё на Solana работает как раньше, бекенд hood (сканер EVM, исполнение) — следующий шаг. Изменения против v0.17:
+- **Суммы токенов и quote больше не ограничены u64 / i64.** ERC-20 с 18 знаками и саплаем 1e9 = 1e27 базовых единиц, ETH в wei проходит i64 уже на 9,2 ETH. Сервер хранит их в `NUMERIC(78,0)`, считает в i128 и принимает/отдаёт **целыми десятичными строками до 38 цифр** (< 1e38): `SignedAction.amount` (sell, withdraw_token, ордера на продажу), `minOut` (buy), `holdings[].amount/held`, `FeedEvent.tokenAmount/solAmount`, `TokenTrade.*`, `ActionStatus.parts[].amount`, `fill.tokenAmount/solAmount/quoteAmount`, `claimable[].solAmount`, `CreatorToken.fees.*Lamports/volumeLamports/lock.lockedAmount/cap.*`, `FairBid.tokens`, `VerifySnapshot.vaults[].lamports`, `committedLamports`. **Фронт: никогда не `Number()`/`parseInt` для этих полей — только `BigInt`** (формат строк не изменился, на Solana значения те же). 39+ цифр, ведущие нули, знак → `400 bad_request`. Суммы в зат (`zecIn`, `minZecOut`, `withdraw_zec.amount`, ордер `limit_buy.amount`, `PoolInfo.*Zat`) — по-прежнему ≤ 2^63−1.
+- **Цепочка как параметр (только контракт).** Новые `chainId`: `0111` (Zcash mainnet + Robinhood Chain mainnet, EVM chain id 4663) и `0212` (Zcash testnet + Robinhood Chain testnet, 46630). Байт 1 = (цепочка << 4) | сеть: `0x01`/`0x02` Solana, `0x11`/`0x12` Robinhood Chain. Допустимы только `0101`, `0202`, `0111`, `0212`. Подпись memo, HTTP, чата и Verify одного `chainId` недействительна на любом другом. anon-ключ hood: путь `m/44'/133'/2'/0'` (mainnet) и `m/44'/133'/3'/0'` (testnet) — **другие ключи**, чем на Solana (утечка одного реестра не связывается с другим). Векторы: `core/testdata/chain-vectors.json` (ключи и подписанный запрос для всех четырёх пар).
+- **`PoolInfo.chain`** — цепочка этого origin (одна сеть = один origin, как и раньше; переключатель Solana / Robinhood на фронте выбирает origin): `{ id: "solana" | "hood", network: "mainnet-beta" | "devnet" | "hood" | "hood-testnet", mainnet, native: { symbol: "SOL" | "ETH", decimals: 9 | 18 }, evmChainId?: 4663 | 46630 }`.
+- **`Venue` += `"pons"`** (Pons V2, Robinhood Chain). Сервер Solana отвечает на `venue: "pons"` `503 venue_unavailable` до hold; в `PoolInfo.venues` его нет.
+- **`GET /api/rates`** — публичные курсы **только для отображения** (≈ USD, переключатель валюты ZEC/SOL/ETH): `Rates` ниже. Источник — фоновый таймер сервера (1Click `/v0/tokens` раз в ~60 с), один и тот же ответ всем, запрос пользователя ничего не запрашивает у 1Click. `Cache-Control: public, max-age=60`. Пока таймер не получил данные (или данные старше 5 мин) — `503 venue_unavailable`. **Для сделок не использовать**: действия по-прежнему идут по `PoolInfo.rate` / `RateUsed` (курс действия).
+
+Изменения v0.17 против v0.16 (финальный аудит `docs/analysis/final-audit.md`, решения лида в STATUS.md):
 - **`withdraw_token` никогда не уходит точной суммой (A1).** Сервер срезает случайные 0,5–2 % от `amount`, делит остаток на части (smart: ±20 %) и **каждую часть** округляет вниз до 3 значащих цифр. Остаток остаётся в `holdings[].amount` (доступно). Сумма частей ≠ `amount`. UI: «≈ amount, the exact sum is rounded by the server so it never matches your buy». Если после среза получается 0 (пыль) или частей больше, чем единиц, → `400 bad_request`. Фактические части — в `ActionStatus.parts` (ниже) и `fill.tokenAmount`.
 - **Продажа, совпадающая с покупкой (A6).** Если `sell.amount` в пределах ±1 % от одной из публичных покупок этого ключа по этому mint за последние 48 ч, от их суммы или от всей позиции (`available + held`, «продать 100 %»), сервер применяет тот же срез 0,5–2 % и округление до 3 значащих цифр; `minZecOut` уменьшается пропорционально (та же минимальная цена). Остаток остаётся на балансе. Иначе сумма не меняется. Проверка `below_minimum` — по подписанному `minZecOut`. UI для кнопки «100 %»: показывать «≈».
 - **Ордера на продажу (A5):** при каждом срабатывании после перевзвода и при срабатывании на сумму, совпадающую с покупкой (правило A6), сумма снова срезается и округляется. `Order.amount` уменьшается до новой суммы, остаток hold возвращается на баланс. Две попытки одного ордера никогда не идут одной суммой.
@@ -154,6 +167,7 @@
 | GET | `/api/tokens/:mint/safety` | `TokenSafety` \| `202 PendingResponse` (v0.5), см. «Безопасность токена» |
 | GET | `/api/tokens/:mint/candles?tf=1m&from=&to=` | `Candle[]` — OHLC для lightweight-charts (см. ниже) |
 | GET | `/api/pool` | `PoolInfo` — публичный: UA пула, `chainId`, минимумы, K подтверждений. Без pubkey и без cookies |
+| GET | `/api/rates` | `Rates` (v0.18) — approximate, display only; кэш таймера 60 с, одинаково всем; `503` до первых данных |
 | GET | `/api/portfolio` (подписанный) | `Portfolio` — pubkey только в заголовке `x-unzeen-pubkey`, **не в пути** |
 | POST | `/api/actions` (подписанный) | `SignedAction` → `ActionReceipt` — все действия только с баланса |
 | GET | `/api/actions/:id` (подписанный) | `ActionStatus` — только владельцу (pubkey заголовка = автор действия), иначе 404 |
@@ -182,7 +196,7 @@
 ## Типы
 
 ```ts
-type Venue = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "bags";   // v0.13: + raydium-launchlab, bags; v0.16: bags включён (mainnet)
+type Venue = "pumpfun" | "meteora-dbc" | "jupiter" | "raydium-launchlab" | "bags" | "pons";   // v0.13: + raydium-launchlab, bags; v0.16: bags включён (mainnet); v0.18: + pons (Robinhood Chain, на сервере Solana → 503)
 type Quote = "SOL" | "USDC" | "USD1" | "ZEC";   // v0.13: ZEC = ZEC SPL A7bd…QXaS (мостовой)
 
 interface FeedEvent {
@@ -253,7 +267,8 @@ interface Candle {
 interface PoolInfo {
   address: string;          // UA пула (только Orchard/Ironwood receiver), одинаковый для всех
   network: "main" | "test";
-  chainId: string;          // hex 2 байта для подписи memo и HTTP: только "0202" (Zcash testnet + Solana devnet) или "0101" (mainnet + mainnet-beta)
+  chainId: string;          // hex 2 байта для подписи memo и HTTP: только "0202" (Zcash testnet + Solana devnet) или "0101" (mainnet + mainnet-beta); v0.18: + "0111" / "0212" (Robinhood Chain mainnet / testnet)
+  chain: ChainInfo;         // v0.18: цепочка этого origin
   minDepositZat: string;    // ниже — не зачисляется (остаётся пулу как пыль)
   minActionZat: string;     // минимальная сумма действия с баланса (zecIn / withdraw_zec)
   minClaimZat: string;      // v0.11: минимум claim (ZEC-эквивалент claimable), ≤ minActionZat
@@ -306,6 +321,24 @@ interface PoolInfo {
     source: "near-1click" | "fixed";
     ts: number;                 // время котировки, unix мс
   };
+}
+
+// v0.18: PoolInfo.chain
+interface ChainInfo {
+  id: "solana" | "hood";
+  network: "mainnet-beta" | "devnet" | "hood" | "hood-testnet";
+  mainnet: boolean;
+  native: { symbol: "SOL" | "ETH"; decimals: 9 | 18 };   // газ/quote-валюта цепочки: lamports или wei в полях *Lamports
+  evmChainId?: 4663 | 46630;  // только hood
+}
+
+// v0.18: GET /api/rates — approximate, display only (НЕ для расчёта сделок)
+interface Rates {
+  usd: { ZEC: string; SOL: string; ETH: string };   // десятичные строки, 6 значащих цифр
+  pairs: { "ZEC/SOL": string; "ZEC/ETH": string };  // сколько SOL / ETH за 1 ZEC (из тех же USD-цен)
+  approximate: true;
+  source: "near-1click";
+  ts: number;               // когда таймер сервера получил цены, unix мс
 }
 
 interface VenueInfo {        // v0.16: PoolInfo.venues[]
@@ -946,14 +979,123 @@ Mint не base58-32 → `400`; mint не в публичном списке → 
 `/api/creator` и `/api/stats` реализованы в v0.9 и перенесены в основную таблицу REST.
 
 
+## Сценарии (v0.19)
+
+План — цепочка блоков, которую пользователь подписывает **один раз**; core исполняет шаги сам, каждый шаг — обычное действие (`buy`/`sell`/`order_create`/…) с hold **в момент шага**, в эпохах, неотличимое на цепочке от ручного. Релейер и адаптеры не меняются. Флаг `UNZEEN_SCENARIOS` (можно включать на публичном деплое): выключен → нет `features.scenarios` и `PoolInfo.scenarios`, `scenario_*` → `400 bad_request`.
+
+```ts
+// PoolInfo.features += scenarios?: true;  PoolInfo.scenarios?: ScenarioParams (только при флаге)
+interface ScenarioParams {
+  blocks: ScenarioBlockType[];     // включённые блоки: без fl_* при выключенном fair-launch, без chat без features.chat
+  maxSteps: 12; maxRuns: 40; maxActivePerKey: 3;
+  ttlSecs: { min: 3600; max: 259200; maxNoWithdraw: 604800; default: 86400 };  // 7 сут — только для планов без withdraw_*
+  floors: {                        // серверные полы (не настраиваются), для «≈» в UI
+    afterDepositSecs: [600, 2400];  timeAtJitterSecs: [0, 600];  fixedWaitJitterPct: 10;  fixedWaitJitterMinSecs: 30;
+    withdrawAfterTradeMinSecs: 3600; withdrawExtraSecs: [0, 1800];
+    swapGapSecs: [180, 900]; swapShaveBps: [200, 800];
+    chatAfterTradeSecs: [600, 1800]; repeatJitterPct: 10; dcaWeightJitterPct: 20; tradeGapEpochs: [1, 3];
+  };
+}
+
+type ScenarioBlockType = ScenarioBlock["type"];
+type MintRef = string | { step: number };   // base58 mint | mint, созданный шагом create / купленный шагом swap (его `to`)
+type AmountSpec =
+  | { abs: string }                           // целое > 0: зат (≤ 2^63−1) или токены (≤ 38 цифр) — по полю
+  | { pct: number; of: "balance" | { step: number } };   // 1..100; выход более раннего шага нужного типа (ниже)
+type Guard = { slippageBps: number } | { limitPrice: string };   // 50..5000 | цена пары за 1 целый токен (> 0, ≤ 18 знаков)
+type GotoRef = { goto: number };              // только вперёд: id > текущего
+type OnFail = "stop" | "skip" | GotoRef | { retry: 1 | 2 | 3; then: "stop" | "skip" | GotoRef };
+
+type ScenarioBlock =
+  | { type: "manual_start" }                                   // только шаг 0
+  | { type: "time_at"; at: number }                            // unix мс, кратно 60 000, now+60 с ≤ at ≤ now+TTL
+  | { type: "price_cross"; mint: MintRef; op: "gte" | "lte"; priceSol: string; timeoutSecs?: number }
+  | { type: "deposit_received"; minZat: string; timeoutSecs?: number }   // ≥ minDepositZat; ≤ 1 на план; выход — зат
+  | { type: "own_result"; ref: { step: number } | { orderId: string } | { actionId: string };
+      on: "filled" | "failed" | "any"; timeoutSecs?: number }          // step — только шаг order_place
+  | { type: "curve_progress"; mint: MintRef; gtePct?: number; graduated?: true; timeoutSecs?: number }   // ровно одно из двух
+  | { type: "wait_fixed"; secs: number }                       // 30..TTL, фактически ≈ (± max(30 с, 10 %))
+  | { type: "wait_random"; minSecs: number; maxSecs: number }  // 30 ≤ min < max ≤ TTL
+  | { type: "buy"; venue: Venue; mint: MintRef; zec: AmountSpec; guard: Guard; exec: "now" | "delayed" | "max" }
+  | { type: "sell"; venue: Venue; mint: MintRef; amount: AmountSpec; guard: Guard; exec: "now" | "delayed" | "max" }
+  | { type: "sell_all"; venue: Venue; mint: MintRef; guard: Guard; exec: "now" | "delayed" | "max" }
+  | { type: "swap"; from: MintRef; to: MintRef; amount: AmountSpec; guardSell: Guard; guardBuy: Guard;
+      venueSell?: Venue; venueBuy?: Venue; exec: "delayed" | "max" }
+  | { type: "dca"; side: "buy" | "sell"; venue: Venue; mint: MintRef; total: AmountSpec; slices: number;   // 2..12
+      everySecs: { min: number; max: number }; guard: Guard; exec: "delayed" | "max" }   // min ≥ 600, slices × max ≤ TTL
+  | { type: "order_place"; order: Omit<OrderCreate, "op" | "amount" | "mint"> & { amount: AmountSpec; mint: MintRef } }
+  | { type: "order_cancel"; ref: { step: number } | { orderId: string } }
+  | { type: "create"; create: Omit<CreateAction, "op" | "initialBuyZec"> & { initialBuyZec?: AmountSpec } }
+  | { type: "fl_create"; launch: Omit<FlCreate, "op"> }        // только при features.fairLaunch
+  | { type: "fl_bid"; launchId: string; holdZat: string; ciphertext: string }   // только в уже опубликованный запуск
+  | { type: "fl_cancel"; launchId: string }
+  | { type: "claim"; mint?: MintRef }
+  | { type: "withdraw_token"; mint: MintRef; amount: AmountSpec; to: string | string[];
+      smart?: { parts: number; maxDelayMin: number }; exec: "delayed" | "max" }   // адресов = parts (или 1), различные
+  | { type: "withdraw_zec"; to: string; amount: AmountSpec; exec: "delayed" | "max" }
+  | { type: "check_safety"; mint: MintRef; require: SafetyRequire; onFalse: "stop" | GotoRef }
+  | { type: "repeat"; from: number; times: number }            // from < текущего, times 2..10, диапазоны repeat не пересекаются
+  | { type: "end" }
+  | { type: "chat"; mint: MintRef; text: string; showCreatorBadge?: boolean };   // только при features.chat
+
+interface SafetyRequire {          // хотя бы одно поле
+  authoritiesRevoked?: true; noRiskyExtensions?: true; maxTop10Pct?: number; minLpBurnedPct?: number;
+  maxSniperPct?: number; maxDevPct?: number;   // два последних — только при features.fullTrades
+}
+
+interface ScenarioStep { id: number; block: ScenarioBlock; onFail?: OnFail }   // id = индекс шага в steps (0..n−1)
+interface ScenarioPlan { v: 1; ttlSecs?: number; steps: ScenarioStep[] }      // 1..12 шагов
+
+// SignedAction +=
+  | { op: "scenario_create"; plan: ScenarioPlan; replaces?: string }   // → { id, status: "active" | "waiting_start" }
+  | { op: "scenario_start"; id: string }                                // → { id, status: "active" }
+  | { op: "scenario_cancel"; id: string } | { op: "scenario_cancel"; all: true }   // → { id, status: "cancelled" } / { ids, status }
+
+interface Scenario {                       // Portfolio.scenarios: ≤ 5, активные первыми, затем закрытые ≤ 24 ч
+  id: string;
+  status: "waiting_start" | "active" | "done" | "failed" | "cancelled" | "expired";
+  createdAt: number;                       // вниз до минуты
+  expiresAt: number;                       // вверх до часа
+  cursor: number;
+  plan: ScenarioPlan;                      // эхо; адреса и UA маской «Ab3d…9xYz», text/meta/ciphertext — пустые строки
+  steps: { id: number; status: "pending" | "waiting" | "running" | "done" | "skipped" | "failed";
+           runs: number; nextAt?: number /* вниз до минуты */; actionId?: string; orderId?: string; error?: ErrorCode }[];
+  error?: ErrorCode;
+}
+```
+
+**Выходы шагов для `{of: {step}}`:** зат — `deposit_received`, `sell`, `sell_all`, `claim`; токены — `buy`, `create`, `swap`. `buy.zec`, `withdraw_zec.amount`, `create.initialBuyZec`, `dca(side=buy).total`, `order_place(limit_buy).amount` — зат; остальные `amount`/`total` — токены. Ссылка на шаг с выходом другого типа, на текущий или более поздний шаг → `scenario_invalid` `bad_ref`.
+
+**Исполнений** (`maxRuns` 40): каждый торговый шаг, ордер, вывод, claim, create, fl_*, chat = 1; `swap` = 2; `dca` = `slices`; тело `repeat` × (`times` − 1) сверху; триггеры, ожидания, `check_safety`, `repeat`, `end`, `manual_start` = 0.
+
+**Ошибки валидации** (`details: { step?: number, code }`, `step` нет у ошибок плана целиком):
+- `scenario_invalid` (400): `bad_version`, `empty`, `too_many_steps`, `bad_field`, `bad_step_id`, `unknown_block`, `bad_ttl`, `bad_mint`, `bad_amount`, `bad_guard`, `bad_exec`, `bad_venue`, `bad_ref`, `bad_goto`, `bad_on_fail`, `bad_range`, `bad_repeat`, `too_many_runs`, `manual_start_not_first`, `deposit_twice`, `same_mint`, `bad_address`, `bad_meta`, `bad_text`;
+- `scenario_rule` (422): `now_not_first` (P1: `exec:"now"` только у шага 0 или у шага 1 после `manual_start`, и не внутри `repeat`), `withdraw_too_soon` (P2: `withdraw_token` mint M после сделки/запуска по M без ожидания с гарантированным минимумом ≥ 3600 с между ними; `wait_fixed` считается за `secs − max(30, 10 %)`), `unpriced_mint` (P8: `slippageBps`, `price_cross`, `curve_progress` по литеральному mint без цены тика; mint, созданный планом, допустим; `limitPrice` — для любого);
+- `bad_request` с `details.code = "feature_disabled"`: блок выключенной функции (`fl_*`, `chat`, `maxSniperPct`/`maxDevPct`) — ответ как на неизвестную операцию;
+- `scenario_limit` (422): > 3 активных планов ключа; `scenario_not_active` (409): `start`/`cancel` не из нужного статуса.
+- Сервер дополнительно проверяет при создании то, что требует состояния: UA (`check_ua`), правила ордера, кап/лок создателя — при исполнении шага.
+
+**Поведение (решения владельца 13.10):** TTL 1–72 ч (по умолчанию 24 ч), до 7 сут для планов без выводов; Now — только сразу после ручного старта; ожидания отображаются «≈»; hold — в момент шага (не хватило → `insufficient_balance` → `onFail`); `deposit_received` считает только депозиты (не выручку и не claim), срабатывает через 10–40 мин после зачисления; `fl_bid` — только в опубликованный запуск; ордера плана **отменяются** при отмене и истечении плана (hold возвращается), при успешном завершении остаются; `retry` — только для `slippage`, `pool_liquidity`, `venue_unavailable`, `rate_limited`, пауза 1–5 эпох; `balance_frozen` — не ошибка шага, план ждёт. Сценарные действия видны в `Portfolio.actions`/`orders` как обычные; публичных метрик сценариев нет. Адреса вывода, `create.meta`, `fl_bid.ciphertext`, `chat.text` хранятся зашифрованными ключом вне БД и стираются при постановке шага или закрытии плана; план целиком стирается через 24 ч после закрытия, удаляется через 48 ч.
+
+**Отличия от черновика спеки (§6 `scenarios.md`):**
+1. `ttlSecs.maxNoWithdraw: 604800` — новое поле (решение владельца: 7 сут для планов без `withdraw_*`); с выводом — по-прежнему 72 ч.
+2. `ScenarioStep.id` **обязан** равняться индексу шага (0..n−1): ссылки `{step}`, `goto`, `repeat.from` — по индексу, без отдельной нумерации.
+3. `floors.fixedWaitJitterMinSecs: 30` — новое поле (у черновика минимум ±30 с был только в тексте).
+4. Ссылка `MintRef {step}` допустима только на `create` и `swap` (у `swap` — его `to`); на `buy` — `bad_ref` (mint покупки и так известен литералом).
+5. `AmountSpec.abs`: токены — до 38 цифр (v0.18), зат — ≤ 2^63−1.
+6. `scenario_cancel {all: true}` отвечает `{ ids: string[], status: "cancelled" }`.
+7. Блок выключенной функции → `bad_request` с `details.code = "feature_disabled"` (в черновике — просто `bad_request`).
+8. Паддинг `Portfolio` 8192 и `pad` тела 16384 зафиксированы (в черновике — предложение).
+9. Перечислены коды `details.code`; в векторах каждый невалидный план содержит ровно одну ошибку, порядок проверок не входит в контракт.
+
 ## Единицы сумм
 
 Правило: **всё, что можно потратить или получить, — целые строки в базовых единицах**; цены и агрегированная статистика — десятичные строки в UI-единицах.
 
 | Поле | Единицы |
 |---|---|
-| `FeedEvent.tokenAmount`, `holdings[].amount`, `SignedAction.amount` (sell, withdraw_token, order sell) | базовые единицы токена (целое), делить на `10^decimals` |
-| `FeedEvent.solAmount`, `claimable[].solAmount`, `Candle.volume` | лампорты (целое) |
+| `FeedEvent.tokenAmount`, `holdings[].amount`, `SignedAction.amount` (sell, withdraw_token, order sell) | базовые единицы токена (целое), делить на `10^decimals` ; v0.18: до 38 цифр (u128), только `BigInt` |
+| `FeedEvent.solAmount`, `claimable[].solAmount`, `Candle.volume` | лампорты (целое); v0.18: на hood — wei (`PoolInfo.chain.native.decimals` = 18), до 38 цифр |
 | `zecBalance`, `zecHeld`, `zecIn`, `minZecOut`, `withdraw_zec.amount`, `initialBuyZec`, order buy `amount`, `PoolInfo.min*Zat`, `DepositInfo.amountZat` | затоши (целое), 1 ZEC = 10^8 |
 | `minOut` (buy) | базовые единицы токена (целое) |
 | ZIP-321 `amount=` (строит фронт) | **десятичная** строка ZEC, например `0.05` |
@@ -961,6 +1103,7 @@ Mint не base58-32 → `400`; mint не в публичном списке → 
 | `PlatformStats.*Sol`, `zecShielded`, `topTokens[].volumeSol` | десятичная строка SOL/ZEC (UI, только для отображения, округлено вниз) или `"<5"` |
 | `CreatorToken.fees.*Lamports`, `CreatorToken.volumeLamports` | лампорты (целое) |
 | `CreatorToken.lock.lockedAmount`, `cap.capTokens`, `cap.positionTokens` | базовые единицы токена (целое) |
+| `Rates.usd`, `Rates.pairs` (v0.18) | десятичные строки, **approximate, display only** — не для сделок |
 | `ts`, `createdAt` | unix **мс**; исключения — `Candle.time` и memo `expiry` в unix **секундах** |
 
 ## Свечи (OHLC)
@@ -974,7 +1117,7 @@ Mint не base58-32 → `400`; mint не в публичном списке → 
 
 ## Подпись запросов anon-ключом
 
-Ключ: ed25519. Деривация фиксирована (v1): BIP-39 (12 слов, пустой passphrase) → seed → **SLIP-0010 ed25519 (все сегменты hardened), путь `m/44'/133'/<net>'/0'`** → 32-байтный секрет, где **`<net>` = 0 для mainnet (`chainId 0101`) и 1 для devnet/testnet (`chainId 0202`)**. Одна фраза даёт разные anon-ключи в разных сетях. Смена пути = смена всех anon-ключей, только с миграцией. Векторы: `core/testdata/unz1-vectors.json`, раздел `anonKey` (мнемоника → seed → ключ для каждой сети). Заголовки:
+Ключ: ed25519. Деривация фиксирована (v1): BIP-39 (12 слов, пустой passphrase) → seed → **SLIP-0010 ed25519 (все сегменты hardened), путь `m/44'/133'/<net>'/0'`** → 32-байтный секрет, где **`<net>` = 0 для mainnet (`chainId 0101`) и 1 для devnet/testnet (`chainId 0202`)**; v0.18: 2 для `0111`, 3 для `0212` (векторы `core/testdata/chain-vectors.json`). Одна фраза даёт разные anon-ключи в разных сетях. Смена пути = смена всех anon-ключей, только с миграцией. Векторы: `core/testdata/unz1-vectors.json`, раздел `anonKey` (мнемоника → seed → ключ для каждой сети). Заголовки:
 
 | Заголовок | Значение |
 |---|---|
@@ -1032,6 +1175,10 @@ type ErrorCode =
   | "chat_not_eligible"    // 403 (v0.12): стоимость аккаунта ниже PoolInfo.chat.minAccountZat (без сумм)
   | "chat_muted"           // 403 (v0.12): ник замьючен оператором в этом чате
   | "not_creator"          // 403 (v0.12): showCreatorBadge / chat_hide не от создателя mint
+  | "scenario_invalid"     // 400 (v0.19): план не прошёл проверку структуры; details = { step?, code }
+  | "scenario_rule"        // 422 (v0.19): план нарушает правило приватности P1/P2/P8; details = { step, code }
+  | "scenario_limit"       // 422 (v0.19): > 3 активных планов ключа
+  | "scenario_not_active"  // 409 (v0.19): scenario_start / scenario_cancel не из нужного статуса
   | "internal";            // 500
 ```
 404 отдаётся и для mint, который сервис не отслеживает (даже если токен существует на Solana); исключения v0.5 — `GET /api/tokens/:mint` и `/safety`, они отвечают `202` и ставят mint в очередь индексатора. `message` — для разработчика, текст UI фронт берёт по `code`.
@@ -1056,7 +1203,7 @@ off  len     поле
 ..   64      sig
 ```
 - `sig = ed25519(anon_sk, utf8("unzeen/memo/v1") ‖ chain_id ‖ bytes[0 .. перед sig])`.
-- `chain_id` (2 байта, не передаётся; берётся из `PoolInfo.chainId`): байт 0 — Zcash (1 mainnet, 2 testnet), байт 1 — Solana (1 mainnet-beta, 2 devnet). Допустимы только `0202` и `0101`; смешанные (`0102`, `0201`) не используются, сервер с такой конфигурацией не стартует.
+- `chain_id` (2 байта, не передаётся; берётся из `PoolInfo.chainId`): байт 0 — Zcash (1 mainnet, 2 testnet), байт 1 — цепочка торговли: Solana (`0x01` mainnet-beta, `0x02` devnet), v0.18 Robinhood Chain (`0x11` mainnet 4663, `0x12` testnet 46630). Допустимы только `0101`, `0202`, `0111`, `0212`; смешанные (`0102`, `0201`, `0112`, `0211`) не используются, сервер с такой конфигурацией не стартует.
 - **Refund в v1 не используется (решение лида 12.10).** Фронт **всегда** шлёт `target_kind = 0` и `expiry = now + 24 ч`. Формат не меняется: `target_kind = 1` по-прежнему декодируется и подписывается, но получатель игнорируется — истёкший депозит **всегда зачисляется на баланс**.
 - `nonce` для deposit не уникализируется: каждая нота зачисляется отдельно по `(txid, pool, action_index)`. Оплатили тот же QR дважды → зачислены оба платежа. Несколько нот с одним memo в одной tx суммируются.
 - `expiry` сравнивается со **временем блока**, в котором tx замайнена (не с часами сервера): истёк, если `block_time > expiry`.

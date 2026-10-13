@@ -18,7 +18,9 @@ use serde_json::json;
 use crate::{
     ActionReceipt, CreatorRules, Ledger, LedgerError, Result,
     actions::{NewAction, RateUsed, ZAT_PER_ZEC},
-    journal, to_i64, to_u64,
+    journal,
+    num::Num,
+    to_i64, to_u64,
 };
 
 /// Creator fee of a confirmed launch tx (lamports): the relayer's exact figure when it reported
@@ -26,7 +28,7 @@ use crate::{
 /// 10 000)` of the venue (pump.fun creator fee is 0.05–0.30 % of the curve leg by fee tier;
 /// DBC: 1 % fee × 80 % after Meteora × 50 % creator = 0.40 % of the input). Never more than
 /// what the tx paid. Erring high only keeps the participants' money with the pool.
-pub fn launch_creator_fee(rules: &CreatorRules, venue: Option<&str>, out_lamports: i64, fact: Option<i64>) -> i64 {
+pub fn launch_creator_fee(rules: &CreatorRules, venue: Option<&str>, out_lamports: i128, fact: Option<i128>) -> i128 {
     let paid = out_lamports.max(0);
     if let Some(f) = fact {
         return f.clamp(0, paid);
@@ -35,8 +37,9 @@ pub fn launch_creator_fee(rules: &CreatorRules, venue: Option<&str>, out_lamport
         Some("meteora-dbc") => rules.launch_fee_bps_dbc,
         _ => rules.launch_fee_bps_pumpfun,
     } as u128;
-    let fee = ((paid as u128) * bps).div_ceil(10_000);
-    fee.min(paid as u128) as i64
+    // paid ≤ i128::MAX and bps ≤ u32::MAX: the product can exceed u128 only for absurd inputs.
+    let fee = (paid as u128).saturating_mul(bps).div_ceil(10_000);
+    fee.min(paid as u128) as i128
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -47,7 +50,7 @@ pub struct CreditReport {
     /// withheld as the launch-tx fee).
     pub pool_revenue: u64,
     /// Lamports withheld from creator sweeps as the launch-tx fee (pool's).
-    pub withheld_lamports: u64,
+    pub withheld_lamports: u128,
 }
 
 impl Ledger {
@@ -64,7 +67,7 @@ impl Ledger {
         let rows = tx
             .query(
                 "SELECT s.id, s.mint, s.lamports, ct.anon_pubkey, s.quote_mint = $2,
-                        CASE WHEN s.quote_amount <= 9223372036854775807 THEN s.quote_amount::bigint END
+                        CASE WHEN s.quote_amount <= 9223372036854775807 THEN s.quote_amount END
                  FROM creator_fee_sweeps s LEFT JOIN creator_tokens ct ON ct.mint = s.mint
                  WHERE s.network = $1 AND s.status = 'confirmed' AND s.kind = 'creator' AND s.credited_at IS NULL
                    AND (s.quote_mint IS NULL OR s.quote_mint = $2
@@ -75,39 +78,43 @@ impl Ledger {
             .await?;
         let mut rep = CreditReport::default();
         for r in &rows {
-            let (id, mint, lamports, pk): (i64, String, Option<i64>, Option<Vec<u8>>) =
+            // Lamport (wei) side is NUMERIC(78,0); the ZEC side is zat (BIGINT columns), so a ZEC
+            // SPL sweep above i64::MAX units is not a real sweep: left to the operator.
+            let (id, mint, lamports, pk): (i64, String, Option<Num>, Option<Vec<u8>>) =
                 (r.get(0), r.get(1), r.get(2), r.get(3));
             let is_zec = r.get::<_, Option<bool>>(4).unwrap_or(false);
-            if is_zec && r.get::<_, Option<i64>>(5).is_none() {
-                continue; // > i64::MAX ZEC SPL units: not a real sweep, leave it to the operator
+            if is_zec && r.get::<_, Option<Num>>(5).is_none() {
+                continue;
             }
-            let amount = if is_zec { r.get::<_, Option<i64>>(5) } else { lamports }
-                .unwrap_or(0)
+            let amount: i128 = if is_zec { r.get::<_, Option<Num>>(5) } else { lamports }
+                .unwrap_or_default()
+                .0
                 .max(0);
             let (left_col, claim_col) = if is_zec {
                 ("launch_fee_zat_left", "zat")
             } else {
                 ("launch_fee_left", "lamports")
             };
-            let pool_part: i64 = match pk {
+            let pool_part: i128 = match pk {
                 Some(pk) if amount > 0 => {
                     // Launch-tx fee first: the pool's share comes out of the earliest sweeps.
-                    let left: i64 = tx
+                    let left: i128 = tx
                         .query_one(
                             &format!("SELECT {left_col} FROM creator_tokens WHERE mint = $1 FOR UPDATE"),
                             &[&mint],
                         )
                         .await?
-                        .get(0);
+                        .get::<_, Num>(0)
+                        .0;
                     let pool_part = left.clamp(0, amount);
                     if pool_part > 0 {
                         tx.execute(
                             &format!("UPDATE creator_tokens SET {left_col} = {left_col} - $2 WHERE mint = $1"),
-                            &[&mint, &pool_part],
+                            &[&mint, &Num(pool_part)],
                         )
                         .await?;
                         if !is_zec {
-                            rep.withheld_lamports += to_u64(pool_part);
+                            rep.withheld_lamports += pool_part as u128;
                         }
                     }
                     let to_creator = amount - pool_part;
@@ -119,7 +126,7 @@ impl Ledger {
                                    SET {claim_col} = creator_claimable.{claim_col} + EXCLUDED.{claim_col},
                                        updated_at = now()"
                             ),
-                            &[&pk, &mint, &to_creator],
+                            &[&pk, &mint, &Num(to_creator)],
                         )
                         .await?;
                         rep.credited += 1;
@@ -136,16 +143,16 @@ impl Ledger {
             if is_zec {
                 tx.execute(
                     "UPDATE creator_fee_sweeps SET credited_at = date_trunc('hour', now()),
-                            pool_quote_amount = $2::bigint::numeric
+                            pool_quote_amount = $2::numeric
                      WHERE id = $1",
-                    &[&id, &pool_part],
+                    &[&id, &Num(pool_part)],
                 )
                 .await?;
             } else {
                 tx.execute(
                     "UPDATE creator_fee_sweeps SET credited_at = date_trunc('hour', now()), pool_lamports = $2
                      WHERE id = $1",
-                    &[&id, &pool_part],
+                    &[&id, &Num(pool_part)],
                 )
                 .await?;
             }
@@ -156,7 +163,7 @@ impl Ledger {
 
     /// `Portfolio.claimable`: (mint, lamports, zat) with a positive amount (v0.14: zat of
     /// ZEC-pair fees).
-    pub async fn claimable(&self, pk: &[u8; 32]) -> Result<Vec<(String, u64, u64)>> {
+    pub async fn claimable(&self, pk: &[u8; 32]) -> Result<Vec<(String, u128, u64)>> {
         let pk_s: &[u8] = pk;
         let c = self.pool.get().await?;
         Ok(c.query(
@@ -166,7 +173,7 @@ impl Ledger {
         )
         .await?
         .into_iter()
-        .map(|r| (r.get(0), to_u64(r.get(1)), to_u64(r.get(2))))
+        .map(|r| (r.get(0), r.get::<_, Num>(1).u128_or_zero(), to_u64(r.get(2))))
         .collect())
     }
 
@@ -201,10 +208,11 @@ impl Ledger {
                 &[&pk_s, &mint],
             )
             .await?;
-        let lamports: u64 = rows.iter().map(|r| to_u64(r.get(1))).sum();
+        let lamports: u128 = rows.iter().map(|r| r.get::<_, Num>(1).u128_or_zero()).sum();
         // v0.14: ZEC-pair fees are owed in zat already (1:1, no rate).
         let fee_zat: u64 = rows.iter().map(|r| to_u64(r.get(2))).sum();
-        let zat = ((lamports as u128) * ZAT_PER_ZEC / (rate.lamports_per_zec.max(1) as u128)) as u64;
+        let zat = u64::try_from(lamports.saturating_mul(ZAT_PER_ZEC) / (rate.lamports_per_zec.max(1) as u128))
+            .map_err(|_| LedgerError::Range)?;
         let zat = zat.saturating_add(fee_zat);
         if rows.is_empty() || zat < self.rules.min_claim_zat.max(1) {
             return Err(LedgerError::BelowMinimum);
@@ -271,8 +279,14 @@ mod tests {
         assert_eq!(launch_creator_fee(&r, Some("pumpfun"), -5, None), 0);
         // Huge values do not overflow.
         assert_eq!(
-            launch_creator_fee(&r, Some("pumpfun"), i64::MAX, None),
-            ((i64::MAX as u128) * 30).div_ceil(10_000) as i64
+            launch_creator_fee(&r, Some("pumpfun"), i64::MAX as i128, None),
+            ((i64::MAX as u128) * 30).div_ceil(10_000) as i128
         );
+        // 18-decimal quote (wei): 4.2 ETH paid, 30 bps → 0.0126 ETH; 1e27 does not overflow.
+        assert_eq!(
+            launch_creator_fee(&r, Some("pons"), 4_200_000_000_000_000_000, None),
+            12_600_000_000_000_000
+        );
+        assert_eq!(launch_creator_fee(&r, None, 10i128.pow(27), None), 3 * 10i128.pow(24));
     }
 }

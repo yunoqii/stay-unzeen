@@ -10,6 +10,7 @@
 use deadpool_postgres::GenericClient;
 use serde_json::{Value, json};
 
+use crate::num::{Num, opt_num};
 use crate::{ActionReceipt, Ledger, LedgerError, Result, journal, to_i64, to_u64};
 
 /// 1 ZEC in zatoshis.
@@ -40,9 +41,11 @@ pub struct NewJob {
     pub op: JobOp,
     pub venue: Option<String>,
     pub mint: Option<String>,
-    pub lamports_in: Option<u64>,
-    pub token_amount: Option<u64>,
-    pub min_out: Option<u64>,
+    /// Quote base units (lamports / wei / quote token units); NUMERIC(78,0).
+    pub lamports_in: Option<u128>,
+    /// Token base units; NUMERIC(78,0).
+    pub token_amount: Option<u128>,
+    pub min_out: Option<u128>,
     pub meta: Option<Value>,
     pub dest: Option<String>,
     pub gas_lamports: Option<u64>,
@@ -98,14 +101,14 @@ pub struct NewAction {
     /// Service fee in zat (not subject to the minimum).
     pub fee_zat: u64,
     /// Token hold `(mint, base units)` for sell / withdraw_token.
-    pub token_hold: Option<(String, u64)>,
+    pub token_hold: Option<(String, u128)>,
     pub rate: Option<RateUsed>,
     pub network: String,
     pub jobs: Vec<NewJob>,
     pub payout: Option<NewPayout>,
     /// buy: `(mint, upper-bound estimate of tokens received)`. Checked against the creator
     /// cap only when the key created that mint (API v0.5); ignored otherwise.
-    pub gain: Option<(String, u64)>,
+    pub gain: Option<(String, u128)>,
     /// v0.13: set ONLY for ZEC SPL pair actions (USDC/USD1 pairs are booked in lamports like
     /// SOL). The rate column then holds ZEC SPL units per ZEC (source "parity") and the job
     /// amounts are ZEC SPL units (RELAYER v8).
@@ -165,8 +168,8 @@ pub struct ActionBrief {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenHolding {
     pub mint: String,
-    pub available: u64,
-    pub held: u64,
+    pub available: u128,
+    pub held: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,6 +186,10 @@ pub struct DepositRow {
 
 fn opt_i64(v: Option<u64>) -> Result<Option<i64>> {
     v.map(to_i64).transpose()
+}
+
+fn i64_of(v: i128) -> Result<i64> {
+    i64::try_from(v).map_err(|_| LedgerError::Range)
 }
 
 fn read_rate(r: &tokio_postgres::Row, rate: usize, src: usize, ts: usize) -> Option<RateUsed> {
@@ -229,9 +236,9 @@ impl Ledger {
         let id: [u8; 16] = rand::random();
         let (pk_s, nonce_s, hash_s, id_s): (&[u8], &[u8], &[u8], &[u8]) = (pk, nonce, request_hash, &id);
         let (tmint, thold) = match &a.token_hold {
-            Some((m, n)) if *n > 0 => (Some(m.as_str()), to_i64(*n)?),
+            Some((m, n)) if *n > 0 => (Some(m.as_str()), Num::from_u128(*n)?),
             Some(_) => return Err(LedgerError::Range),
-            None => (None, 0),
+            None => (None, Num::ZERO),
         };
         let (rate, rate_src, rate_ts) = match &a.rate {
             Some(r) => (
@@ -333,14 +340,14 @@ impl Ledger {
         }
         if let Some(m) = tmint {
             // Creator rule: the initial-buy tokens stay on the balance until the lock ends.
-            let locked: i64 = tx
+            let locked: Num = tx
                 .query_opt(
                     "SELECT locked_amount FROM creator_tokens
                      WHERE mint = $1 AND anon_pubkey = $2 AND locked_until > now()",
                     &[&m, &pk_s],
                 )
                 .await?
-                .map_or(0, |r| r.get(0));
+                .map_or(Num::ZERO, |r| r.get(0));
             let ok = tx
                 .execute(
                     "UPDATE token_balances SET available = available - $3, held = held + $3, updated_at = now()
@@ -350,21 +357,21 @@ impl Ledger {
                 .await?
                 == 1;
             if !ok {
-                if locked > 0 {
-                    let available: i64 = tx
+                if locked.0 > 0 {
+                    let available: Num = tx
                         .query_opt(
                             "SELECT available FROM token_balances WHERE anon_pubkey = $1 AND mint = $2",
                             &[&pk_s, &m],
                         )
                         .await?
-                        .map_or(0, |r| r.get(0));
+                        .map_or(Num::ZERO, |r| r.get(0));
                     if available >= thold {
                         return Err(LedgerError::CreatorLocked);
                     }
                 }
                 return Err(LedgerError::InsufficientBalance);
             }
-            token_journal(tx, pk_s, m, "hold", -thold, thold, id_s).await?;
+            token_journal(tx, pk_s, m, "hold", -thold.0, thold.0, id_s).await?;
         }
         for (part, j) in a.jobs.iter().enumerate() {
             let part = i16::try_from(part).map_err(|_| LedgerError::Range)?;
@@ -379,9 +386,9 @@ impl Ledger {
                     &j.op.as_str(),
                     &j.venue,
                     &j.mint,
-                    &opt_i64(j.lamports_in)?,
-                    &opt_i64(j.token_amount)?,
-                    &opt_i64(j.min_out.map(quantize_min_out))?,
+                    &opt_num(j.lamports_in)?,
+                    &opt_num(j.token_amount)?,
+                    &opt_num(j.min_out.map(quantize_min_out))?,
                     &j.meta,
                     &j.dest,
                     &opt_i64(j.gas_lamports)?,
@@ -418,7 +425,7 @@ impl Ledger {
         pk: &[u8],
         action_id: &[u8],
         mint: &str,
-        est: u64,
+        est: u128,
     ) -> Result<()> {
         if self.rules.cap_tokens == 0 {
             return Ok(());
@@ -433,18 +440,18 @@ impl Ledger {
         if !creator {
             return Ok(());
         }
-        let est = to_i64(est)?;
-        let position: i64 = tx
+        let est = Num::from_u128(est)?;
+        let position: Num = tx
             .query_one(
-                "SELECT (COALESCE((SELECT available + held FROM token_balances
-                                    WHERE anon_pubkey = $1 AND mint = $2), 0)
-                       + COALESCE((SELECT sum(gain_est) FROM actions
-                                    WHERE anon_pubkey = $1 AND gain_mint = $2 AND status = 'queued'), 0))::bigint",
+                "SELECT COALESCE((SELECT available + held FROM token_balances
+                                   WHERE anon_pubkey = $1 AND mint = $2), 0)
+                      + COALESCE((SELECT sum(gain_est) FROM actions
+                                   WHERE anon_pubkey = $1 AND gain_mint = $2 AND status = 'queued'), 0)",
                 &[&pk, &mint],
             )
             .await?
             .get(0);
-        if i128::from(position) + i128::from(est) > i128::from(self.rules.cap_tokens) {
+        if position.0.saturating_add(est.0) > i128::try_from(self.rules.cap_tokens).unwrap_or(i128::MAX) {
             return Err(LedgerError::CreatorCap);
         }
         tx.execute(
@@ -507,8 +514,8 @@ impl Ledger {
             .into_iter()
             .map(|r| TokenHolding {
                 mint: r.get(0),
-                available: to_u64(r.get(1)),
-                held: to_u64(r.get(2)),
+                available: r.get::<_, Num>(1).u128_or_zero(),
+                held: r.get::<_, Num>(2).u128_or_zero(),
             })
             .collect())
     }
@@ -621,14 +628,13 @@ impl Ledger {
         let amount: i64 = a.get(4);
         let rate: Option<i64> = a.get(6);
         let token_mint: Option<String> = a.get(7);
-        let token_hold: i64 = a.get(8);
+        let token_hold: i128 = a.get::<_, Num>(8).0;
         let quote_mint: Option<String> = a.get(9);
 
         let jobs = tx
             .query(
                 "SELECT id, op, mint, lamports_in, token_amount, status, out_mint, out_token_amount,
-                        COALESCE(out_lamports,
-                                 CASE WHEN out_quote_amount <= 9223372036854775807 THEN out_quote_amount::bigint END),
+                        COALESCE(out_lamports, out_quote_amount),
                         error_code, venue, out_creator_fee
                  FROM relayer_jobs WHERE action_id = $1 AND settled_at IS NULL ORDER BY part FOR UPDATE",
                 &[&action_id],
@@ -648,7 +654,7 @@ impl Ledger {
         if jobs.iter().any(|r| {
             r.get::<_, &str>(5) == "confirmed"
                 && matches!(r.get::<_, &str>(1), "buy" | "sell" | "create")
-                && r.get::<_, Option<i64>>(8).is_none()
+                && r.get::<_, Option<Num>>(8).is_none()
         }) {
             tracing::warn!(
                 action_id,
@@ -665,37 +671,38 @@ impl Ledger {
 
         let mut any_ok = false;
         let mut first_err: Option<String> = None;
-        let mut refund: i64 = 0;
+        // ZEC refund in zat; quote and token amounts are i128 (NUMERIC(78,0), migration 0026).
+        let mut refund: i128 = 0;
         let mut fill = serde_json::Map::new();
         // Token hold accounting (sell / transfer): spent vs returned.
-        let mut tok_spent: i64 = 0;
-        let mut tok_back: i64 = 0;
-        let mut sol_total: i64 = 0;
-        let mut tok_total: i64 = 0;
+        let mut tok_spent: i128 = 0;
+        let mut tok_back: i128 = 0;
+        let mut sol_total: i128 = 0;
+        let mut tok_total: i128 = 0;
         // v0.16 Bags: a create's first buy is its own `buy` job (part ≥ 1). Its tokens are the
         // creator's initial-buy tokens (locked like a first buy inside the create tx), and a
         // failed one refunds its share of the ZEC hold even though the create went through.
-        let chained_tokens: i64 = if kind == "create" {
+        let chained_tokens: i128 = if kind == "create" {
             jobs.iter()
                 .filter(|r| r.get::<_, &str>(1) == "buy" && r.get::<_, &str>(5) == "confirmed")
-                .map(|r| r.get::<_, Option<i64>>(7).unwrap_or(0).max(0))
+                .map(|r| r.get::<_, Option<Num>>(7).unwrap_or_default().0.max(0))
                 .sum()
         } else {
             0
         };
-        let li_total: i64 = jobs
+        let li_total: i128 = jobs
             .iter()
             .filter(|r| matches!(r.get::<_, &str>(1), "buy" | "create"))
-            .map(|r| r.get::<_, Option<i64>>(3).unwrap_or(0).max(0))
+            .map(|r| r.get::<_, Option<Num>>(3).unwrap_or_default().0.max(0))
             .sum();
 
         for j in &jobs {
             let op: &str = j.get(1);
             let ok = j.get::<_, &str>(5) == "confirmed";
-            let lamports_in: Option<i64> = j.get(3);
-            let job_tokens: Option<i64> = j.get(4);
-            let out_tokens: i64 = j.get::<_, Option<i64>>(7).unwrap_or(0).max(0);
-            let out_lamports: i64 = j.get::<_, Option<i64>>(8).unwrap_or(0).max(0);
+            let lamports_in: Option<i128> = j.get::<_, Option<Num>>(3).map(|n| n.0);
+            let job_tokens: Option<i128> = j.get::<_, Option<Num>>(4).map(|n| n.0);
+            let out_tokens: i128 = j.get::<_, Option<Num>>(7).unwrap_or_default().0.max(0);
+            let out_lamports: i128 = j.get::<_, Option<Num>>(8).unwrap_or_default().0.max(0);
             if !ok {
                 if first_err.is_none() {
                     first_err = Some(j.get::<_, Option<String>>(9).unwrap_or_else(|| "internal".into()));
@@ -704,7 +711,7 @@ impl Ledger {
                 // that failed return the whole hold below anyway).
                 let li = lamports_in.unwrap_or(0).max(0);
                 if matches!(op, "buy" | "create") && li > 0 && li_total > 0 {
-                    refund += ((amount as i128) * (li as i128) / (li_total as i128)) as i64;
+                    refund += i128::from(amount) * li / li_total;
                 }
                 if matches!(op, "sell" | "transfer") {
                     tok_back += job_tokens.unwrap_or(0);
@@ -720,7 +727,7 @@ impl Ledger {
                     let li = lamports_in.unwrap_or(0);
                     if li > 0 && out_lamports < li {
                         // Unspent lamports of the (initial) buy go back in ZEC, pro rata.
-                        refund += ((amount as i128) * ((li - out_lamports) as i128) / (li as i128)) as i64;
+                        refund += i128::from(amount) * (li - out_lamports) / li;
                     }
                     if let Some(m) = &mint {
                         if out_tokens > 0 {
@@ -740,23 +747,28 @@ impl Ledger {
                             // (= zat): its launch fee is kept in zat; a 0 fact there is the
                             // relayer's lamport conversion of a stock-only quote, not a figure.
                             let zec_pair = quote_mint.is_some();
-                            let fact = j.get::<_, Option<i64>>(11).filter(|f| !zec_pair || *f > 0);
+                            let fact = j.get::<_, Option<Num>>(11).map(|n| n.0).filter(|f| !zec_pair || *f > 0);
                             let launch_fee = crate::creator_fees::launch_creator_fee(
                                 &self.rules,
                                 j.get::<_, Option<&str>>(10),
                                 out_lamports,
                                 fact,
                             );
-                            let (fee_lamports, fee_zat) = if zec_pair { (0, launch_fee) } else { (launch_fee, 0) };
+                            // ZEC-pair launch fee is in ZEC SPL units = zat (BIGINT column).
+                            let (fee_lamports, fee_zat) = if zec_pair {
+                                (Num::ZERO, i64_of(launch_fee)?)
+                            } else {
+                                (Num(launch_fee), 0)
+                            };
                             tx.execute(
                                 "INSERT INTO creator_tokens (mint, anon_pubkey, locked_amount, locked_until,
                                                              launch_fee_lamports, launch_fee_left,
                                                              launch_fee_zat, launch_fee_zat_left)
-                                 VALUES ($1, $2, $3::bigint, CASE WHEN $3::bigint > 0
+                                 VALUES ($1, $2, $3::numeric, CASE WHEN $3::numeric > 0
                                      THEN date_trunc('hour', now() + make_interval(secs => $4::float8))
-                                          + interval '1 hour' END, $5, $5, $6, $6)
+                                          + interval '1 hour' END, $5::numeric, $5::numeric, $6, $6)
                                  ON CONFLICT (mint) DO NOTHING",
-                                &[m, &pk, &locked, &lock_secs, &fee_lamports, &fee_zat],
+                                &[m, &pk, &Num(locked), &lock_secs, &fee_lamports, &fee_zat],
                             )
                             .await?;
                             fill.insert("mint".into(), json!(m));
@@ -769,7 +781,7 @@ impl Ledger {
                     tok_back += job_tokens.unwrap_or(0) - sold;
                     let r = rate.unwrap_or(0);
                     if r > 0 && out_lamports > 0 {
-                        let zat = ((out_lamports as i128) * (ZAT_PER_ZEC as i128) / (r as i128)) as i64;
+                        let zat = i64_of(out_lamports * (ZAT_PER_ZEC as i128) / i128::from(r))?;
                         if zat > 0 {
                             tx.execute(
                                 "INSERT INTO balances (anon_pubkey, available_zat) VALUES ($1, $2)
@@ -803,7 +815,7 @@ impl Ledger {
                 tx.execute(
                     "UPDATE token_balances SET held = held - $3, available = available + $4, updated_at = now()
                      WHERE anon_pubkey = $1 AND mint = $2",
-                    &[&pk, m, &token_hold, &back],
+                    &[&pk, m, &Num(token_hold), &Num(back)],
                 )
                 .await?;
                 if tok_spent > 0 {
@@ -818,7 +830,11 @@ impl Ledger {
 
         // ZEC hold: spent if anything executed (minus refund), else returned in full.
         if hold > 0 && !rearmed {
-            let refund = if any_ok { refund.clamp(0, hold) } else { hold };
+            let refund = if any_ok {
+                i64_of(refund.clamp(0, i128::from(hold)))?
+            } else {
+                hold
+            };
             tx.execute(
                 "UPDATE balances SET held_zat = held_zat - $2, available_zat = available_zat + $3,
                         updated_at = now() WHERE anon_pubkey = $1",
@@ -989,8 +1005,8 @@ impl Ledger {
 /// E4: every `min_out` written into a relayer job is rounded DOWN to 3 significant decimal
 /// digits, so the on-chain value does not reveal the exact reference price (a trigger, a
 /// quote) it was computed from. Values below 1000 already have ≤ 3 significant digits.
-pub fn quantize_min_out(v: u64) -> u64 {
-    let mut p = 1u64;
+pub fn quantize_min_out(v: u128) -> u128 {
+    let mut p = 1u128;
     while v / p >= 1_000 {
         p *= 10;
     }
@@ -1000,27 +1016,28 @@ pub fn quantize_min_out(v: u64) -> u64 {
 /// A1/A5/A6 (final audit): a token amount that leaves the pool must not equal a public
 /// amount (a buy of the same vault). Shave `0.5 % + u·1.5 %` (`u` uniform in [0, 1)), then
 /// round down to 3 significant digits. Always ≤ `amount`; 0 only for dust.
-pub fn fuzz_token_amount(amount: u64, u: f64) -> u64 {
-    let shave = ((amount as f64) * (0.005 + 0.015 * u.clamp(0.0, 1.0))).ceil() as u64;
+pub fn fuzz_token_amount(amount: u128, u: f64) -> u128 {
+    // f64 keeps 53 bits: the shave of a 1e27 amount is approximate, the result stays ≤ amount.
+    let shave = ((amount as f64) * (0.005 + 0.015 * u.clamp(0.0, 1.0))).ceil() as u128;
     quantize_min_out(amount.saturating_sub(shave.max(1)))
 }
 
 /// [`fuzz_token_amount`] with a fresh random `u`.
-pub fn fuzz_token_amount_rand(amount: u64) -> u64 {
+pub fn fuzz_token_amount_rand(amount: u128) -> u128 {
     fuzz_token_amount(amount, (rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64)
 }
 
 /// A6: does selling `amount` of `mint` mirror a public buy of this key? True when it is within
 /// ±1 % of one of its buy credits still in the journal (≤ 48 h), of their sum, or of the
 /// whole current position (available + held: "sell 100 %" after older buys).
-pub async fn matches_public_buy<C: GenericClient>(c: &C, pk: &[u8], mint: &str, amount: u64) -> Result<bool> {
-    let a = i64::try_from(amount).map_err(|_| LedgerError::Range)?;
-    let near = "abs(x - $3::bigint)::numeric * 100 <= x";
+pub async fn matches_public_buy<C: GenericClient>(c: &C, pk: &[u8], mint: &str, amount: u128) -> Result<bool> {
+    let a = Num::from_u128(amount)?;
+    let near = "abs(x - $3::numeric) * 100 <= x";
     let q = format!(
         "SELECT EXISTS (SELECT 1 FROM (SELECT delta_available AS x FROM token_ops
                                       WHERE anon_pubkey = $1 AND mint = $2 AND kind = 'buy_credit'
                                         AND delta_available > 0) b WHERE {near})
-             OR EXISTS (SELECT 1 FROM (SELECT sum(delta_available)::bigint AS x FROM token_ops
+             OR EXISTS (SELECT 1 FROM (SELECT sum(delta_available) AS x FROM token_ops
                                       WHERE anon_pubkey = $1 AND mint = $2 AND kind = 'buy_credit'
                                         AND delta_available > 0) s WHERE x > 0 AND {near})
              OR EXISTS (SELECT 1 FROM (SELECT available + held AS x FROM token_balances
@@ -1061,14 +1078,14 @@ pub(crate) async fn credit_tokens<C: GenericClient>(
     tx: &C,
     pk: &[u8],
     mint: &str,
-    n: i64,
+    n: i128,
     action_id: &[u8],
 ) -> Result<()> {
     tx.execute(
         "INSERT INTO token_balances (anon_pubkey, mint, available) VALUES ($1, $2, $3)
          ON CONFLICT (anon_pubkey, mint) DO UPDATE
            SET available = token_balances.available + EXCLUDED.available, updated_at = now()",
-        &[&pk, &mint, &n],
+        &[&pk, &mint, &Num(n)],
     )
     .await?;
     token_journal(tx, pk, mint, "buy_credit", n, 0, action_id).await
@@ -1079,14 +1096,14 @@ pub(crate) async fn token_journal<C: GenericClient>(
     pk: &[u8],
     mint: &str,
     kind: &str,
-    d_avail: i64,
-    d_held: i64,
+    d_avail: i128,
+    d_held: i128,
     action_id: &[u8],
 ) -> Result<()> {
     tx.execute(
         "INSERT INTO token_ops (anon_pubkey, mint, kind, delta_available, delta_held, action_id)
          VALUES ($1, $2, $3, $4, $5, $6)",
-        &[&pk, &mint, &kind, &d_avail, &d_held, &action_id],
+        &[&pk, &mint, &kind, &Num(d_avail), &Num(d_held), &action_id],
     )
     .await?;
     Ok(())
@@ -1104,8 +1121,27 @@ mod quantize_tests {
         assert_eq!(quantize_min_out(1_234), 1_230);
         assert_eq!(quantize_min_out(98_765_432_109), 98_700_000_000);
         assert_eq!(quantize_min_out(425_000_000), 425_000_000);
-        assert_eq!(quantize_min_out(u64::MAX), 18_400_000_000_000_000_000);
-        for v in [1u64, 7, 12_345, 999_999, 1_000_001, 123_456_789_012] {
+        assert_eq!(quantize_min_out(u64::MAX as u128), 18_400_000_000_000_000_000);
+        // 18-decimal ERC-20 amounts (1e27 base units and around).
+        assert_eq!(quantize_min_out(10u128.pow(27)), 10u128.pow(27));
+        assert_eq!(quantize_min_out(10u128.pow(27) + 1), 10u128.pow(27));
+        assert_eq!(
+            quantize_min_out(1_234_567_890_123_456_789_012_345_678),
+            1_230_000_000_000_000_000_000_000_000
+        );
+        assert_eq!(
+            quantize_min_out(u128::MAX),
+            340_000_000_000_000_000_000_000_000_000_000_000_000
+        );
+        for v in [
+            1u128,
+            7,
+            12_345,
+            999_999,
+            1_000_001,
+            123_456_789_012,
+            10u128.pow(27) - 1,
+        ] {
             let q = quantize_min_out(v);
             assert!(q <= v && v - q < v / 100 + 1, "{v} -> {q}");
         }
@@ -1123,7 +1159,13 @@ mod fuzz_tests {
         assert_eq!(fuzz_token_amount(1_000_000_000_000, 1.0), 980_000_000_000);
         assert_eq!(fuzz_token_amount(123_456_789, 0.5), 121_000_000);
         for u in [0.0, 0.3, 0.99] {
-            for a in [1_000u64, 34_000_000_000_000, 987_654_321] {
+            for a in [
+                1_000u128,
+                34_000_000_000_000,
+                987_654_321,
+                10u128.pow(27),
+                7 * 10u128.pow(26) + 12_345,
+            ] {
                 let f = fuzz_token_amount(a, u);
                 assert!(f < a && f as f64 >= a as f64 * 0.97, "{a} {u} {f}");
                 assert_eq!(quantize_min_out(f), f);
@@ -1135,7 +1177,7 @@ mod fuzz_tests {
 
 impl Ledger {
     /// A6 for the API: [`matches_public_buy`] on a pooled connection.
-    pub async fn sell_mirrors_buy(&self, pk: &[u8; 32], mint: &str, amount: u64) -> Result<bool> {
+    pub async fn sell_mirrors_buy(&self, pk: &[u8; 32], mint: &str, amount: u128) -> Result<bool> {
         let c = self.pool.get().await?;
         let pk_s: &[u8] = pk;
         matches_public_buy(&c, pk_s, mint, amount).await
@@ -1145,7 +1187,7 @@ impl Ledger {
 /// One part of a token withdrawal for its owner (API v0.17 `ActionStatus.parts`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WithdrawPart {
-    pub amount: u64,
+    pub amount: u128,
     /// Earliest execution (unix ms, whole seconds).
     pub not_before_ms: u64,
     /// `queued` | `sent` | `confirmed` | `failed`.
@@ -1171,7 +1213,7 @@ impl Ledger {
         Ok(rows
             .into_iter()
             .map(|r| WithdrawPart {
-                amount: to_u64(r.get::<_, Option<i64>>(0).unwrap_or(0)),
+                amount: crate::num::u128_of(r.get(0)),
                 not_before_ms: to_u64(r.get(1)),
                 status: r.get(2),
             })

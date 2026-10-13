@@ -21,6 +21,8 @@ pub mod limit;
 pub mod market;
 pub mod orders;
 pub mod rate;
+pub mod rates;
+pub mod scenarios;
 pub mod stats;
 pub mod verify;
 
@@ -56,6 +58,8 @@ pub struct Inner {
     pub cfg: Config,
     pub ledger: Ledger,
     pub rate: Arc<RateProvider>,
+    /// v0.18 `GET /api/rates`: display-only prices from a background timer.
+    pub public_rates: Arc<rates::PublicRates>,
     pub ip_limit: Limiter,
     pub key_limit: Limiter,
     pub feed_tx: broadcast::Sender<Arc<market::FeedMsg>>,
@@ -81,6 +85,7 @@ impl AppState {
         let (feed_tx, _) = broadcast::channel(1024);
         Self(Arc::new(Inner {
             rate: RateProvider::new(cfg.rate.clone()),
+            public_rates: rates::PublicRates::new(&cfg.rate.oneclick_url),
             ip_limit: Limiter::new(l.ip_per_sec, l.ip_burst),
             key_limit: Limiter::new(l.key_per_min / 60.0, l.key_burst),
             ws_slots: Arc::new(Semaphore::new(l.max_ws)),
@@ -101,6 +106,7 @@ const BODY_LIMIT: usize = 1024 * 1024;
 pub fn router(st: AppState) -> Router {
     let mut r = Router::new()
         .route("/api/pool", get(pool))
+        .route("/api/rates", get(rates::rates))
         .route("/api/portfolio", get(portfolio))
         .route("/api/actions", post(submit_action))
         .route("/api/actions/{id}", get(action_status))
@@ -277,6 +283,7 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
         "address": address,
         "network": st.cfg.network,
         "chainId": p.chain.to_hex(),
+        "chain": chain_block(p.chain),
         "minDepositZat": p.min_deposit_zat.to_string(),
         "minActionZat": p.min_action_zat.to_string(),
         "minClaimZat": st.cfg.launch.min_claim_zat.to_string(),
@@ -375,7 +382,27 @@ pub fn max_initial_buy_lamports(l: &config::LaunchConfig) -> u64 {
     if l.cap_bps == 0 {
         return 0;
     }
-    l.curve().max_lamports_within(l.cap_tokens())
+    l.curve()
+        .max_lamports_within(u64::try_from(l.cap_tokens()).unwrap_or(u64::MAX))
+}
+
+/// v0.18 `PoolInfo.chain`: the chain this origin trades on (one origin = one `chainId`).
+pub fn chain_block(c: unzeen_protocol::ChainId) -> Value {
+    let mut v = json!({
+        "id": c.trade.chain(),
+        "network": c.trade.network(),
+        "mainnet": c.trade.is_mainnet(),
+    });
+    match c.trade {
+        unzeen_protocol::TradeNet::Solana(_) => {
+            v["native"] = json!({ "symbol": "SOL", "decimals": 9 });
+        }
+        unzeen_protocol::TradeNet::Hood(h) => {
+            v["native"] = json!({ "symbol": "ETH", "decimals": 18 });
+            v["evmChainId"] = json!(h.evm_chain_id());
+        }
+    }
+    v
 }
 
 /// v0.16 `PoolInfo.venues`: every enabled venue with what the pool can do there right now.
@@ -788,4 +815,5 @@ pub fn spawn_background(st: &AppState) {
     }
     // D14: ZEC/SOL quote on a timer, never on demand.
     tokio::spawn(st.rate.clone().refresh_loop());
+    tokio::spawn(st.public_rates.clone().refresh_loop());
 }

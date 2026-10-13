@@ -124,7 +124,9 @@ pub struct Smart {
     pub max_delay_min: u32,
 }
 
-pub(crate) const VENUES: [&str; 5] = ["pumpfun", "meteora-dbc", "jupiter", "raydium-launchlab", "bags"];
+pub(crate) const VENUES: [&str; 6] = ["pumpfun", "meteora-dbc", "jupiter", "raydium-launchlab", "bags", "pons"];
+/// v0.18: venues of Robinhood Chain (`PoolInfo.chain.id = "hood"`); refused on a Solana server.
+pub(crate) const HOOD_VENUES: [&str; 1] = ["pons"];
 const PLATFORMS: [&str; 3] = ["unzeen", "bonk", "stonk"];
 /// ZEC SPL amounts are rounded to 0.0001 ZEC (D10 for ZEC pairs).
 pub const ZEC_UNITS_STEP: u64 = 10_000;
@@ -142,6 +144,28 @@ pub fn parse_amount(s: &str, field: &str) -> ApiResult<u64> {
 
 fn positive(s: &str, field: &str) -> ApiResult<u64> {
     match parse_amount(s, field)? {
+        0 => Err(ApiError::bad_request(format!("{field} must be > 0"))),
+        v => Ok(v),
+    }
+}
+
+/// Max digits of a token amount (v0.18): < 1e38, inside the ledger's i128 (NUMERIC(78,0) column).
+/// Covers 18-decimal ERC-20 supplies (1e27) with room to spare.
+pub const TOKEN_AMOUNT_MAX_DIGITS: usize = 38;
+
+/// v0.18: token base units (sell / withdraw_token / order sell `amount`, buy `minOut`) —
+/// canonical integer string up to [`TOKEN_AMOUNT_MAX_DIGITS`] digits (never parsed as u64).
+pub fn parse_token_amount(s: &str, field: &str) -> ApiResult<u128> {
+    let ok = !s.is_empty()
+        && s.len() <= TOKEN_AMOUNT_MAX_DIGITS
+        && s.bytes().all(|b| b.is_ascii_digit())
+        && (s == "0" || !s.starts_with('0'));
+    (if ok { s.parse::<u128>().ok() } else { None })
+        .ok_or_else(|| ApiError::bad_request(format!("{field}: expected an integer string in base units")))
+}
+
+fn positive_tokens(s: &str, field: &str) -> ApiResult<u128> {
+    match parse_token_amount(s, field)? {
         0 => Err(ApiError::bad_request(format!("{field} must be > 0"))),
         v => Ok(v),
     }
@@ -245,8 +269,14 @@ fn delay(min: f64, max: f64) -> f64 {
 fn venue(st: &AppState, v: &str) -> ApiResult<String> {
     if !VENUES.contains(&v) {
         return Err(ApiError::bad_request(
-            "venue: expected pumpfun | meteora-dbc | jupiter | raydium-launchlab | bags",
+            "venue: expected pumpfun | meteora-dbc | jupiter | raydium-launchlab | bags | pons",
         ));
+    }
+    // v0.18: a venue of another chain (pons = Robinhood Chain) is never executed here.
+    if HOOD_VENUES.contains(&v) {
+        return Err(ApiError::venue_unavailable(format!(
+            "{v} trades on Robinhood Chain, not on this server"
+        )));
     }
     if !st.cfg.venues.iter().any(|e| e == v) {
         return Err(ApiError::venue_unavailable(format!("venue {v} is not enabled")));
@@ -345,10 +375,10 @@ fn parity_used(applied: u64) -> RateUsed {
 }
 
 /// Estimated zat of `amount` base units at `price_quote` (decimal ZEC per whole token).
-fn estimate_zat_zec(price_quote: &str, decimals: i16, amount: u64, units_per_zec: u64) -> Option<u64> {
+fn estimate_zat_zec(price_quote: &str, decimals: i16, amount: u128, units_per_zec: u64) -> Option<u64> {
     // sol_to_lamports gives price × 1e9; ZEC SPL has 8 decimals.
     let units_per_whole = crate::config::sol_to_lamports(&truncate_decimals(price_quote, 9))? / 10;
-    let units = (amount as u128) * (units_per_whole as u128) / 10u128.checked_pow(decimals.max(0) as u32)?;
+    let units = amount.checked_mul(units_per_whole as u128)? / 10u128.checked_pow(decimals.max(0) as u32)?;
     Some((units * 100_000_000 / (units_per_zec.max(1) as u128)).min(u64::MAX as u128) as u64)
 }
 
@@ -368,10 +398,10 @@ fn used(r: &rate::Rate, applied: u64) -> RateUsed {
 }
 
 /// Estimated zat value of `amount` base units at `price_sol` (decimal SOL per whole token).
-fn estimate_zat(price_sol: &str, decimals: i16, amount: u64, lamports_per_zec: u64) -> Option<u64> {
+fn estimate_zat(price_sol: &str, decimals: i16, amount: u128, lamports_per_zec: u64) -> Option<u64> {
     let lamports_per_whole = crate::config::sol_to_lamports(&truncate_decimals(price_sol, 9))?;
-    let lamports = (amount as u128) * (lamports_per_whole as u128) / 10u128.checked_pow(decimals.max(0) as u32)?;
-    let zat = lamports * 100_000_000 / (lamports_per_zec.max(1) as u128);
+    let lamports = amount.checked_mul(lamports_per_whole as u128)? / 10u128.checked_pow(decimals.max(0) as u32)?;
+    let zat = lamports.checked_mul(100_000_000)? / (lamports_per_zec.max(1) as u128);
     Some(zat.min(u64::MAX as u128) as u64)
 }
 
@@ -411,8 +441,8 @@ pub fn check_meta(m: &Meta) -> ApiResult<()> {
 }
 
 /// Split `amount` into `parts` non-equal positive pieces (±20 % around the mean).
-pub fn split_amount(amount: u64, parts: u32) -> Vec<u64> {
-    let parts = parts.max(1) as u64;
+pub fn split_amount(amount: u128, parts: u32) -> Vec<u128> {
+    let parts = parts.max(1) as u128;
     let mean = amount / parts;
     let mut out = Vec::with_capacity(parts as usize);
     let mut left = amount;
@@ -421,8 +451,9 @@ pub fn split_amount(amount: u64, parts: u32) -> Vec<u64> {
         let v = if remaining_parts == 1 {
             left
         } else {
-            let jitter = ((mean as f64) * 0.2 * (rand_unit() * 2.0 - 1.0)) as i64;
-            let v = (mean as i64 + jitter).max(1) as u64;
+            // f64 jitter (53 bits) is enough for ±20 % of a 1e27 mean.
+            let jitter = ((mean as f64) * 0.2 * (rand_unit() * 2.0 - 1.0)) as i128;
+            let v = (mean as i128 + jitter).max(1) as u128;
             // Leave at least 1 per remaining part.
             v.min(left - (remaining_parts - 1))
         };
@@ -436,18 +467,18 @@ pub fn split_amount(amount: u64, parts: u32) -> Vec<u64> {
 /// amount is shaved 0–1 % and rounded down to 0.001 SOL so it does not reveal `zec_in`; the
 /// user is charged only the ZEC equivalent of the lamports actually sent (the rest stays
 /// available), and `minOut` shrinks in proportion (same minimum price).
-pub fn fuzzed_buy(zec_in: u64, min_out: u64, applied: u64, min_action: u64) -> ApiResult<(u64, u64, u64)> {
+pub fn fuzzed_buy(zec_in: u64, min_out: u128, applied: u64, min_action: u64) -> ApiResult<(u64, u64, u128)> {
     fuzzed_buy_step(zec_in, min_out, applied, min_action, rate::LAMPORTS_STEP)
 }
 
 /// [`fuzzed_buy`] with another rounding step (ZEC SPL pairs: 0.0001 ZEC).
 pub fn fuzzed_buy_step(
     zec_in: u64,
-    min_out: u64,
+    min_out: u128,
     applied: u64,
     min_action: u64,
     step: u64,
-) -> ApiResult<(u64, u64, u64)> {
+) -> ApiResult<(u64, u64, u128)> {
     let full = zat_to_lamports(zec_in, applied);
     let mut lamports = rate::fuzz_units(full, rand_unit(), step);
     // Never charge less than the minimum action because of rounding: step back up if possible.
@@ -464,7 +495,8 @@ pub fn fuzzed_buy_step(
             "zecIn too small (buys are rounded down to 0.001 SOL / 0.0001 ZEC)",
         ));
     }
-    let min_out = ((min_out as u128) * (lamports as u128) / (full.max(1) as u128)) as u64;
+    // minOut (token base units, u128) scaled by lamports/full ≤ 1: no overflow below 3.4e38/1.8e19.
+    let min_out = min_out.saturating_mul(lamports as u128) / (full.max(1) as u128);
     Ok((zat, lamports, min_out))
 }
 
@@ -528,7 +560,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             let v = venue(st, &v)?;
             let mint = solana_address(&mint, "mint")?;
             let zec_in = positive(&zec_in, "zecIn")?;
-            let min_out = parse_amount(&min_out, "minOut")?;
+            let min_out = parse_token_amount(&min_out, "minOut")?;
             if zec_in < min_action {
                 return Err(ApiError::below_minimum("zecIn below PoolInfo.minActionZat"));
             }
@@ -551,7 +583,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                     crate::launch::tokens_at_spot(units, upw, t.decimals)
                 });
                 return Ok(NewAction {
-                    gain: Some((mint.clone(), spot.unwrap_or(min_out).max(min_out))),
+                    gain: Some((mint.clone(), spot.map_or(min_out, u128::from).max(min_out))),
                     amount_zat,
                     fee_zat: now_fee(mode),
                     rate: Some(parity_used(applied)),
@@ -559,7 +591,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                     jobs: vec![NewJob {
                         venue: Some(v),
                         mint: Some(mint),
-                        lamports_in: Some(units),
+                        lamports_in: Some(units.into()),
                         min_out: Some(min_out),
                         ..job(JobOp::Buy, mode, epoch(mode))
                     }],
@@ -576,16 +608,21 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 let lpw = crate::config::sol_to_lamports(&truncate_decimals(&p, 9))?;
                 crate::launch::tokens_at_spot(lamports, lpw, d)
             });
-            let gain = crate::launch::buy_gain_estimate(&crate::rules_curve(st, &v).await?.0, lamports, spot, min_out);
+            let gain = crate::launch::buy_gain_estimate(
+                &crate::rules_curve(st, &v).await?.0,
+                lamports,
+                spot,
+                u64::try_from(min_out).unwrap_or(u64::MAX),
+            );
             NewAction {
-                gain: Some((mint.clone(), gain)),
+                gain: Some((mint.clone(), u128::from(gain).max(min_out))),
                 amount_zat,
                 fee_zat: now_fee(mode),
                 rate: Some(used(&r, applied)),
                 jobs: vec![NewJob {
                     venue: Some(v),
                     mint: Some(mint),
-                    lamports_in: Some(lamports),
+                    lamports_in: Some(lamports.into()),
                     min_out: Some(min_out),
                     ..job(JobOp::Buy, mode, epoch(mode))
                 }],
@@ -601,7 +638,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
         } => {
             let v = venue(st, &v)?;
             let mint = solana_address(&mint, "mint")?;
-            let amount = positive(&amount, "amount")?;
+            let amount = positive_tokens(&amount, "amount")?;
             let min_zec_out = parse_amount(&min_zec_out, "minZecOut")?;
             // A6: a sell that mirrors this key's public buy (±1 %) is shaved 0.5–2 % and
             // rounded to 3 significant digits (the rest stays available); minZecOut shrinks in
@@ -614,7 +651,8 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 if a2 == 0 {
                     return Err(ApiError::below_minimum("sell amount too small"));
                 }
-                let m2 = ((min_zec_out as u128) * (a2 as u128)).div_ceil(amount as u128) as u64;
+                // a2 ≤ amount, so m2 ≤ min_zec_out (a zat value).
+                let m2 = ((min_zec_out as u128).saturating_mul(a2)).div_ceil(amount) as u64;
                 (a2, m2)
             } else {
                 (amount, min_zec_out)
@@ -646,7 +684,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                         venue: Some(v),
                         mint: Some(mint),
                         token_amount: Some(amount),
-                        min_out: Some(zat_to_lamports_ceil(min_zec_out, applied)),
+                        min_out: Some(zat_to_lamports_ceil(min_zec_out, applied).into()),
                         ..job(JobOp::Sell, mode, epoch(mode))
                     }],
                     ..base("sell")
@@ -673,7 +711,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                     venue: Some(v),
                     mint: Some(mint),
                     token_amount: Some(amount),
-                    min_out: Some(zat_to_lamports_ceil(min_zec_out, applied)),
+                    min_out: Some(zat_to_lamports_ceil(min_zec_out, applied).into()),
                     ..job(JobOp::Sell, mode, epoch(mode))
                 }],
                 ..base("sell")
@@ -799,19 +837,19 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 // pool through the vault pinned to the new mint. Not atomic: a sniper can buy
                 // in between; min_out from the Bags curve bounds the price paid.
                 let (curve, _, _) = crate::rules_curve(st, &v).await?;
-                let min_out = curve.tokens_out_initial(lamports) / 4 * 3;
+                let min_out = u128::from(curve.tokens_out_initial(lamports) / 4 * 3);
                 // RELAYER v10: the vault picked for the launch must also fund the first buy.
                 m["reserve_lamports"] = json!(lamports);
                 jobs.push(NewJob {
                     venue: Some(v.clone()),
-                    lamports_in: Some(0),
+                    lamports_in: Some(0u128),
                     min_out: Some(0),
                     meta: Some(m),
                     ..job(JobOp::Create, mode, delay)
                 });
                 jobs.push(NewJob {
                     venue: Some(v),
-                    lamports_in: Some(lamports),
+                    lamports_in: Some(lamports.into()),
                     min_out: Some(min_out),
                     held: true,
                     ..job(JobOp::Buy, mode, delay)
@@ -819,7 +857,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             } else {
                 jobs.push(NewJob {
                     venue: Some(v),
-                    lamports_in: Some(lamports),
+                    lamports_in: Some(lamports.into()),
                     min_out: Some(0),
                     meta: Some(m),
                     ..job(JobOp::Create, mode, delay)
@@ -858,7 +896,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
         } => {
             no_now(mode)?;
             let mint = solana_address(&mint, "mint")?;
-            let amount = positive(&amount, "amount")?;
+            let amount = positive_tokens(&amount, "amount")?;
             let dests: Vec<String> = match to {
                 To::One(s) => vec![s],
                 To::Many(v) => v,
@@ -884,7 +922,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                     return Err(ApiError::bad_request("to: addresses must be distinct"));
                 }
             }
-            if amount < u64::from(parts) {
+            if amount < u128::from(parts) {
                 return Err(ApiError::bad_request("amount smaller than the number of parts"));
             }
             let r = rate(st).await?;
@@ -895,11 +933,11 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             // A1: always shaved 0.5–2 % and every part rounded down to 3 significant digits:
             // no part (nor their sum) equals a public buy. The remainder stays available.
             let total = fuzz_token_amount_rand(amount);
-            let split: Vec<u64> = split_amount(total, parts).into_iter().map(quantize_min_out).collect();
-            if total < u64::from(parts) || split.contains(&0) {
+            let split: Vec<u128> = split_amount(total, parts).into_iter().map(quantize_min_out).collect();
+            if total < u128::from(parts) || split.contains(&0) {
                 return Err(ApiError::bad_request("amount too small to withdraw"));
             }
-            let amount: u64 = split.iter().sum();
+            let amount: u128 = split.iter().sum();
             let jobs = split
                 .into_iter()
                 .zip(dests)
@@ -943,15 +981,52 @@ mod tests {
     }
 
     #[test]
+    fn token_amounts_are_not_u64() {
+        // v0.18: 18-decimal ERC-20 amounts (1e27 base units) and everything up to 38 digits.
+        assert_eq!(
+            parse_token_amount("1000000000000000000000000000", "x").unwrap(),
+            10u128.pow(27)
+        );
+        assert_eq!(
+            parse_token_amount("18446744073709551616", "x").unwrap(),
+            u64::MAX as u128 + 1
+        );
+        let max = "9".repeat(TOKEN_AMOUNT_MAX_DIGITS);
+        assert_eq!(parse_token_amount(&max, "x").unwrap(), 10u128.pow(38) - 1);
+        assert!(i128::try_from(parse_token_amount(&max, "x").unwrap()).is_ok());
+        for bad in [
+            "",
+            "01",
+            "-1",
+            "1.5",
+            "1e27",
+            &"1".repeat(39),
+            "340282366920938463463374607431768211456",
+        ] {
+            assert!(parse_token_amount(bad, "x").is_err(), "{bad}");
+        }
+        assert!(positive_tokens("0", "x").is_err());
+        // Splits and estimates of 1e27 stay exact sums and do not overflow.
+        let v = split_amount(10u128.pow(27), 4);
+        assert_eq!(v.iter().sum::<u128>(), 10u128.pow(27));
+        assert!(v.iter().all(|x| *x > 0));
+        // 1e27 base units, 18 decimals = 1e9 whole tokens at 1e-9 SOL = 1 SOL; 10 SOL/ZEC.
+        assert_eq!(
+            estimate_zat("0.000000001", 18, 10u128.pow(27), 10_000_000_000),
+            Some(10_000_000)
+        );
+    }
+
+    #[test]
     fn split_sums() {
         for parts in 1..=5 {
-            for amount in [parts as u64, 7, 1_000, 123_456_789] {
-                if amount < parts as u64 {
+            for amount in [parts as u128, 7, 1_000, 123_456_789] {
+                if amount < parts as u128 {
                     continue;
                 }
                 let v = split_amount(amount, parts);
                 assert_eq!(v.len(), parts as usize);
-                assert_eq!(v.iter().sum::<u64>(), amount);
+                assert_eq!(v.iter().sum::<u128>(), amount);
                 assert!(v.iter().all(|x| *x > 0));
             }
         }

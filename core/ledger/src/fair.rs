@@ -18,8 +18,17 @@ use unzeen_fair::{alloc, bid, drand::VerifiedBeacon, merkle};
 use crate::{
     ActionReceipt, Ledger, LedgerError, Result,
     actions::{NewAction, credit_tokens, mark_settled, minute_now_ms},
-    journal, to_i64, to_u64,
+    journal,
+    num::Num,
+    to_i64, to_u64,
 };
+
+/// Fair-launch math (`unzeen_fair::alloc`) is pump.fun/Solana-only and stays `u64`; the
+/// NUMERIC(78,0) columns (0026) are converted at the edge and a value above `u64` is a range
+/// error, never a silent truncation.
+fn num_u64(v: Option<Num>) -> Result<u64> {
+    v.unwrap_or_default().to_u64()
+}
 
 const MS: &str = "(extract(epoch FROM {}) * 1000)::bigint";
 
@@ -81,7 +90,7 @@ pub struct OwnerBid {
     pub hold_zat: u64,
     pub status: String,
     pub amount_zat: Option<u64>,
-    pub tokens: Option<u64>,
+    pub tokens: Option<u128>,
     pub charge_zat: Option<u64>,
     pub released_zat: Option<u64>,
     pub leaf: Option<Vec<u8>>,
@@ -473,11 +482,14 @@ impl Ledger {
                 &[&network, &venue],
             )
             .await?;
-        Ok(r.map(|r| CurveRow {
-            virtual_sol: to_u64(r.get(0)),
-            virtual_tokens: to_u64(r.get(1)),
-            real_tokens: to_u64(r.get(2)),
-            total_supply: to_u64(r.get(3)),
+        // Solana curves fit u64; a row that does not (an 18-decimal EVM curve) is skipped.
+        Ok(r.and_then(|r| {
+            Some(CurveRow {
+                virtual_sol: num_u64(r.get(0)).ok()?,
+                virtual_tokens: num_u64(r.get(1)).ok()?,
+                real_tokens: num_u64(r.get(2)).ok()?,
+                total_supply: num_u64(r.get(3)).ok()?,
+            })
         }))
     }
 
@@ -814,6 +826,7 @@ impl Ledger {
             .map(|r| {
                 let status: String = r.get(2);
                 let opt = |i: usize| r.get::<_, Option<i64>>(i).map(to_u64);
+                let tokens = r.get::<_, Option<Num>>(4).map(Num::u128_or_zero);
                 OwnerBid {
                     launch_id: id16(r.get(0)),
                     hold_zat: to_u64(r.get(1)),
@@ -822,7 +835,7 @@ impl Ledger {
                     } else {
                         None
                     },
-                    tokens: opt(4),
+                    tokens,
                     charge_zat: opt(5),
                     released_zat: opt(6),
                     leaf: r.get(7),
@@ -1102,7 +1115,8 @@ impl Ledger {
             .collect::<Result<_>>()?;
         let es: Vec<i64> = plan.effective.iter().map(|e| to_i64(*e)).collect::<Result<_>>()?;
         tx.execute(
-            "UPDATE fl_bids b SET status = 'revealed', amount_zat = u.amount, e_lamports = u.e, ciphertext = NULL
+            "UPDATE fl_bids b SET status = 'revealed', amount_zat = u.amount, e_lamports = u.e::numeric,
+                    ciphertext = NULL
              FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS u(id, amount, e) WHERE b.id = u.id",
             &[&ids, &amounts, &es],
         )
@@ -1118,9 +1132,8 @@ impl Ledger {
         // is created by this very tx, so only a venue config change can trip it.
         let net = (lamports_in as u128) * (10_000 - p.fee_bound_bps.min(9_999) as u128) / 10_000;
         let quote = alloc::curve_tokens_out(p.curve.virtual_sol, p.curve.virtual_tokens, net as u64);
-        let min_out = crate::actions::quantize_min_out(
-            ((quote as u128) * (10_000 - p.slippage_bps.min(10_000) as u128) / 10_000) as u64,
-        );
+        let min_out =
+            crate::actions::quantize_min_out((quote as u128) * (10_000 - p.slippage_bps.min(10_000) as u128) / 10_000);
         let mint_secret: &[u8] = &p.mint_secret;
         let job: i64 = tx
             .query_one(
@@ -1129,8 +1142,8 @@ impl Ledger {
                  VALUES ('fair_create', $1, $2, $3, $4, $5, 'now', now(), $6) RETURNING id",
                 &[
                     &venue,
-                    &to_i64(lamports_in)?,
-                    &to_i64(min_out)?,
+                    &Num::from(lamports_in),
+                    &Num::from_u128(min_out)?,
                     &meta,
                     &network,
                     &mint_secret,
@@ -1147,8 +1160,8 @@ impl Ledger {
                 &id_s,
                 &sig,
                 &to_i64(p.rate)?,
-                &to_i64(plan.total)?,
-                &to_i64(lamports_in)?,
+                &Num::from(plan.total),
+                &Num::from(lamports_in),
                 &plan.oversubscribed,
                 &(valid.len() as i32),
                 &job,
@@ -1273,12 +1286,12 @@ impl Ledger {
         let creator: Option<Vec<u8>> = r.get(1);
         let create_aid: Option<Vec<u8>> = r.get(2);
         let rate = to_u64(r.get::<_, Option<i64>>(3).unwrap_or(0));
-        let total_e = to_u64(r.get::<_, Option<i64>>(4).unwrap_or(0));
+        let total_e = num_u64(r.get(4))?;
         let oversubscribed = r.get::<_, Option<bool>>(5).unwrap_or(false);
         let valid_bids = r.get::<_, Option<i32>>(6).unwrap_or(0);
         let mint: String = r.get::<_, Option<String>>(9).unwrap_or_default();
-        let t = to_u64(r.get::<_, Option<i64>>(10).unwrap_or(0));
-        let s = to_u64(r.get::<_, Option<i64>>(11).unwrap_or(0));
+        let t = num_u64(r.get(10))?;
+        let s = num_u64(r.get(11))?;
         let sig: Option<String> = r.get(12);
         let decimals: i16 = tx
             .query_opt("SELECT decimals FROM tokens WHERE mint = $1", &[&mint])
@@ -1292,13 +1305,13 @@ impl Ledger {
                 &[&lid],
             )
             .await?;
-        let mut creator_tokens: i64 = 0;
+        let mut creator_tokens: i128 = 0;
         for b in &bids {
             let (bid_id, pk, aid): (i64, Vec<u8>, Option<Vec<u8>>) = (b.get(0), b.get(1), b.get(2));
             let amount = to_u64(b.get::<_, Option<i64>>(3).unwrap_or(0));
-            let e = to_u64(b.get::<_, Option<i64>>(4).unwrap_or(0));
+            let e = num_u64(b.get(4))?;
             let sh = alloc::share(e, total_e, t, s, rate, amount);
-            let tokens = to_i64(sh.tokens)?;
+            let tokens = i128::from(sh.tokens);
             let charge = to_i64(sh.charge_zat)?;
             if let Some(aid) = &aid {
                 if tokens > 0 {
@@ -1318,7 +1331,7 @@ impl Ledger {
                     "INSERT INTO token_balances (anon_pubkey, mint, available) VALUES ($1, $2, $3)
                      ON CONFLICT (anon_pubkey, mint) DO UPDATE
                        SET available = token_balances.available + EXCLUDED.available, updated_at = now()",
-                    &[&pk, &mint, &tokens],
+                    &[&pk, &mint, &Num(tokens)],
                 )
                 .await?;
             }
@@ -1328,7 +1341,7 @@ impl Ledger {
                 .get(0);
             tx.execute(
                 "UPDATE fl_bids SET status = 'settled', tokens = $2, charge_zat = $3, released_zat = $4 WHERE id = $1",
-                &[&bid_id, &tokens, &charge, &(hold - charge)],
+                &[&bid_id, &Num(tokens), &charge, &(hold - charge)],
             )
             .await?;
             if creator.as_deref() == Some(pk.as_slice()) {
@@ -1346,17 +1359,17 @@ impl Ledger {
             let launch_fee = crate::creator_fees::launch_creator_fee(
                 &self.rules,
                 r.get::<_, Option<&str>>(14),
-                to_i64(s)?,
-                r.get::<_, Option<i64>>(15),
+                i128::from(s),
+                r.get::<_, Option<Num>>(15).map(|n| n.0),
             );
             tx.execute(
                 "INSERT INTO creator_tokens (mint, anon_pubkey, locked_amount, locked_until,
                                              launch_fee_lamports, launch_fee_left)
-                 VALUES ($1, $2, $3::bigint, CASE WHEN $3::bigint > 0
+                 VALUES ($1, $2, $3::numeric, CASE WHEN $3::numeric > 0
                      THEN date_trunc('hour', now() + make_interval(secs => $4::float8)) + interval '1 hour' END,
-                     $5, $5)
+                     $5::numeric, $5::numeric)
                  ON CONFLICT (mint) DO NOTHING",
-                &[&mint, cpk, &locked, &lock_secs, &launch_fee],
+                &[&mint, cpk, &Num(locked), &lock_secs, &Num(launch_fee)],
             )
             .await?;
         }

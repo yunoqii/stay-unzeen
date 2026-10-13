@@ -1,0 +1,1990 @@
+{
+ "description": "API v0.19 scenario plans → validation result. Every invalid case has exactly one error. ctx = defaults overridden by case.ctx.",
+ "defaults": {
+  "nowMs": 1791763200000,
+  "minDepositZat": "100000",
+  "venues": [
+   "pumpfun",
+   "meteora-dbc"
+  ],
+  "fairLaunch": false,
+  "chat": false,
+  "fullTrades": false,
+  "pricedMints": [
+   "So11111111111111111111111111111111111111112",
+   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+  ]
+ },
+ "cases": [
+  {
+   "name": "T1 private buy & exit",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "deposit_received",
+       "minZat": "1000000"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 1200,
+       "maxSecs": 5400
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "check_safety",
+       "mint": "So11111111111111111111111111111111111111112",
+       "require": {
+        "authoritiesRevoked": true,
+        "noRiskyExtensions": true
+       },
+       "onFalse": "stop"
+      }
+     },
+     {
+      "id": 3,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "pct": 95,
+        "of": {
+         "step": 0
+        }
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "max"
+      }
+     },
+     {
+      "id": 4,
+      "block": {
+       "type": "order_place",
+       "order": {
+        "kind": "bracket",
+        "venue": "pumpfun",
+        "mint": "So11111111111111111111111111111111111111112",
+        "amount": {
+         "pct": 100,
+         "of": {
+          "step": 3
+         }
+        },
+        "tpPriceSol": "0.000002",
+        "slPriceSol": "0.0000005",
+        "rearm": true,
+        "exec": "delayed"
+       }
+      }
+     },
+     {
+      "id": 5,
+      "block": {
+       "type": "own_result",
+       "ref": {
+        "step": 4
+       },
+       "on": "any"
+      }
+     },
+     {
+      "id": 6,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 3600,
+       "maxSecs": 21600
+      }
+     },
+     {
+      "id": 7,
+      "block": {
+       "type": "withdraw_zec",
+       "to": "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+       "amount": {
+        "pct": 100,
+        "of": "balance"
+       },
+       "exec": "max"
+      }
+     }
+    ],
+    "ttlSecs": 259200
+   },
+   "expect": {
+    "ok": true,
+    "runs": 3,
+    "ttlSecs": 259200
+   }
+  },
+  {
+   "name": "T3 DCA in, 7-day TTL without withdrawals",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "manual_start"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "dca",
+       "side": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "total": {
+        "abs": "50000000"
+       },
+       "slices": 6,
+       "everySecs": {
+        "min": 7200,
+        "max": 21600
+       },
+       "guard": {
+        "limitPrice": "0.000001"
+       },
+       "exec": "delayed"
+      },
+      "onFail": {
+       "retry": 2,
+       "then": "skip"
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "end"
+      }
+     }
+    ],
+    "ttlSecs": 604800
+   },
+   "expect": {
+    "ok": true,
+    "runs": 6,
+    "ttlSecs": 604800
+   }
+  },
+  {
+   "name": "T4 rotate",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "manual_start"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "swap",
+       "from": "So11111111111111111111111111111111111111112",
+       "to": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+       "amount": {
+        "pct": 100,
+        "of": "balance"
+       },
+       "guardSell": {
+        "slippageBps": 500
+       },
+       "guardBuy": {
+        "limitPrice": "0.5"
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 2,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "now right after manual_start",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "manual_start"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "now"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 1,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "now as the first step",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "now"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 1,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "P1: now after a wait",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "manual_start"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "now"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_rule",
+    "step": 2,
+    "code": "now_not_first"
+   }
+  },
+  {
+   "name": "P1: now inside a repeat",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "now"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "repeat",
+       "from": 0,
+       "times": 2
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_rule",
+    "step": 0,
+    "code": "now_not_first"
+   }
+  },
+  {
+   "name": "P2: withdraw right after buying the mint",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "pct": 100,
+        "of": {
+         "step": 0
+        }
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_rule",
+    "step": 1,
+    "code": "withdraw_too_soon"
+   }
+  },
+  {
+   "name": "P2: 1 h random wait is enough",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 3600,
+       "maxSecs": 7200
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "pct": 100,
+        "of": {
+         "step": 0
+        }
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 2,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "P2: 30 min minimum is not",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 1800,
+       "maxSecs": 7200
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "pct": 100,
+        "of": {
+         "step": 0
+        }
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_rule",
+    "step": 2,
+    "code": "withdraw_too_soon"
+   }
+  },
+  {
+   "name": "P2: wait_fixed 3600 s counts as ≈3240 s (jitter)",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_fixed",
+       "secs": 3600
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "abs": "5"
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_rule",
+    "step": 2,
+    "code": "withdraw_too_soon"
+   }
+  },
+  {
+   "name": "P2: another mint is not affected",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+       "amount": {
+        "abs": "5"
+       },
+       "to": "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 2,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "P8: slippage guard on a mint without a tick",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_rule",
+    "step": 0,
+    "code": "unpriced_mint"
+   }
+  },
+  {
+   "name": "P8: limitPrice works for any mint",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "limitPrice": "0.0001"
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 1,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "P8: price trigger on a mint without a tick",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "price_cross",
+       "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+       "op": "gte",
+       "priceSol": "0.001"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "limitPrice": "0.01"
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_rule",
+    "step": 0,
+    "code": "unpriced_mint"
+   }
+  },
+  {
+   "name": "P8: guard on the plan's own launch",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "create",
+       "create": {
+        "venue": "pumpfun",
+        "meta": {
+         "name": "Test",
+         "symbol": "TST"
+        },
+        "initialBuyZec": {
+         "abs": "1000000"
+        }
+       }
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 90000,
+       "maxSecs": 93600
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "sell",
+       "venue": "pumpfun",
+       "mint": {
+        "step": 0
+       },
+       "amount": {
+        "pct": 100,
+        "of": {
+         "step": 0
+        }
+       },
+       "guard": {
+        "slippageBps": 1500
+       },
+       "exec": "delayed"
+      }
+     }
+    ],
+    "ttlSecs": 259200
+   },
+   "expect": {
+    "ok": true,
+    "runs": 2,
+    "ttlSecs": 259200
+   }
+  },
+  {
+   "name": "P10: fl_bid with fair-launch off",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "fl_bid",
+       "launchId": "00000000000000000000000000000000",
+       "holdZat": "1000000",
+       "ciphertext": "x"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "bad_request",
+    "step": 0,
+    "code": "feature_disabled"
+   }
+  },
+  {
+   "name": "fl_bid with fair-launch on",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "fl_bid",
+       "launchId": "00000000000000000000000000000000",
+       "holdZat": "1000000",
+       "ciphertext": "x"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 1,
+    "ttlSecs": 86400
+   },
+   "ctx": {
+    "fairLaunch": true
+   }
+  },
+  {
+   "name": "chat with chat off",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "chat",
+       "mint": "So11111111111111111111111111111111111111112",
+       "text": "gm"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "bad_request",
+    "step": 0,
+    "code": "feature_disabled"
+   }
+  },
+  {
+   "name": "chat with chat on",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "chat",
+       "mint": "So11111111111111111111111111111111111111112",
+       "text": "gm"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 1,
+    "ttlSecs": 86400
+   },
+   "ctx": {
+    "chat": true
+   }
+  },
+  {
+   "name": "snipers rule needs full trades",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "check_safety",
+       "mint": "So11111111111111111111111111111111111111112",
+       "require": {
+        "maxSniperPct": 20
+       },
+       "onFalse": "stop"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "bad_request",
+    "step": 0,
+    "code": "feature_disabled"
+   }
+  },
+  {
+   "name": "13 steps",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 3,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 4,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 5,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 6,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 7,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 8,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 9,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 10,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 11,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 12,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": null,
+    "code": "too_many_steps"
+   }
+  },
+  {
+   "name": "empty plan",
+   "plan": {
+    "v": 1,
+    "steps": []
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": null,
+    "code": "empty"
+   }
+  },
+  {
+   "name": "version 2",
+   "plan": {
+    "v": 2,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": null,
+    "code": "bad_version"
+   }
+  },
+  {
+   "name": "7-day TTL with a withdrawal",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 3600,
+       "maxSecs": 7200
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "withdraw_zec",
+       "to": "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+       "amount": {
+        "abs": "100000"
+       },
+       "exec": "max"
+      }
+     }
+    ],
+    "ttlSecs": 604800
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": null,
+    "code": "bad_ttl"
+   }
+  },
+  {
+   "name": "TTL below 1 h",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ],
+    "ttlSecs": 1800
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": null,
+    "code": "bad_ttl"
+   }
+  },
+  {
+   "name": "manual_start not first",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "manual_start"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 1,
+    "code": "manual_start_not_first"
+   }
+  },
+  {
+   "name": "step id must equal its index",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 1,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_step_id"
+   }
+  },
+  {
+   "name": "goto backwards",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      },
+      "onFail": {
+       "goto": 0
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 1,
+    "code": "bad_goto"
+   }
+  },
+  {
+   "name": "retry then goto forward",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      },
+      "onFail": {
+       "retry": 3,
+       "then": {
+        "goto": 2
+       }
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 60,
+       "maxSecs": 120
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "end"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 1,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "retry 4",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      },
+      "onFail": {
+       "retry": 4,
+       "then": "stop"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_on_fail"
+   }
+  },
+  {
+   "name": "more than 40 executions",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "dca",
+       "side": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "total": {
+        "abs": "50000000"
+       },
+       "slices": 12,
+       "everySecs": {
+        "min": 600,
+        "max": 600
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "repeat",
+       "from": 0,
+       "times": 4
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": null,
+    "code": "too_many_runs"
+   }
+  },
+  {
+   "name": "repeat counts its body",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "wait_random",
+       "minSecs": 600,
+       "maxSecs": 1200
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "repeat",
+       "from": 0,
+       "times": 10
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 10,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "repeat over manual_start",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "manual_start"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 2,
+      "block": {
+       "type": "repeat",
+       "from": 0,
+       "times": 2
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 2,
+    "code": "bad_repeat"
+   }
+  },
+  {
+   "name": "zat output where tokens are needed",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "deposit_received",
+       "minZat": "1000000"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "sell",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "pct": 50,
+        "of": {
+         "step": 0
+        }
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 1,
+    "code": "bad_ref"
+   }
+  },
+  {
+   "name": "reference to a later step",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "pct": 50,
+        "of": {
+         "step": 1
+        }
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "claim"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_ref"
+   }
+  },
+  {
+   "name": "mint of a buy step is not a MintRef",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "sell_all",
+       "venue": "pumpfun",
+       "mint": {
+        "step": 0
+       },
+       "guard": {
+        "limitPrice": "1"
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 1,
+    "code": "bad_ref"
+   }
+  },
+  {
+   "name": "two deposit triggers",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "deposit_received",
+       "minZat": "1000000"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "deposit_received",
+       "minZat": "1000000"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 1,
+    "code": "deposit_twice"
+   }
+  },
+  {
+   "name": "deposit trigger below minDepositZat",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "deposit_received",
+       "minZat": "99999"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_amount"
+   }
+  },
+  {
+   "name": "v0.18: 1e27 token sell",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "sell",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "abs": "1000000000000000000000000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 1,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "39-digit amount",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "sell",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "abs": "111111111111111111111111111111111111111"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_amount"
+   }
+  },
+  {
+   "name": "zat amount above i64",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "9223372036854775808"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_amount"
+   }
+  },
+  {
+   "name": "swap with now",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "manual_start"
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "swap",
+       "from": "So11111111111111111111111111111111111111112",
+       "to": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+       "amount": {
+        "abs": "5"
+       },
+       "guardSell": {
+        "slippageBps": 500
+       },
+       "guardBuy": {
+        "limitPrice": "1"
+       },
+       "exec": "now"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 1,
+    "code": "bad_exec"
+   }
+  },
+  {
+   "name": "swap to itself",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "swap",
+       "from": "So11111111111111111111111111111111111111112",
+       "to": "So11111111111111111111111111111111111111112",
+       "amount": {
+        "abs": "5"
+       },
+       "guardSell": {
+        "slippageBps": 500
+       },
+       "guardBuy": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "same_mint"
+   }
+  },
+  {
+   "name": "time_at in the past",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "time_at",
+       "at": 1791763140000
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_range"
+   }
+  },
+  {
+   "name": "time_at within TTL",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "time_at",
+       "at": 1791766800000
+      }
+     },
+     {
+      "id": 1,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 1,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "smart withdrawal: one address per part",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+       "amount": {
+        "abs": "1000"
+       },
+       "to": [
+        "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T"
+       ],
+       "smart": {
+        "parts": 2,
+        "maxDelayMin": 30
+       },
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_address"
+   }
+  },
+  {
+   "name": "smart withdrawal ok",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "withdraw_token",
+       "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+       "amount": {
+        "abs": "1000"
+       },
+       "to": [
+        "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+        "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+       ],
+       "smart": {
+        "parts": 2,
+        "maxDelayMin": 30
+       },
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": true,
+    "runs": 1,
+    "ttlSecs": 86400
+   }
+  },
+  {
+   "name": "venue not enabled",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "bags",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_venue"
+   }
+  },
+  {
+   "name": "unknown block",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "teleport"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "unknown_block"
+   }
+  },
+  {
+   "name": "unknown field",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "buy",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "zec": {
+        "abs": "1000000"
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "delayed",
+       "extra": 1
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_field"
+   }
+  },
+  {
+   "name": "DCA longer than the TTL",
+   "plan": {
+    "v": 1,
+    "steps": [
+     {
+      "id": 0,
+      "block": {
+       "type": "dca",
+       "side": "sell",
+       "venue": "pumpfun",
+       "mint": "So11111111111111111111111111111111111111112",
+       "total": {
+        "pct": 100,
+        "of": "balance"
+       },
+       "slices": 12,
+       "everySecs": {
+        "min": 3600,
+        "max": 10800
+       },
+       "guard": {
+        "slippageBps": 500
+       },
+       "exec": "max"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "ok": false,
+    "error": "scenario_invalid",
+    "step": 0,
+    "code": "bad_range"
+   }
+  }
+ ]
+}

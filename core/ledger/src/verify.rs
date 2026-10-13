@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use tokio_postgres::IsolationLevel;
 use unzeen_protocol::verify::{self as pv, Node, SnapshotHeader};
 
+use crate::num::Num;
 use crate::{Ledger, LedgerError, Result, to_i64, to_u64};
 
 /// Max assets in one proof response (ZEC + 11 random).
@@ -75,7 +76,7 @@ pub struct SnapshotRow {
     pub solana_slot: u64,
     pub zcash_height: u32,
     pub zec_reserve_zat: u64,
-    pub committed_lamports: u64,
+    pub committed_lamports: u128,
     pub rate_sell: Option<u64>,
     pub rate_buy: Option<u64>,
     /// v0.13 `quoteAssets` (NULL for snapshots built before 0019).
@@ -85,7 +86,7 @@ pub struct SnapshotRow {
     /// (asset, decimals, granule, root, sum)
     pub trees: Vec<(String, i16, u64, Vec<u8>, String)>,
     /// (address, sig, lamports, tokens)
-    pub vaults: Vec<(String, String, u64, Value)>,
+    pub vaults: Vec<(String, String, u128, Value)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -373,8 +374,8 @@ impl Ledger {
         // per key → piece numbers unique (E6).
         let zec_rows = tx
             .query(
-                "SELECT anon_pubkey, sum(z)::bigint, sum(l)::bigint FROM (
-                     SELECT anon_pubkey, available_zat + held_zat AS z, 0::bigint AS l FROM balances
+                "SELECT anon_pubkey, sum(z)::bigint, sum(l) FROM (
+                     SELECT anon_pubkey, available_zat + held_zat AS z, 0::numeric AS l FROM balances
                      UNION ALL
                      SELECT anon_pubkey, zat, lamports FROM creator_claimable WHERE lamports > 0 OR zat > 0
                  ) x GROUP BY anon_pubkey HAVING sum(z) > 0 OR sum(l) > 0 ORDER BY anon_pubkey",
@@ -385,11 +386,16 @@ impl Ledger {
         for r in zec_rows {
             let pk: Vec<u8> = r.get(0);
             let Ok(pk) = pk.try_into() else { continue };
-            let (z, l) = (to_u64(r.get(1)), to_u64(r.get(2)));
+            // Claimable lamports (wei) are NUMERIC; the ZEC leaf they turn into is u64 zat.
+            let (z, l) = (to_u64(r.get(1)), r.get::<_, Num>(2).u128_or_zero());
             let fees = if l == 0 {
                 0
             } else {
-                match rates.buy.and_then(|rb| pv::claimable_zat(l, rb)) {
+                let f = rates
+                    .buy
+                    .filter(|rb| *rb > 0)
+                    .and_then(|rb| u64::try_from(l.checked_mul(100_000_000)?.div_ceil(u128::from(rb))).ok());
+                match f {
                     Some(f) => f,
                     None => return Ok(Err("no_rate")),
                 }
@@ -417,7 +423,10 @@ impl Ledger {
             if assets.last().is_none_or(|a| a.0 != mint) {
                 assets.push((mint, dec, pv::MINT_GRANULE, vec![]));
             }
-            assets.last_mut().expect("pushed").3.push((pk, to_u64(r.get(3))));
+            // Verify v1/v2 leaves are u64 (a Solana SPL amount always fits); a larger per-key
+            // balance (18-decimal ERC-20) needs Verify v3 and fails the snapshot loudly.
+            let v = r.get::<_, Num>(3).to_u64()?;
+            assets.last_mut().expect("pushed").3.push((pk, v));
         }
 
         // Pieces (rounded up, split 2..4), common tree size.
@@ -605,7 +614,7 @@ impl Ledger {
                 &to_i64(zec_reserve)?,
                 &(n as i32),
                 &digest.to_vec(),
-                &committed,
+                &Num::from(committed),
                 &rate,
                 &job,
                 &rate_buy,
@@ -805,7 +814,7 @@ impl Ledger {
             )
             .await?
             .into_iter()
-            .map(|v| (v.get(0), v.get(1), to_u64(v.get(2)), v.get(3)))
+            .map(|v| (v.get(0), v.get(1), v.get::<_, Num>(2).u128_or_zero(), v.get(3)))
             .collect();
         Ok(Some(SnapshotRow {
             id: sid,
@@ -818,7 +827,7 @@ impl Ledger {
             solana_slot: to_u64(r.get::<_, Option<i64>>(7).unwrap_or(0)),
             zcash_height: r.get::<_, Option<i32>>(8).unwrap_or(0) as u32,
             zec_reserve_zat: to_u64(r.get::<_, Option<i64>>(9).unwrap_or(0)),
-            committed_lamports: to_u64(r.get::<_, Option<i64>>(10).unwrap_or(0)),
+            committed_lamports: crate::num::u128_of(r.get(10)),
             rate_sell: r.get::<_, Option<i64>>(11).map(to_u64),
             rate_buy: r.get::<_, Option<i64>>(12).map(to_u64),
             quote_assets: r.get(13),

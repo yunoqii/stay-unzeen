@@ -51,11 +51,16 @@ pub fn k_count(n: u64, k: u64) -> Value {
 
 /// Decimal string of `v` base units rounded DOWN to `step`, or `"<k"` when it is built from
 /// fewer than `k` events.
-pub fn k_amount(events: u64, v: u64, step: u64, decimals: u32, k: u64) -> Value {
+pub fn k_amount(events: u64, v: u128, step: u128, decimals: u32, k: u64) -> Value {
     if events < k {
         return json!(format!("<{k}"));
     }
-    json!(units(round_down(v, step), decimals))
+    json!(units(round_down_u128(v, step), decimals))
+}
+
+/// [`round_down`] for NUMERIC(78,0) sums (wei volumes pass u64).
+pub fn round_down_u128(v: u128, step: u128) -> u128 {
+    if step <= 1 { v } else { v - v % step }
 }
 
 pub fn round_down(v: u64, step: u64) -> u64 {
@@ -63,9 +68,9 @@ pub fn round_down(v: u64, step: u64) -> u64 {
 }
 
 /// `v / 10^decimals` as a plain decimal string without trailing zeros ("12.5", "0", "3").
-pub fn units(v: u64, decimals: u32) -> String {
-    let d = 10u128.pow(decimals);
-    let (w, f) = ((v as u128) / d, (v as u128) % d);
+pub fn units(v: u128, decimals: u32) -> String {
+    let d = 10u128.pow(decimals.min(38));
+    let (w, f) = (v / d, v % d);
     if f == 0 {
         return w.to_string();
     }
@@ -87,7 +92,8 @@ pub fn zec_publish(prev: Option<(u64, u64)>, total_zat: u64, count: u64, p: &Sta
 #[derive(Clone, Debug, Default)]
 struct VenueAgg {
     trades: u64,
-    volume: u64,
+    /// Σ quote base units (lamports; wei on Robinhood Chain), NUMERIC sum.
+    volume: u128,
     launches: u64,
 }
 
@@ -177,7 +183,7 @@ async fn compute<C: GenericClient>(
             &format!(
                 "SELECT venue,
                         count(*) FILTER (WHERE kind IN ('buy', 'sell')),
-                        COALESCE(sum(sol_amount) FILTER (WHERE kind IN ('buy', 'sell')), 0)::bigint,
+                        COALESCE(sum(sol_amount) FILTER (WHERE kind IN ('buy', 'sell')), 0),
                         count(*) FILTER (WHERE kind = 'create')
                  FROM trades WHERE ts < {CUT} GROUP BY venue"
             ),
@@ -190,7 +196,7 @@ async fn compute<C: GenericClient>(
     for r in &rows {
         let a = VenueAgg {
             trades: to_u64(r.get(1)),
-            volume: to_u64(r.get(2)),
+            volume: r.get::<_, crate::num::Num>(2).u128_or_zero(),
             launches: to_u64(r.get(3)),
         };
         total.trades += a.trades;
@@ -207,7 +213,7 @@ async fn compute<C: GenericClient>(
         by.insert(
             v.into(),
             json!({
-                "volumeSol": k_amount(a.trades, a.volume, p.sol_round_lamports, 9, k),
+                "volumeSol": k_amount(a.trades, a.volume, p.sol_round_lamports.into(), 9, k),
                 "trades": k_count(a.trades, k),
                 "launches": k_count(a.launches, k),
             }),
@@ -242,7 +248,7 @@ async fn compute<C: GenericClient>(
                 "SELECT t.mint, t.symbol, t.name, t.image, t.venue, t.status, t.decimals,
                         trim_scale(t.price_sol)::text, trim_scale(t.market_cap_sol)::text,
                         (extract(epoch FROM t.created_at) * 1000)::bigint, x.vol, x.n
-                 FROM (SELECT mint, sum(sol_amount)::bigint AS vol, count(*) AS n FROM trades
+                 FROM (SELECT mint, sum(sol_amount) AS vol, count(*) AS n FROM trades
                        WHERE kind IN ('buy', 'sell') AND ts < {CUT}
                          AND ts >= {CUT} - make_interval(days => $2)
                        GROUP BY mint HAVING count(*) >= $3) x
@@ -265,7 +271,10 @@ async fn compute<C: GenericClient>(
                 "priceSol": r.get::<_, String>(7),
                 "marketCapSol": r.get::<_, String>(8),
                 "createdAt": r.get::<_, i64>(9),
-                "volumeSol": units(round_down(to_u64(r.get(10)), p.sol_round_lamports), 9),
+                "volumeSol": units(
+                    round_down_u128(r.get::<_, crate::num::Num>(10).u128_or_zero(), p.sol_round_lamports.into()),
+                    9
+                ),
                 "trades": to_u64(r.get(11)),
             });
             if let Some(img) = r.get::<_, Option<String>>(3) {
@@ -276,10 +285,10 @@ async fn compute<C: GenericClient>(
         .collect();
 
     let data = json!({
-        "volumeSol": k_amount(total.trades, total.volume, p.sol_round_lamports, 9, k),
+        "volumeSol": k_amount(total.trades, total.volume, p.sol_round_lamports.into(), 9, k),
         "trades": k_count(total.trades, k),
         "launches": k_count(total.launches, k),
-        "zecShielded": k_amount(zec_n, zec_zat, p.zec_round_zat, 8, k),
+        "zecShielded": k_amount(zec_n, zec_zat.into(), p.zec_round_zat.into(), 8, k),
         "byVenue": by,
         "topTokens": top,
         "topWindowDays": p.top_window_days,
@@ -308,7 +317,11 @@ mod tests {
         assert_eq!(units(1_500_000_000, 9), "1.5");
         assert_eq!(units(1, 9), "0.000000001");
         assert_eq!(units(250_000_000, 8), "2.5");
-        assert_eq!(units(u64::MAX, 9), "18446744073.709551615");
+        assert_eq!(units(u64::MAX as u128, 9), "18446744073.709551615");
+        // wei: 1e27 base units with 18 decimals = 1e9 whole tokens.
+        assert_eq!(units(10u128.pow(27), 18), "1000000000");
+        assert_eq!(units(4_200_000_000_000_000_001, 18), "4.200000000000000001");
+        assert_eq!(round_down_u128(10u128.pow(27) + 123, 100), 10u128.pow(27) + 100);
         assert_eq!(round_down(1_999, 1_000), 1_000);
         assert_eq!(round_down(1_999, 0), 1_999);
         assert_eq!(round_down(1_999, 1), 1_999);

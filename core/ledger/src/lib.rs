@@ -16,6 +16,7 @@ pub mod creator_fees;
 pub mod decide;
 pub mod fair;
 mod migrate;
+pub mod num;
 pub mod orders;
 pub mod payouts;
 pub mod quotes;
@@ -34,6 +35,7 @@ pub use actions::{
 pub use chat::{ChatMsgMeta, ChatPost, ChatQuery, ChatRequest, NonceCtx};
 pub use deadpool_postgres;
 pub use decide::{MemoInput, NoteObs, Outcome, Policy, Stage, evaluate};
+pub use num::Num;
 pub use payouts::{HeldPayout, InflightPayout, PayoutRow};
 pub use quotes::PoolQuote;
 pub use rebalance::{FundOutcome, History as RebalanceHistory, Inventory, LiveRebalance, RebalanceView};
@@ -222,7 +224,7 @@ pub struct CreatorRules {
     /// Lock of the initial-buy tokens, seconds (0 = off). The end is rounded UP to the hour.
     pub lock_secs: u64,
     /// Max position of the creator through the pool, token base units (0 = off).
-    pub cap_tokens: u64,
+    pub cap_tokens: u128,
     /// Upper bound of the venue creator fee on the launch buy, bps of the lamports paid
     /// (fees included), used when the relayer did not report the exact fee (API v0.9).
     pub launch_fee_bps_pumpfun: u32,

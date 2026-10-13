@@ -143,7 +143,11 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
     let key = note_ref_key(c, &db)?;
     // Public facts for `GET /api/pool` (the API server has no wallet access).
     let ua = wallet::show(c)?.ua_orchard;
-    let cluster = crate::rebalance::cluster_str(policy.chain.solana);
+    let solana = policy
+        .chain
+        .solana()
+        .ok_or_else(|| anyhow::anyhow!("Robinhood Chain pools are not served by this scanner yet"))?;
+    let cluster = crate::rebalance::cluster_str(solana);
     if let Err(msg) = ledger.check_pool_network(c.network.as_str(), cluster).await? {
         anyhow::bail!("refusing to start: {msg}");
     }
@@ -175,7 +179,7 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
         None
     };
     let rebalance_cfg = if rebalance {
-        let cfg = crate::rebalance::RebalanceCfg::from_env(c, policy.chain.solana)?;
+        let cfg = crate::rebalance::RebalanceCfg::from_env(c, solana)?;
         match cfg.dry_reason() {
             Some(reason) => info!(reason, "rebalance enabled in DRY-RUN mode (quotes only, nothing sent)"),
             None => {

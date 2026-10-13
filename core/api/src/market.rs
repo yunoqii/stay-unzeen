@@ -16,7 +16,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
-use unzeen_ledger::{LedgerError, tokio_postgres::Row};
+use unzeen_ledger::{LedgerError, Num, tokio_postgres::Row};
 
 use crate::{
     AppState,
@@ -46,8 +46,9 @@ fn trade_json(r: &Row) -> Value {
         "venue": r.get::<_, String>(2),
         "mint": r.get::<_, String>(3),
         "symbol": r.get::<_, String>(4),
-        "tokenAmount": r.get::<_, i64>(5).to_string(),
-        "solAmount": r.get::<_, i64>(6).to_string(),
+        // v0.18: NUMERIC(78,0) (18-decimal tokens, wei), always decimal strings.
+        "tokenAmount": r.get::<_, Num>(5).to_string(),
+        "solAmount": r.get::<_, Num>(6).to_string(),
         "decimals": r.get::<_, i16>(7),
         "solanaTx": r.get::<_, String>(8),
         "ts": r.get::<_, i64>(9),
@@ -175,9 +176,9 @@ pub fn lamports_sol(l: i64) -> String {
 
 /// v0.12 list fields of /tokens (filters and sorting in the browser): every value is public
 /// (the pool's own trades in the feed, the indexer's tick snapshot).
-fn list_fields(v: &mut Value, unzeen_launch: bool, vol24: i64, trades24: i64, progress: Option<String>) {
+fn list_fields(v: &mut Value, unzeen_launch: bool, vol24: Num, trades24: i64, progress: Option<String>) {
     v["unzeenLaunch"] = json!(unzeen_launch);
-    v["volume24hSol"] = json!(lamports_sol(vol24));
+    v["volume24hSol"] = json!(unzeen_ledger::stats::units(vol24.u128_or_zero(), 9));
     v["unzeenTrades24h"] = json!(trades24.max(0));
     if let Some(p) = progress {
         v["curveProgressPct"] = json!(p);
@@ -200,7 +201,7 @@ pub async fn tokens(State(st): State<AppState>, Query(q): Query<HashMap<String, 
                     trim_scale(t.price_sol)::text, trim_scale(t.market_cap_sol)::text,
                     (extract(epoch FROM t.created_at) * 1000)::bigint,
                     EXISTS (SELECT 1 FROM trades c WHERE c.mint = t.mint AND c.kind = 'create'),
-                    COALESCE(a.vol, 0)::bigint, COALESCE(a.n, 0)::bigint,
+                    COALESCE(a.vol, 0), COALESCE(a.n, 0)::bigint,
                     CASE WHEN t.status = 'curve' THEN s.data->'market'->>'curveProgressPct' END,
                     t.quote_mint, trim_scale(t.price_quote)::text, t.platform
              FROM tokens t
@@ -392,7 +393,7 @@ pub async fn trades(
             .iter()
             .map(|r| {
                 let mut v = trade_json(r);
-                let tags: Vec<&str> = if r.get::<_, i64>(6) >= whale {
+                let tags: Vec<&str> = if r.get::<_, Num>(6).0 >= i128::from(whale) {
                     vec!["whale"]
                 } else {
                     vec![]

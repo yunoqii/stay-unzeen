@@ -833,7 +833,7 @@ mod tests {
     use std::sync::Mutex;
 
     use serde_json::{Value, json};
-    use unzeen_ledger::{PgConfig, Policy, tokio_postgres};
+    use unzeen_ledger::{Num, PgConfig, Policy, tokio_postgres};
     use unzeen_protocol::{ChainId, ZcashNet};
     use zcash_address::ToAddress;
     use zcash_protocol::consensus::NetworkType;
@@ -1193,7 +1193,7 @@ mod tests {
             .await;
         assert_eq!(r.get::<_, String>(0), "dry_run");
         assert!(r.get::<_, bool>(1));
-        assert_eq!(r.get::<_, i64>(2), 5_600_000_000);
+        assert_eq!(r.get::<_, Num>(2).0, 5_600_000_000);
         assert_eq!(
             r.get::<_, Option<String>>(3),
             None,
@@ -1249,7 +1249,7 @@ mod tests {
             .await;
         assert_eq!(j.get::<_, String>(1), "fund_vaults");
         assert_eq!(
-            j.get::<_, i64>(2),
+            j.get::<_, Num>(2).0,
             5_580_000_000,
             "amount out minus the kept fee buffer"
         );
@@ -1271,7 +1271,7 @@ mod tests {
             .await;
         assert_eq!(r.get::<_, i64>(0), 0, "core settles fund_vaults jobs");
         assert_eq!(r.get::<_, String>(1), "done");
-        assert_eq!(r.get::<_, i64>(2), 5_590_000_000);
+        assert_eq!(r.get::<_, Num>(2).0, 5_590_000_000);
         assert!(r.get::<_, bool>(3), "1Click quote signature kept for disputes");
         assert_eq!((w.builds, oc.0.lock().unwrap().quotes), (1, 1));
         db.drop().await;
@@ -1392,7 +1392,7 @@ mod tests {
             .one("SELECT target, status, amount_out FROM pool_rebalances WHERE target = 'zec_spl'")
             .await;
         assert_eq!(
-            (t.get::<_, String>(0), t.get::<_, String>(1), t.get::<_, i64>(2)),
+            (t.get::<_, String>(0), t.get::<_, String>(1), t.get::<_, Num>(2).0),
             ("zec_spl".into(), "done".into(), 49_976_005)
         );
         db.drop().await;

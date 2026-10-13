@@ -1,8 +1,10 @@
 //! anon-key derivation (docs/API.md, "Подпись запросов anon-ключом").
 //!
 //! BIP-39 seed (64 bytes, empty passphrase) → SLIP-0010 ed25519, path
-//! `m/44'/133'/<net>'/0'`, where `<net>` = 0 for mainnet and 1 for devnet/testnet.
-//! One phrase therefore yields a different anon identity per network.
+//! `m/44'/133'/<net>'/0'`, where `<net>` = 0 for Solana mainnet (`0101`), 1 for Solana devnet
+//! (`0202`), v0.18: 2 for Robinhood Chain mainnet (`0111`), 3 for its testnet (`0212`).
+//! One phrase therefore yields a different anon identity per network and per chain (a leaked
+//! Solana ledger cannot be joined with a Robinhood one by key).
 //!
 //! The web client derives keys; core implements the same function for test vectors and
 //! dev tools only.
@@ -10,17 +12,18 @@
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha512;
 
-use crate::{ChainId, SigningKey, SolanaCluster, ZcashNet};
+use crate::{ChainId, HoodNet, SigningKey, SolanaCluster, TradeNet, ZcashNet};
 
 const HARDENED: u32 = 0x8000_0000;
 
-/// Network index in the path: 0 = mainnet (Zcash mainnet + Solana mainnet-beta),
-/// 1 = everything else (testnet / devnet).
+/// Network index in the path: 0 = Zcash mainnet + Solana mainnet-beta, 1 = Solana devnet /
+/// testnet (unchanged since v0.3), 2 = Robinhood Chain mainnet, 3 = Robinhood Chain testnet.
 pub fn network_index(chain: ChainId) -> u32 {
-    if chain.zcash == ZcashNet::Mainnet && chain.solana == SolanaCluster::MainnetBeta {
-        0
-    } else {
-        1
+    match chain.trade {
+        TradeNet::Solana(SolanaCluster::MainnetBeta) if chain.zcash == ZcashNet::Mainnet => 0,
+        TradeNet::Solana(_) => 1,
+        TradeNet::Hood(HoodNet::Mainnet) => 2,
+        TradeNet::Hood(HoodNet::Testnet) => 3,
     }
 }
 
@@ -89,5 +92,16 @@ mod tests {
         assert_eq!(path_string(m), "m/44'/133'/0'/0'");
         assert_eq!(path_string(t), "m/44'/133'/1'/0'");
         assert_ne!(derive(&seed, m).to_bytes(), derive(&seed, t).to_bytes());
+        // v0.18 Robinhood Chain: own indices, own keys.
+        let hm = ChainId::hood(ZcashNet::Mainnet, HoodNet::Mainnet);
+        let ht = ChainId::hood(ZcashNet::Testnet, HoodNet::Testnet);
+        assert_eq!(path_string(hm), "m/44'/133'/2'/0'");
+        assert_eq!(path_string(ht), "m/44'/133'/3'/0'");
+        let keys = [m, t, hm, ht].map(|c| derive(&seed, c).to_bytes());
+        for i in 0..4 {
+            for j in i + 1..4 {
+                assert_ne!(keys[i], keys[j]);
+            }
+        }
     }
 }

@@ -334,12 +334,22 @@ impl TestDb {
         self.admin.execute(q, &[]).await.unwrap()
     }
 
-    async fn scalar_i64(&self, q: &str) -> i64 {
+    async fn scalar_text(&self, q: &str) -> String {
         self.admin
             .execute(&format!("SET search_path = {}", self.schema), &[])
             .await
             .unwrap();
         self.admin.query_one(q, &[]).await.unwrap().get(0)
+    }
+
+    async fn scalar_i64(&self, q: &str) -> i64 {
+        self.admin
+            .execute(&format!("SET search_path = {}", self.schema), &[])
+            .await
+            .unwrap();
+        // BIGINT or NUMERIC(78,0) (0026) alike.
+        let n: unzeen_ledger::Num = self.admin.query_one(q, &[]).await.unwrap().get(0);
+        i64::try_from(n.0).unwrap()
     }
 }
 
@@ -358,7 +368,7 @@ fn action(kind: &str, amount: u64, fee: u64, token: Option<(&str, u64)>, jobs: V
         kind: kind.into(),
         amount_zat: amount,
         fee_zat: fee,
-        token_hold: token.map(|(m, n)| (m.to_string(), n)),
+        token_hold: token.map(|(m, n)| (m.to_string(), u128::from(n))),
         rate: Some(RateUsed {
             lamports_per_zec: RATE,
             source: "fixed".into(),
@@ -376,7 +386,7 @@ fn buy_job(mint: &str, lamports: u64) -> NewJob {
     NewJob {
         venue: Some("pumpfun".into()),
         mint: Some(mint.into()),
-        lamports_in: Some(lamports),
+        lamports_in: Some(lamports.into()),
         min_out: Some(1),
         ..NewJob::new(JobOp::Buy, 0.0)
     }
@@ -536,7 +546,7 @@ async fn buy_sell_withdraw_settlement() {
     // WITHDRAW_TOKEN in 2 parts with a fee: one part fails -> its tokens come back, fee spent.
     let part = |n: u64| NewJob {
         mint: Some("MINT".into()),
-        token_amount: Some(n),
+        token_amount: Some(n.into()),
         dest: Some("DEST".into()),
         gas_lamports: Some(1_000_000),
         ..NewJob::new(JobOp::Transfer, 0.0)
@@ -957,4 +967,93 @@ async fn big_payouts_wait_without_blocking() {
     assert_eq!(l.held_payouts(1_000_000).await.unwrap().len(), 4);
     // No cap (testnet): everything.
     assert_eq!(l.ready_payouts(10, None).await.unwrap().len(), 6);
+}
+
+/// 0026 / API v0.18: token amounts of an 18-decimal ERC-20 (1e27 base units) and quote amounts
+/// in wei (> i64::MAX) go through hold → job → settlement → holdings without truncation.
+#[tokio::test]
+async fn numeric_amounts_beyond_u64() {
+    let Some(db) = setup().await else { return };
+    let l = &db.ledger;
+    let e27: u128 = 10u128.pow(27);
+    fund(l, 11, 0, 5_000_000).await;
+    let me = pk(11);
+    let hexpk = hex::encode(me);
+    // A buy whose job spends 4.2 ETH (wei, > i64::MAX) and receives 1e27 + 1 tokens.
+    let wei_in: u128 = 4_200_000_000_000_000_000;
+    let buy = NewAction {
+        jobs: vec![NewJob {
+            venue: Some("pumpfun".into()),
+            mint: Some("BIG".into()),
+            lamports_in: Some(wei_in),
+            min_out: Some(e27 + 123_456),
+            ..NewJob::new(JobOp::Buy, 0.0)
+        }],
+        ..action("buy", 1_000_000, 0, None, vec![])
+    };
+    let b = l.submit(&me, &[1; 16], &[1; 32], &buy).await.unwrap();
+    // min_out quantized to 3 significant digits, exactly, at 1e27 scale.
+    assert_eq!(
+        db.scalar_text("SELECT lamports_in::text || '/' || min_out::text FROM relayer_jobs")
+            .await,
+        format!("{wei_in}/{e27}")
+    );
+    db.sql(&format!(
+        "UPDATE relayer_jobs SET status = 'confirmed', signature = 'S1', out_token_amount = {}, out_lamports = {}",
+        e27 + 1,
+        wei_in / 2
+    ))
+    .await;
+    assert_eq!(l.settle_ready(10).await.unwrap(), 1);
+    let h = &l.token_holdings(&me).await.unwrap()[0];
+    assert_eq!((h.mint.as_str(), h.available, h.held), ("BIG", e27 + 1, 0));
+    // Half the wei unspent → half the ZEC back.
+    assert_eq!(l.balance(&me).await.unwrap().unwrap().available_zat, 4_500_000);
+    let v = l.action_view(&me, &b.id).await.unwrap().unwrap();
+    assert_eq!(v.fill.unwrap()["tokenAmount"], (e27 + 1).to_string());
+
+    // Sell 1e27 of it: hold, then a partial fill (sold 7e26) returns the rest.
+    let sell = NewAction {
+        jobs: vec![NewJob {
+            venue: Some("pumpfun".into()),
+            mint: Some("BIG".into()),
+            token_amount: Some(e27),
+            min_out: Some(1),
+            ..NewJob::new(JobOp::Sell, 0.0)
+        }],
+        token_hold: Some(("BIG".into(), e27)),
+        ..action("sell", 0, 0, None, vec![])
+    };
+    l.submit(&me, &[2; 16], &[2; 32], &sell).await.unwrap();
+    let h = &l.token_holdings(&me).await.unwrap()[0];
+    assert_eq!((h.available, h.held), (1, e27));
+    // Two holds of 1e27 do not fit: insufficient, nothing changes.
+    let again = NewAction {
+        token_hold: Some(("BIG".into(), e27)),
+        ..action("sell", 0, 0, None, vec![])
+    };
+    assert!(matches!(
+        l.submit(&me, &[3; 16], &[3; 32], &again).await,
+        Err(LedgerError::InsufficientBalance)
+    ));
+    db.sql(&format!(
+        "UPDATE relayer_jobs SET status = 'confirmed', signature = 'S2', out_token_amount = 7{z}, out_lamports = 10000000000
+          WHERE op = 'sell'",
+        z = "0".repeat(26)
+    ))
+    .await;
+    assert_eq!(l.settle_ready(10).await.unwrap(), 1);
+    let h = &l.token_holdings(&me).await.unwrap()[0];
+    assert_eq!((h.available, h.held), (3 * 10u128.pow(26) + 1, 0));
+    // 1e10 lamports at 1e10 lamports/ZEC = 1 ZEC credited.
+    assert_eq!(l.balance(&me).await.unwrap().unwrap().available_zat, 104_500_000);
+    // The journal keeps signed NUMERIC deltas.
+    assert_eq!(
+        db.scalar_text(&format!(
+            "SELECT sum(delta_available)::text FROM token_ops WHERE anon_pubkey = '\\x{hexpk}'"
+        ))
+        .await,
+        (3 * 10u128.pow(26) + 1).to_string()
+    );
+    db.drop_schema().await;
 }

@@ -15,6 +15,7 @@
 use deadpool_postgres::GenericClient;
 use serde_json::{Value, json};
 
+use crate::num::Num;
 use crate::{Ledger, LedgerError, Result, to_i64, to_u64};
 
 /// ZEC SPL (Zcash on Solana, bridged) — target of `zec_spl` rebalances (0019).
@@ -97,8 +98,14 @@ pub enum FundOutcome {
     Attention,
 }
 
-fn opt_u64(v: Option<i64>) -> Option<u64> {
-    v.map(to_u64)
+/// The ZEC → SOL rebalance is Solana-only and keeps `u64` lamports; its NUMERIC(78,0) columns
+/// (0026) are converted here (a value above u64 reads as `u64::MAX`, never wraps).
+fn opt_u64(v: Option<Num>) -> Option<u64> {
+    v.map(num_u64)
+}
+
+fn num_u64(v: Num) -> u64 {
+    u64::try_from(v.0.max(0)).unwrap_or(u64::MAX)
 }
 
 fn opt_u32(v: Option<i32>) -> Option<u32> {
@@ -114,7 +121,12 @@ async fn insert_fund_job<C: GenericClient>(c: &C, network: &str, lamports: i64, 
     Ok(c.query_one(
         "INSERT INTO relayer_jobs (op, lamports_in, meta, network, exec_mode, not_before)
          VALUES ('fund_vaults', $1, $2, $3, 'delayed', now() + make_interval(secs => $4)) RETURNING id",
-        &[&lamports, &json!({ "purpose": "rebalance" }), &network, &delay_secs],
+        &[
+            &Num::from(lamports),
+            &json!({ "purpose": "rebalance" }),
+            &network,
+            &delay_secs,
+        ],
     )
     .await?
     .get(0))
@@ -133,9 +145,9 @@ impl Ledger {
             )
             .await?;
         Ok(row.map(|r| Inventory {
-            vault_lamports: to_u64(r.get(0)),
+            vault_lamports: num_u64(r.get(0)),
             vault_count: u32::try_from(r.get::<_, i32>(1)).unwrap_or(0),
-            rebalance_lamports: to_u64(r.get(2)),
+            rebalance_lamports: num_u64(r.get(2)),
             age_secs: secs(r.get(3)).unwrap_or(0),
         }))
     }
@@ -311,8 +323,8 @@ impl Ledger {
                     &id,
                     &deposit_address,
                     quote,
-                    &to_i64(amount_out_quote)?,
-                    &to_i64(min_amount_out)?,
+                    &Num::from(amount_out_quote),
+                    &Num::from(min_amount_out),
                     &(deadline_unix as f64),
                 ],
             )
@@ -334,7 +346,7 @@ impl Ledger {
                 "UPDATE pool_rebalances SET status = 'dry_run', quote = $2, quoted_at = now(), amount_out_quote = $3,
                         min_amount_out = $4, updated_at = now(), finished_at = now()
                  WHERE id = $1 AND status = 'planned' AND dry_run",
-                &[&id, quote, &to_i64(amount_out_quote)?, &to_i64(min_amount_out)?],
+                &[&id, quote, &Num::from(amount_out_quote), &Num::from(min_amount_out)],
             )
             .await?;
         Ok(n == 1)
@@ -444,7 +456,7 @@ impl Ledger {
                         oc_status = 'SUCCESS', amount_out = $2, dest_tx = $3, fund_quote_jobs = $4, updated_at = now(),
                         finished_at = CASE WHEN cardinality($4::bigint[]) = 0 THEN now() END
                  WHERE id = $1",
-                &[&id, &to_i64(amount_out)?, &dest_tx, &jobs],
+                &[&id, &Num::from(amount_out), &dest_tx, &jobs],
             )
             .await?;
             tx.commit().await?;
@@ -461,7 +473,7 @@ impl Ledger {
                     fund_attempts = CASE WHEN $4::bigint IS NULL THEN 0 ELSE 1 END, updated_at = now(),
                     finished_at = CASE WHEN $4::bigint IS NULL THEN now() END
              WHERE id = $1",
-            &[&id, &to_i64(amount_out)?, &dest_tx, &job],
+            &[&id, &Num::from(amount_out), &dest_tx, &job],
         )
         .await?;
         tx.commit().await?;
@@ -529,7 +541,9 @@ impl Ledger {
             return Ok(FundOutcome::Waiting);
         };
         let status: String = j.get(0);
-        let lamports: Option<i64> = j.get(1);
+        let lamports: Option<i64> = j
+            .get::<_, Option<Num>>(1)
+            .map(|n| i64::try_from(n.0).unwrap_or(i64::MAX));
         let out = match status.as_str() {
             "confirmed" => {
                 tx.execute(

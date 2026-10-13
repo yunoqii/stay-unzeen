@@ -14,7 +14,7 @@ use unzeen_ledger::{
 
 use crate::{
     AppState,
-    actions::{parse_amount, solana_address},
+    actions::{parse_amount, parse_token_amount, solana_address},
     error::{ApiError, ApiResult},
     rate::{apply_spread, zat_to_lamports},
 };
@@ -171,7 +171,12 @@ pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], 
                     ));
                 }
             };
-            let amount = parse_amount(&amount, "amount")?;
+            // limit_buy: zat (i64 range); sell kinds: token base units (v0.18, up to 38 digits).
+            let amount: u128 = if kind == "limit_buy" {
+                u128::from(parse_amount(&amount, "amount")?)
+            } else {
+                parse_token_amount(&amount, "amount")?
+            };
             if amount == 0 {
                 return Err(ApiError::bad_request("amount must be > 0"));
             }
@@ -200,15 +205,16 @@ pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], 
             let min_action = st.cfg.policy.min_action_zat;
             let gain = if buy {
                 // Creator cap: upper-bound tokens for this buy (initial curve, or the trigger price).
-                let lamports = zat_to_lamports(amount, rate(st, &r, true).lamports_per_zec);
+                let zat = u64::try_from(amount).map_err(|_| ApiError::bad_request("amount"))?;
+                let lamports = zat_to_lamports(zat, rate(st, &r, true).lamports_per_zec);
                 let lpw = (e18 / 1_000_000_000).min(u64::MAX as u128) as u64;
                 let spot = crate::launch::tokens_at_spot(lamports, lpw.max(1), dec);
                 let curve = crate::rules_curve(st, "pumpfun").await?.0;
-                Some(crate::launch::buy_gain_estimate(&curve, lamports, spot, 0))
+                Some(u128::from(crate::launch::buy_gain_estimate(&curve, lamports, spot, 0)))
             } else {
                 // Sell value at the trigger price must reach the minimum action.
                 let lamports = lo::sell_min_out(amount, e18, dec.clamp(0, 18) as u32, 0).unwrap_or(0);
-                let zat = (lamports as u128) * 100_000_000 / (rate(st, &r, false).lamports_per_zec.max(1) as u128);
+                let zat = lamports.saturating_mul(100_000_000) / (rate(st, &r, false).lamports_per_zec.max(1) as u128);
                 if zat < min_action as u128 {
                     return Err(ApiError::below_minimum(
                         "order value at the trigger price below PoolInfo.minActionZat",

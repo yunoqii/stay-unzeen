@@ -293,8 +293,8 @@ pub struct LaunchConfig {
 }
 
 impl LaunchConfig {
-    pub fn cap_tokens(&self) -> u64 {
-        ((self.total_supply as u128) * (self.cap_bps as u128) / 10_000) as u64
+    pub fn cap_tokens(&self) -> u128 {
+        (self.total_supply as u128) * (self.cap_bps as u128) / 10_000
     }
 
     pub fn rules(&self) -> unzeen_ledger::CreatorRules {
@@ -537,7 +537,7 @@ impl Config {
         }
         if launch.virtual_sol_lamports == 0
             || launch.total_supply == 0
-            || launch.virtual_token_reserves <= launch.cap_tokens()
+            || u128::from(launch.virtual_token_reserves) <= launch.cap_tokens()
         {
             bail!("UNZEEN_LAUNCH_*: need virtual reserves > 0 and > the creator cap");
         }
@@ -682,6 +682,14 @@ impl Config {
                 }
             },
         };
+        // v0.18: venues of another chain (pons = Robinhood Chain) cannot be enabled on Solana.
+        if let Some(v) = cfg
+            .venues
+            .iter()
+            .find(|v| crate::actions::HOOD_VENUES.contains(&v.as_str()))
+        {
+            bail!("UNZEEN_VENUES: {v} is a Robinhood Chain venue; this server trades on Solana");
+        }
         Ok(cfg)
     }
 

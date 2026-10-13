@@ -182,18 +182,19 @@ impl Ledger {
         let Some(rate) = lamports_per_zec_sell.filter(|r| *r > 0) else {
             return Ok((zat, frozen));
         };
-        let lamports: i64 = c
+        let lamports: u128 = c
             .query_one(
                 "SELECT COALESCE(floor(sum((b.available + b.held)::numeric * p.price_sol * 1e9
-                                            / power(10::numeric, COALESCE(t.decimals, 6)))), 0)::bigint
+                                            / power(10::numeric, COALESCE(t.decimals, 6)))), 0)
                  FROM token_balances b JOIN intel_prices p ON p.mint = b.mint
                  LEFT JOIN tokens t ON t.mint = b.mint
                  WHERE b.anon_pubkey = $1",
                 &[&pk_s],
             )
             .await?
-            .get(0);
-        let tok_zat = ((to_u64(lamports) as u128) * 100_000_000 / rate as u128).min(u64::MAX as u128) as u64;
+            .get::<_, crate::num::Num>(0)
+            .u128_or_zero();
+        let tok_zat = (lamports.saturating_mul(100_000_000) / rate as u128).min(u64::MAX as u128) as u64;
         Ok((zat.saturating_add(tok_zat), frozen))
     }
 

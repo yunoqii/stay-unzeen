@@ -27,7 +27,7 @@ pub async fn cabinet(State(st): State<AppState>, method: Method, uri: Uri, heade
 }
 
 /// `CreatorToken` (API.md v0.9).
-pub fn token_json(r: &CreatorTokenRow, cap_bps: u64, cap_tokens: u64) -> Value {
+pub fn token_json(r: &CreatorTokenRow, cap_bps: u64, cap_tokens: u128) -> Value {
     let safety = r.safety.as_ref();
     let market = safety.and_then(|s| s.get("market"));
     // Snapshot of the indexer first (tick-fresh), then the token row.
