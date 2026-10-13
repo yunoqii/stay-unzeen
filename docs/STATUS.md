@@ -30,6 +30,7 @@
 - web: форма /launch (pump.fun/Meteora, лимит initial buy, правила), fair-launch UI (tlock в браузере, кольца, проверка включения, reveal) — код только в ленивом чанке; 202/202 (по отчёту)
 - core: доказательство Verify 64 КиБ, сборщик creator fees → claimable → claim, исправления fair-launch F1–F15, лимитки/TP/SL (все 4 типа), API v0.8; 131/131 (проверил лид)
 - web: /verify с проверкой в браузере, офлайн-скрипт; adapters: снимок vault для Verify, ключи аттестаций по назначению, ценовой проход
+- Черновики сдачи: `docs/submission/` (README, описание 1898/1948 символов, сценарий видео, чек-лист); LICENSE (MIT) добавлен
 - Ревью кода дня 2: `docs/analysis/review-day3.md` (critical нет; N1–N11 розданы агентам)
 - Ревью безопасности/приватности дня 2: `docs/analysis/review-day2.md` (3 critical закрыты решениями владельца, high — в работе у backend/frontend)
 - Ресёрч Zcash-стека: `docs/analysis/zcash-stack.md`
@@ -61,7 +62,6 @@
 - **Своей ноды Zebra/lightwalletd НЕ ставим** (окончательно, владелец). Только публичный lightwalletd (zec.rocks) + запасной; self-host/Tor — только строка в roadmap README
 
 ## Риски
-- creator fee от самой launch-tx уходит создателю (решение «пулу» не соблюдается, ~0.05–0.3% денег участников fair-launch)
 - Ключи аттестаций пусты на devnet → якоря Verify/fair не записаны (ждём пополнение владельцем, НЕ с vault)
 - Правила создателя действуют на один anon-ключ — обход вторым ключом не закрыть без связывания; в UI «rules apply to the launching key»
 - Контракт релейера: нет `avoid_vaults` в задании (вывод не знает vault покупки — сейчас эвристика), нет UPDATE not_before у роли, `create` в релейере не реализован, роль unzeen_relayer не проверена вживую

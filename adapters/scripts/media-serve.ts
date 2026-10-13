@@ -1,7 +1,7 @@
 /**
  * DEV ONLY: serves the published token media (UNZEEN_METADATA_DIR, default
  * $UNZEEN_HOME/<cluster>/media) on 127.0.0.1, so a local UNZEEN_METADATA_BASE_URL
- * resolves. Production: nginx / CDN serving the same directory.
+ * resolves. Production: nginx on our own VPS (no CDN) serving the same directory.
  *   pnpm media:serve [port=8787]   ->  http://127.0.0.1:8787/media/<sha>.<ext>
  * No access log (no IPs are recorded).
  */
