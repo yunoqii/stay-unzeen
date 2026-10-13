@@ -76,7 +76,10 @@ export class PgCreateIndex implements CreateIndexStore {
 
   async available(): Promise<boolean> {
     const r = await this.db
-      .query<{ ok: boolean }>(`SELECT to_regclass('intel_creates') IS NOT NULL AND has_table_privilege(current_user, 'intel_creates', 'INSERT,UPDATE,SELECT') AS ok`)
+      .query<{ ok: boolean }>(`SELECT to_regclass('intel_creates') IS NOT NULL
+                AND has_table_privilege(current_user, 'intel_creates', 'INSERT,SELECT')
+                AND has_column_privilege(current_user, 'intel_creates', 'rug', 'UPDATE')
+                AND has_column_privilege(current_user, 'intel_creates', 'rug_checked_at', 'UPDATE') AS ok`)
       .catch(() => null);
     return r?.rows[0]?.ok === true;
   }

@@ -337,6 +337,11 @@ describe("A4: reserve for the held first buy", () => {
     id: "1", part: 0, op: "create", venue: "bags", mint: null, lamports_in: "0", token_amount: null, min_out: "0", meta, dest: null, gas_lamports: null,
     network: "mainnet-beta", attempts: 0, status: "claimed", signature: null, last_valid_block_height: null, vault: null, sent_at_ms: null, not_before_ms: "0",
   });
+  it("core v0.17 writes `reserve_lamports` (number, lamports) into the Bags create meta: exactly that key is read", () => {
+    const meta = JSON.parse('{"name":"N","symbol":"S","reserve_lamports":123456789}'); // the shape core stores
+    expect(rowToSpec(row(meta), "mainnet-beta")).toMatchObject({ reserveLamports: 123_456_789n });
+    expect(rowToSpec(row({ name: "N", symbol: "S", reserveLamports: 123 }), "mainnet-beta")).not.toHaveProperty("reserveLamports"); // other spellings ignored
+  });
   it("meta.reserve_lamports is parsed (number or string) and refused when malformed", () => {
     expect(rowToSpec(row({ name: "N", symbol: "S", reserve_lamports: 250_000_000 }), "mainnet-beta")).toMatchObject({ kind: "create", reserveLamports: 250_000_000n });
     expect(rowToSpec(row({ name: "N", symbol: "S", reserve_lamports: "250000000" }), "mainnet-beta")).toMatchObject({ reserveLamports: 250_000_000n });

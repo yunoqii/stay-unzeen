@@ -330,3 +330,47 @@ describe.skipIf(!DB)("market_trades rows (live Postgres, temp schema)", () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// intel_creates with core's exact grants (0024 + infra/indexer-role.sql: UPDATE on rug columns only)
+// ---------------------------------------------------------------------------
+
+import { PgCreateIndex } from "../src/intel/dev-index";
+
+describe.skipIf(!DB)("intel_creates under the indexer role's column grants (live Postgres)", () => {
+  const schema = `intel_ci_${randomBytes(4).toString("hex")}`;
+  const role = `idx_${randomBytes(4).toString("hex")}`;
+  let admin: pg.Pool;
+  let pool: pg.Pool;
+  beforeAll(async () => {
+    admin = new pg.Pool({ connectionString: DB, max: 1 });
+    const ddl = fs.readFileSync(path.resolve(__dirname, "../../core/migrations/0024_intel_creates.sql"), "utf8");
+    const table = ddl.slice(ddl.indexOf("CREATE TABLE intel_creates"), ddl.indexOf(");", ddl.indexOf("CREATE TABLE intel_creates")) + 2);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    await admin.query(`SET search_path = ${schema}; ${table}`);
+    await admin.query(`CREATE ROLE ${role} NOLOGIN`);
+    await admin.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
+    // exactly infra/indexer-role.sql
+    await admin.query(`GRANT SELECT, INSERT, UPDATE (rug, rug_checked_at) ON ${schema}.intel_creates TO ${role}`);
+    pool = new pg.Pool({ connectionString: DB, max: 1, options: `-c search_path=${schema} -c role=${role}` });
+  });
+  afterAll(async () => {
+    await pool?.end();
+    await admin?.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    await admin?.query(`DROP ROLE IF EXISTS ${role}`);
+    await admin?.end();
+  });
+  it("available() is true with column-level UPDATE; record / rug / count work under that role", async () => {
+    const idx = new PgCreateIndex(pool, "mainnet-beta");
+    expect(await idx.available()).toBe(true);
+    await idx.record([{ mint: "M1", venue: "raydium-launchlab", creator: "D", slot: 5, createdAt: T - RUG_WINDOW_MS * 2, signature: "s1" }]);
+    await idx.record([{ mint: "M1", venue: "raydium-launchlab", creator: "D", slot: 5, createdAt: T, signature: "s1" }]); // replay ignored
+    await idx.setRug("M1", true);
+    expect(await idx.count("D")).toEqual({ launches: 1, rugs: 1, since: T - RUG_WINDOW_MS * 2 });
+    expect((await idx.byCreator("D", 5))[0]).toMatchObject({ mint: "M1", rug: true, venue: "raydium-launchlab" });
+  });
+  it("without the rug column grant: not available (kept in memory)", async () => {
+    await admin.query(`REVOKE UPDATE (rug) ON ${schema}.intel_creates FROM ${role}`);
+    expect(await new PgCreateIndex(pool, "mainnet-beta").available()).toBe(false);
+  });
+});
