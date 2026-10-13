@@ -2,7 +2,12 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.10** (13.10, исправления по `docs/analysis/review-day8.md`; миграция `0014_verify_review.sql`). Изменения против v0.9:
+Статус: **v0.11** (13.10, RUNBOOK GAP; миграция `0015_rebalance.sql` — внутренняя, на API не влияет). Изменения против v0.10:
+- **`PoolInfo.minClaimZat`** (новое поле, строка зат): минимум для `claim` — отдельный порог (env `MIN_CLAIM_ZAT`, по умолчанию 10 000 = 0.0001 ZEC, не больше `minActionZat`). `claim` меньше него → `422 below_minimum`. Кнопку «Claim» активировать при `claimableLamports` ≥ эквивалента `minClaimZat` по `lamportsPerZecSell` (раньше — `minActionZat`).
+- **Stats:** операторская команда `unzeen-api stats-snapshot --include-today` снимает статистику со срезом 00:00 UTC **завтра** (сегодняшняя активность видна; k-анонимность и округление те же). Ручные `verify-snapshot` / `stats-snapshot` на mainnet — только с `--allow-mainnet`. Контракт ответов не меняется.
+- Авторебаланс пула ZEC → SOL (NEAR Intents 1Click, `docs/RELAYER.md` v7) публичных полей не добавляет.
+
+Изменения v0.10 против v0.9 (13.10, исправления по `docs/analysis/review-day8.md`; миграция `0014_verify_review.sql`):
 - **Verify, дерево mint:** гранула = **1 базовая единица** (`granule: "1"`, было `10^decimals`): сумма корня mint = точная сумма балансов, совпадает с балансом vault (E1). ZEC — по-прежнему 0.001 ZEC.
 - **Verify, дерева `SOL` больше нет** (E5/E6). `claimable` создателя входит в его **ZEC-лист**: `значение = available + held + ceil(Σ claimable-лампортов ключа по всем mint × 1e8 / rateLamportsPerZecBuy)`, затем округление вверх до 0.001 ZEC. Одно значение на ключ → номера кусков уникальны в пределах ключа. `AssetId` = `"ZEC" | mint`. Новое поле снимка `rateLamportsPerZecBuy` (курс пересчёта). Есть `claimable`, но нет курса → снимок пропускается (`no_rate`) и повторяется.
 - **Verify, `committedLamports`** = только газ стоящих в очереди выводов токенов (`transfer`). SOL под стоящие в очереди buy/create — актив (его ZEC-hold и так в обязательствах), больше не вычитается (E9).
@@ -161,6 +166,7 @@ interface PoolInfo {
   chainId: string;          // hex 2 байта для подписи memo и HTTP: только "0202" (Zcash testnet + Solana devnet) или "0101" (mainnet + mainnet-beta)
   minDepositZat: string;    // ниже — не зачисляется (остаётся пулу как пыль)
   minActionZat: string;     // минимальная сумма действия с баланса (zecIn / withdraw_zec)
+  minClaimZat: string;      // v0.11: минимум claim (ZEC-эквивалент claimable), ≤ minActionZat
   confirmations: number;    // K: через сколько блоков депозит зачисляется (по умолчанию 3)
   fees: {                   // v0.4
     createFeeZat: string;             // комиссия запуска, зат
@@ -716,7 +722,7 @@ interface VerifyProof {                   // GET /api/verify/proof (подпис
 - **T1.** Ничего из кабинета не публикуется нигде: публичные `Token`, `TokenSafety`, лента, `/api/stats` не содержат ни комиссий создателя, ни его позиции, ни лока, ни признака «этот токен — чей-то». Числа о создателе есть только в этом ответе и в `Portfolio.claimable`.
 - **Откуда числа:** `fees` — реестр (`claimable` за вычетом комиссии самой launch-tx, см. claim); `volumeLamports`/`trades` — сделки пула по mint (то же, что в публичной ленте); `holders`, `status`, `curveProgressPct` — последний снимок индексатора (тик, ≈ 60 с; запрос кабинета индексатор не дёргает); `lock`/`cap` — правила создателя в реестре (см. «Правила создателя»).
 - **Требование к индексатору (INTEL.md):** число холдеров кладётся в снимок как `holders.count` (целое: владельцы с ненулевым балансом, без аккаунтов bonding curve / пула AMM; vault пула считаются как обычные владельцы). Пока его нет, `holders = null`.
-- **UI:** кнопка «Claim» = `POST /api/actions {op:"claim", mint}` (активна при `claimableLamports` ≥ эквивалента `minActionZat` по `lamportsPerZecSell`). Подписи: «Fees from your launch buy stay with the pool», «Fees are collected by the pool every 6–12 h». Позиция и лок — только в кабинете; не показывать их на публичной странице токена даже владельцу (скриншоты).
+- **UI:** кнопка «Claim» = `POST /api/actions {op:"claim", mint}` (активна при `claimableLamports` ≥ эквивалента `minClaimZat` (v0.11) по `lamportsPerZecSell`). Подписи: «Fees from your launch buy stay with the pool», «Fees are collected by the pool every 6–12 h». Позиция и лок — только в кабинете; не показывать их на публичной странице токена даже владельцу (скриншоты).
 
 ## Статистика (v0.9)
 
