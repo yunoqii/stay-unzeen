@@ -1,5 +1,13 @@
 //! Private orders (API.md v0.8, spec docs/analysis/orders.md): limit_buy, limit_sell,
-//! take_profit (= limit_sell on the server), stop_loss (two consecutive ticks).
+//! take_profit (= limit_sell on the server), stop_loss (two consecutive ticks), and v0.15
+//! bracket (TP + SL legs on ONE token hold, OCO).
+//!
+//! - Bracket: one `orders` row (`trigger_price_sol` = TP, `sl_price_sol` = SL). A leg firing
+//!   moves the row to `triggered` (+ `leg`) in the same transaction that creates the trade, so
+//!   the other leg is extinguished atomically; the row lock makes concurrent passes safe.
+//! - Re-arm (v0.15, `rearm`): a trade that failed as a whole with `slippage` (settlement, see
+//!   [`rearm_on_slippage`]) or a stop-loss guard miss puts the order back to `open` with its
+//!   hold, at most [`MAX_REARMS`] times and only before `expires_at`.
 //!
 //! - Create: one transaction = nonce + hold (on the `order_create` action row, whose id is the
 //!   order id) + `orders` row. Creator lock / cap / frozen / minimums come from `submit_in`.
@@ -24,6 +32,9 @@ use crate::{
 pub const MAX_OPEN_PER_KEY: i64 = 10;
 pub const MAX_OPEN_PER_MINT: i64 = 4;
 pub const MAX_OPEN_GLOBAL: i64 = 1_000;
+/// v0.15: how many times an order with `rearm` goes back to `open` after slippage
+/// (also the DB CHECK on `orders.rearms`).
+pub const MAX_REARMS: i16 = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewOrder {
@@ -38,6 +49,12 @@ pub struct NewOrder {
     pub ttl_secs: u64,
     /// limit_buy: upper-bound token estimate for the creator cap (ignored for non-creators).
     pub gain: Option<u64>,
+    /// v0.15 bracket only: the stop-loss leg (canonical decimal, < `trigger`) and its slippage.
+    /// `trigger` / `slippage_bps` are the take-profit leg.
+    pub sl_trigger: Option<String>,
+    pub sl_slippage_bps: Option<u32>,
+    /// v0.15: back to `open` after slippage (≤ [`MAX_REARMS`] times).
+    pub rearm: bool,
 }
 
 impl NewOrder {
@@ -62,6 +79,12 @@ pub struct OrderRow {
     pub armed: bool,
     pub action_id: Option<[u8; 16]>,
     pub error: Option<String>,
+    /// v0.15 bracket: stop-loss leg price and slippage; `leg` = the leg that fired.
+    pub sl_trigger: Option<String>,
+    pub sl_slippage_bps: Option<i32>,
+    pub leg: Option<String>,
+    pub rearm: bool,
+    pub rearms: u32,
 }
 
 /// Inputs of one evaluation pass, computed by the API.
@@ -81,6 +104,9 @@ pub struct EvalReport {
     pub failed: u64,
     pub expired: u64,
     pub closed: u64,
+    /// v0.15: orders put back to `open` after a stop-loss guard miss (settlement re-arms are
+    /// not counted here).
+    pub rearmed: u64,
     /// Orders whose evaluation failed (rolled back alone, retried next pass).
     pub errors: u64,
 }
@@ -193,6 +219,52 @@ async fn close_order<C: GenericClient>(tx: &C, order_id: &[u8], status: &str, er
     Ok(())
 }
 
+/// v0.15 re-arm, called by settlement inside its transaction for an action that failed as a
+/// whole with `slippage`. If it is the trade of a `triggered` order with `rearm` (re-arms left,
+/// not expired), its hold goes back onto the order (the `order_create` action is queued again
+/// with the same ZEC / token hold and creator-cap estimate; balances do not change) and the
+/// order is `open` again (SL disarmed, leg and action link cleared). Returns `true` when the
+/// hold was taken over: the caller must then NOT release it.
+pub(crate) async fn rearm_on_slippage<C: GenericClient>(tx: &C, action_id: &[u8]) -> Result<bool> {
+    let Some(o) = tx
+        .query_opt(
+            "SELECT id FROM orders WHERE action_id = $1 AND status = 'triggered' AND rearm AND rearms < $2
+               AND expires_at > now() FOR UPDATE",
+            &[&action_id, &MAX_REARMS],
+        )
+        .await?
+    else {
+        return Ok(false);
+    };
+    let oid: Vec<u8> = o.get(0);
+    let a = tx
+        .query_one(
+            "SELECT hold_zat, token_hold, gain_mint, gain_est FROM actions WHERE id = $1",
+            &[&action_id],
+        )
+        .await?;
+    let (hold, thold, gmint, gest): (i64, i64, Option<String>, Option<i64>) = (a.get(0), a.get(1), a.get(2), a.get(3));
+    let n = tx
+        .execute(
+            "UPDATE actions SET status = 'queued', error = NULL, hold_zat = $2, token_hold = $3, gain_mint = $4,
+                    gain_est = $5, updated_at = now()
+             WHERE id = $1 AND status = 'executed'",
+            &[&oid, &hold, &thold, &gmint, &gest],
+        )
+        .await?;
+    if n != 1 {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE orders SET status = 'open', action_id = NULL, leg = NULL, sl_armed_tick = NULL,
+                rearms = rearms + 1, amount = CASE WHEN kind = 'limit_buy' THEN $2 ELSE amount END
+         WHERE id = $1",
+        &[&oid, &hold],
+    )
+    .await?;
+    Ok(true)
+}
+
 impl Ledger {
     /// `order_create`. Receipt id = order id; status `open`.
     pub async fn order_create(
@@ -242,11 +314,12 @@ impl Ledger {
         let id: &[u8] = &r.id;
         tx.execute(
             "INSERT INTO orders (id, anon_pubkey, venue, mint, kind, trigger_price_sol, amount, slippage_bps, exec_mode,
-                                 expires_at, last_tick)
+                                 expires_at, last_tick, sl_price_sol, sl_slippage_bps, rearm)
              VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7, $8, $9,
                      date_trunc('hour', now() + make_interval(secs => $10) + interval '1 hour' - interval '1 microsecond'),
                      -- E16: only ticks AFTER the order are evaluated.
-                     (SELECT tick_at FROM intel_prices WHERE mint = $4))",
+                     (SELECT tick_at FROM intel_prices WHERE mint = $4),
+                     $11::text::numeric, $12, $13)",
             &[
                 &id,
                 &pk_s,
@@ -258,6 +331,9 @@ impl Ledger {
                 &(o.slippage_bps as i32),
                 &o.exec_mode,
                 &(o.ttl_secs as f64),
+                &o.sl_trigger,
+                &o.sl_slippage_bps.map(|v| v as i32),
+                &o.rearm,
             ],
         )
         .await?;
@@ -319,7 +395,8 @@ impl Ledger {
             .query(
                 "SELECT id, venue, mint, kind, trigger_price_sol::text, amount, slippage_bps, exec_mode, status,
                         (extract(epoch FROM created_at) * 1000)::bigint, (extract(epoch FROM expires_at) * 1000)::bigint,
-                        sl_armed_tick IS NOT NULL, action_id, error
+                        sl_armed_tick IS NOT NULL, action_id, error, sl_price_sol::text, sl_slippage_bps, leg, rearm,
+                        rearms
                  FROM orders WHERE anon_pubkey = $1 AND mint IS NOT NULL
                  ORDER BY (status IN ('open', 'triggered')) DESC, created_at DESC, id LIMIT 20",
                 &[&pk_s],
@@ -342,6 +419,11 @@ impl Ledger {
                 armed: r.get(11),
                 action_id: r.get::<_, Option<Vec<u8>>>(12).map(id16),
                 error: r.get(13),
+                sl_trigger: r.get(14),
+                sl_slippage_bps: r.get(15),
+                leg: r.get(16),
+                rearm: r.get(17),
+                rearms: r.get::<_, i16>(18).max(0) as u32,
             })
             .collect())
     }
@@ -440,12 +522,14 @@ impl Ledger {
                         p.tick_at, p.prev_tick_at, p.status,
                         p.price_sol <= o.trigger_price_sol, p.price_sol >= o.trigger_price_sol,
                         o.trigger_price_sol::text, COALESCE(t.decimals, 6::smallint), COALESCE(b.frozen, FALSE),
-                        p.price_sol::text, (extract(epoch FROM now()) * 1000)::bigint - p.tick_at
+                        p.price_sol::text, (extract(epoch FROM now()) * 1000)::bigint - p.tick_at,
+                        p.price_sol <= o.sl_price_sol, o.sl_price_sol::text, o.sl_slippage_bps,
+                        o.rearm AND o.rearms < $2 AND o.expires_at > now()
                  FROM orders o JOIN intel_prices p ON p.mint = o.mint
                  LEFT JOIN tokens t ON t.mint = o.mint LEFT JOIN balances b ON b.anon_pubkey = o.anon_pubkey
                  WHERE o.id = $1 AND o.status = 'open' AND p.tick_at > COALESCE(o.last_tick, 0)
                  FOR UPDATE OF o SKIP LOCKED",
-                &[&id],
+                &[&id, &MAX_REARMS],
             )
             .await?
         else {
@@ -467,6 +551,10 @@ impl Ledger {
         let frozen: bool = r.get(15);
         let price: String = r.get(16);
         let age_ms: i64 = r.get(17);
+        let sl_le: bool = r.get::<_, Option<bool>>(18).unwrap_or(false);
+        let sl_trigger: Option<String> = r.get(19);
+        let sl_slip = r.get::<_, Option<i32>>(20).unwrap_or(1_500).max(0) as u32;
+        let can_rearm: bool = r.get(21);
         let set_tick = |armed_next: Option<i64>| {
             let id = id.clone();
             async move {
@@ -488,29 +576,30 @@ impl Ledger {
             rep.failed += 1;
             return Ok(());
         }
-        let cond = if matches!(kind.as_str(), "limit_buy" | "stop_loss") {
-            le
-        } else {
-            ge
-        };
-        let fire = match (kind.as_str(), cond) {
-            (_, false) => false,
-            ("stop_loss", true) => armed.is_some() && armed == prev_tick,
-            _ => true,
-        };
-        if !fire {
-            let next = (kind == "stop_loss" && cond).then_some(tick);
-            set_tick(next).await?;
-            if next.is_some() {
-                rep.armed += 1;
-            }
+        let Some(decision) = decide(&kind, le, ge, sl_le, armed, prev_tick) else {
             return Ok(());
-        }
-        let buy = kind == "limit_buy";
+        };
+        let (eff, leg) = match decision {
+            Decision::Wait { arm } => {
+                set_tick(arm.then_some(tick)).await?;
+                if arm {
+                    rep.armed += 1;
+                }
+                return Ok(());
+            }
+            Decision::Fire { kind, leg } => (kind, leg),
+        };
+        // The fired leg's trigger and slippage (bracket SL leg: its own columns).
+        let (trigger, slip) = if leg == Some("sl") {
+            (sl_trigger.unwrap_or_default(), sl_slip)
+        } else {
+            (trigger, slip)
+        };
+        let buy = eff == "limit_buy";
         let rate = if buy { p.rate_buy.as_ref() } else { p.rate_sell.as_ref() };
         let (Some(rate), false) = (rate, frozen) else {
             // No rate / frozen balance: wait for the next tick (SL stays armed).
-            set_tick(armed.filter(|_| kind == "stop_loss").map(|_| tick)).await?;
+            set_tick((eff == "stop_loss").then_some(tick)).await?;
             return Ok(());
         };
         let (Some(trigger_e18), Some(price_e18)) = (parse_e18(&trigger), parse_e18(&price)) else {
@@ -520,9 +609,19 @@ impl Ledger {
         };
         // E4: the trigger guard stays off chain. A stop-loss whose tick gapped below
         // trigger × (1 − slippage) does not sell (as before, when min_out came from the trigger).
-        if !trigger_guard_ok(&kind, price_e18, trigger_e18, slip) {
-            close_order(tx, &id, "failed", Some("slippage")).await?;
-            rep.failed += 1;
+        if !trigger_guard_ok(eff, price_e18, trigger_e18, slip) {
+            if can_rearm {
+                // v0.15: back to waiting (disarmed), hold kept; one re-arm used.
+                tx.execute(
+                    "UPDATE orders SET last_tick = $2, sl_armed_tick = NULL, rearms = rearms + 1 WHERE id = $1",
+                    &[&id, &tick],
+                )
+                .await?;
+                rep.rearmed += 1;
+            } else {
+                close_order(tx, &id, "failed", Some("slippage")).await?;
+                rep.failed += 1;
+            }
             return Ok(());
         }
         let a = tx
@@ -629,10 +728,11 @@ impl Ledger {
             &[&id],
         )
         .await?;
+        // OCO: the whole row (both legs of a bracket) leaves `open` in this transaction.
         tx.execute(
-            "UPDATE orders SET status = 'triggered', action_id = $2, last_tick = $3, sl_armed_tick = NULL
+            "UPDATE orders SET status = 'triggered', action_id = $2, last_tick = $3, sl_armed_tick = NULL, leg = $4
              WHERE id = $1",
-            &[&id, &aid_s, &tick],
+            &[&id, &aid_s, &tick, &leg],
         )
         .await?;
         rep.triggered += 1;
@@ -646,7 +746,8 @@ impl Ledger {
         let scrubbed = c
             .execute(
                 "UPDATE orders SET mint = NULL, trigger_price_sol = NULL, amount = 0, slippage_bps = NULL,
-                        action_id = NULL, sl_armed_tick = NULL, last_tick = NULL
+                        action_id = NULL, sl_armed_tick = NULL, last_tick = NULL, sl_price_sol = NULL,
+                        sl_slippage_bps = NULL, leg = NULL, rearms = 0
                  WHERE closed_at < now() - interval '24 hours' AND mint IS NOT NULL",
                 &[],
             )
@@ -670,6 +771,132 @@ impl Ledger {
             )
             .await?;
         Ok(r.map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))))
+    }
+}
+
+/// Outcome of one tick for an open order (prices already compared in SQL).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// Not firing; `arm` = a stop-loss condition holds on this tick (first of two).
+    Wait { arm: bool },
+    /// Fire as `kind` (`limit_buy` / `limit_sell` / `take_profit` / `stop_loss`); `leg` is set
+    /// for a bracket (`"tp"` / `"sl"`).
+    Fire {
+        kind: &'static str,
+        leg: Option<&'static str>,
+    },
+}
+
+/// Trigger decision. `le` / `ge`: tick price vs `trigger_price_sol` (bracket: the TP leg);
+/// `sl_le`: tick price ≤ the bracket SL leg; `armed`: tick where the SL condition first held;
+/// `prev_tick`: the tick before this one. A stop-loss (or SL leg) fires only when it was armed
+/// on exactly the previous tick. Bracket: TP wins on its tick and disarms SL. `None` for an
+/// unknown kind (left untouched).
+pub fn decide(
+    kind: &str,
+    le: bool,
+    ge: bool,
+    sl_le: bool,
+    armed: Option<i64>,
+    prev_tick: Option<i64>,
+) -> Option<Decision> {
+    let confirmed = armed.is_some() && armed == prev_tick;
+    Some(match kind {
+        "limit_buy" if le => Decision::Fire {
+            kind: "limit_buy",
+            leg: None,
+        },
+        "limit_sell" | "take_profit" if ge => Decision::Fire {
+            kind: if kind == "limit_sell" {
+                "limit_sell"
+            } else {
+                "take_profit"
+            },
+            leg: None,
+        },
+        "stop_loss" if le && confirmed => Decision::Fire {
+            kind: "stop_loss",
+            leg: None,
+        },
+        "stop_loss" => Decision::Wait { arm: le },
+        "bracket" if ge => Decision::Fire {
+            kind: "take_profit",
+            leg: Some("tp"),
+        },
+        "bracket" if sl_le && confirmed => Decision::Fire {
+            kind: "stop_loss",
+            leg: Some("sl"),
+        },
+        "bracket" => Decision::Wait { arm: sl_le },
+        "limit_buy" | "limit_sell" | "take_profit" => Decision::Wait { arm: false },
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod decide_tests {
+    use super::*;
+
+    const TP: Decision = Decision::Fire {
+        kind: "take_profit",
+        leg: Some("tp"),
+    };
+    const SL: Decision = Decision::Fire {
+        kind: "stop_loss",
+        leg: Some("sl"),
+    };
+
+    #[test]
+    fn bracket_legs() {
+        // Between the legs: nothing.
+        assert_eq!(
+            decide("bracket", true, false, false, None, Some(1)),
+            Some(Decision::Wait { arm: false })
+        );
+        // TP fires on the first tick, no confirmation.
+        assert_eq!(decide("bracket", false, true, false, None, None), Some(TP));
+        // SL: first tick arms, second consecutive tick fires.
+        assert_eq!(
+            decide("bracket", true, false, true, None, Some(1)),
+            Some(Decision::Wait { arm: true })
+        );
+        assert_eq!(decide("bracket", true, false, true, Some(1), Some(1)), Some(SL));
+        // Armed on an older tick (a tick in between): re-arm, do not fire.
+        assert_eq!(
+            decide("bracket", true, false, true, Some(1), Some(2)),
+            Some(Decision::Wait { arm: true })
+        );
+        // Armed SL, then the price jumps over TP: TP fires (SL never does).
+        assert_eq!(decide("bracket", false, true, false, Some(1), Some(1)), Some(TP));
+    }
+
+    #[test]
+    fn single_kinds_unchanged() {
+        let fire = |k| Some(Decision::Fire { kind: k, leg: None });
+        assert_eq!(decide("limit_buy", true, false, false, None, None), fire("limit_buy"));
+        assert_eq!(decide("limit_sell", false, true, false, None, None), fire("limit_sell"));
+        assert_eq!(
+            decide("take_profit", true, true, false, None, None),
+            fire("take_profit")
+        );
+        assert_eq!(
+            decide("stop_loss", true, false, false, None, Some(1)),
+            Some(Decision::Wait { arm: true })
+        );
+        assert_eq!(
+            decide("stop_loss", true, false, false, Some(1), Some(1)),
+            fire("stop_loss")
+        );
+        assert_eq!(
+            decide("stop_loss", false, true, false, Some(1), Some(1)),
+            Some(Decision::Wait { arm: false })
+        );
+        // sl_le is ignored outside brackets.
+        assert_eq!(
+            decide("limit_sell", false, false, true, Some(1), Some(1)),
+            Some(Decision::Wait { arm: false })
+        );
+        assert_eq!(decide("weird", true, true, true, None, None), None);
     }
 }
 

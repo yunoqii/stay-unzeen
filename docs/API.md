@@ -2,7 +2,13 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.14** (13.10; миграция `0020_quote_fees.sql`; RELAYER.md v9). Изменения против v0.13:
+Статус: **v0.15** (13.10; миграция `0021_bracket_orders.sql`; RELAYER.md без изменений). Изменения против v0.14:
+- **Bracket-ордер (TP + SL на одну позицию, OCO).** `order_create` += `kind: "bracket"` с полями `tpPriceSol` и `slPriceSol` (вместо `triggerPriceSol`, его у bracket быть не должно → `400`), `tpPriceSol > slPriceSol` (иначе `400`). **Один hold токенов** на обе ноги. TP-нога = `take_profit` (`p ≥ tpPriceSol`), SL-нога = `stop_loss` (`p ≤ slPriceSol` на 2 тиках подряд). Срабатывает первая нога, чьё условие выполнилось; вторая гасится **в той же транзакции реестра** (ордер — одна запись, двойного исполнения нет). Slippage: `slippageBps` — TP-нога (по умолчанию `defaultSlippageBps.bracket` = 500), `slSlippageBps` — SL-нога (по умолчанию `defaultSlippageBps.stop_loss` = 1500). `below_minimum` при создании — по стоимости `amount × slPriceSol`. Bracket считается **одним** ордером в лимитах (10 на ключ, 4 на ключ и mint). Остальные правила — как у одиночных: цена только с тика, `minOut` от цены тика с квантованием, только `delayed`/`max`, только SOL-пары pump.fun, TTL ≤ 72 ч, D1-ретеншн 24/48 ч.
+- **`Order`** += `slPriceSol?`, `slSlippageBps?` (только bracket; `triggerPriceSol` у bracket = цена TP), `leg?: "tp" | "sl"` (какая нога сработала; есть у `triggered`/`filled` и у `failed` после срабатывания), `rearm?: true`, `rearms: number`. `armed` у bracket — взведена SL-нога.
+- **Перевзвод после slippage (`rearm`).** `order_create` += `rearm?: boolean` (по умолчанию `false`, любой `kind`). Если сделка ордера не прошла по `slippage` (в сети или серверный guard stop-loss: `p < trigger · (1 − slippage)`), ордер с `rearm: true` **возвращается в `open`** с тем же hold (SL снова ждёт 2 тика), `rearms += 1`; не больше `PoolInfo.orders.maxRearms` (3) раз и только до `expiresAt`. Иначе — как раньше: `failed` (`slippage`), hold освобождён. Другие ошибки (`graduated`, `pool_liquidity`, …) не перевзводят. У `limit_buy` после перевзвода `amount` = фактический hold (остаток D10 первой попытки уже возвращён на баланс). Связь со старой сделкой не хранится: `actionId` после перевзвода пуст, неудачная сделка видна в `Portfolio.actions` как обычный `failed`.
+- **`PoolInfo.orders`** += `kinds` включает `"bracket"`, `defaultSlippageBps.bracket` (500), `maxRearms` (3).
+
+Изменения v0.14 против v0.13 (13.10; миграция `0020_quote_fees.sql`; RELAYER.md v9):
 - **Creator fees пар не к SOL зачисляются.** Комиссии создателя токена в паре к **ZEC** приходят в ZEC SPL и зачисляются **1:1 в зат** (без курса SOL и без спреда): новое поле `Portfolio.claimable[].zecAmount` (строка зат, `"0"`, если нет). Комиссии в **USDC/USD1** зачисляются в лампорты (`solAmount`) по курсу пула A на момент сбора — как у SOL-пар. `claim` переводит в ZEC и то, и другое: `floor(solAmount × 1e8 / lamportsPerZecSell) + zecAmount`; порог `minClaimZat` — к сумме. Кабинет создателя: `fees` += `claimableZat`, `claimedZat`. Кнопку «Claim» активировать, если `claimableZat + эквивалент claimableLamports ≥ minClaimZat`.
 - **Creator fee самой launch-tx для ZEC-запусков** удерживается в единицах ZEC (зат), а не в лампортах; правило «первые сборы mint — пулу» не меняется.
 - **Объём и свечи ZEC-пар.** У сделок в паре к ZEC `FeedEvent.solAmount` теперь SOL-эквивалент по курсу ZEC/SOL пула **на момент сделки** (core проставляет его до того, как событие уходит в ленту; сделки старше 15 мин без курса остаются `"0"`). Поэтому `volume24hSol`, свечи, статистика и объём в кабинете учитывают ZEC-пары. `Token.priceSol` ZEC-пары = `priceQuote × курс ZEC/SOL` (обновляется вместе с курсом); `marketCapSol` пока может быть `"0"`.
@@ -249,14 +255,16 @@ interface PoolInfo {
   chat?: ChatParams;        // v0.12: только при features.chat = true
   quotes: QuoteAsset[];     // v0.13: включённые пары не к SOL (пусто — только SOL)
   orders: {                 // v0.8: приватные ордера
-    kinds: ("limit_buy" | "limit_sell" | "take_profit" | "stop_loss")[];
+    kinds: ("limit_buy" | "limit_sell" | "take_profit" | "stop_loss" | "bracket")[];   // v0.15: + bracket
     venues: "pumpfun"[];
     maxOpenPerKey: number;      // 10
     maxOpenPerMint: number;     // 4 (на ключ и mint)
     maxTtlSecs: number;         // 259200 (72 ч)
     defaultTtlSecs: number;     // 86400
-    defaultSlippageBps: { limit_buy: number; limit_sell: number; take_profit: number; stop_loss: number };  // 500/500/500/1500
+    defaultSlippageBps: { limit_buy: number; limit_sell: number; take_profit: number; stop_loss: number;
+                          bracket: number };  // 500/500/500/1500; v0.15 bracket = TP-нога 500 (SL-нога — stop_loss)
     slConfirmTicks: number;     // 2
+    maxRearms: number;          // v0.15: 3 — сколько раз ордер с rearm: true возвращается в open после slippage
     priceTick: { minSecs: number; maxSecs: number };   // 45/75: «checks about once a minute»
   };
   launchRules: {            // v0.5: правила создателя Unzeen-запуска, которые реестр применяет принудительно
@@ -350,10 +358,14 @@ type SignedAction = (
   | { op: "withdraw_token"; mint: string; amount: string; to: string | string[];   // на новый Solana-адрес
       smart?: { parts: number; maxDelayMin: number }; exec?: "delayed" | "max" }  // умный вывод: parts 2..5 (длина `to` = parts)
   | { op: "order_create"; venue: "pumpfun"; mint: string;                        // v0.8, см. «Ордера»
-      kind: "limit_buy" | "limit_sell" | "take_profit" | "stop_loss";
-      triggerPriceSol: string;     // десятичная SOL за 1 целый токен (как Token.priceSol), > 0, ≤ 18 значащих цифр
+      kind: "limit_buy" | "limit_sell" | "take_profit" | "stop_loss" | "bracket";   // v0.15: bracket
+      triggerPriceSol?: string;    // обязателен для всех, КРОМЕ bracket (у bracket → 400); десятичная SOL за 1 целый токен (как Token.priceSol), > 0, ≤ 18 значащих цифр
+      tpPriceSol?: string;         // v0.15: только bracket (обязателен), формат как triggerPriceSol
+      slPriceSol?: string;         // v0.15: только bracket (обязателен), < tpPriceSol
+      slSlippageBps?: number;      // v0.15: только bracket, SL-нога, 50..5000; по умолчанию defaultSlippageBps.stop_loss
+      rearm?: boolean;             // v0.15: перевзвод после slippage (≤ maxRearms раз, до expiresAt); по умолчанию false
       amount: string;              // limit_buy: зат; остальные: базовые единицы токена
-      slippageBps?: number;        // 50..5000; по умолчанию PoolInfo.orders.defaultSlippageBps[kind]
+      slippageBps?: number;        // 50..5000; по умолчанию PoolInfo.orders.defaultSlippageBps[kind] (bracket: TP-нога)
       ttlSecs?: number;            // 3600..PoolInfo.orders.maxTtlSecs; по умолчанию 86400; expiresAt округляется ВВЕРХ до часа
       exec?: "delayed" | "max" }   // "now" → 400
   | { op: "order_cancel"; orderId: string }                                       // только из open
@@ -368,12 +380,18 @@ type SignedAction = (
 interface Order {                 // v0.8: только в Portfolio.orders (владельцу)
   id: string;                     // 32 hex (= id ответа order_create)
   venue: "pumpfun"; mint: string;
-  kind: "limit_buy" | "limit_sell" | "take_profit" | "stop_loss";
-  triggerPriceSol: string; amount: string; slippageBps: number; exec: "delayed" | "max";
+  kind: "limit_buy" | "limit_sell" | "take_profit" | "stop_loss" | "bracket";
+  triggerPriceSol: string;        // bracket (v0.15): = цена TP-ноги
+  amount: string; slippageBps: number; exec: "delayed" | "max";   // bracket: slippageBps — TP-нога
+  slPriceSol?: string;            // v0.15: только bracket
+  slSlippageBps?: number;         // v0.15: только bracket
+  leg?: "tp" | "sl";              // v0.15: только bracket — какая нога сработала (triggered/filled/failed после срабатывания)
+  rearm?: true;                   // v0.15: перевзвод после slippage включён
+  rearms: number;                 // v0.15: сколько раз уже перевзведён (0..maxRearms)
   status: "open" | "triggered" | "filled" | "cancelled" | "expired" | "failed";
   createdAt: number;              // unix мс, вниз до минуты
   expiresAt: number;              // unix мс, вверх до часа
-  armed?: true;                   // stop_loss: условие выполнено на одном тике, ждём второго подряд
+  armed?: true;                   // stop_loss / SL-нога bracket: условие выполнено на одном тике, ждём второго подряд
   actionId?: string;              // triggered/filled/failed после срабатывания: статус сделки — в Portfolio.actions
   error?: ErrorCode;              // failed: graduated | slippage | below_minimum | creator_cap | ...
 }
@@ -809,10 +827,13 @@ interface VerifyProof {                   // GET /api/verify/proof (подпис
 | `limit_sell` | `p ≥ trigger` | sell | токены |
 | `take_profit` | `p ≥ trigger` (сервер = `limit_sell`; «+X % от входа» считается **только в браузере**, на сервер уходит абсолютная цена) | sell | токены |
 | `stop_loss` | `p ≤ trigger` **на 2 тиках подряд** | sell | токены |
+| `bracket` (v0.15) | TP: `p ≥ tpPriceSol` **или** SL: `p ≤ slPriceSol` на 2 тиках подряд — что раньше (OCO) | sell | токены (один hold на обе ноги) |
 
 - **Только mint, которыми торговал пул** (есть в публичном `GET /api/tokens`), площадка `pumpfun`, на кривой. Иначе `422 order_unsupported_mint`. Токен ушёл в AMM → открытые ордера `failed` (`graduated`), hold освобождается.
 - **Цена — только с тика индексатора** (раз в 45–75 с, по всем токенам пула сразу, независимо от ордеров). Ордера не порождают ни одного запроса к RPC. v0.10: ордер видит только тики **после своего создания**; тик старше **180 с** (индексатор стоял) не исполняет и не взводит ничего.
-- **Защита исполнения (v0.10) — от цены тика `p`:** buy `minOut = lamports / (p · (1 + slippage))`, sell `minLamports = amount · p · (1 − slippage)`, затем вниз до 3 значащих цифр. Триггер в цепочку не попадает: сервер проверяет его сам — stop-loss продаёт, только если `p ≥ trigger · (1 − slippage)`, иначе ордер `failed` (`slippage`). Не исполнилось по slippage в сети → ордер `failed` (`slippage`), hold освобождён (перевзвода в MVP нет).
+- **Защита исполнения (v0.10) — от цены тика `p`:** buy `minOut = lamports / (p · (1 + slippage))`, sell `minLamports = amount · p · (1 − slippage)`, затем вниз до 3 значащих цифр. Триггер в цепочку не попадает: сервер проверяет его сам — stop-loss продаёт, только если `p ≥ trigger · (1 − slippage)`, иначе ордер `failed` (`slippage`). Не исполнилось по slippage в сети → ордер `failed` (`slippage`), hold освобождён; v0.15: с `rearm: true` — обратно в `open` (см. ниже).
+- **Bracket (v0.15):** одна запись, один hold токенов, две ноги. Нога TP проверяется как `take_profit` (со своим `slippageBps`), нога SL — как `stop_loss` (2 тика подряд, guard и `minOut` со `slSlippageBps`). Если на тике выполнено условие TP, SL-взвод сбрасывается. Срабатывание одной ноги переводит весь ордер в `triggered` (`leg` = `"tp"` / `"sl"`) в той же транзакции, что создаёт сделку: вторая нога больше не проверяется; два параллельных прохода оценщика не создают двух сделок. Отмена — одним `order_cancel` для обеих ног.
+- **Перевзвод (v0.15, `rearm: true`):** сделка ордера упала с `slippage` в сети (не исполнилась ни одна часть) или серверный guard stop-loss/SL-ноги не пропустил цену → ордер снова `open` в той же транзакции реестра, hold остаётся на ордере (баланс не меняется), SL-взвод сброшен, `rearms += 1`, `actionId` и `leg` очищены. Не больше `maxRearms` (3) раз и только пока `now < expiresAt`; после — `failed` (`slippage`). Любая другая ошибка сделки закрывает ордер как раньше. Неудачная попытка остаётся в `Portfolio.actions` обычным `failed` buy/sell.
 - **Hold** берётся при создании (как у действия: `insufficient_balance`, `balance_frozen`, `creator_locked`, `creator_cap` для покупки создателя, `below_minimum`: для sell — по стоимости `amount × trigger`). При срабатывании hold переходит на новое действие без изменения баланса (для buy неиспользованный после D10 остаток сразу возвращается).
 - **TTL** 1–72 ч (по умолчанию 24 ч), `expiresAt` вверх до часа; истёк → `expired`, hold освобождён.
 - **Отмена** — только из `open` (`409 order_not_open` иначе; чужой/неизвестный — 404). Ответ `{ id, status: "cancelled" }`.

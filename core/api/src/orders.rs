@@ -1,4 +1,4 @@
-//! Private orders (API.md v0.8): `order_create` / `order_cancel`, `Portfolio.orders`,
+//! Private orders (API.md v0.8; v0.15 bracket + re-arm): `order_create` / `order_cancel`, `Portfolio.orders`,
 //! `PoolInfo.orders` and the evaluator loop (price only from the indexer tick, never RPC).
 //!
 //! Logs: counts only — never mint, price, order id or time of an order.
@@ -19,7 +19,7 @@ use crate::{
     rate::{apply_spread, zat_to_lamports},
 };
 
-pub const KINDS: [&str; 4] = ["limit_buy", "limit_sell", "take_profit", "stop_loss"];
+pub const KINDS: [&str; 5] = ["limit_buy", "limit_sell", "take_profit", "stop_loss", "bracket"];
 pub const MAX_TTL_SECS: u64 = 259_200;
 pub const DEFAULT_TTL_SECS: u64 = 86_400;
 
@@ -27,6 +27,8 @@ pub fn default_slippage(kind: &str) -> u32 {
     if kind == "stop_loss" { 1_500 } else { 500 }
 }
 
+// Parsed once per request and dropped: the size difference does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum OrderOp {
@@ -35,7 +37,15 @@ enum OrderOp {
         mint: String,
         kind: String,
         #[serde(rename = "triggerPriceSol")]
-        trigger_price_sol: String,
+        trigger_price_sol: Option<String>,
+        /// v0.15 bracket legs.
+        #[serde(rename = "tpPriceSol")]
+        tp_price_sol: Option<String>,
+        #[serde(rename = "slPriceSol")]
+        sl_price_sol: Option<String>,
+        #[serde(rename = "slSlippageBps")]
+        sl_slippage_bps: Option<u32>,
+        rearm: Option<bool>,
         amount: String,
         #[serde(rename = "slippageBps")]
         slippage_bps: Option<u32>,
@@ -112,6 +122,10 @@ pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], 
             mint,
             kind,
             trigger_price_sol,
+            tp_price_sol,
+            sl_price_sol,
+            sl_slippage_bps,
+            rearm,
             amount,
             slippage_bps,
             ttl_secs,
@@ -122,7 +136,7 @@ pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], 
             }
             if !KINDS.contains(&kind.as_str()) {
                 return Err(ApiError::bad_request(
-                    "kind: limit_buy | limit_sell | take_profit | stop_loss",
+                    "kind: limit_buy | limit_sell | take_profit | stop_loss | bracket",
                 ));
             }
             let exec = match exec.as_deref() {
@@ -135,14 +149,36 @@ pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], 
                 }
             };
             let mint = solana_address(&mint, "mint")?;
-            let trigger = check_price(&trigger_price_sol)?;
+            let bracket = kind == "bracket";
+            // v0.15: a bracket has tpPriceSol + slPriceSol and no triggerPriceSol; the rest the reverse.
+            let (trigger, sl) = match (bracket, trigger_price_sol, tp_price_sol, sl_price_sol, sl_slippage_bps) {
+                (false, Some(t), None, None, None) => (check_price(&t)?, None),
+                (true, None, Some(tp), Some(sl), _) => {
+                    let (tp, sl) = (check_price(&tp)?, check_price(&sl)?);
+                    if lo::parse_e18(&sl) >= lo::parse_e18(&tp) {
+                        return Err(ApiError::bad_request("slPriceSol must be below tpPriceSol"));
+                    }
+                    (tp, Some(sl))
+                }
+                (true, ..) => {
+                    return Err(ApiError::bad_request(
+                        "bracket: tpPriceSol and slPriceSol (no triggerPriceSol)",
+                    ));
+                }
+                _ => {
+                    return Err(ApiError::bad_request(
+                        "triggerPriceSol required; tpPriceSol/slPriceSol/slSlippageBps only for bracket",
+                    ));
+                }
+            };
             let amount = parse_amount(&amount, "amount")?;
             if amount == 0 {
                 return Err(ApiError::bad_request("amount must be > 0"));
             }
             let slip = slippage_bps.unwrap_or_else(|| default_slippage(&kind));
-            if !(50..=5_000).contains(&slip) {
-                return Err(ApiError::bad_request("slippageBps: 50..5000"));
+            let sl_slip = bracket.then(|| sl_slippage_bps.unwrap_or_else(|| default_slippage("stop_loss")));
+            if !(50..=5_000).contains(&slip) || sl_slip.is_some_and(|v| !(50..=5_000).contains(&v)) {
+                return Err(ApiError::bad_request("slippageBps / slSlippageBps: 50..5000"));
             }
             let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
             if !(3_600..=MAX_TTL_SECS).contains(&ttl) {
@@ -157,7 +193,9 @@ pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], 
                 .get()
                 .await
                 .map_err(|_| ApiError::venue_unavailable("ZEC/SOL rate unavailable, retry later"))?;
-            let e18 = lo::parse_e18(&trigger).ok_or_else(|| ApiError::bad_request("triggerPriceSol"))?;
+            // Value checks use the lowest exit price: the SL leg of a bracket.
+            let e18 = lo::parse_e18(sl.as_deref().unwrap_or(&trigger))
+                .ok_or_else(|| ApiError::bad_request("triggerPriceSol"))?;
             let buy = kind == "limit_buy";
             let min_action = st.cfg.policy.min_action_zat;
             let gain = if buy {
@@ -188,6 +226,9 @@ pub async fn submit(st: &AppState, raw: Value, pk: &[u8; 32], nonce: &[u8; 16], 
                 exec_mode: exec.into(),
                 ttl_secs: ttl,
                 gain,
+                sl_trigger: sl,
+                sl_slippage_bps: sl_slip,
+                rearm: rearm.unwrap_or(false),
             };
             let rec = st.ledger.order_create(pk, nonce, hash, &o).await?;
             Ok(json!({ "id": hex::encode(rec.id), "status": rec.status }))
@@ -208,7 +249,18 @@ pub fn order_json(o: &OrderRow) -> Value {
         "status": o.status,
         "createdAt": o.created_at_ms,
         "expiresAt": o.expires_at_ms,
+        "rearms": o.rearms,
     });
+    if o.kind == "bracket" {
+        v["slPriceSol"] = json!(o.sl_trigger.clone().unwrap_or_default());
+        v["slSlippageBps"] = json!(o.sl_slippage_bps.unwrap_or(0));
+        if let Some(l) = &o.leg {
+            v["leg"] = json!(l);
+        }
+    }
+    if o.rearm {
+        v["rearm"] = json!(true);
+    }
     if o.armed && o.status == "open" {
         v["armed"] = json!(true);
     }
@@ -236,8 +288,10 @@ pub fn pool_block() -> Value {
             "limit_sell": default_slippage("limit_sell"),
             "take_profit": default_slippage("take_profit"),
             "stop_loss": default_slippage("stop_loss"),
+            "bracket": default_slippage("bracket"),
         },
         "slConfirmTicks": 2,
+        "maxRearms": lo::MAX_REARMS,
         "priceTick": { "minSecs": 45, "maxSecs": 75 },
     })
 }
@@ -255,8 +309,9 @@ pub async fn evaluator_loop(st: AppState) {
             delay_max: st.epochs.delay(true),
         };
         match st.ledger.orders_tick(st.cfg.cluster, &p).await {
-            Ok(r) if r.triggered + r.failed + r.expired + r.closed + r.errors > 0 => tracing::info!(
+            Ok(r) if r.triggered + r.failed + r.expired + r.closed + r.rearmed + r.errors > 0 => tracing::info!(
                 triggered = r.triggered,
+                rearmed = r.rearmed,
                 failed = r.failed,
                 expired = r.expired,
                 closed = r.closed,

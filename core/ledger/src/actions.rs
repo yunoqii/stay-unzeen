@@ -730,8 +730,14 @@ impl Ledger {
             }
         }
 
+        // v0.15: the trade of an order with `rearm` failed as a whole on slippage → the hold goes
+        // back onto the order (open again) instead of the balance, in this transaction.
+        let rearmed = !any_ok
+            && first_err.as_deref() == Some("slippage")
+            && crate::orders::rearm_on_slippage(&tx, action_id).await?;
+
         // Token hold: spend what left the pool, return the rest.
-        if let Some(m) = &token_mint {
+        if let (Some(m), false) = (&token_mint, rearmed) {
             debug_assert!(tok_spent + tok_back <= token_hold);
             let back = token_hold - tok_spent; // includes any part not covered by a job
             if token_hold > 0 {
@@ -752,7 +758,7 @@ impl Ledger {
         }
 
         // ZEC hold: spent if anything executed (minus refund), else returned in full.
-        if hold > 0 {
+        if hold > 0 && !rearmed {
             let refund = if any_ok { refund.clamp(0, hold) } else { hold };
             tx.execute(
                 "UPDATE balances SET held_zat = held_zat - $2, available_zat = available_zat + $3,

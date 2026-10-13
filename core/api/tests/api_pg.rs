@@ -2799,6 +2799,377 @@ mod orders_v08 {
         assert!(deleted >= 6);
         e.drop_schema().await;
     }
+
+    // ============================================================== v0.15: bracket + re-arm
+
+    fn bracket(amount: u64, tp: &str, sl: &str) -> Value {
+        json!({"op":"order_create","venue":"pumpfun","mint":MINT,"kind":"bracket","tpPriceSol":tp,"slPriceSol":sl,
+               "amount":amount.to_string()})
+    }
+
+    impl Env {
+        /// (available, held) token base units of `user(n)` for MINT.
+        async fn tokens(&self, n: u8) -> (i64, i64) {
+            let pk = hex::encode(user(n).verifying_key().to_bytes());
+            let r = self
+                .admin
+                .query_one(
+                    &format!(
+                        "SELECT available, held FROM {}.token_balances WHERE anon_pubkey = '\\x{pk}' AND mint = '{MINT}'",
+                        self.schema
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+            (r.get(0), r.get(1))
+        }
+
+        async fn sells_of(&self, n: u8) -> i64 {
+            let pk = hex::encode(user(n).verifying_key().to_bytes());
+            self.one_i64(&format!(
+                "SELECT count(*) FROM {s}.relayer_jobs j JOIN {s}.actions a ON a.id = j.action_id
+                 WHERE a.anon_pubkey = '\\x{pk}' AND a.kind = 'sell' AND j.op = 'sell'",
+                s = self.schema
+            ))
+            .await
+        }
+
+        async fn orders_env(&self, users: &[u8]) {
+            let s = &self.schema;
+            self.sql(&format!(
+                "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals) VALUES ('{MINT}', 'pumpfun', 'T', 'T', 6)
+                 ON CONFLICT DO NOTHING"
+            ))
+            .await;
+            for n in users {
+                let pk = hex::encode(user(*n).verifying_key().to_bytes());
+                self.sql(&format!(
+                    "INSERT INTO {s}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{pk}', '{MINT}', 1000000000000)"
+                ))
+                .await;
+            }
+            self.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+        }
+
+        /// Close the relayer job of `aid` as the relayer would.
+        async fn fail_job(&self, aid: &str, code: &str) {
+            self.sql(&format!(
+                "UPDATE {}.relayer_jobs SET status = 'failed', error_code = '{code}', error_message = 'x'
+                 WHERE action_id = '\\x{aid}'",
+                self.schema
+            ))
+            .await;
+        }
+    }
+
+    fn eval_params() -> unzeen_ledger::orders::EvalParams {
+        let r = unzeen_ledger::RateUsed {
+            lamports_per_zec: RATE,
+            source: "fixed".into(),
+            ts_ms: now_ms(),
+        };
+        unzeen_ledger::orders::EvalParams {
+            rate_buy: Some(r.clone()),
+            rate_sell: Some(r),
+            delay_delayed: 30.0,
+            delay_max: 300.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn bracket_oco_one_hold_and_tick_race() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.orders_env(&[3, 4]).await;
+        let post = |n: u8, v: Value| {
+            let body = v.to_string();
+            let e = &e;
+            async move { e.signed(&user(n), "POST", "/api/actions", &body).await }
+        };
+        let pool = e.get("/api/pool").await.body;
+        assert!(pool["orders"]["kinds"].as_array().unwrap().contains(&json!("bracket")));
+        assert_eq!(pool["orders"]["defaultSlippageBps"]["bracket"], 500);
+        assert_eq!(pool["orders"]["maxRearms"], 3);
+
+        // Validation.
+        let mut bad = bracket(500_000_000_000, "0.000002", "0.0000008");
+        bad["triggerPriceSol"] = json!("0.000002");
+        assert_eq!(
+            code(&post(3, bad).await),
+            "bad_request",
+            "bracket has no triggerPriceSol"
+        );
+        let mut bad = bracket(500_000_000_000, "0.000002", "0.0000008");
+        bad.as_object_mut().unwrap().remove("slPriceSol");
+        assert_eq!(code(&post(3, bad).await), "bad_request", "both legs required");
+        assert_eq!(
+            code(&post(3, bracket(500_000_000_000, "0.000001", "0.000001")).await),
+            "bad_request",
+            "sl < tp"
+        );
+        let mut bad = create("stop_loss", 500_000_000_000, "0.000001");
+        bad["slPriceSol"] = json!("0.0000008");
+        assert_eq!(code(&post(3, bad).await), "bad_request", "legs only for bracket");
+        let mut bad = bracket(500_000_000_000, "0.000002", "0.0000008");
+        bad["slSlippageBps"] = json!(10);
+        assert_eq!(code(&post(3, bad).await), "bad_request");
+        // below_minimum is judged at the SL price: 1000 tokens × 1e-9 → nothing.
+        assert_eq!(
+            code(&post(3, bracket(100_000_000, "1", "0.000000001")).await),
+            "below_minimum"
+        );
+
+        // A: TP 2e-6 / SL 0.8e-6; B: TP 1e-5 / SL 0.8e-6. One hold each.
+        e.tick(1, "0.000001", "curve").await;
+        let r = post(3, bracket(500_000_000_000, "0.000002", "0.0000008")).await;
+        assert_eq!(
+            (r.status, r.body["status"].as_str()),
+            (StatusCode::OK, Some("open")),
+            "{:?}",
+            r.body
+        );
+        let a = r.body["id"].as_str().unwrap().to_string();
+        let mut b = bracket(500_000_000_000, "0.00001", "0.0000008");
+        b["rearm"] = json!(true);
+        let r = post(3, b).await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        let b = r.body["id"].as_str().unwrap().to_string();
+        assert_eq!(e.tokens(3).await, (0, 1_000_000_000_000), "one hold per bracket");
+        let o = e.order(3, &a).await;
+        assert_eq!(o["kind"], "bracket");
+        assert_eq!(o["triggerPriceSol"], "0.000002");
+        assert_eq!(o["slPriceSol"], "0.0000008");
+        assert_eq!(
+            (o["slippageBps"].as_i64(), o["slSlippageBps"].as_i64()),
+            (Some(500), Some(1500))
+        );
+        assert_eq!(o["rearms"], 0);
+        assert!(o.get("leg").is_none() && o.get("rearm").is_none());
+        assert_eq!(e.order(3, &b).await["rearm"], true);
+
+        // SL leg arms on both…
+        e.tick(2, "0.0000007", "curve").await;
+        e.wait_order(3, &a, |o| o["armed"] == true).await;
+        e.wait_order(3, &b, |o| o["armed"] == true).await;
+        // …then the price jumps over A's TP: A fires on TP, B is disarmed.
+        e.tick(3, "0.0000021", "curve").await;
+        let o = e.wait_order(3, &a, |o| o["status"] == "triggered").await;
+        assert_eq!(o["leg"], "tp");
+        let aid = o["actionId"].as_str().unwrap().to_string();
+        e.wait_order(3, &b, |o| o.get("armed").is_none()).await;
+        assert_eq!(e.order(3, &b).await["status"], "open");
+        let job = e
+            .admin
+            .query_one(
+                &format!("SELECT token_amount, min_out FROM {s}.relayer_jobs WHERE action_id = '\\x{aid}'"),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(job.get::<_, Option<i64>>(0), Some(500_000_000_000));
+        assert_eq!(
+            job.get::<_, i64>(1) as u64,
+            quantize_min_out(sell_min_out(500_000_000_000, parse_e18("0.0000021").unwrap(), 6, 500).unwrap()),
+            "TP leg: tick price, TP slippage"
+        );
+        // Two ticks below SL: only B sells (SL leg, its own slippage); A stays as it was.
+        e.tick(4, "0.00000075", "curve").await;
+        e.wait_order(3, &b, |o| o["armed"] == true).await;
+        e.tick(5, "0.00000075", "curve").await;
+        let o = e.wait_order(3, &b, |o| o["status"] == "triggered").await;
+        assert_eq!(o["leg"], "sl");
+        let bid = o["actionId"].as_str().unwrap().to_string();
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT min_out FROM {s}.relayer_jobs WHERE action_id = '\\x{bid}'"
+            ))
+            .await as u64,
+            quantize_min_out(sell_min_out(500_000_000_000, parse_e18("0.00000075").unwrap(), 6, 1_500).unwrap()),
+            "SL leg: tick price, SL slippage"
+        );
+        assert_eq!(e.order(3, &a).await["actionId"].as_str(), Some(aid.as_str()));
+        assert_eq!(e.sells_of(3).await, 2, "one trade per bracket");
+        assert_eq!(e.tokens(3).await, (0, 1_000_000_000_000), "holds moved to the trades");
+        // Cancel after a leg fired: not open.
+        assert_eq!(
+            code(&post(3, json!({"op":"order_cancel","orderId":a})).await),
+            "order_not_open"
+        );
+        // B re-arms on slippage as a whole bracket (both legs back).
+        e.fail_job(&bid, "slippage").await;
+        let o = e.wait_order(3, &b, |o| o["status"] == "open").await;
+        assert_eq!(
+            (o["rearms"].as_i64(), o.get("leg"), o.get("actionId")),
+            (Some(1), None, None)
+        );
+        assert_eq!(e.tokens(3).await, (0, 1_000_000_000_000), "hold kept on the order");
+        // Cancel releases the bracket's single hold.
+        let r = post(3, json!({"op":"order_cancel","orderId":b})).await;
+        assert_eq!(r.body["status"], "cancelled", "{:?}", r.body);
+        assert_eq!(e.tokens(3).await, (500_000_000_000, 500_000_000_000));
+
+        // Race: SL armed, then two ticks (SL confirm, then TP) land while several evaluators
+        // run at once. Exactly one leg fires, one trade, the hold moves once.
+        let r = post(4, bracket(400_000_000_000, "0.000002", "0.0000008")).await;
+        let c = r.body["id"].as_str().unwrap().to_string();
+        e.tick(6, "0.0000007", "curve").await;
+        e.wait_order(4, &c, |o| o["armed"] == true).await;
+        let pass = || async {
+            for _ in 0..5 {
+                e.ledger.orders_tick("devnet", &eval_params()).await.unwrap();
+            }
+        };
+        let ticks = async {
+            e.tick(7, "0.0000007", "curve").await;
+            e.tick(8, "0.0000025", "curve").await;
+        };
+        tokio::join!(pass(), pass(), pass(), pass(), ticks);
+        let o = e.wait_order(4, &c, |o| o["status"] == "triggered").await;
+        assert!(matches!(o["leg"].as_str(), Some("tp" | "sl")), "{o:?}");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(e.sells_of(4).await, 1, "OCO: one trade");
+        assert_eq!(e.tokens(4).await, (600_000_000_000, 400_000_000_000));
+        assert_eq!(e.order(4, &c).await["status"], "triggered");
+
+        // D1 retention scrubs the bracket legs too.
+        e.sql(&format!(
+            "UPDATE {s}.orders SET closed_at = now() - interval '25 hours', status = 'cancelled' WHERE kind = 'bracket'"
+        ))
+        .await;
+        e.ledger.orders_janitor().await.unwrap();
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.orders WHERE sl_price_sol IS NOT NULL OR leg IS NOT NULL OR mint IS NOT NULL"
+            ))
+            .await,
+            0
+        );
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn rearm_after_slippage() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.orders_env(&[5]).await;
+        e.fund(6, 0, 100_000_000).await;
+        let post = |n: u8, v: Value| {
+            let body = v.to_string();
+            let e = &e;
+            async move { e.signed(&user(n), "POST", "/api/actions", &body).await }
+        };
+        let with_rearm = |mut v: Value| {
+            v["rearm"] = json!(true);
+            v
+        };
+        e.tick(1, "0.000001", "curve").await;
+
+        // limit_sell + rearm: on-chain slippage → open again, same hold; then filled.
+        let r = post(5, with_rearm(create("limit_sell", 500_000_000_000, "0.000001"))).await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        let ls = r.body["id"].as_str().unwrap().to_string();
+        e.tick(2, "0.0000011", "curve").await;
+        let o = e.wait_order(5, &ls, |o| o["status"] == "triggered").await;
+        let aid1 = o["actionId"].as_str().unwrap().to_string();
+        e.fail_job(&aid1, "slippage").await;
+        let o = e.wait_order(5, &ls, |o| o["status"] == "open").await;
+        assert_eq!((o["rearms"].as_i64(), o.get("actionId")), (Some(1), None));
+        assert_eq!(
+            e.tokens(5).await,
+            (500_000_000_000, 500_000_000_000),
+            "hold stays on the order"
+        );
+        let pf = e.signed(&user(5), "GET", "/api/portfolio", "").await.body;
+        let failed = pf["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == aid1.as_str())
+            .cloned();
+        assert_eq!(
+            failed.unwrap()["status"],
+            "failed",
+            "the attempt is an ordinary failed sell"
+        );
+        // Next tick: fires again (a new trade), then settles.
+        e.tick(3, "0.0000012", "curve").await;
+        let o = e.wait_order(5, &ls, |o| o["status"] == "triggered").await;
+        let aid2 = o["actionId"].as_str().unwrap().to_string();
+        assert_ne!(aid1, aid2);
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SIGR', out_token_amount = 500000000000,
+                    out_lamports = 500000000 WHERE action_id = '\\x{aid2}'"
+        ))
+        .await;
+        let o = e.wait_order(5, &ls, |o| o["status"] == "filled").await;
+        assert_eq!(o["rearms"], 1);
+        assert_eq!(e.tokens(5).await, (500_000_000_000, 0));
+
+        // Re-arms exhausted → failed (slippage), hold released.
+        let r = post(5, with_rearm(create("limit_sell", 100_000_000_000, "0.000001"))).await;
+        let ex = r.body["id"].as_str().unwrap().to_string();
+        e.sql(&format!("UPDATE {s}.orders SET rearms = 3 WHERE id = '\\x{ex}'"))
+            .await;
+        // Another error than slippage never re-arms.
+        let r = post(5, with_rearm(create("limit_sell", 100_000_000_000, "0.000001"))).await;
+        let pl = r.body["id"].as_str().unwrap().to_string();
+        e.tick(4, "0.0000013", "curve").await;
+        let a_ex = e.wait_order(5, &ex, |o| o["status"] == "triggered").await["actionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let a_pl = e.wait_order(5, &pl, |o| o["status"] == "triggered").await["actionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        e.fail_job(&a_ex, "slippage").await;
+        e.fail_job(&a_pl, "pool_liquidity").await;
+        assert_eq!(
+            e.wait_order(5, &ex, |o| o["status"] == "failed").await["error"],
+            "slippage"
+        );
+        assert_eq!(
+            e.wait_order(5, &pl, |o| o["status"] == "failed").await["error"],
+            "pool_liquidity"
+        );
+        assert_eq!(e.tokens(5).await, (500_000_000_000, 0));
+
+        // stop_loss + rearm: the server guard (tick gapped below trigger × (1 − 15 %)) re-arms
+        // instead of failing; without rearm the same gap fails.
+        let r = post(5, with_rearm(create("stop_loss", 100_000_000_000, "0.000001"))).await;
+        let sl = r.body["id"].as_str().unwrap().to_string();
+        let r = post(5, create("stop_loss", 100_000_000_000, "0.000001")).await;
+        let sl0 = r.body["id"].as_str().unwrap().to_string();
+        e.tick(5, "0.0000005", "curve").await;
+        e.wait_order(5, &sl, |o| o["armed"] == true).await;
+        e.tick(6, "0.0000005", "curve").await;
+        let o = e.wait_order(5, &sl, |o| o["rearms"] == 1).await;
+        assert_eq!((o["status"].as_str(), o.get("armed")), (Some("open"), None));
+        assert_eq!(
+            e.wait_order(5, &sl0, |o| o["status"] == "failed").await["error"],
+            "slippage"
+        );
+        assert_eq!(e.tokens(5).await, (400_000_000_000, 100_000_000_000));
+
+        // limit_buy + rearm: amount becomes the actual hold (D10 remainder already back);
+        // the balance never changes on re-arm; cancel returns everything.
+        let r = post(6, with_rearm(create("limit_buy", 10_000_000, "0.000001"))).await;
+        let lb = r.body["id"].as_str().unwrap().to_string();
+        e.tick(7, "0.0000009", "curve").await;
+        let o = e.wait_order(6, &lb, |o| o["status"] == "triggered").await;
+        let ab = o["actionId"].as_str().unwrap().to_string();
+        let (avail, held) = e.avail(6).await;
+        assert_eq!(avail + held, 100_000_000);
+        e.fail_job(&ab, "slippage").await;
+        let o = e.wait_order(6, &lb, |o| o["status"] == "open").await;
+        assert_eq!(o["amount"].as_str().unwrap().parse::<i64>().unwrap(), held);
+        assert_eq!(e.avail(6).await, (avail, held), "re-arm moves no money");
+        let r = post(6, json!({"op":"order_cancel","orderId":lb})).await;
+        assert_eq!(r.body["status"], "cancelled", "{:?}", r.body);
+        assert_eq!(e.avail(6).await, (100_000_000, 0));
+        e.drop_schema().await;
+    }
 }
 
 // ================================================================== API v0.9: launch fee, cabinet, stats
