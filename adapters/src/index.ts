@@ -29,3 +29,4 @@ export * from "./attest";
 export * as intel from "./intel";
 export * from "./jito";
 export * as fairBundle from "./fair-bundle";
+export * as evm from "./evm";

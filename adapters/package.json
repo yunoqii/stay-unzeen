@@ -31,7 +31,11 @@
     "launchlab:probe": "tsx scripts/launchlab-probe.ts",
     "launchlab:leg-local": "tsx scripts/launchlab-leg-local.ts",
     "bags:auth": "tsx scripts/bags-auth.ts",
-    "bags:fund": "tsx scripts/bags-fund.ts"
+    "bags:fund": "tsx scripts/bags-fund.ts",
+    "evm:keys": "tsx scripts/evm-keys.ts",
+    "evm:abi": "tsx scripts/evm-fetch-abi.ts",
+    "evm:fixtures": "tsx scripts/evm-record-fixtures.ts",
+    "test:fork": "HOOD_FORK=1 vitest run test/evm/pons-fork.test.ts"
   },
   "engines": {
     "node": ">=20"
@@ -47,7 +51,8 @@
     "bn.js": "5.2.5",
     "bs58": "6.0.0",
     "pg": "8.23.1",
-    "sharp": "0.35.5"
+    "sharp": "0.35.5",
+    "viem": "2.57.5"
   },
   "devDependencies": {
     "@types/bn.js": "5.2.0",
