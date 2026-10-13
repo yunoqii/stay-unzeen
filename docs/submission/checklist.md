@@ -69,3 +69,8 @@ Rules recap: one submission, one track (Private Markets); all code written in th
 - [ ] **O/B** Demo alive the whole period: monitoring alerts handled, volume unlocked after any reboot, balances topped up (TAZ, devnet SOL, demo keys, attestation keys).
 - [ ] **B** Daily Verify snapshots and anchors keep coming (judges may check history).
 - [ ] **L** No pushes that break the demo; if fixes are needed, keep them small and documented (the window rule is about the build period; TODO(lead): confirm whether post-deadline commits are acceptable or should wait until after Nov 23).
+
+
+## Видео (решение владельца 13.10)
+- [ ] Записываем Cut B (с fair-launch), храним только локально
+- [ ] 28.10, после открытия репо: загрузить unlisted (доступ по ссылке), ссылку — в форму
