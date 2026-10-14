@@ -1,0 +1,11 @@
+{
+ "source": "viem signTypedData / signMessage (adapters/src/evm/attest.ts types and domain)",
+ "chainId": 4663,
+ "snapshotId": "7",
+ "blockNumber": "12345678",
+ "vault": "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A",
+ "vaultSig": "0xd2b941f9d6cd833259ee9bef7895fc35d0fb6b5c70781b33019a6b5c431559735799afce468c5ccf4c854a8ac9b619eb3c3dfc24b9cd942c279bc6b5019bff361c",
+ "operator": "0x1563915e194D8CfBA1943570603F7606A3115508",
+ "digest": "0599aace63033323a97e37e390bd17f2156e2758e576e0ccb7228dcf450b9ae8",
+ "operatorSig": "0x884b42174f35878c5bd56f47791a758c215f3321543f10b64f0838537764aa526ad1586d6a15d38689a5b76cb34e256f8062e6dcceb38970f9d3993cae66d5961c"
+}

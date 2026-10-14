@@ -25,12 +25,16 @@ const ICON: Record<Tone, React.ReactNode> = {
  */
 export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { snap: VerifySnapshot; check: SnapshotCheck; isLatest: boolean; pinned: string | null; network: Network }) {
   const vaultsOk = Object.values(check.vaults).filter(Boolean).length;
+  // v0.20 Robinhood Chain (digest v3): EVM signatures, a block number instead of a slot, an attest tx.
+  const evm = snap.digestVersion === 3;
+  const chainName = evm ? "Robinhood Chain" : "Solana";
+  const explorer = evm ? (process.env.NEXT_PUBLIC_HOOD !== "1" ? "" : snap.chainId === "0212" ? "https://explorer.testnet.chain.robinhood.com" : "https://robinhoodchain.blockscout.com") : "https://solscan.io";
   const op = check.operator;
   // v0.10: the operator signs before the memo-tx; in between the snapshot is "Signed · Anchor pending".
   const signedOk = op === "verified" || op === "unpinned";
   const anchorLabel =
     check.anchor === "anchored"
-      ? "Anchored on Solana"
+      ? `Anchored on ${chainName}`
       : check.anchor === "mismatch"
         ? "Anchor memo does not match"
         : signedOk
@@ -41,13 +45,15 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
       tone: check.digestOk ? "ok" : "bad",
       label: check.digestOk ? "Digest recomputed" : "Digest does not match",
       detail: check.digestOk
-        ? snap.digestVersion === 2
+        ? evm
+          ? "Digest v3: u128 leaf values and token ids, from the roots, the reserve, the block, the height and the quote assets below."
+          : snap.digestVersion === 2
           ? "Digest v2: from the roots, the reserve, the slot, the height and the quote assets below."
           : "From the roots, the reserve, the slot and the height below."
         : (check.error ?? "The fields of this snapshot do not hash to the digest the server sent."),
     },
     // v0.17: before digest v2 the quote assets (what counts as bridged ZEC) were not signed.
-    ...(check.digestOk && snap.digestVersion !== 2 && (snap.quoteAssets?.length ?? 0) > 0
+    ...(check.digestOk && (snap.digestVersion ?? 1) < 2 && (snap.quoteAssets?.length ?? 0) > 0
       ? [{ tone: "warn" as Tone, label: "Quote assets not signed", detail: "This older snapshot (digest v1) does not sign its quote asset list. The bridged ZEC part of the cover is the server's word here." }]
       : []),
     {
@@ -64,9 +70,11 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
                 : "Operator signature invalid",
       detail:
         op === "verified"
-          ? "Ed25519 over the recomputed digest, by the attestation key pinned in this app."
+          ? evm
+            ? "EIP-191 over the recomputed digest, by the attestation address pinned in this app."
+            : "Ed25519 over the recomputed digest, by the attestation key pinned in this app."
           : op === "pending"
-            ? "The operator signs the digest right after the snapshot is built, before it goes on Solana."
+            ? `The operator signs the digest right after the snapshot is built, before it goes on ${chainName}.`
             : op === "unpinned"
               ? "This build has no pinned attestation key to compare with. Compare the key with the one in the README."
               : op === "wrong_key"
@@ -77,7 +85,9 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
       tone: check.allVaultsOk ? "ok" : "bad",
       label: `Vault signatures ${vaultsOk}/${Object.keys(check.vaults).length}`,
       detail: check.allVaultsOk
-        ? "Every vault signed this snapshot with its own key."
+        ? evm
+          ? "Every vault signed an EIP-712 statement of this snapshot and block with its own key."
+          : "Every vault signed this snapshot with its own key."
         : check.duplicateVaults.length > 0
           ? `A vault is listed more than once (${check.duplicateVaults.length}). It counts once; a snapshot like this should not be trusted.`
           : "A vault did not sign this snapshot. Its balance does not count.",
@@ -96,7 +106,7 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
         </h2>
         <p className="mt-1 text-sm text-muted-foreground">{fmtUtc(snap.takenAt)}</p>
         <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-3 text-xs sm:grid-cols-3">
-          <Fact k="Solana slot" v={snap.solanaSlot.toLocaleString("en-US")} />
+          <Fact k={evm ? "Block" : "Solana slot"} v={snap.solanaSlot.toLocaleString("en-US")} />
           <Fact k="Zcash height" v={snap.zcashHeight.toLocaleString("en-US")} />
           <Fact k="Leaves per tree" v={snap.leaves.toLocaleString("en-US")} />
         </dl>
@@ -130,13 +140,13 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
               {snap.anchor ? (
                 <dl className="mt-1 space-y-1 text-xs">
                   <div className="flex items-center justify-between gap-3">
-                    <dt className="text-faint-foreground">Memo tx</dt>
+                    <dt className="text-faint-foreground">{evm ? "Attest tx" : "Memo tx"}</dt>
                     <dd>
                       <CopyButton
-                        value={snap.anchor.solanaTx}
-                        label="Copy memo transaction signature"
-                        toastText="Signature copied"
-                        toastDescription="Look it up later, ideally over Tor. Its memo is exactly the roots digest."
+                        value={evm ? `${explorer}/tx/${snap.anchor.solanaTx}` : snap.anchor.solanaTx}
+                        label={evm ? "Copy the attest transaction's explorer link" : "Copy memo transaction signature"}
+                        toastText={evm ? "Explorer link copied" : "Signature copied"}
+                        toastDescription={evm ? "Open it later, ideally over Tor: its input data is exactly the roots digest." : "Look it up later, ideally over Tor. Its memo is exactly the roots digest."}
                         className="gap-1.5 font-mono"
                       >
                         {shortAddr(snap.anchor.solanaTx, 6, 6)}
@@ -144,7 +154,7 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
                     </dd>
                   </div>
                   <div className="flex items-center justify-between gap-3">
-                    <dt className="text-faint-foreground">Slot</dt>
+                    <dt className="text-faint-foreground">{evm ? "Block" : "Slot"}</dt>
                     <dd className="font-mono text-muted-foreground tabular">{snap.anchor.slot.toLocaleString("en-US")}</dd>
                   </div>
                   {snap.operator && (
@@ -161,14 +171,14 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
               ) : (
                 <p className="mt-0.5 text-xs text-pretty text-faint-foreground">
                   {signedOk
-                    ? "The operator already signed this digest. The memo-tx that puts it on Solana follows, usually within a minute."
-                    : "The root goes on Solana as a memo, so it cannot be shown differently to different people. Usually within a minute."}
+                    ? `The operator already signed this digest. The transaction that puts it on ${chainName} follows, usually within a minute.`
+                    : `The root goes on ${chainName}, so it cannot be shown differently to different people. Usually within a minute.`}
                 </p>
               )}
               {check.anchor === "mismatch" && (
                 <p role="alert" className="mt-2 flex items-start gap-1.5 rounded-lg bg-sell/10 p-2.5 text-xs text-sell">
                   <WarningCircle size={13} weight="fill" className="mt-px shrink-0" aria-hidden />
-                  The memo read back from Solana differs from this digest. Do not trust this snapshot until it is explained.
+                  The digest read back from {chainName} differs from this one. Do not trust this snapshot until it is explained.
                 </p>
               )}
             </div>

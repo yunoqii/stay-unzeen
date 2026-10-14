@@ -22,6 +22,7 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { base58 } from "@scure/base";
+import { verifyOperatorEip191, verifyVaultEip712 } from "./evm-sig";
 import type { AssetId, VerifyPathNode, VerifyProof, VerifyProofPiece, VerifyQuoteAsset, VerifySnapshot, VerifyVault } from "@/lib/api/types";
 
 const enc = new TextEncoder();
@@ -278,17 +279,33 @@ export function checkSnapshot(s: VerifySnapshot, pinnedOperator: string | null):
   let operator: OperatorCheck = "pending";
   if (s.operator) {
     // Always over the digest computed HERE, never over the one the server claims.
-    const sigOk = !!digest && verifyEd25519(s.operator.pubkey, s.operator.sig, hexToBytes(digest));
-    operator = !sigOk ? "bad_signature" : !pinnedOperator ? "unpinned" : pinnedOperator === s.operator.pubkey ? "verified" : "wrong_key";
+    // v0.20 Robinhood Chain (digest v3): the operator is an EVM address signing the digest bytes (EIP-191).
+    const evm = digestVersionOf(s) === 3;
+    const sigOk = !!digest && (evm ? verifyOperatorEip191(s.operator.pubkey, digest, s.operator.sig) : verifyEd25519(s.operator.pubkey, s.operator.sig, hexToBytes(digest)));
+    const same = evm ? pinnedOperator?.toLowerCase() === s.operator.pubkey.toLowerCase() : pinnedOperator === s.operator.pubkey;
+    operator = !sigOk ? "bad_signature" : !pinnedOperator ? "unpinned" : same ? "verified" : "wrong_key";
   }
   const vaults: Record<string, boolean> = {};
   const duplicateVaults: string[] = [];
+  const v3 = (() => {
+    try {
+      return digestVersionOf(s) === 3;
+    } catch {
+      return false;
+    }
+  })();
+  const evmChain = s.chainId === "0111" ? 4663 : s.chainId === "0212" ? 46630 : null;
+  const seenLower = new Set<string>();
   for (const v of s.vaults) {
-    if (v.address in vaults) {
+    // EVM addresses differ only in letter case: one vault.
+    const key = v3 ? v.address.toLowerCase() : v.address;
+    if (v.address in vaults || seenLower.has(key)) {
       if (!duplicateVaults.includes(v.address)) duplicateVaults.push(v.address);
       continue;
     }
-    vaults[v.address] = verifyVault(s.chainId, s.id, v);
+    seenLower.add(key);
+    // v3: every vault signs an EIP-712 statement { snapshotId, address, blockNumber = solanaSlot } on its chain.
+    vaults[v.address] = v3 ? evmChain !== null && verifyVaultEip712(evmChain, s.id, v.address, s.solanaSlot, v.sig) : verifyVault(s.chainId, s.id, v);
   }
   return {
     digest,

@@ -176,8 +176,8 @@ function VerifyView({ network }: { network: Network }) {
       <SnapshotHeader snap={snap} check={check} isLatest={isLatest} pinned={pinnedOperator(network)} network={network} />
 
       <section aria-labelledby="solv-t">
-        <SectionTitle id="solv-t" title="Solvency" note="Liabilities are the root sums. Assets are what the signed vaults hold at the same slot." />
-        <SolvencyTable rows={rows} symbols={symbols} />
+        <SectionTitle id="solv-t" title="Solvency" note={`Liabilities are the root sums. Assets are what the signed vaults hold at the same ${snap.digestVersion === 3 ? "block" : "slot"}.`} />
+        <SolvencyTable rows={rows} symbols={symbols} native={snap.digestVersion === 3 ? "ETH" : "SOL"} />
         <QuoteAssetsTable rows={quoteRows} />
       </section>
 

@@ -2485,7 +2485,18 @@ async function hoodRoute(method: "GET" | "POST", pathWithQuery: string, body: st
       return h.candles(decodeURIComponent(m[1]), tf, n("from"), n("to"));
     }
     if ((m = p.match(/^\/api\/tokens\/([^/]+)\/chat$/))) throw new ApiError("not_found", "no chat on this chain yet", 404);
-    if (p.startsWith("/api/verify")) throw new ApiError("feature_disabled", "Verify is not on this chain yet", 404);
+    if (process.env.NEXT_PUBLIC_HOOD === "1" && p.startsWith("/api/verify")) {
+      // Verify v3 on the mock: a REAL snapshot recorded from the hood end-to-end run (EIP-712 vaults, EIP-191
+      // operator, digest v3), served as this origin's only snapshot. The key here held nothing in it.
+      const snap = (await import("@/lib/verify/testdata/hood-snapshot.json")).default as unknown as { id: number; takenAt: number; rootsDigest: string; anchor?: unknown };
+      if (p === "/api/verify" || p === `/api/verify/${snap.id}`) return snap;
+      if (p === "/api/verify/snapshots") return [{ id: snap.id, takenAt: snap.takenAt, rootsDigest: snap.rootsDigest, ...(snap.anchor ? { anchor: snap.anchor } : {}) }];
+      if (p === "/api/verify/proof") {
+        authorize("hood", method, pathWithQuery, body, headers);
+        return { snapshotId: snap.id, proofs: [], truncated: false };
+      }
+      throw new ApiError("not_found", "unknown snapshot", 404);
+    }
     if ((m = p.match(/^\/api\/actions\/([^/]+)$/))) {
       const pub = authorize("hood", method, pathWithQuery, body, headers);
       const own = h.action(pub, decodeURIComponent(m[1]));

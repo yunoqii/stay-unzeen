@@ -15,7 +15,7 @@ const EASE = [0.16, 1, 0.3, 1] as const;
  * operator's reserve statement (attested), drawn as two segments of one bar, so the attested part is
  * never mistaken for a proof.
  */
-export function SolvencyTable({ rows, symbols }: { rows: SolvencyRow[]; symbols: Map<string, string> }) {
+export function SolvencyTable({ rows, symbols, native = "SOL" }: { rows: SolvencyRow[]; symbols: Map<string, string>; native?: string }) {
   if (rows.length === 0) return <p className="text-sm text-muted-foreground">No liabilities in this snapshot.</p>;
   return (
     <div className="border border-border">
@@ -28,14 +28,14 @@ export function SolvencyTable({ rows, symbols }: { rows: SolvencyRow[]; symbols:
       </div>
       <ul className="divide-y divide-border">
         {rows.map((r, i) => (
-          <Row key={r.asset} r={r} label={assetLabel(r.asset, symbols)} i={i} />
+          <Row key={r.asset} r={r} label={assetLabel(r.asset, symbols)} i={i} native={native} />
         ))}
       </ul>
     </div>
   );
 }
 
-function Row({ r, label, i }: { r: SolvencyRow; label: string; i: number }) {
+function Row({ r, label, i, native = "SOL" }: { r: SolvencyRow; label: string; i: number; native?: string }) {
   const bps = coverageBps(r.assets, r.liabilities);
   const unit = r.asset === "ZEC" ? "ZEC" : "";
   const zec = r.kind === "proven_attested";
@@ -75,11 +75,11 @@ function Row({ r, label, i }: { r: SolvencyRow; label: string; i: number }) {
                 ? "Not covered"
                 : zec
                   ? r.bridgedZat !== undefined && r.bridgedZat > BigInt(0)
-                    ? "Proven SOL + bridged ZEC + attested ZEC"
-                    : "Proven SOL + attested ZEC"
+                    ? `Proven ${native} + bridged ZEC + attested ZEC`
+                    : `Proven ${native} + attested ZEC`
                   : "Proven"}
         </span>
-        {unknown && <p className="mt-1 text-[11px] text-pretty text-faint-foreground">Not ZEC or a Solana mint: this page can&apos;t check it.</p>}
+        {unknown && <p className="mt-1 text-[11px] text-pretty text-faint-foreground">Not ZEC or a token of this chain: this page can&apos;t check it.</p>}
         {zec && (
           <p className="mt-1 text-[11px] text-pretty text-faint-foreground">
             Attested by the operator, not cryptographically proven.{" "}

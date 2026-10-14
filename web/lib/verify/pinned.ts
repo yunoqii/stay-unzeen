@@ -2,8 +2,9 @@
 // fair-launch memos). The browser compares operator.pubkey of every snapshot with it: a server that
 // swaps the key cannot pass the check. Also published in the README.
 //
-// NEXT_PUBLIC_ATTESTATION_PUBKEY_DEVNET / _MAINNET (base58). In mock mode with no value the mock
-// operator key is pinned, so the whole check runs end to end.
+// NEXT_PUBLIC_ATTESTATION_PUBKEY_DEVNET / _MAINNET (base58), _HOOD (0x address, v0.20 Robinhood Chain: the
+// operator signs with EIP-191). In mock mode with no value the mock operator key is pinned, so the whole check
+// runs end to end.
 
 import type { Network } from "@/lib/network";
 
@@ -17,8 +18,15 @@ const PINNED: Record<Network, string> = {
   hood: process.env.NEXT_PUBLIC_HOOD === "1" ? (process.env.NEXT_PUBLIC_ATTESTATION_PUBKEY_HOOD ?? "").trim() : "",
 };
 
+/**
+ * TEST ONLY: attestation address of the recorded hood snapshot the mock serves (lib/verify/testdata/
+ * hood-snapshot.json, from the adapters hood end-to-end run).
+ */
+const MOCK_HOOD_OPERATOR = process.env.NEXT_PUBLIC_HOOD === "1" ? "0x97a23cd8Cec339c6b179aC798187B430883A0776" : "";
+
 /** Pinned operator key of a network, or null when this build has none. */
 export function pinnedOperator(n: Network): string | null {
   if (PINNED[n]) return PINNED[n];
-  return process.env.NEXT_PUBLIC_API_MODE === "real" ? null : MOCK_OPERATOR_PUBKEY;
+  if (process.env.NEXT_PUBLIC_API_MODE === "real") return null;
+  return n === "hood" && MOCK_HOOD_OPERATOR ? MOCK_HOOD_OPERATOR : MOCK_OPERATOR_PUBKEY;
 }
