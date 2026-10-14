@@ -878,7 +878,8 @@ export interface VerifyVault {
 export interface VerifySnapshot extends VerifySnapshotSummary {
   chainId: string;
   /** v0.17: 2 = rootsDigest v2 (also signs quoteAssets). Absent = 1 (older snapshots). */
-  digestVersion?: 1 | 2;
+  /** v0.20: 3 = Robinhood Chain snapshots (u128 leaves, ERC-20 assets); Solana stays 2. */
+  digestVersion?: 1 | 2 | 3;
   /** N, the same for every tree of the snapshot. */
   leaves: number;
   solanaSlot: number;
@@ -1093,8 +1094,11 @@ export interface Scenario {
   /** Unix ms, rounded up to the hour. */
   expiresAt: number;
   cursor: number;
-  /** Echo of the plan: addresses and UA masked (Ab3d…9xYz), chat text / launch meta without content. */
-  plan: ScenarioPlan;
+  /**
+   * v0.20: no longer sent — the plan and its addresses live only on the device that signed it (lib/scenarios/
+   * store.ts). Older servers sent an echo with "sealed" / masked addresses.
+   */
+  plan?: ScenarioPlan;
   steps: ScenarioStepState[];
   error?: ScenarioStepError;
 }

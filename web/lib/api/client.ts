@@ -58,7 +58,11 @@ function qs(params: Record<string, string | number | undefined>): string {
 const enc = encodeURIComponent;
 
 /** Absent `quote` (servers before v0.13) means a SOL pair. */
-const withQuote = <T extends { quote?: Token["quote"] }>(t: T): T => (!t.quote ? { ...t, quote: "SOL" } : t);
+/**
+ * The native pair of the origin is "SOL" inside the UI (the *Sol / *Lamports fields carry the native coin).
+ * v0.20: a Robinhood Chain server may name it "ETH"; that is the same native pair.
+ */
+const withQuote = <T extends { quote?: Token["quote"] }>(t: T): T => (!t.quote || (t.quote as string) === "ETH" ? { ...t, quote: "SOL" } : t);
 
 export interface TradesQuery {
   before?: string;

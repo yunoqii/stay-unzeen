@@ -110,12 +110,14 @@ function Scenarios() {
       minActionZat: pool?.minActionZat,
       venueInfo: pool?.venues,
       orders: pool?.orders,
+      // v0.20: own_result on an own order outside the plan counts as a trade of its mint (P2).
+      refMint: (id) => portfolio?.orders?.find((o) => o.id === id)?.mint ?? null,
       token: (m) => {
         const t = byMint.get(m);
         return t ? { mint: m, symbol: t.symbol, decimals: t.decimals, venue: t.venue, quote: t.quote ?? "SOL", status: t.status, priced: pricedToken(t) } : null;
       },
     }),
-    [params, pool, byMint, network, now],
+    [params, pool, byMint, network, now, portfolio?.orders],
   );
 
   const plan = useMemo(() => (draft ? toPlan(draft) : null), [draft]);

@@ -780,7 +780,6 @@ export function createScenarioMock(host: ScenarioHost, params: (network: Network
       // Compressed clock: not rounded up to the hour like core, or a demo plan would seem to live for hours.
       expiresAt: Math.round(r.expiresAt),
       cursor: r.cursor,
-      plan: { ...r.plan, steps: r.plan.steps.map((s) => ({ ...s, block: mask(s.block) })) },
       steps: r.steps.map((x, id) => ({
         id,
         status: x.status,

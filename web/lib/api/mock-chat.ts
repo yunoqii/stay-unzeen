@@ -39,6 +39,16 @@ export function mockChatParams(network: Network): ChatParams {
 
 // ---- nickname (chat.md §2) ----
 
+/** mint[32] of the nick formula: base58 bytes on Solana; v0.20 Robinhood Chain: 12 zero bytes ‖ 20-byte address. */
+export function mintBytes32(mint: string): Uint8Array {
+  if (/^0x[0-9a-fA-F]{40}$/.test(mint)) {
+    const out = new Uint8Array(32);
+    out.set(hexBytes(mint.slice(2).toLowerCase()), 12);
+    return out;
+  }
+  return base58.decode(mint);
+}
+
 const CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz";
 const NICK_DOMAIN = new TextEncoder().encode("unzeen/chat/nick/v1");
 
@@ -64,7 +74,7 @@ const hexBytes = (h: string) => Uint8Array.from(h.match(/../g)!.map((x) => parse
 
 /** nick = b32(HMAC-SHA256(K_chat, domain ‖ chainId[2] ‖ mint[32] ‖ anonPubkey[32] ‖ flag))[0..8] */
 export function chatNick(kChat: Uint8Array, chainIdHex: string, mint: string, pubkey: string, creator: boolean): string {
-  const parts = [NICK_DOMAIN, hexBytes(chainIdHex), base58.decode(mint), base58.decode(pubkey), Uint8Array.of(creator ? 1 : 0)];
+  const parts = [NICK_DOMAIN, hexBytes(chainIdHex), mintBytes32(mint), base58.decode(pubkey), Uint8Array.of(creator ? 1 : 0)];
   const msg = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let o = 0;
   for (const p of parts) {

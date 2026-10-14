@@ -145,7 +145,7 @@ describe("verify vectors: snapshotV2 (API v0.17)", () => {
   });
 
   it("an unknown digestVersion is refused, never guessed", () => {
-    expect(() => rootsDigest({ ...base(), digestVersion: 3 as unknown as 2 })).toThrow(/digestVersion/);
+    expect(() => rootsDigest({ ...base(), digestVersion: 4 as unknown as 2 })).toThrow(/digestVersion/);
   });
 
   it("verify-proof.mjs computes the same v1 and v2 digests and quote bytes", async () => {

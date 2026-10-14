@@ -10,6 +10,9 @@
 //   rootsDigest v2 (API v0.17, digestVersion 2) = SHA256("unzeen/verify/v2/snapshot" ‖ the v1 fields
 //                 ‖ u32(Q) ‖ per quote asset, ascending mint bytes: mint[32] ‖ u8(decimals) ‖ u8(bridged)
 //                 ‖ u8(counted) ‖ u64(dustBelow))      no quoteAssets -> Q = 0
+//   v3 (API v0.20, digestVersion 3, Robinhood Chain): "unzeen/verify/v3/{leaf,node,snapshot}" tags, the leaf
+//                 value is u128 (16 bytes), an ERC-20 asset is 12 zero bytes ‖ its 20-byte address; the
+//                 snapshot fields are those of v2 (solanaSlot carries the chain's block number)
 //   operator.sig = ed25519(attestation key, rootsDigest bytes)
 //   vault.sig    = ed25519(vault key, utf8("unzeen/verify/v1/vault\n" + chainId + "\n" + snapshotId + "\n" + address))
 //
@@ -27,6 +30,12 @@ export const NODE_TAG = enc.encode("unzeen/verify/v1/node");
 export const SNAPSHOT_TAG = enc.encode("unzeen/verify/v1/snapshot");
 /** API v0.17: the v2 digest also signs the snapshot's quoteAssets. */
 export const SNAPSHOT_TAG_V2 = enc.encode("unzeen/verify/v2/snapshot");
+/** API v0.20: v3 tags (u128 leaf values, ERC-20 assets). */
+export const LEAF_TAG_V3 = enc.encode("unzeen/verify/v3/leaf");
+export const NODE_TAG_V3 = enc.encode("unzeen/verify/v3/node");
+export const SNAPSHOT_TAG_V3 = enc.encode("unzeen/verify/v3/snapshot");
+
+export type DigestVersion = 1 | 2 | 3;
 export const ZEC_ASSET = new Uint8Array(32);
 const U128_MAX = (BigInt(1) << BigInt(128)) - BigInt(1);
 const U64_MAX = (BigInt(1) << BigInt(64)) - BigInt(1);
@@ -84,6 +93,12 @@ function chainBytes(chainId: string): Uint8Array {
  */
 export function assetBytes(asset: AssetId): Uint8Array | null {
   if (asset === "ZEC") return ZEC_ASSET;
+  // v0.20: an ERC-20 (Robinhood Chain) = 12 zero bytes ‖ the 20-byte address (any letter case).
+  if (/^0x[0-9a-fA-F]{40}$/.test(asset)) {
+    const out = new Uint8Array(32);
+    out.set(hexToBytes(asset.slice(2).toLowerCase()), 12);
+    return out;
+  }
   try {
     const b = base58.decode(asset);
     return b.length === 32 ? b : null;
@@ -109,15 +124,19 @@ export interface LeafInput {
   blind: Uint8Array;
 }
 
-export function leafHash(x: LeafInput): Uint8Array {
+export function leafHash(x: LeafInput, v: DigestVersion = 1): Uint8Array {
   if (x.asset.length !== 32 || x.anonPubkey.length !== 32 || x.blind.length !== 32) throw new Error("leaf: 32-byte fields expected");
+  if (v === 3) {
+    if (x.value > U128_MAX) throw new RangeError("leaf value exceeds u128");
+    return sha256(concat([LEAF_TAG_V3, chainBytes(x.chainId), u32(x.snapshotId), x.asset, x.anonPubkey, u8(x.piece), u128(x.value), x.blind]));
+  }
   if (x.value > U64_MAX) throw new RangeError("leaf value exceeds u64");
   return sha256(concat([LEAF_TAG, chainBytes(x.chainId), u32(x.snapshotId), x.asset, x.anonPubkey, u8(x.piece), u64(x.value), x.blind]));
 }
 
 /** The parent commits to BOTH child sums: moving value between children changes the hash. */
-export function nodeOf(l: SumNode, r: SumNode): SumNode {
-  return { hash: sha256(concat([NODE_TAG, l.hash, u128(l.sum), r.hash, u128(r.sum)])), sum: l.sum + r.sum };
+export function nodeOf(l: SumNode, r: SumNode, v: DigestVersion = 1): SumNode {
+  return { hash: sha256(concat([v === 3 ? NODE_TAG_V3 : NODE_TAG, l.hash, u128(l.sum), r.hash, u128(r.sum)])), sum: l.sum + r.sum };
 }
 
 /** One step of the climb, bottom-up. */
@@ -131,7 +150,7 @@ export interface TraceStep {
 }
 
 /** Climb from a leaf to the root. Throws on malformed path entries. */
-export function climb(leaf: SumNode, leafIndex: number, path: VerifyPathNode[]): { root: SumNode; steps: TraceStep[] } {
+export function climb(leaf: SumNode, leafIndex: number, path: VerifyPathNode[], v: DigestVersion = 1): { root: SumNode; steps: TraceStep[] } {
   let cur = leaf;
   let idx = leafIndex;
   const steps: TraceStep[] = [];
@@ -140,7 +159,7 @@ export function climb(leaf: SumNode, leafIndex: number, path: VerifyPathNode[]):
     if (!isHex32(s.hash) || sum === null) throw new Error(`malformed path entry at level ${level}`);
     const sib: SumNode = { hash: hex32(s.hash), sum };
     const right = (idx & 1) === 0;
-    cur = right ? nodeOf(cur, sib) : nodeOf(sib, cur);
+    cur = right ? nodeOf(cur, sib, v) : nodeOf(sib, cur, v);
     if (cur.sum > U128_MAX) throw new RangeError("sum overflows u128");
     steps.push({ level, siblingSide: right ? "right" : "left", sibling: { hash: s.hash.toLowerCase(), sum }, node: { hash: bytesToHex(cur.hash), sum: cur.sum } });
     idx = Math.floor(idx / 2);
@@ -148,10 +167,10 @@ export function climb(leaf: SumNode, leafIndex: number, path: VerifyPathNode[]):
   return { root: cur, steps };
 }
 
-/** Digest version of a snapshot: no field = 1 (before API v0.17). Anything else than 1 or 2 is refused. */
-export function digestVersionOf(s: Pick<VerifySnapshot, "digestVersion">): 1 | 2 {
+/** Digest version of a snapshot: no field = 1 (before API v0.17); 3 = Robinhood Chain (v0.20). Anything else is refused. */
+export function digestVersionOf(s: Pick<VerifySnapshot, "digestVersion">): DigestVersion {
   const v = s.digestVersion ?? 1;
-  if (v !== 1 && v !== 2) throw new Error(`unknown digestVersion ${String(v).slice(0, 16)}: this page can't recompute it`);
+  if (v !== 1 && v !== 2 && v !== 3) throw new Error(`unknown digestVersion ${String(v).slice(0, 16)}: this page can't recompute it`);
   return v;
 }
 
@@ -175,13 +194,13 @@ export function rootsDigest(
   const trees = s.trees.map((t) => {
     const asset = assetBytes(t.asset);
     const sum = parseUint(t.sum);
-    if (!asset) throw new Error(`unknown asset id "${String(t.asset).slice(0, 48)}": not ZEC or a base58 mint, so the digest can't be recomputed`);
+    if (!asset) throw new Error(`unknown asset id "${String(t.asset).slice(0, 48)}": not ZEC, a base58 mint or a 0x token, so the digest can't be recomputed`);
     if (!isHex32(t.root) || sum === null) throw new Error(`malformed tree ${t.asset}`);
     return { asset, root: hex32(t.root), sum };
   });
   trees.sort((a, b) => cmpBytes(a.asset, b.asset));
   const parts: Uint8Array[] = [
-    version === 2 ? SNAPSHOT_TAG_V2 : SNAPSHOT_TAG,
+    version === 3 ? SNAPSHOT_TAG_V3 : version === 2 ? SNAPSHOT_TAG_V2 : SNAPSHOT_TAG,
     chainBytes(s.chainId),
     u32(s.id),
     u64(Math.floor(s.takenAt / 1000)),
@@ -192,7 +211,7 @@ export function rootsDigest(
     u32(trees.length),
   ];
   for (const t of trees) parts.push(t.asset, t.root, u128(t.sum));
-  if (version === 2) {
+  if (version >= 2) {
     // Sorted by mint bytes (the first 32 bytes of each entry); a v1 digest never covers quoteAssets.
     const qs = (s.quoteAssets ?? []).map(quoteAssetBytes).sort((a, b) => cmpBytes(a.subarray(0, 32), b.subarray(0, 32)));
     parts.push(u32(qs.length), ...qs);
@@ -439,9 +458,11 @@ export interface ProofCheck {
 }
 
 function checkPiece(s: VerifySnapshot, asset: Uint8Array, granule: bigint, root: { hash: string; sum: bigint }, pk: Uint8Array, p: VerifyProofPiece): PieceResult {
-  const value = parseUint(p.value, U64_MAX);
+  const v = digestVersionOf(s);
+  // v3: leaf values are u128 (ERC-20 amounts with 18 decimals pass u64 fast).
+  const value = parseUint(p.value, v === 3 ? U128_MAX : U64_MAX);
   const base = { piece: p.piece, leafIndex: p.leafIndex, value: value ?? BigInt(0), leaf: "", steps: [] as TraceStep[], rootMatches: false, sumMatches: false, ok: false };
-  if (value === null) return { ...base, error: "value is not a u64" };
+  if (value === null) return { ...base, error: v === 3 ? "value is not a u128" : "value is not a u64" };
   if (granule > BigInt(0) && value % granule !== BigInt(0)) return { ...base, error: "value is not a multiple of the granule" };
   if (!isHex32(p.blind)) return { ...base, error: "blind is not 32 bytes" };
   if (!Number.isInteger(p.piece) || p.piece < 0 || p.piece > 255) return { ...base, error: "bad piece number" };
@@ -449,9 +470,9 @@ function checkPiece(s: VerifySnapshot, asset: Uint8Array, granule: bigint, root:
   const depth = Math.log2(s.leaves);
   if (!Number.isInteger(depth) || p.path.length !== depth) return { ...base, error: `path has ${p.path.length} levels, the tree has ${depth}` };
   if (!Number.isInteger(p.leafIndex) || p.leafIndex < 0 || p.leafIndex >= s.leaves) return { ...base, error: "leaf index outside the tree" };
-  const leaf = leafHash({ chainId: s.chainId, snapshotId: s.id, asset, anonPubkey: pk, piece: p.piece, value, blind: hex32(p.blind) });
+  const leaf = leafHash({ chainId: s.chainId, snapshotId: s.id, asset, anonPubkey: pk, piece: p.piece, value, blind: hex32(p.blind) }, v);
   try {
-    const { root: r, steps } = climb({ hash: leaf, sum: value }, p.leafIndex, p.path);
+    const { root: r, steps } = climb({ hash: leaf, sum: value }, p.leafIndex, p.path, v);
     const rootMatches = bytesToHex(r.hash) === root.hash;
     const sumMatches = r.sum === root.sum;
     return { ...base, leaf: bytesToHex(leaf), steps, rootMatches, sumMatches, ok: rootMatches && sumMatches };
@@ -478,7 +499,7 @@ export function checkProof(s: VerifySnapshot, proof: VerifyProof, anonPubkeyB58:
     const bytes = assetBytes(ap.asset);
     const fail = (error: string): AssetResult => ({ asset: ap.asset, decimals: ap.decimals, committed: BigInt(0), pieces: [], ok: false, error });
     if (!tree) return fail("no tree for this asset in the snapshot");
-    if (!bytes) return fail("unknown asset id: not ZEC or a base58 mint");
+    if (!bytes) return fail("unknown asset id: not ZEC, a base58 mint or a 0x token");
     const rootSum = parseUint(tree.sum);
     if (!isHex32(tree.root) || rootSum === null) return fail("malformed tree root");
     const granule = parseUint(tree.granule) ?? BigInt(0);

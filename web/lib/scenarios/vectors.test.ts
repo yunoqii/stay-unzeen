@@ -12,6 +12,7 @@ interface Ctx {
   nowMs: number;
   minDepositZat: string;
   minActionZat?: string;
+  refMints?: Record<string, string>;
   venues: Venue[];
   fairLaunch: boolean;
   chat: boolean;
@@ -43,6 +44,7 @@ describe.skipIf(!existsSync(file))("scenario-vectors.json (API.md v0.19)", () =>
       venues: x.venues,
       features: { fl: x.fairLaunch, chat: x.chat, fullTrades: x.fullTrades },
       priced: (m) => x.pricedMints.includes(m),
+      refMint: (id) => x.refMints?.[id] ?? null,
     };
     const r = validatePlan(c.plan, ctx);
     const got = serverIssues(r);

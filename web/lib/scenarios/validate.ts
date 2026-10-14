@@ -7,9 +7,8 @@
 //       "invalid"     -> 400 scenario_invalid  (details.code from the contract list)
 //       "rule"        -> 422 scenario_rule     (P1 now_not_first, P2 withdraw_too_soon, P8 unpriced_mint)
 //       "bad_request" -> 400 bad_request, details.code "feature_disabled" (block of a feature that is off)
-//       "client"      -> not a server answer: what the server only finds out when the step runs (pool
-//                        minimum, venue of a known token, order support) or what could never run (a sealed
-//                        step inside a repeat). The builder still blocks signing on it;
+//       "client"      -> reserved; v0.20: none left (the server is the authority). What the server only finds
+//                        out when a step runs (venue of a token, venue switched off) is a warning instead;
 //   - floors:   server floors that change WHEN or HOW MUCH a step runs (P3–P7, P9), shown on the chain;
 //   - warnings: UI-only nudges, never a rejection.
 
@@ -47,6 +46,8 @@ export interface ValidateCtx {
   venueInfo?: VenueInfo[];
   orders?: OrdersParams;
   token?(mint: string): TokenFacts | null;
+  /** v0.20: mint of an own order / action referenced by id (own_result {orderId | actionId}), resolved like the server does at creation. */
+  refMint?(id: string): string | null;
   recentDepositAt?: number | null;
 }
 
@@ -329,8 +330,8 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
     const checkVenue = (v: Venue | undefined, mint: MintRef | undefined) => {
       if (!v || (ctx.venues && !ctx.venues.includes(v))) return bad(i, "bad_venue", `${label}: ${v ? `${v} is not available on this pool` : "choose a venue"}.`);
       const t = typeof mint === "string" && mint ? ctx.token?.(mint) : null;
-      if (t && v !== "jupiter" && t.venue !== v) bad(i, "venue_mismatch", `${label}: $${t.symbol} trades on ${t.venue}.`, "client");
-      if (ctx.venueInfo && !ctx.venueInfo.find((x) => x.venue === v)?.trade) bad(i, "venue_off", `${label}: ${v} takes no trades on this network.`, "client");
+      if (t && v !== "jupiter" && t.venue !== v) warn(i, "venue_mismatch", `$${t.symbol} trades on ${t.venue}: this step would fail when it runs.`);
+      if (ctx.venueInfo && !ctx.venueInfo.find((x) => x.venue === v)?.trade) warn(i, "venue_off", `${v} takes no trades on this network right now: this step would fail when it runs.`);
     };
 
     const checkExec = (e: unknown, allowNow: boolean) => {
@@ -436,7 +437,8 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
           Number.isInteger(b.slices) && b.slices >= 2 && b.slices <= 12 && !!ev && Number.isInteger(ev.min) && Number.isInteger(ev.max) && ev.min >= 600 && ev.max >= ev.min && b.slices * ev.max <= ttl,
           `2–12 slices, at least 10 min apart, and slices × the longest gap within the plan's ${formatSecs(ttl)}.`,
         );
-        if (ctx.minActionZat && b.side === "buy" && b.total && "abs" in b.total && UINT_RE.test(b.total.abs) && Number.isInteger(b.slices) && b.slices > 0 && BigInt(b.total.abs) / BigInt(b.slices) < BigInt(ctx.minActionZat))
+        // v0.20: the lightest slice (−20 % weight) must still reach the minimum: total / slices × 0.8.
+        if (ctx.minActionZat && b.side === "buy" && b.total && "abs" in b.total && UINT_RE.test(b.total.abs) && Number.isInteger(b.slices) && b.slices > 0 && (BigInt(b.total.abs) * BigInt(4)) / (BigInt(b.slices) * BigInt(5)) < BigInt(ctx.minActionZat))
           bad(i, "bad_amount", `${label}: each slice would be below the pool minimum of ${Number(ctx.minActionZat) / 1e8} ZEC.`);
         checkGuard(b.guard, b.mint);
         checkExec(b.exec, false);
@@ -449,10 +451,17 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
           bad(i, "bad_field", `${label}: set up the order.`);
           break;
         }
+        // v0.20: the order is parsed at creation like order_create (fields, exec, prices, ttl).
+        const ORDER_FIELDS = ["venue", "kind", "mint", "amount", "triggerPriceSol", "tpPriceSol", "slPriceSol", "slSlippageBps", "rearm", "slippageBps", "ttlSecs", "exec"];
+        const extraO = Object.keys(o).filter((k) => !ORDER_FIELDS.includes(k));
+        if (extraO.length) {
+          bad(i, "bad_field", `${label}: unknown order field: ${extraO[0]}.`);
+          break;
+        }
         const key = checkMint(o.mint);
         const kinds = ctx.orders?.kinds ?? ["limit_buy", "limit_sell", "take_profit", "stop_loss", "bracket"];
         if (!kinds.includes(o.kind)) bad(i, "bad_field", `${label}: unknown order type.`);
-        if (o.venue !== "pumpfun") bad(i, "bad_venue", `${label}: orders run on pump.fun only.`);
+        if (o.venue !== undefined && o.venue !== "pumpfun") bad(i, "bad_venue", `${label}: orders run on pump.fun only.`);
         checkAmount(o.amount, o.kind === "limit_buy" ? { kind: "zat" } : { kind: "tokens", mint: key }, "amount", false);
         if (o.kind === "bracket") {
           range(price(o.tpPriceSol) && price(o.slPriceSol), "set the take-profit and stop-loss prices.");
@@ -481,7 +490,7 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
           break;
         }
         if (c.venue === "jupiter" || !c.venue || (ctx.venues && !ctx.venues.includes(c.venue))) bad(i, "bad_venue", `${label}: choose a launchpad this pool has on.`);
-        else if (ctx.venueInfo && !ctx.venueInfo.find((x) => x.venue === c.venue)?.create) bad(i, "venue_off", `${label}: launches are off on ${c.venue} right now.`, "client");
+        else if (ctx.venueInfo && !ctx.venueInfo.find((x) => x.venue === c.venue)?.create) warn(i, "venue_off", `Launches are off on ${c.venue} right now: this step would fail when it runs.`);
         const name = c.meta?.name ?? "";
         const symbol = c.meta?.symbol ?? "";
         if (name.trim().length < 1 || name.length > 32 || !/^[A-Za-z0-9]{1,10}$/.test(symbol)) bad(i, "bad_meta", `${label}: a name of 1–32 characters and a ticker of 1–10 letters or digits.`);
@@ -509,7 +518,7 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
         // minimum of ≥ 1 h.
         if (key) {
           // v0.19: the guaranteed waits along every path add up to ≥ 1 h.
-          const shortest = tradesOf(plan, key).length ? shortestWaitTo(plan, i, key, P) : Infinity;
+          const shortest = tradesOf(plan, key, ctx.refMint).length ? shortestWaitTo(plan, i, key, P, ctx.refMint) : Infinity;
           if (shortest < F.withdrawAfterTradeMinSecs)
             bad(i, "withdraw_too_soon", `Withdraw waits ≥${formatSecs(F.withdrawAfterTradeMinSecs)} after your last trade of this token. On some path (next step, a skip, a go-to or a repeat) the waits since a trade of this token add up to less — “bought → withdrew 40 s later” links your new address to the buy.`, "rule");
           else if (shortest !== Infinity) {
@@ -538,7 +547,9 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
           bad(i, "feature_disabled", `${label}: dev and sniper shares are not available on this pool.`, "bad_request");
           break;
         }
-        if (!Object.values(r).some((v) => v !== undefined && v !== false)) bad(i, "bad_field", `${label}: pick at least one condition.`);
+        // v0.20: the two flags are requirements only as `true`; `false` is not a condition.
+        if (r.authoritiesRevoked === (false as unknown as true) || r.noRiskyExtensions === (false as unknown as true)) bad(i, "bad_field", `${label}: a flag is either required (true) or left out.`);
+        else if (!Object.values(r).some((v) => v !== undefined && v !== false)) bad(i, "bad_field", `${label}: pick at least one condition.`);
         for (const k of ["maxTop10Pct", "maxDevPct", "minLpBurnedPct", "maxSniperPct"] as const) if (r[k] !== undefined) range(Number.isFinite(r[k]) && r[k]! >= 0 && r[k]! <= 100, "percentages are 0–100.");
         if (b.onFalse !== "stop") checkGoto(b.onFalse?.goto, i, "Otherwise go to");
         break;
@@ -644,9 +655,11 @@ export function validatePlan(plan: ScenarioPlan, ctx: ValidateCtx): PlanCheck {
 /** Where control can go after step i: the next step, forward gotos (onFail, check_safety), repeat's back edge. */
 function successors(plan: ScenarioPlan, i: number): number[] {
   const s = plan.steps[i];
+  // v0.20: `end` is terminal; a wait never fails, so its onFail is no edge.
+  if (s.block?.type === "end") return [];
   const out = new Set<number>([i + 1]);
   const f = s.onFail;
-  if (f && typeof f === "object") {
+  if (f && typeof f === "object" && s.block?.type !== "wait_random" && s.block?.type !== "wait_fixed") {
     if ("goto" in f) out.add(f.goto);
     if ("retry" in f && typeof f.then === "object") out.add(f.then.goto);
   }
@@ -661,21 +674,27 @@ function successors(plan: ScenarioPlan, i: number): number[] {
 }
 
 /** Steps that trade mint `key`: buy / sell / sell_all / dca / swap / create, an order on it, and the own_result that sees it fill. */
-function tradesOf(plan: ScenarioPlan, key: string): number[] {
+function tradesOf(plan: ScenarioPlan, key: string, refMint?: (id: string) => string | null): number[] {
   const out: number[] = [];
   plan.steps.forEach((s, i) => {
     const b = s.block;
     if (!b) return;
     if (tradedKeys(plan, s).includes(key)) out.push(i);
     else if (b.type === "order_place" && mintKey(plan, b.order?.mint) === key) out.push(i);
+    // v0.20: waiting on an own order / action outside the plan is a trade of its mint (its fill is public).
+    else if (b.type === "own_result" && b.ref && refMint) {
+      const id = "orderId" in b.ref ? b.ref.orderId : "actionId" in b.ref ? b.ref.actionId : null;
+      const m = id ? refMint(id) : null;
+      if (m && `m:${m}` === key) out.push(i);
+    }
   });
   return out;
 }
 
 /** The smallest total guaranteed wait over all paths from a trade of `key` to `target` (for the 12 h hint). */
-function shortestWaitTo(plan: ScenarioPlan, target: number, key: string, p: ScenarioParams): number {
+function shortestWaitTo(plan: ScenarioPlan, target: number, key: string, p: ScenarioParams, refMint?: (id: string) => string | null): number {
   let best = Infinity;
-  for (const t of tradesOf(plan, key)) {
+  for (const t of tradesOf(plan, key, refMint)) {
     // Dijkstra over steps, weight = guaranteed wait of the step entered.
     const dist = new Map<number, number>([[t, 0]]);
     const queue: [number, number][] = [[0, t]];

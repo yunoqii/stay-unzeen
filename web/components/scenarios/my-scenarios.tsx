@@ -44,7 +44,7 @@ const STEP_ICON: Record<ScenarioStepState["status"], PhIcon> = {
 };
 
 /** The floors of an echoed plan (they depend on its shape only, not on sealed values). */
-function floorsOf(plan: Scenario["plan"]) {
+function floorsOf(plan: NonNullable<Scenario["plan"]>) {
   return validatePlan(plan, { params: DEFAULT_SCENARIO_PARAMS, now: 0, minDepositZat: "0", features: { chat: true, fullTrades: true }, priced: () => true }).floors;
 }
 
@@ -172,9 +172,10 @@ function Card({ s, name, local, tok, now, busy, onStart, onCancel }: { s: Scenar
   const done = s.steps.filter((x) => x.status === "done" || x.status === "skipped").length;
   const current = s.steps[s.cursor];
   const next = current?.nextAt;
-  const floors = useMemo(() => floorsOf(s.plan), [s.plan]);
-  // Sealed values come from this device's encrypted copy of the signed plan; elsewhere they read as sealed.
-  const plan = local && local.steps.length === s.plan.steps.length && local.steps.every((x, i) => x.block.type === s.plan.steps[i].block.type) ? local : s.plan;
+  // v0.20: Portfolio no longer carries the plan. It (and its addresses) come from this device's encrypted
+  // copy of the signed plan; on another device only the step statuses are known.
+  const plan = local && local.steps.length === s.steps.length ? local : (s.plan ?? null);
+  const floors = useMemo(() => (plan ? floorsOf(plan) : []), [plan]);
   const [confirm, setConfirm] = useState(false);
   return (
     <div className="p-4 sm:p-5">
@@ -186,7 +187,7 @@ function Card({ s, name, local, tok, now, busy, onStart, onCancel }: { s: Scenar
           </p>
           <p className="mt-0.5 text-xs text-muted-foreground">
             {done}/{s.steps.length} steps
-            {live && current ? ` · now: ${stepTitle(s.plan.steps[s.cursor])}` : ""}
+            {live && current && plan?.steps[s.cursor] ? ` · now: ${stepTitle(plan.steps[s.cursor])}` : ""}
             {live && next ? ` · next ${relative(next, now)}` : ""}
             {live ? ` · expires ${relative(s.expiresAt, now)}` : ""}
           </p>
@@ -247,9 +248,9 @@ function Card({ s, name, local, tok, now, busy, onStart, onCancel }: { s: Scenar
       <AnimatePresence initial={false}>
         {open && (
           <motion.ol key="steps" initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.25, ease: EASE }} style={{ overflow: "hidden" }} className="mt-1">
-            {s.plan.steps.map((p, i) => {
-              const st = s.steps[i];
-              const Icon = BLOCK_ICON[p.block.type];
+            {s.steps.map((st, i) => {
+              const p = plan?.steps[i];
+              const Icon = p ? BLOCK_ICON[p.block.type] : Circle;
               const StIcon = st ? STEP_ICON[st.status] : Circle;
               const tapes = st && (st.status === "pending" || st.status === "waiting" || st.status === "running") ? floors.filter((f) => f.step === i) : [];
               return (
@@ -258,10 +259,10 @@ function Card({ s, name, local, tok, now, busy, onStart, onCancel }: { s: Scenar
                   <span className="min-w-0">
                     <span className="flex items-center gap-1.5 text-xs">
                       <Icon size={12} weight="light" className="text-faint-foreground" aria-hidden />
-                      {stepTitle(p)}
+                      {p ? stepTitle(p) : `Step ${i + 1}`}
                       {st && st.runs > 1 && <span className="text-faint-foreground">· ran {st.runs}×</span>}
                     </span>
-                    <span className="block truncate text-[11px] text-muted-foreground">{describeBlock(plan, plan.steps[i].block, tok, { sealed: true })}</span>
+                    <span className="block truncate text-[11px] text-muted-foreground">{plan && p ? describeBlock(plan, p.block, tok, { sealed: true }) : "Signed on another device: the plan is kept only there."}</span>
                     {st?.error && <span className="block text-[11px] text-destructive">{stepErrorText(st.error)}</span>}
                     {tapes.length > 0 && (
                       <span className="mt-1 flex flex-col gap-0.5">

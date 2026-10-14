@@ -79,3 +79,13 @@ describe("slow mode default (R6)", () => {
     ).toEqual([0.5, 0.4, 1_200_000]);
   });
 });
+
+describe("nick mint bytes (v0.20 Robinhood Chain)", () => {
+  it("an 0x token is 12 zero bytes ‖ its address", async () => {
+    const { mintBytes32 } = await import("@/lib/api/mock-chat");
+    const b = mintBytes32("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed");
+    expect(b.length).toBe(32);
+    expect([...b.slice(0, 12)].every((x) => x === 0)).toBe(true);
+    expect(Buffer.from(b.slice(12)).toString("hex")).toBe("5aaeb6053f3e94c9b9a09f33669435e7ef1beaed");
+  });
+});
