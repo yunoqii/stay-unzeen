@@ -99,7 +99,7 @@ interface HoodToken {
   progress: number;
   /** v0.22: when the pool last priced this token (unix ms); older than PRICE_MAX_AGE_S -> 503 stale_price. */
   priceAt: number;
-  /** Mock only: after a stale_price answer the pool "reprices" the token here, inside the 60 s Retry-After. */
+  /** Mock only: when the stale token gets its next price (see freshen). */
   refreshAt?: number;
 }
 
@@ -214,6 +214,20 @@ export function createHoodMock(host: HoodHost): HoodMock {
     return tokens.find((t) => t.token.mint.toLowerCase() === mint.toLowerCase()) ?? null;
   };
 
+  /**
+   * The pool's price timer (mock): a token whose price went stale is repriced ~45 s after anyone looks at it,
+   * inside the 60 s Retry-After. Mirrors core: priceTs = price_at rounded down to 10 s, absent without a price.
+   */
+  function freshen(t: HoodToken) {
+    const now = Date.now();
+    if (t.refreshAt !== undefined && now >= t.refreshAt) [t.priceAt, t.refreshAt] = [t.refreshAt, undefined];
+    const stale = !(t.price > 0) || now - t.priceAt > PRICE_MAX_AGE_S * 1000;
+    if (stale) t.refreshAt ??= now + 45_000;
+    if (t.price > 0) t.token.priceTs = Math.floor(t.priceAt / 10_000) * 10_000;
+    else delete t.token.priceTs;
+    return stale;
+  }
+
   function settle(a: HoodAction) {
     if (a.status.status !== "queued") return;
     const acc = host.account(a.pubkey);
@@ -296,9 +310,10 @@ export function createHoodMock(host: HoodHost): HoodMock {
       };
     },
     feed: (limit) => history.slice(0, Math.min(limit, 200)),
-    tokens: () => tokens.filter((t) => t.heat > 0).map((t) => ({ ...t.token })),
+    tokens: () => tokens.filter((t) => t.heat > 0).map((t) => (freshen(t), { ...t.token })),
     token(mint) {
       const t = find(mint);
+      if (t) freshen(t);
       return t ? { ...t.token, trades: history.filter((e) => e.mint === t.token.mint).slice(0, 50) } : null;
     },
     trades(mint, filter, limit) {
@@ -383,9 +398,7 @@ export function createHoodMock(host: HoodHost): HoodMock {
         if (t.token.status === "graduated") throw new ApiError("graduated", "token left the bonding curve", 409);
         // v0.22: no zero price limit on this origin, and no trade on a stale pool price (both before any hold).
         amountOf(x.op === "buy" ? x.minOut : x.minZecOut, x.op === "buy" ? "minOut" : "minZecOut");
-        if (t.refreshAt !== undefined && Date.now() >= t.refreshAt) [t.priceAt, t.refreshAt] = [t.refreshAt, undefined];
-        if (!(t.price > 0) || Date.now() - t.priceAt > PRICE_MAX_AGE_S * 1000) {
-          t.refreshAt ??= Date.now() + 45_000;
+        if (freshen(t)) {
           throw new ApiError("stale_price", "no fresh pool price for this token", 503, undefined, 60);
         }
         if (x.op === "buy") {

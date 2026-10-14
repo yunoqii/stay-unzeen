@@ -22,7 +22,7 @@ const PINNED: Record<Network, string> = {
  * TEST ONLY: attestation address of the recorded hood snapshot the mock serves (lib/verify/testdata/
  * hood-snapshot.json, from the adapters hood end-to-end run).
  */
-const MOCK_HOOD_OPERATOR = process.env.NEXT_PUBLIC_HOOD === "1" ? "0x97a23cd8Cec339c6b179aC798187B430883A0776" : "";
+const MOCK_HOOD_OPERATOR = process.env.NEXT_PUBLIC_HOOD === "1" ? "0x7c4DFd22C39cd4CaeBC4A8b0297075f519524330" : "";
 
 /** Pinned operator key of a network, or null when this build has none. */
 export function pinnedOperator(n: Network): string | null {

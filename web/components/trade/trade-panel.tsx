@@ -12,8 +12,10 @@ import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, unitsToNumber, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
 import { NETWORK_CONFIG, nativeOf, useNetwork } from "@/lib/network";
 import { nowFee as poolNowFee, resolveExec, useDefaultExec, withExec, type ExecMode, type NowFee } from "@/lib/exec";
-import { lamportsToZatCeil, quoteBuy, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
+import { isPriceStale, lamportsToZatCeil, quoteBuy, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
 import { useRecentBuys } from "@/hooks/use-recent-buys";
+import { useNow } from "@/hooks/use-now";
+import { usePriceTs } from "@/hooks/use-price-ts";
 import { formatQuote, QUOTE_DECIMALS, quoteAsset, quotePerSol, tokenQuote, zecSpreadBps } from "@/lib/quotes";
 import type { Quote as Pair } from "@/lib/api/types";
 import { isSlippageBps, MAX_SLIPPAGE_BPS, SELL_PRESETS, SLIPPAGE_CHOICES_BPS, updateTradeSettings, useTradeSettings } from "@/lib/trade-settings";
@@ -138,6 +140,10 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
   const rate = lastRate(network, side) ?? poolRate;
   // v0.22: 503 stale_price -> the button waits for Retry-After, then the same amount is re-quoted and re-signed.
   const [stale, setStale] = useState<{ left: number; value: string; tries: number } | null>(null);
+  // v0.23: block before sending when the pool's price is missing or older than priceMaxAgeSecs − 20 s.
+  const now = useNow(5000);
+  const priceTs = usePriceTs(token.mint, token.priceTs, hood);
+  const priceOld = hood && now !== null && isPriceStale(priceTs, pool?.chain?.priceMaxAgeSecs, now);
   // v0.13: the pair. ZEC pairs run at 1:1 parity with the pool's spread (no SOL rate); USDC / USD1 pairs use the
   // ZEC/SOL rate like SOL pairs, against the token's SOL-equivalent price.
   const pair = tokenQuote(token);
@@ -192,7 +198,7 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
   /** Hood: no quote or a zero limit means no fresh price to sign against; never send 0. */
   const limitOf = (q: typeof quote) => (q === null ? BigInt(0) : "minOut" in q ? q.minOut : q.minZecOut);
   const noPrice = hood && parsed !== null && !inputError && limitOf(quote) === BigInt(0);
-  const waiting = stale !== null || noPrice;
+  const waiting = stale !== null || noPrice || priceOld;
   const canSubmit = !busy && !waiting && parsed !== null && !inputError && !frozen && portfolio !== null;
 
   const setPreset = (v: string) => {
@@ -213,6 +219,11 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
     // Invalid input stays in the field with its hint; nothing is signed.
     if (busy || parsed === null || inputError || frozen || portfolio === null) return;
     if (hood && limitOf(quote) === BigInt(0)) return; // "Price updating…": the server would answer 400
+    if (priceOld) {
+      // An automatic retry that meets a still-old price waits another round instead of sending a sure 503.
+      if (tries > 0) setStale({ left: 10, value, tries });
+      return;
+    }
     setBusy(true);
     setError(null);
     const action: SignedAction = withExec(
@@ -406,7 +417,7 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
         <p role="status" aria-live="polite" className="flex gap-2 rounded-xl border border-border px-3 py-2.5 text-xs text-pretty text-muted-foreground">
           <Info size={14} weight="light" className="mt-px shrink-0" aria-hidden />
           <span>
-            {stale ? (
+            {stale && !priceOld ? (
               <>
                 Price updating… The pool needs a fresh price for ${token.symbol} before it trades. Nothing was held. Retrying in{" "}
                 <span className="tabular text-foreground">{staleLeft}s</span>.{" "}
@@ -415,7 +426,10 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
                 </button>
               </>
             ) : (
-              <>Price updating… There is no fresh price for ${token.symbol} to set your limit against yet{maxAge ? ` (prices older than ${Math.round(maxAge / 60)} min aren't traded on)` : ""}.</>
+              <>
+                Price updating… There is no fresh pool price for ${token.symbol} to set your limit against yet
+                {maxAge ? ` (prices older than ${Math.round(maxAge / 60)} min aren't traded on)` : ""}. Buy and sell unlock by themselves when it arrives.
+              </>
             )}
           </span>
         </p>

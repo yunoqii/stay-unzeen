@@ -87,6 +87,8 @@ export interface Token {
   status: "curve" | "graduated";
   decimals: number;
   priceSol: DecimalString; // SOL per 1 whole token (SOL equivalent for non-SOL pairs, may be "0")
+  /** v0.23: when the pool last recorded the price, unix ms rounded down to 10 s; absent = no price. */
+  priceTs?: number;
   marketCapSol: DecimalString; // SOL equivalent for non-SOL pairs, may be "0"
   createdAt: number; // unix ms
   /** v0.13: the curve's pair ("SOL" for every older token; treat absent as "SOL"). */

@@ -197,3 +197,16 @@ export function amountsMatch(a: bigint, b: bigint, tolerance = 0.02): boolean {
   const max = a > b ? a : b;
   return diff * BigInt(10_000) <= max * BigInt(Math.round(tolerance * 10_000));
 }
+
+// ---- v0.23: fresh pool price (hood) ----
+
+/** Server default of PoolInfo.chain.priceMaxAgeSecs. */
+export const PRICE_MAX_AGE_DEFAULT_S = 300;
+/** Margin for the 10 s rounding of priceTs and clock skew (docs/API.md v0.23: 10–20 s). */
+export const PRICE_SLACK_S = 20;
+
+/** True when the server would answer 503 stale_price: no priceTs, or older than maxAge − slack. */
+export function isPriceStale(priceTs: number | undefined, maxAgeSecs: number | undefined, now: number): boolean {
+  if (priceTs === undefined || !Number.isFinite(priceTs)) return true;
+  return now - priceTs > ((maxAgeSecs ?? PRICE_MAX_AGE_DEFAULT_S) - PRICE_SLACK_S) * 1000;
+}

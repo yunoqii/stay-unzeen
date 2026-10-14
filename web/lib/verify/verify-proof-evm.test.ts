@@ -23,7 +23,7 @@ interface Mjs {
 }
 const load = async () => (await import(/* @vite-ignore */ path.resolve(__dirname, "../../public/verify/verify-proof.mjs"))) as Mjs;
 
-const OPERATOR = "0x97a23cd8Cec339c6b179aC798187B430883A0776"; // mock hood operator, TEST ONLY
+const OPERATOR = "0x7c4DFd22C39cd4CaeBC4A8b0297075f519524330"; // mock hood operator, TEST ONLY
 const snap = hood as unknown as VerifySnapshot;
 const file = (s: unknown) => ({ anonPubkey: "11111111111111111111111111111111", snapshot: s, proof: { snapshotId: snap.id, proofs: [], truncated: false } });
 const N_SECP = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");

@@ -148,7 +148,11 @@ describe("mock: actions from the balance", () => {
       expect(BigInt(p.amount).toString().replace(/0+$/, "").length).toBeLessThanOrEqual(3);
     }
     expect(sent < BigInt(total)).toBe(true);
-    expect(sent * BigInt(1000) >= BigInt(total) * BigInt(975)).toBe(true); // at most ~2 % + rounding
+    // Shaved 0.5–2 %, then every part rounded down to 3 significant digits, which costs up to 1 % more of that
+    // part (e.g. 100999… -> 100000…). So sent >= total × 0.98 × 0.99 and sent <= total × 0.995. (The old bound,
+    // 97.5 %, failed whenever a large shave met a part starting with "100".)
+    expect(sent * BigInt(10_000) >= BigInt(total) * BigInt(9702)).toBe(true);
+    expect(sent * BigInt(1000) <= BigInt(total) * BigInt(995)).toBe(true);
     const h = mid.holdings.find((x) => x.mint === t.mint)!;
     expect(h).toMatchObject({ held: sent.toString(), amount: (BigInt(total) - sent).toString() });
     expect(BigInt(mid.zecBalance) < BigInt(after.zecBalance)).toBe(true); // gas paid in ZEC

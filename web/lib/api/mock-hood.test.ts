@@ -115,6 +115,16 @@ describe("mock v0.18: Robinhood Chain origin", () => {
     await expect(call("POST", "/api/actions", { op: "buy", venue: "pons", mint: t.mint, zecIn: "10000000", minOut: "1" })).resolves.toMatchObject({ status: "queued" });
   });
 
+  it("v0.23: priceTs is the pool's price time rounded down to 10 s, and a stale token is repriced within a minute", async () => {
+    vi.setSystemTime(vi.getRealSystemTime() + 60 * 60_000); // an hour on: every price is old
+    let [t] = (await call<TokenListItem[]>("GET", "/api/tokens")).filter((x) => x.status === "curve");
+    expect(t.priceTs! % 10_000).toBe(0);
+    expect(Date.now() - t.priceTs! > 300_000).toBe(true);
+    vi.setSystemTime(Date.now() + 50_000);
+    [t] = (await call<TokenListItem[]>("GET", "/api/tokens")).filter((x) => x.mint === t.mint);
+    expect(Date.now() - t.priceTs!).toBeLessThan(20_000);
+  });
+
   it("orders and scenarios are not on this chain yet", async () => {
     await expect(call("POST", "/api/actions", { op: "order_create", venue: "pumpfun", mint: "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", kind: "limit_buy", amount: "1000000", triggerPriceSol: "1" })).rejects.toMatchObject({ code: "bad_request" });
   });

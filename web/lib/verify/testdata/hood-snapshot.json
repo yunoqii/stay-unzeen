@@ -1,1 +1,99 @@
-{"anchor":{"blockTime":1791963236,"matches":true,"slot":88190867,"solanaTx":"0xcb1ceec3c813c6d68f5815cedee971b22e1dc6cdf44433a70ffe99f1d2cae546"},"chainId":"0111","committedLamports":"0","digestVersion":3,"id":1,"leaves":1024,"operator":{"pubkey":"0x97a23cd8Cec339c6b179aC798187B430883A0776","sig":"0x1629d5edd2f955e4efe430680ab119c018de0857e8025fa10042c27fa949f5f2631e60a84450349ac0b5157a261016d7b4831a79855b4b4538759f986a3c22241c"},"quoteAssets":[{"bridged":false,"counted":false,"decimals":6,"dustBelow":"10000","mint":"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU","quote":"USDC"},{"bridged":false,"counted":false,"decimals":6,"dustBelow":"10000","mint":"USDCoctVLVnvTXBEuP9s8hntucdJokbo17RwHuNXemT","quote":"USDC"}],"rateLamportsPerZecBuy":"495840488133802548","rateLamportsPerZecSell":"500823809622584483","rootsDigest":"e069ac49112df525cb0970f3ce5730440ce6bb0fb113f8c120a3121403db8b4a","solanaSlot":88190866,"takenAt":1791963180000,"trees":[{"asset":"0x04Dd70aE7e8FF6d889F92Bb716f6ED75066b87db","decimals":18,"granule":"1","root":"2168a5fc786b65cea11898fbdfffb7f15dceb0ce203848e43a1130e60a96d692","sum":"10489721890168345072221432"},{"asset":"ZEC","decimals":8,"granule":"100000","root":"ad630014dacc19e51fc88e5107cdec04e91236fd1273f2302b3b3fc385a02765","sum":"194700000"}],"vaults":[{"address":"0x011EEdA66Bb58C31935ae0BFAEeE2F9F1dAf4875","lamports":"19983460751171312532","sig":"0x57a3f4107c4efd5d37721a8a4557623299d6815b6eb331081dbfe021e0cdb4c347cb97d66fe2f6003c2dca3daefe420a83744b45a5936334f45743212cea66f61c","tokens":[{"amount":"10489721890168345072221432","mint":"0x04Dd70aE7e8FF6d889F92Bb716f6ED75066b87db"}]},{"address":"0x1F60fEFB7b5d3c4743F686b5d53D176A6Eef6C61","lamports":"19979999630515479000","sig":"0x3d1a17e235cfcd0766e270e0e189260f596a8d71d79e4cfd676718902329c42d64cc38f69a978985db47d1ee0868f9a1b2af9b50969a739dbd482a34f79d34c01b","tokens":[]},{"address":"0x74E53dAaE8FB439CD03c8177Cc47Cb93393D8231","lamports":"20000000000000000000","sig":"0x007def666d008b385a92dbb4ce54cc2615105db1eb3ff4b64ae155f076922e6432e9045dc38dac366ff75bd8d74b0df5254acf502854a21048bda7de6cdd24831c","tokens":[]},{"address":"0x97a23cd8Cec339c6b179aC798187B430883A0776","lamports":"20000000000000000000","sig":"0x65c728a3f5596afa61e15493ef1953c17eb342dc41f59a90c431d43868a717e94f7d21196daf8e96e3e1de4552bd70d93586859d0d1f8cbdc0cfc594f11736961c","tokens":[]},{"address":"0xBE636f2D0A86C49D7D881c19ac81dBA591265024","lamports":"9644530625991763","sig":"0xa29d328630c1fc8ead2a8f908a9173d5cfd2cc12be1d1b5d2a8460b314045a7d2ac6101289b0241eb0ad94a2e1f36d73515f7cd5bff437426010e8cadc92e7b01c","tokens":[]},{"address":"0xE8facb48Fa3dB4C4Ab4cbB19471A5a0ef6b32eF2","lamports":"20000000000000000000","sig":"0x1a76a9694144d57a6ed986293dbb4d4021b40f9f9fc45da4784ae6da48b7473125c0b52b34c8ddddea80bdfcd7bbb8ca5a30dd203f540b9b4558fc9625a18fa81b","tokens":[]},{"address":"0xEDF8AE45cfA21eB513620fF375022B5CDfB7b989","lamports":"20000000000000000000","sig":"0x1eb10458a5490235af2c4d92d98e7cf3b3d819fe0bf7a0e09d06fee55b72b8630a2853b4f232fab121189a9b57b6dcd90708c1d0a41f7b3968fbcb2a4cec180d1c","tokens":[]},{"address":"0xe2211969Fe3A92f01678141967BA8F967Cb74707","lamports":"20000000000000000000","sig":"0xd7d8536a7b9cd208ec4f0e9d0da2c65ed16b6d7f43b0fa64fc6bb15bdb58891f74817651779877ab4cdc7e3ee114f908561dbd8d47396674f1429acc5216a93c1c","tokens":[]}],"zcashHeight":3000000,"zecReserve":{"amountZat":"500000000","attested":true,"height":3000000}}
+{
+ "anchor": {
+  "blockTime": 1791964448,
+  "matches": true,
+  "slot": 88202889,
+  "solanaTx": "0x8d63307fadf6800aeeb5094e6d877bb9470320fc8d8c56d548a307c4c44154cb"
+ },
+ "chainId": "0111",
+ "committedLamports": "0",
+ "digestVersion": 3,
+ "id": 1,
+ "leaves": 1024,
+ "operator": {
+  "pubkey": "0x7c4DFd22C39cd4CaeBC4A8b0297075f519524330",
+  "sig": "0xdfdac6b913a6ce693434a13fd06e0fff65eb27353272b045c8b2be2e14b9de3f6d4e0ec4e46b11f98a2b63e4f5ac2e2a7ac3d4c0cf39cf25482d39557239137c1c"
+ },
+ "rateLamportsPerZecBuy": "493036296333139733",
+ "rateLamportsPerZecSell": "497991434989754202",
+ "rootsDigest": "2844929cf5f4b4d6d11dbabf6e77db1670b3fc7cf7248dee59127b1c9d3683f5",
+ "solanaSlot": 88202888,
+ "takenAt": 1791964440000,
+ "trees": [
+  {
+   "asset": "0xEeaF305cf5DD22E59631F1297E9C84174b810640",
+   "decimals": 18,
+   "granule": "1",
+   "root": "7181d33367f5aed415a172a9a773f0424bf12e6a8fa65d528429ee9048af8f3f",
+   "sum": "10424813872490161030662350"
+  },
+  {
+   "asset": "ZEC",
+   "decimals": 8,
+   "granule": "100000",
+   "root": "a0b6e6b3bf110c0d56cb8e499a4cbd21782d3dd35384afbc20d67942ebaea5e4",
+   "sum": "194700000"
+  }
+ ],
+ "vaults": [
+  {
+   "address": "0x18bE65899EefBf9946f20BAE99C6eE513468d07b",
+   "lamports": "19983527477395098985",
+   "sig": "0x28b380a7aec3dc09bd77d76900b2f8da4e7106e6542e6102b66bd6bc0ade0af258d1628224ea970a61dc70730d1447637d95b6d6345c89c3b007b51c812277031c",
+   "tokens": [
+    {
+     "amount": "10424813872490161030662350",
+     "mint": "0xEeaF305cf5DD22E59631F1297E9C84174b810640"
+    }
+   ]
+  },
+  {
+   "address": "0x7c4DFd22C39cd4CaeBC4A8b0297075f519524330",
+   "lamports": "20000000000000000000",
+   "sig": "0xdd6ecc1ed3af86c3f55e2a413495122e3ad0efb70124b2c041362fe95f0a620626faf68e5b92e1148a43ec800a3f1bc77d5122ea37154716bd5f3d3fd85e1a8d1b",
+   "tokens": []
+  },
+  {
+   "address": "0x9F91A3dF950F93a2078274Ed9aB23Fe6906e935C",
+   "lamports": "20000000000000000000",
+   "sig": "0x56b63a59088fa53d5792c6c6cb52063bb6ebc9551923deb626dc20b2e811f61a7cabdb98459c0261415254079aee700fae7e535dfb85fc9176b63731d59a36341c",
+   "tokens": []
+  },
+  {
+   "address": "0xB65352EB02865a847B1f6BC8615b800E60f82263",
+   "lamports": "19979999632279479000",
+   "sig": "0xd3b3013661b5610fba1bf23319fd14ac676e52dee84b66865e72b370fe03cf292f6c49e1adfea15fa4e328fb4ee4d35cfb0fabea234af1e3cdc087a1230ae31e1c",
+   "tokens": []
+  },
+  {
+   "address": "0xE28c07C332545a26E7de1A43d591A5030baFE388",
+   "lamports": "20000000000000000000",
+   "sig": "0x0ed45cbcbd16003d8174b4a45fe15592508a60a717c9f5b96f13e83b678f1f4d3b6a61e704fdfedfd30a689d420043c60e201897f96ee3d24a04518fa23309a81b",
+   "tokens": []
+  },
+  {
+   "address": "0xb0F458b4ae43dcc9Bc3720A8e58a31Bb694943C3",
+   "lamports": "20000000000000000000",
+   "sig": "0xf52fc4de1f4fa2f7ba3763ee80269fb66785afb540e6c1251a59561afa1017ab382025a0a3f2d638e2f83d3b1d05a4da6f0b552d4124ff919f396964d530260d1b",
+   "tokens": []
+  },
+  {
+   "address": "0xd276304188a0C27b65150894aa8eE3fCbaF223c2",
+   "lamports": "9744795448917263",
+   "sig": "0xac302602d58bb6642a595b7ae9d040a4dd042a3a6cd9e968b1ea5549d2134aa44e66529f3cc91b2da74c65d212d9c0bcdbc4cc914d71b9af63f9ecb6175e6f8a1b",
+   "tokens": []
+  },
+  {
+   "address": "0xfDd6aAC5AA792f301c4e5cdC9Bc4223E9F224C10",
+   "lamports": "20000000000000000000",
+   "sig": "0xfe65e87888d324f912108d0ab60213bea4e382ead919eab89257b400b80430814026254d3380cc8ca4964d2bc707c47e2d1df4b9634e489631e7413a08c3e7021b",
+   "tokens": []
+  }
+ ],
+ "zcashHeight": 3000000,
+ "zecReserve": {
+  "amountZat": "500000000",
+  "attested": true,
+  "height": 3000000
+ }
+}
