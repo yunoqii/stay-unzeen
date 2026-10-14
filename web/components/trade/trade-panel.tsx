@@ -26,6 +26,7 @@ import { useTokens } from "@/hooks/use-tokens";
 import { orderSupport } from "@/lib/orders";
 import { OrdersPanel, OrdersUnavailable } from "./orders-panel";
 import { Button } from "@/components/ui/button";
+import { CoinIcon } from "@/components/icons/coin";
 import { ActionStatusCard } from "./action-status";
 import { ExecSwitch } from "./exec-switch";
 import { Chip, ErrorNote } from "./parts";
@@ -326,7 +327,10 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
           aria-describedby={`${ids}-hint`}
           className="tabular min-w-0 flex-1 bg-transparent text-2xl font-medium tracking-tight outline-none placeholder:text-faint-foreground"
         />
-        <span className="ml-3 shrink-0 text-sm text-muted-foreground">{unit}</span>
+        <span className="ml-3 inline-flex shrink-0 items-center gap-1 text-sm text-muted-foreground">
+          {isBuy && <CoinIcon symbol="ZEC" size={14} />}
+          {unit}
+        </span>
       </div>
 
       <div className="flex flex-wrap gap-1.5">
@@ -514,8 +518,12 @@ function Quote({
     // v0.18: native base units (lamports, or wei on Robinhood Chain) through the exact string.
     const nat = nativeOf();
     const sol = unitsToNumber((lamports ?? BigInt(0)).toString(), nat.decimals);
-    if (pair.quote === "SOL") return `≈ ${formatSol(sol)} ${nat.symbol}`;
-    if (pair.perSol === null) return `≈ ${formatSol(sol)} ${nat.symbol}`;
+    if (pair.quote === "SOL" || pair.perSol === null)
+      return (
+        <span key="size">
+          ≈ {formatSol(sol)} <CoinIcon symbol={nat.symbol} size={11} /> {nat.symbol}
+        </span>
+      );
     return (
       <span key="size">
         ≈ {formatQuote(sol * pair.perSol, pair.quote)} {pair.quote}
@@ -531,7 +539,7 @@ function Quote({
           [`Min received · ${slippage / 100}%`, `${formatCompact(unitsToNumber(quote.minOut.toString(), token.decimals))} ${sym}`],
         ]
       : [
-          ["You receive", <span key="v" className="text-foreground">≈ {formatZec(quote.zecOut.toString())} ZEC</span>],
+          ["You receive", <span key="v" className="text-foreground">≈ {formatZec(quote.zecOut.toString())} <CoinIcon symbol="ZEC" size={12} /> ZEC</span>],
           ["Trade size", size("lamports" in quote ? quote.lamports : null, "quoteUnits" in quote ? quote.quoteUnits : null)],
           // A6: a rounded sell signs the same minimum price on fewer tokens, so the floor shrinks with it.
           [`Min received · ${slippage / 100}%`, `${rounded ? "≈ " : ""}${formatZec(quote.minZecOut.toString())} ZEC`],

@@ -10,6 +10,7 @@ import { UsdHint } from "@/components/layout/amount";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PeekToggle, Veiled } from "./peek";
+import { CoinZec } from "@/components/icons/coin-zec";
 
 /** Increase since the last poll, for the "+0.1" note. */
 function useGain(zat: string | undefined) {
@@ -51,7 +52,10 @@ export function BalanceCard({ portfolio, onWithdraw }: { portfolio: Portfolio | 
         {portfolio ? (
           <p className="text-4xl font-medium tracking-tight tabular sm:text-5xl">
             <Veiled>{formatZec(portfolio.zecBalance)}</Veiled>
-            <span className="ml-2 text-lg font-normal text-muted-foreground sm:text-xl">ZEC</span>
+            <span className="ml-2 inline-flex items-baseline gap-1.5 text-lg font-normal text-muted-foreground sm:text-xl">
+              <CoinZec size={16} />
+              ZEC
+            </span>
             <UsdHint zec={zatToZec(portfolio.zecBalance)} className="ml-3 align-middle text-sm font-normal tracking-normal" />
           </p>
         ) : (

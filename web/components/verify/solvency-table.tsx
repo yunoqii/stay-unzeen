@@ -6,6 +6,7 @@ import { coverageBps, type QuoteHolding, type SolvencyRow } from "@/lib/verify/m
 import { assetLabel, fmtAmount, fmtPct } from "@/lib/verify/display";
 import { cn } from "@/lib/utils";
 import { shortAddr } from "@/lib/format";
+import { CoinIcon } from "@/components/icons/coin";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 
@@ -46,7 +47,10 @@ function Row({ r, label, i, native = "SOL" }: { r: SolvencyRow; label: string; i
   return (
     <li className="grid grid-cols-2 gap-x-4 gap-y-2 px-4 py-3.5 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)] md:items-center">
       <span className="col-span-2 min-w-0 md:col-span-1">
-        <span className="font-medium">{label}</span>
+        <span className="inline-flex items-center gap-1.5 font-medium">
+          <CoinIcon symbol={r.asset === "ZEC" ? "ZEC" : ""} size={14} />
+          {label}
+        </span>
         {zec && <span className="block text-[11px] text-faint-foreground">Incl. creator fees owed</span>}
       </span>
       <Num label="Liabilities" v={`${fmtAmount(r.liabilities, r.decimals, frac)} ${unit}`} />

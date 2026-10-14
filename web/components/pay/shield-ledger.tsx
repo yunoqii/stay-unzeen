@@ -5,6 +5,7 @@ import { animate, useReducedMotion } from "motion/react";
 import { formatZec } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { RedactionTape } from "@/components/motion/redaction-tape";
+import { CoinZec } from "@/components/icons/coin-zec";
 
 /**
  * M1 Shielding tape (docs/design/motion-v2.md): when the deposit is credited the "Incoming" line is taped
@@ -17,13 +18,19 @@ export function ShieldLedger({ incomingZat, balanceZat, credited }: { incomingZa
       <Line label="Incoming · shielded ZEC">
         <span className="relative inline-block px-0.5">
           {incomingZat ? formatZec(incomingZat) : "—"}
-          <span className="ml-1 text-sm font-normal text-muted-foreground">ZEC</span>
+          <span className="ml-1 inline-flex items-baseline gap-1 text-sm font-normal text-muted-foreground">
+            <CoinZec size={13} />
+            ZEC
+          </span>
           {credited && <RedactionTape state="covered" />}
         </span>
       </Line>
       <Line label="Private balance">
         {credited && balanceZat ? <Counted zat={balanceZat} from={incomingZat} /> : <span className="text-faint-foreground">—</span>}
-        <span className="ml-1 text-sm font-normal text-muted-foreground">ZEC</span>
+        <span className="ml-1 inline-flex items-baseline gap-1 text-sm font-normal text-muted-foreground">
+          <CoinZec size={13} />
+          ZEC
+        </span>
       </Line>
       <p className="px-1 font-mono text-[11px] text-faint-foreground">
         {credited ? (

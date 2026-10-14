@@ -6,6 +6,7 @@ import type { DisplayPref } from "@/lib/display";
 import { useNative } from "@/lib/chain";
 import { setDisplayPref, useDisplayPref } from "@/lib/display-store";
 import { cn } from "@/lib/utils";
+import { CoinIcon } from "@/components/icons/coin";
 
 const PREFS: readonly DisplayPref[] = ["zec", "native"];
 
@@ -52,7 +53,10 @@ export function DisplaySwitch({ className, size = "sm", "aria-labelledby": label
                 transition={{ type: "spring", bounce: 0, duration: 0.3 }}
               />
             )}
-            <span className="relative">{LABEL[p]}</span>
+            <span className="relative inline-flex items-center gap-1">
+              <CoinIcon symbol={LABEL[p]} size={size === "xs" ? 11 : 12} className="text-current" />
+              {LABEL[p]}
+            </span>
           </button>
         );
       })}

@@ -23,6 +23,7 @@ import { KeyGate } from "@/components/key/key-gate";
 import { PaySteps, type PayStep } from "./pay-steps";
 import { QrRing } from "./qr-ring";
 import { ShieldLedger } from "./shield-ledger";
+import { CoinZec } from "@/components/icons/coin-zec";
 
 const PRESETS = ["0.1", "0.5", "1"];
 /** Zcash target block time. */
@@ -206,7 +207,10 @@ function DepositRequest({
               className="min-w-0 flex-1 bg-transparent text-2xl font-medium tabular outline-none placeholder:text-faint-foreground disabled:cursor-not-allowed"
               placeholder="0.1"
             />
-            <span className="text-lg text-muted-foreground">ZEC</span>
+            <span className="inline-flex items-center gap-1.5 text-lg text-muted-foreground">
+              <CoinZec size={16} />
+              ZEC
+            </span>
           </div>
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
             <p id="topup-amount-hint" className={cn("text-xs", amountError ? "text-destructive" : "text-faint-foreground")}>

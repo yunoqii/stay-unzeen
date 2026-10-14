@@ -6,6 +6,7 @@
 
 import type { ReactNode } from "react";
 import { NETWORK_CONFIG, useNetwork } from "@/lib/network";
+import { CoinZec } from "@/components/icons/coin-zec";
 
 interface Step {
   title: string;
@@ -94,7 +95,10 @@ export function VerifyExplainers() {
       <section id="why-attested" aria-labelledby="why-t" className="mt-16 scroll-mt-24">
         <div className="ledger md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <div className="p-5 sm:p-6">
-            <p className="font-mono text-[10px] tracking-wider text-faint-foreground uppercase">ZEC reserve</p>
+            <p className="inline-flex items-center gap-1.5 font-mono text-[10px] tracking-wider text-faint-foreground uppercase">
+              <CoinZec size={12} />
+              ZEC reserve
+            </p>
             <h2 id="why-t" className="mt-3 text-lg font-medium tracking-tight">
               Why the ZEC reserve is attested, not proven
             </h2>

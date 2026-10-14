@@ -12,6 +12,7 @@ import { VenueTag } from "@/components/tokens/venue-tag";
 import { Veiled } from "./peek";
 import { UsdHint } from "@/components/layout/amount";
 import { useDisplay } from "@/lib/display-store";
+import { CoinIcon } from "@/components/icons/coin";
 
 export function HoldingsList({
   holdings,
@@ -100,7 +101,7 @@ export function HoldingsList({
                       <Veiled>{amount === null ? "—" : formatCompact(amount)}</Veiled>
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      ≈ <Veiled>{shownValue === null ? "—" : formatSol(shownValue)}</Veiled> {display.unit}
+                      ≈ <Veiled>{shownValue === null ? "—" : formatSol(shownValue)}</Veiled> <CoinIcon symbol={display.unit} size={11} /> {display.unit}
                     </p>
                     {valueSol !== null && (
                       <p>

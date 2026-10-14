@@ -5,6 +5,7 @@ import { useDisplay } from "@/lib/display-store";
 import { formatSol } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { usePeek } from "@/components/portfolio/peek";
+import { CoinIcon } from "@/components/icons/coin";
 
 /**
  * A SOL-priced figure (price, market cap, volume, trade size of a SOL pair) in the display unit:
@@ -16,12 +17,15 @@ export function SolAmount({
   className,
   unitClassName = "text-faint-foreground",
   hideUnit,
+  icon,
 }: {
   sol: number;
   format?: (n: number) => string;
   className?: string;
   unitClassName?: string;
   hideUnit?: boolean;
+  /** Coin mark before the unit (key places only: balances, trade totals). */
+  icon?: boolean;
 }) {
   const d = useDisplay();
   const v = d.sol(sol);
@@ -32,6 +36,11 @@ export function SolAmount({
       {!hideUnit && (
         <>
           {" "}
+          {icon && (
+            <>
+              <CoinIcon symbol={d.unit} size={12} />{" "}
+            </>
+          )}
           <span className={unitClassName}>{d.unit}</span>
         </>
       )}

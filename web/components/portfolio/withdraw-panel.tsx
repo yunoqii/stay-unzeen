@@ -21,6 +21,7 @@ import { TokenGlyph } from "@/components/tokens/token-glyph";
 import { ActionStatusCard } from "@/components/trade/action-status";
 import { Veiled } from "./peek";
 import { ScatterParts } from "./scatter-parts";
+import { CoinZec } from "@/components/icons/coin-zec";
 
 export type WithdrawTab = "token" | "zec";
 const DELAYS_MIN = [5, 15, 60, 240];
@@ -515,7 +516,10 @@ function ZecWithdraw({ portfolio, pool }: { portfolio: Portfolio; pool: PoolInfo
             aria-invalid={!!amountError}
             className="tabular min-w-0 flex-1 bg-transparent text-2xl font-medium tracking-tight outline-none placeholder:text-faint-foreground"
           />
-          <span className="ml-3 text-sm text-muted-foreground">ZEC</span>
+          <span className="ml-3 inline-flex items-center gap-1 text-sm text-muted-foreground">
+            <CoinZec size={14} />
+            ZEC
+          </span>
         </div>
         {amountError && <p className="mt-1.5 text-xs text-sell">{amountError}</p>}
       </div>

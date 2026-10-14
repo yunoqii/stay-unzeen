@@ -7,6 +7,7 @@ import { useNow } from "@/hooks/use-now";
 import { cn } from "@/lib/utils";
 import { useNative } from "@/lib/chain";
 import { DisplaySwitch } from "./display-switch";
+import { CoinIcon } from "@/components/icons/coin";
 
 /**
  * Public reference prices (ZEC, SOL, ETH in USD and ZEC/SOL), refreshed in the background every minute.
@@ -57,8 +58,11 @@ export function RatesStrip() {
 
 function Rate({ label, value, accent, loading }: { label: string; value: string | null; accent?: boolean; loading: boolean }) {
   return (
-    <div className="flex items-baseline gap-1.5">
-      <dt className={cn(accent && "text-zec/80")}>{label}</dt>
+    <div className="flex items-center gap-1.5">
+      <dt className={cn("inline-flex items-center gap-1", accent && "text-zec/80")}>
+        <CoinIcon symbol={label} size={12} />
+        {label}
+      </dt>
       <dd className={cn("tabular", value ? "text-muted-foreground" : "text-faint-foreground/60")}>{value ?? (loading ? "···" : "—")}</dd>
     </div>
   );

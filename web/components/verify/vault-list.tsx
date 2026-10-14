@@ -7,6 +7,7 @@ import { assetLabel, fmtAmount } from "@/lib/verify/display";
 import { parseUint, type SnapshotCheck } from "@/lib/verify/merkle-sum";
 import { cn } from "@/lib/utils";
 import { CopyButton } from "@/components/ui/copy-button";
+import { CoinIcon } from "@/components/icons/coin";
 
 /**
  * Pool vaults at the snapshot slot / block, each with its signature checked here (ed25519 on Solana, EIP-712 on
@@ -43,7 +44,10 @@ export function VaultList({ snap, check, symbols }: { snap: VerifySnapshot; chec
               </span>
             </div>
             <p className="mt-4 font-mono text-xl tabular">
-              {fmtAmount(parseUint(v.lamports) ?? BigInt(0), native.decimals, evm ? 5 : 3)} <span className="text-sm text-faint-foreground">{native.symbol}</span>
+              {fmtAmount(parseUint(v.lamports) ?? BigInt(0), native.decimals, evm ? 5 : 3)} <span className="inline-flex items-center gap-1 text-sm text-faint-foreground">
+                <CoinIcon symbol={native.symbol} size={12} />
+                {native.symbol}
+              </span>
             </p>
             {v.tokens.length > 0 ? (
               <ul className="mt-3 space-y-1 border-t border-border/60 pt-3 text-xs">

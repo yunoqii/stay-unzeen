@@ -5,6 +5,8 @@ import { motion } from "motion/react";
 import { toast } from "sonner";
 import { CHAIN_LABEL, chainOf, lastSolanaNetwork, setNetwork, useNetwork, type Chain } from "@/lib/network";
 import { cn } from "@/lib/utils";
+import { CoinEth } from "@/components/icons/coin-eth";
+import { CoinSol } from "@/components/icons/coin-sol";
 
 const CHAINS: readonly Chain[] = ["solana", "hood"];
 
@@ -57,7 +59,8 @@ export function ChainSwitch() {
             )}
           >
             {on && <motion.span layoutId={pillId} className="absolute inset-0 rounded-full bg-surface-3" transition={{ type: "spring", bounce: 0, duration: 0.3 }} />}
-            <span className="relative font-mono text-[11px] tracking-wide" title={CHAIN_LABEL[c] === "Robinhood" ? "Robinhood Chain" : CHAIN_LABEL[c]}>
+            <span className="relative inline-flex items-center gap-1 font-mono text-[11px] tracking-wide" title={CHAIN_LABEL[c] === "Robinhood" ? "Robinhood Chain" : CHAIN_LABEL[c]}>
+              {c === "solana" ? <CoinSol size={10} className="text-current" /> : <CoinEth size={12} className="text-current" />}
               {c === "solana" ? "SOL" : "HOOD"}
             </span>
           </button>
