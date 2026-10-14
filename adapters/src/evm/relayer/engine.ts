@@ -14,6 +14,7 @@ import { readyToGraduate, spot } from "../pons/math";
 import type { EvmTxResult } from "../types";
 import type { EvmWithdrawer } from "../withdraw";
 import type { LaunchStore } from "./launches";
+import { fundVaults } from "./pool-state";
 import type { HoodClaimedJob, HoodExecution, HoodJobResult, HoodJobSpec, HoodMarket, HoodQueue } from "./queue";
 
 /**
@@ -158,6 +159,10 @@ export class HoodRelayer {
       const a = this.o.keyring.attest(s.purpose);
       return { vault: a, lockAddress: getAddress(a.address) };
     }
+    if (s.kind === "fund_vaults") {
+      const r = this.o.keyring.rebalance(0);
+      return { vault: r, lockAddress: getAddress(r.address) };
+    }
     if (s.kind === "create") {
       const v = this.o.vaults[randomInt(this.o.vaults.length)]!;
       return { vault: v, lockAddress: getAddress(v.address) };
@@ -206,6 +211,13 @@ export class HoodRelayer {
         return {
           status: "executed",
           execution: { kind: "withdraw", hash: w.hash, block: w.blockNumber, vault: w.vault, token: w.asset as Address, to: w.to, amount: w.received, networkFee: w.networkFee + (w.drop?.networkFee ?? 0n) },
+        };
+      }
+      case "fund_vaults": {
+        const { sent, plan } = await fundVaults(this.o.executor, vault, this.o.vaults.map((v) => v.address), s.wei, this.onSigned(job, vault.address));
+        return {
+          status: "executed",
+          execution: { kind: "fund_vaults", hash: sent.hash, block: sent.receipt.blockNumber, vault: getAddress(vault.address), wei: plan.total, networkFee: sent.networkFee },
         };
       }
       case "attest": {
@@ -307,6 +319,13 @@ export class HoodRelayer {
         return {
           status: "executed",
           execution: { kind: "withdraw", hash: receipt.transactionHash, block: receipt.blockNumber, vault, token: s.token, to, amount, networkFee: receipt.gasUsed * receipt.effectiveGasPrice },
+        };
+      }
+      case "fund_vaults": {
+        const tx = await this.o.executor.read.getTransaction({ hash: receipt.transactionHash });
+        return {
+          status: "executed",
+          execution: { kind: "fund_vaults", hash: receipt.transactionHash, block: receipt.blockNumber, vault, wei: tx.value, networkFee: receipt.gasUsed * receipt.effectiveGasPrice },
         };
       }
       case "attest": {

@@ -10,7 +10,7 @@ import type { SolanaNetwork } from "./postgres-queue";
  * 10 minutes. Public data only.
  */
 export interface LaunchCurve {
-  venue: "pumpfun" | "meteora-dbc" | "bags";
+  venue: "pumpfun" | "meteora-dbc" | "bags" | "pons";
   virtualSolLamports: bigint;
   virtualTokenReserves: bigint;
   realTokenReserves: bigint;

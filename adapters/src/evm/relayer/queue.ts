@@ -26,7 +26,9 @@ export type HoodJobSpec =
   | { kind: "sell"; token: Address; amount: bigint; minWei: bigint }
   | { kind: "create"; meta: { name: string; symbol: string; image?: string }; weiIn: bigint; minOut: bigint }
   | { kind: "withdraw"; token: Address; to: string; amount: bigint; gasWei?: bigint }
-  | { kind: "attest"; memo: string; purpose: "verify" | "fair" };
+  | { kind: "attest"; memo: string; purpose: "verify" | "fair" }
+  /** RELAYER v14 §3: spread up to `wei` from the rebalance address over the vaults (ONE tx). */
+  | { kind: "fund_vaults"; wei: bigint };
 
 export interface HoodSentAttempt {
   hash: Hex;
@@ -86,7 +88,8 @@ export type HoodExecution =
       market: HoodMarket | null;
     }
   | { kind: "withdraw"; hash: Hex; block: bigint; vault: Address; token: Address; to: Address; amount: bigint; networkFee: bigint }
-  | { kind: "attest"; hash: Hex; block: bigint; blockTime: number | null; vault: Address; memo: string; outSig: string | null; networkFee: bigint };
+  | { kind: "attest"; hash: Hex; block: bigint; blockTime: number | null; vault: Address; memo: string; outSig: string | null; networkFee: bigint }
+  | { kind: "fund_vaults"; hash: Hex; block: bigint; vault: Address; wei: bigint; networkFee: bigint };
 
 export type HoodJobResult =
   | { status: "executed"; execution: HoodExecution }
@@ -121,7 +124,7 @@ interface Row {
   not_before_ms: string;
 }
 
-const OPS = ["buy", "sell", "create", "transfer", "attest"];
+const OPS = ["buy", "sell", "create", "transfer", "attest", "fund_vaults"];
 
 export class PgHoodQueue implements HoodQueue {
   private leaseMs = 10 * 60_000;
@@ -229,7 +232,14 @@ export class PgHoodQueue implements HoodQueue {
     try {
       await client.query("BEGIN");
       let res;
-      if (e.kind === "attest") {
+      if (e.kind === "fund_vaults") {
+        // Pool-internal: out_lamports = wei that reached the vaults; no feed rows.
+        res = await client.query(
+          `UPDATE relayer_jobs SET status = 'confirmed', slot = $2, out_lamports = $3::numeric, network_fee = $4, updated_at = now()
+            WHERE id = $1 AND status = 'sent' AND signature = $5 AND claimed_by = $6 AND settled_at IS NULL`,
+          [job.id, e.block.toString(), e.wei.toString(), e.networkFee.toString(), e.hash, job.leaseId],
+        );
+      } else if (e.kind === "attest") {
         res = await client.query(
           `UPDATE relayer_jobs SET status = 'confirmed', slot = $2, out_memo = $3, network_fee = $4, out_block_time = $5,
                   vault = $6, out_sig = COALESCE($7, out_sig), updated_at = now()
@@ -342,6 +352,11 @@ export function rowToHoodSpec(row: Pick<Row, "id" | "op" | "venue" | "mint" | "l
       const m = row.meta as { memo?: unknown; purpose?: unknown } | null;
       if (!m || typeof m.memo !== "string" || !/^[0-9a-f]{64}$/.test(m.memo)) throw new Error(`job ${row.id}: meta.memo must be 64 hex`);
       return { kind: "attest", memo: m.memo, purpose: m.purpose === "verify" ? "verify" : "fair" };
+    }
+    case "fund_vaults": {
+      const wei = big(row.lamports_in, "lamports_in");
+      if (wei <= 0n) throw new Error(`job ${row.id}: lamports_in must be > 0`);
+      return { kind: "fund_vaults", wei };
     }
     default:
       throw new Error(`job ${row.id}: op ${row.op} not supported by the hood relayer`);

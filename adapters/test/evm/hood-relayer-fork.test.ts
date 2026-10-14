@@ -20,6 +20,8 @@ import { PonsAdapter, PONS_ERROR_ABI } from "../../src/evm/pons/adapter";
 import { HoodRelayer } from "../../src/evm/relayer/engine";
 import { MemoryLaunchStore } from "../../src/evm/relayer/launches";
 import { PgHoodQueue } from "../../src/evm/relayer/queue";
+import { FUND_STEP_WEI, hoodPoolMints, hoodSnapshotSigners, hoodSnapshotTick, readInventory, writeInventory, writePonsLaunchCurve } from "../../src/evm/relayer/pool-state";
+import { checkVerifySnapshot } from "../../src/evm/attest";
 import { EvmWithdrawer } from "../../src/evm/withdraw";
 import { MemoryCreatorIndexCounter } from "../../src/keys";
 import { PgMintVaults } from "../../src/relayer/mint-vaults";
@@ -73,7 +75,7 @@ describe.skipIf(!enabled)("hood relayer: job -> tx (anvil fork 4663) -> Postgres
     }
     admin = new pg.Pool({ connectionString: DB, max: 1 });
     await admin.query(`CREATE SCHEMA ${schema}`);
-    for (const t of ["relayer_jobs", "trades", "tokens", "mint_vaults", "verify_snapshots", "creator_fee_sweeps"]) {
+    for (const t of ["relayer_jobs", "trades", "tokens", "mint_vaults", "verify_snapshots", "creator_fee_sweeps", "launch_curves", "pool_sol_inventory", "verify_vaults"]) {
       await admin.query(`CREATE TABLE ${schema}.${t} (LIKE public.${t} INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES)`);
     }
     db = new pg.Pool({ connectionString: DB, max: 4, options: `-c search_path=${schema}` });
@@ -83,7 +85,7 @@ describe.skipIf(!enabled)("hood relayer: job -> tx (anvil fork 4663) -> Postgres
     ex = new EvmExecutor({ read: client, chainId: 4663, fees, allowSend: true, errorAbi: PONS_ERROR_ABI, pollingIntervalMs: 50 });
     kr = new EvmKeyring(generateMnemonic(english, 256), new MemoryCreatorIndexCounter());
     const funders = new FunderPool({ executor: ex, keyring: kr, count: 2 });
-    for (const a of [kr.funder(0), kr.funder(1), kr.vault(0), kr.vault(1), kr.attest("verify")]) {
+    for (const a of [kr.funder(0), kr.funder(1), kr.vault(0), kr.vault(1), kr.attest("verify"), kr.rebalance(0)]) {
       await client.request({ method: "anvil_setBalance" as never, params: [a.address, `0x${parseEther("10").toString(16)}`] as never });
     }
     adapter = new PonsAdapter({ executor: ex, keyring: kr, funders });
@@ -227,5 +229,71 @@ describe.skipIf(!enabled)("hood relayer: job -> tx (anvil fork 4663) -> Postgres
     expect(res.refunded).toBe(1);
     expect((await client.getBalance({ address: kr.rebalance(0).address })) > rb).toBe(true);
     expect((await launches.all()).size).toBe(0);
+  }, 60_000);
+
+  it("launch_curves (hood, pons) and pool_sol_inventory in wei", async () => {
+    const c = await writePonsLaunchCurve(db, "hood", adapter);
+    const r = (await db.query(`SELECT virtual_sol_lamports::text v, virtual_token_reserves::text t, real_token_reserves::text rr, token_total_supply::text s FROM launch_curves WHERE network = 'hood' AND venue = 'pons'`)).rows[0];
+    expect(r).toEqual({ v: c.virtualSolLamports.toString(), t: c.virtualTokenReserves.toString(), rr: c.realTokenReserves.toString(), s: c.tokenTotalSupply.toString() });
+    expect(r.s).toBe("1000000000000000000000000000"); // 1e27: above i64, NUMERIC
+    const inv = await readInventory(ex, [kr.vault(0).address, kr.vault(1).address], kr.rebalance(0).address);
+    await writeInventory(db, "hood", inv);
+    const i = (await db.query(`SELECT vault_lamports::text v, vault_count n, rebalance_lamports::text r FROM pool_sol_inventory WHERE network = 'hood'`)).rows[0];
+    const b0 = await client.getBalance({ address: kr.vault(0).address });
+    const b1 = await client.getBalance({ address: kr.vault(1).address });
+    expect(i).toEqual({ v: (b0 + b1).toString(), n: 2, r: (await client.getBalance({ address: kr.rebalance(0).address })).toString() });
+  }, 60_000);
+
+  it("fund_vaults: ONE tx from the rebalance address, round shares, never vault -> vault", async () => {
+    const vs = [kr.vault(0).address, kr.vault(1).address];
+    const before = await Promise.all(vs.map((a) => client.getBalance({ address: a })));
+    const id = await insertJob({ op: "fund_vaults", lamports_in: parseEther("1").toString(), meta: { purpose: "rebalance" } });
+    await drain();
+    const r = await row(id);
+    expect(r.status).toBe("confirmed");
+    expect(getAddress(r.vault)).toBe(getAddress(kr.rebalance(0).address));
+    const sent = BigInt(r.ol);
+    expect(sent > 0n && sent <= parseEther("1")).toBe(true);
+    const after = await Promise.all(vs.map((a) => client.getBalance({ address: a })));
+    const deltas = after.map((a, i) => a - before[i]!);
+    expect(deltas.reduce((a, b) => a + b, 0n)).toBe(sent);
+    for (const d of deltas) expect(d % FUND_STEP_WEI).toBe(0n);
+    const tx = await client.getTransaction({ hash: r.signature });
+    expect(getAddress(tx.from)).toBe(getAddress(kr.rebalance(0).address));
+    expect(tx.value).toBe(sent);
+  }, 60_000);
+
+  it("Verify v3 snapshot on hood: EIP-55 addresses and mints, wei, EIP-712 sigs, one block", async () => {
+    const minSlot = await client.getBlockNumber();
+    const snap = await db.query<{ id: number }>(
+      `INSERT INTO verify_snapshots (network, chain_id, kind, status, freeze_until, digest_version, min_slot)
+       VALUES ('hood', '0111', 'manual', 'collecting', now() + interval '2 minutes', 3, $1) RETURNING id`,
+      [minSlot.toString()],
+    );
+    const id = snap.rows[0]!.id;
+    const res = await hoodSnapshotTick({
+      db,
+      network: "hood",
+      ex,
+      chainId: 4663,
+      signers: async () => hoodSnapshotSigners(kr, 2, 2, 3),
+      mints: () => hoodPoolMints(db, "hood"),
+    });
+    expect(res).toBe("written");
+    const s = (await db.query(`SELECT solana_slot::text b, assets_done_at IS NOT NULL done FROM verify_snapshots WHERE id = $1`, [id])).rows[0];
+    expect(s.done).toBe(true);
+    expect(BigInt(s.b) >= minSlot).toBe(true);
+    const rows = (await db.query(`SELECT address, lamports::text l, tokens, sig FROM verify_vaults WHERE snapshot_id = $1 ORDER BY address`, [id])).rows;
+    const v0 = rows.find((x) => x.address === getAddress(kr.vault(0).address))!;
+    expect(v0.l).toBe((await client.getBalance({ address: kr.vault(0).address, blockNumber: BigInt(s.b) })).toString());
+    for (const x of rows) {
+      expect(x.address).toBe(getAddress(x.address)); // EIP-55
+      for (const t of x.tokens) expect(t.mint).toBe(getAddress(t.mint));
+      expect(await checkVerifySnapshot(4663, { snapshotId: String(id), address: x.address, blockNumber: BigInt(s.b) }, x.sig)).toBe(true);
+    }
+    const pinnedToken = v0.tokens.find((t: { mint: string }) => t.mint === token) ?? rows.flatMap((x) => x.tokens).find((t: { mint: string }) => t.mint === token);
+    expect(pinnedToken).toBeTruthy();
+    expect(rows.some((x) => x.address === getAddress(kr.rebalance(0).address))).toBe(true);
+    await db.query(`UPDATE verify_snapshots SET status = 'built' WHERE id = $1`, [id]);
   }, 60_000);
 });

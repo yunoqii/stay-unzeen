@@ -24,6 +24,7 @@ describe("hood job rows", () => {
     expect(rowToHoodSpec({ ...base, op: "sell", token_amount: "1000000000000000000000000000", min_out: "0" }, "hood")).toMatchObject({ amount: 10n ** 27n });
     expect(rowToHoodSpec({ ...base, op: "create", mint: null, meta: { name: "A", symbol: "B" } }, "hood")).toMatchObject({ kind: "create", weiIn: 0n });
     expect(rowToHoodSpec({ ...base, op: "transfer", token_amount: "123000", dest: "0xabc", gas_lamports: "50000000000000" }, "hood")).toMatchObject({ kind: "withdraw", gasWei: 5n * 10n ** 13n });
+    expect(rowToHoodSpec({ ...base, op: "fund_vaults", venue: null, mint: null, lamports_in: "1000000000000000000" }, "hood")).toEqual({ kind: "fund_vaults", wei: 10n ** 18n });
     expect(rowToHoodSpec({ ...base, op: "attest", venue: null, mint: null, meta: { memo: "ab".repeat(32), purpose: "verify" } }, "hood")).toEqual({ kind: "attest", memo: "ab".repeat(32), purpose: "verify" });
   });
 
@@ -32,7 +33,7 @@ describe("hood job rows", () => {
     expect(() => rowToHoodSpec({ ...base, op: "buy", venue: "pumpfun", lamports_in: "1", min_out: "1" }, "hood")).toThrow(/pons/);
     expect(() => rowToHoodSpec({ ...base, op: "buy", mint: "So11111111111111111111111111111111111111112", lamports_in: "1", min_out: "1" }, "hood")).toThrow(/EVM address/);
     expect(() => rowToHoodSpec({ ...base, op: "create", meta: { name: "A", symbol: "B", quote: "USDC" } }, "hood")).toThrow(/ETH-paired/);
-    expect(() => rowToHoodSpec({ ...base, op: "fund_vaults" }, "hood")).toThrow(/not supported/);
+    expect(() => rowToHoodSpec({ ...base, op: "fund_quote" }, "hood")).toThrow(/not supported/);
   });
 });
 
