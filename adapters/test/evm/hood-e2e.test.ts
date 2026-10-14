@@ -14,7 +14,19 @@ import path from "node:path";
 import bs58 from "bs58";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPublicClient, getAddress, http, parseEther, type Address, type PublicClient } from "viem";
+import { createPublicClient, getAddress, http, parseEther, recoverMessageAddress, type Address, type PublicClient } from "viem";
+import { checkVerifySnapshot } from "../../src/evm/attest";
+
+/**
+ * The browser's own Verify code (web/lib/verify/merkle-sum.ts), loaded as-is at run time (not type-checked
+ * here: it lives outside this package): digest + leaf paths are checked exactly as users' browsers do.
+ */
+interface WebVerify {
+  rootsDigest(s: unknown): string;
+  checkProof(s: unknown, proof: unknown, anonPubkeyB58: string): { ok: boolean; assets: { asset: string; committed: bigint }[] };
+}
+const WEB_VERIFY = path.join(__dirname, "../../../web/lib/verify/merkle-sum.ts");
+const loadWebVerify = (): Promise<WebVerify> => import(/* @vite-ignore */ WEB_VERIFY) as Promise<WebVerify>;
 import { english, generateMnemonic, generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { loadRepoEnv, REPO_ROOT } from "../../src/env";
 import { hoodMainnet } from "../../src/evm/chain";
@@ -256,32 +268,51 @@ describe.skipIf(!enabled)("hood e2e: core API + hood relayer + anvil fork", () =
     expect((await client.getBalance({ address: to })) > 0n).toBe(true); // gas drop
   }, 600_000);
 
-  it("Verify v3 snapshot: relayer writes EIP-55 vault rows; core builds digest v3", async () => {
+  it("Verify v3: reserve sampled -> snapshot built -> digest, leaf paths (web code), EIP-712 vaults, EIP-191 operator", async () => {
     const env = { ...process.env, DATABASE_URL: process.env.DATABASE_URL!.replace(/\/[^/?]+(\?|$)/, `/${dbName}$1`), UNZEEN_CHAIN: "hood", UNZEEN_NETWORK: "main", UNZEEN_VENUES: "pons", UNZEEN_HOME: home };
     delete (env as Record<string, string | undefined>).DATABASE_URL_RELAYER;
     const r = spawnSync(API_BIN, ["verify-snapshot", "--allow-mainnet"], { env, encoding: "utf8" });
     expect(r.status, r.stderr + r.stdout).toBe(0);
     const id = (await db.query<{ id: number }>(`SELECT max(id) AS id FROM verify_snapshots WHERE network = 'hood'`)).rows[0]!.id;
+    // Scanner stand-in (Ledger::set_reserve): attested reserve sampled AFTER the request, 5 ZEC, 0.01 ZEC granule.
+    await sleep(50);
+    for (const [k, v] of [["reserve_zat", "500000000"], ["reserve_height", "3000000"], ["reserve_credited_zat", "0"], ["reserve_at", String(Date.now())]]) {
+      await db.query(`INSERT INTO pool_meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, [k, v]);
+    }
     let row: any;
     for (let i = 0; i < 240; i++) {
-      row = (await db.query(`SELECT status, digest_version, assets_done_at IS NOT NULL done, skip_reason FROM verify_snapshots WHERE id = $1`, [id])).rows[0];
+      row = (await db.query(`SELECT status, digest_version, skip_reason FROM verify_snapshots WHERE id = $1`, [id])).rows[0];
       if (row.status === "built" || row.status === "skipped") break;
       await sleep(1_000);
     }
-    expect(row.done, JSON.stringify(row)).toBe(true);
-    console.log(`verify snapshot row: ${JSON.stringify(row)}`);
-    if (row.status === "built") expect(row.digest_version).toBe(3);
-    const vaults = (await db.query(`SELECT address, lamports::text l, tokens FROM verify_vaults WHERE snapshot_id = $1`, [id])).rows;
-    expect(vaults.length > 0).toBe(true);
-    for (const v of vaults) {
-      expect(v.address).toBe(getAddress(v.address));
-      for (const t of v.tokens) expect(t.mint).toBe(getAddress(t.mint));
+    expect(row.status, JSON.stringify(row) + apiLog.slice(-1500)).toBe("built");
+    expect(row.digest_version).toBe(3);
+
+    // Public snapshot + operator (attest job executed by this relayer: EIP-191 over the digest).
+    let snap: any = null;
+    for (let i = 0; i < 120; i++) {
+      snap = await fetch(`${base}/api/verify/${id}`).then((x) => x.json(), () => null);
+      if (snap?.operator && snap?.anchor) break;
+      await sleep(1_000);
     }
-    expect(vaults.flatMap((v) => v.tokens).some((t: { mint: string }) => t.mint === mint)).toBe(true);
-    // Report what core did with it (built needs the scanner's ZEC reserve; skipped without it).
-    console.log(`verify snapshot #${id}: ${row.status}${row.skip_reason ? ` (${row.skip_reason})` : ""}`);
-    expect(apiExit, `core API exited: ${apiLog.slice(-1500)}`).toBeNull();
-    const pub = (await fetch(`${base}/api/verify`).then((r) => r.json(), () => null).catch(() => null)) as { digestVersion?: number } | null;
-    if (row.status === "built" && pub?.digestVersion !== undefined) expect(pub.digestVersion).toBe(3);
-  }, 300_000);
+    expect(snap?.digestVersion).toBe(3);
+    const { rootsDigest, checkProof } = await loadWebVerify();
+    const digest = rootsDigest(snap);
+    expect(digest).toBe(String(snap.rootsDigest).toLowerCase());
+    expect(snap.operator, JSON.stringify(snap).slice(0, 500)).toBeTruthy();
+    expect(getAddress(await recoverMessageAddress({ message: { raw: `0x${digest}` }, signature: snap.operator.sig }))).toBe(getAddress(kr.attest("verify").address));
+    expect(snap.anchor.matches).toBe(true);
+    // Vault rows: EIP-55 + EIP-712 statement at the snapshot block.
+    for (const v of snap.vaults) {
+      expect(v.address).toBe(getAddress(v.address));
+      expect(await checkVerifySnapshot(4663, { snapshotId: String(id), address: v.address, blockNumber: BigInt(snap.solanaSlot) }, v.sig)).toBe(true);
+    }
+    expect(snap.trees.some((t: { asset: string }) => t.asset.toLowerCase() === mint.toLowerCase())).toBe(true);
+    // Owner proof (signed GET): every piece climbs to the published roots, with the web's own code.
+    const proof = await anon.req("GET", `/api/verify/proof?snapshot=${id}`);
+    expect(proof.status, JSON.stringify(proof.json)).toBe(200);
+    const pc = checkProof(snap, proof.json, bs58.encode(anon.pub));
+    expect(pc.ok, JSON.stringify(pc, (_k, v) => (typeof v === "bigint" ? v.toString() : v)).slice(0, 800)).toBe(true);
+    expect(pc.assets.some((x) => x.asset.toLowerCase() === mint.toLowerCase() && x.committed > 0n)).toBe(true);
+  }, 400_000);
 });
