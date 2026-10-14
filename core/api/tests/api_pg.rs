@@ -367,6 +367,68 @@ async fn pool_info() {
     e.drop_schema().await;
 }
 
+/// API v0.21: one fixed 16 KiB portfolio, never compressed or transformed, holdings paged.
+#[tokio::test]
+async fn portfolio_fixed_size_uncompressed_and_paged() {
+    let Some(e) = setup().await else { return };
+    let me = user(1);
+    let pk = hex::encode(me.verifying_key().to_bytes());
+    // 45 holdings → pages of 20, 20, 5.
+    for i in 0..45u32 {
+        e.sql(&format!(
+            "INSERT INTO {}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{pk}', 'Mint{i:040}', 1000)",
+            e.schema
+        ))
+        .await;
+    }
+    let get = |path: &'static str| {
+        let h = e.sign(&me, "GET", path, "");
+        e.http
+            .get(format!("{}{}", e.base, path))
+            .header(api_auth::H_PUBKEY, &h.pubkey)
+            .header(api_auth::H_NONCE, &h.nonce)
+            .header(api_auth::H_TS, &h.ts)
+            .header(api_auth::H_SIG, &h.sig)
+            .header("accept-encoding", "gzip, deflate, br, zstd")
+            .send()
+    };
+    let mut seen = Vec::new();
+    for (path, n, more) in [
+        ("/api/portfolio", 20, 25),
+        ("/api/portfolio?holdingsPage=1", 20, 5),
+        ("/api/portfolio?holdingsPage=2", 5, 0),
+        ("/api/portfolio?holdingsPage=3", 0, 0),
+    ] {
+        let r = get(path).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "{path}");
+        assert!(
+            r.headers().get("content-encoding").is_none(),
+            "padded answers are never compressed"
+        );
+        assert_eq!(r.headers()["cache-control"], "no-store, no-transform");
+        let bytes = r.bytes().await.unwrap();
+        assert_eq!(bytes.len(), unzeen_api::PORTFOLIO_BYTES, "{path}: fixed size");
+        assert_eq!(unzeen_api::PORTFOLIO_BYTES, 16_384);
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let h = v["holdings"].as_array().unwrap();
+        assert_eq!(h.len(), n, "{path}");
+        assert_eq!(v["more"]["holdings"], more, "{path}");
+        seen.extend(h.iter().map(|x| x["mint"].as_str().unwrap().to_string()));
+    }
+    seen.dedup();
+    assert_eq!(seen.len(), 45, "pages cover every holding once");
+    // Other query parameters are refused (the signature covers them).
+    let h = e.sign(&me, "GET", "/api/portfolio?x=1", "");
+    assert_eq!(
+        code(&e.raw("GET", "/api/portfolio?x=1", "", Some(&h)).await),
+        "bad_request"
+    );
+    // Other padded answers carry the same headers.
+    let r = e.signed(&me, "GET", "/api/creator", "").await;
+    assert_eq!(r.headers["cache-control"], "no-store, no-transform", "{:?}", r.body);
+    e.drop_schema().await;
+}
+
 #[tokio::test]
 async fn portfolio_auth_and_replay() {
     let Some(e) = setup().await else { return };
@@ -379,7 +441,7 @@ async fn portfolio_auth_and_replay() {
     let r = e.signed(&me, "GET", "/api/portfolio", "").await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
     assert_eq!(r.body["zecBalance"], "0");
-    assert_eq!(r.headers["cache-control"], "no-store");
+    assert_eq!(r.headers["cache-control"], "no-store, no-transform");
 
     e.fund(1, 0, 1_000_000).await;
     let h = e.sign(&me, "GET", "/api/portfolio", "");
@@ -2395,7 +2457,7 @@ mod verify_pl {
         let r = e.signed(&user(1), "GET", "/api/verify/proof", "").await;
         assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
         assert_eq!(r.raw_len, 65_536, "constant 64 KiB bucket");
-        assert_eq!(r.headers["cache-control"], "no-store");
+        assert_eq!(r.headers["cache-control"], "no-store, no-transform");
         let p = &r.body;
         assert_eq!(p["snapshotId"], id);
         assert_eq!(p["truncated"], false);
@@ -3306,7 +3368,7 @@ async fn launch_fee_to_pool_and_creator_cabinet() {
     assert_eq!(empty.status, StatusCode::OK, "{:?}", empty.body);
     assert_eq!(empty.body["tokens"], json!([]));
     assert_eq!(empty.raw_len % 4096, 0);
-    assert_eq!(empty.headers["cache-control"], "no-store");
+    assert_eq!(empty.headers["cache-control"], "no-store, no-transform");
     // Unsigned → 401.
     assert_eq!(e.get("/api/creator").await.status, StatusCode::UNAUTHORIZED);
 
@@ -3750,7 +3812,7 @@ async fn chat_flow() {
     );
     e.ledger.chat_publish().await.unwrap();
     let page = e.get(&format!("/api/tokens/{MINT}/chat")).await;
-    assert_eq!(page.headers["cache-control"], "public, max-age=5");
+    assert_eq!(page.headers["cache-control"], "public, max-age=5, no-transform");
     assert_eq!(page.raw_len % 4096, 0);
     let m = &page.body["messages"][0];
     assert_eq!(

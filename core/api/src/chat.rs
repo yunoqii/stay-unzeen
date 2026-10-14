@@ -118,8 +118,7 @@ fn padded_response(status: StatusCode, mut v: Value) -> Response {
     let total = (len + 9).div_ceil(BODY_BYTES).max(1) * BODY_BYTES;
     v["pad"] = json!(" ".repeat(total - len - 9));
     let mut r = (status, Json(v)).into_response();
-    r.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    crate::padded_headers(&mut r, crate::PADDED_PRIVATE);
     r
 }
 
@@ -393,8 +392,7 @@ fn public_padded(mut v: Value) -> Response {
     let total = (len + 9).div_ceil(4096).max(1) * 4096;
     v["pad"] = json!(" ".repeat(total - len - 9));
     let mut r = Json(v).into_response();
-    r.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=5"));
+    crate::padded_headers(&mut r, "public, max-age=5, no-transform");
     r
 }
 

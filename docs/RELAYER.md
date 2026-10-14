@@ -167,6 +167,13 @@
 - `not_before` соблюдать строго: не брать задание раньше (это защита от тайминга H8). «Ускорять» очередь нельзя.
 - Отдельная роль Postgres для релейера с правами только на свои таблицы (`relayer_jobs` поколоночно, `trades`, `tokens`, `mint_vaults`, `relayer_vault_usage`, `relayer_creator_counter`): `infra/relayer-role.sql` (идемпотентный, перезапускать после новых миграций). Проверено 12.10 на локальной БД: все запросы этого документа проходят; `action_id`, `SELECT *`, `actions`, `balances`, `deposits`, `zec_payouts`, журналы, `pool_meta`, INSERT/DELETE в очередь и сдвиг `not_before` назад — отказ. Колонка `action_id` этой роли **не видна** (column-level SELECT), поэтому `SELECT *` / `RETURNING *` по `relayer_jobs` не работают — перечисляйте колонки.
 
+## Деплой: сжатие (API v0.21)
+Паддированные ответы API (`/api/portfolio`, `/api/actions*`, `/api/verify/proof`, `/api/creator`, `/api/tokens/*/chat`) выравнивают размер, чтобы он не выдавал содержимое. Сжатие (gzip/br/zstd) это ломает. Core их не сжимает и ставит `Cache-Control: ... no-transform`, но **reverse-proxy / CDN не должен сжимать эти пути**:
+- nginx: в `location ~ ^/api/(portfolio|actions|verify/proof|creator|tokens/.+/chat)` — `gzip off; brotli off;` (или не включать `application/json` в `gzip_types` для API целиком).
+- Caddy: `encode` не применять к этим путям (matcher `not path ...`).
+- Cloudflare: уважает `no-transform`, но лучше Compression Rule «disable» на `/api/*`.
+Проверка после деплоя: `curl -sI -H 'Accept-Encoding: gzip, br' https://<api>/api/tokens/<mint>/chat` — заголовка `Content-Encoding` нет.
+
 ## Таблица `relayer_jobs`
 
 | Поле | Кто пишет | Смысл |

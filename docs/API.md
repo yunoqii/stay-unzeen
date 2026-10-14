@@ -2,7 +2,11 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.20** (13.10; миграция `0029_verify_v3.sql`; RELAYER.md v14). Изменения против v0.19:
+Статус: **v0.21** (14.10; без миграций; RELAYER.md v14 + раздел «Деплой: сжатие»). Изменения против v0.20:
+- **`Portfolio` всегда ровно 16 384 байт** (16 КиБ; было 64 КиБ). Списки с лимитами: `holdings` — страница из 20 (`GET /api/portfolio?holdingsPage=N`, N от 0; запрос подписывается вместе с query; другие параметры → 400), `scenarios` ≤ 3, `orders` ≤ 8, `actions` ≤ 8, `deposits` ≤ 5, `claimable` ≤ 5, `fairBids` ≤ 3, `fairLaunches` ≤ 3. Если и так не влезает — с конца обрезаются по порядку `deposits` → `actions` → `fairLaunches` → `claimable` → `orders` → `fairBids` → `scenarios` (списки отсортированы «активные/новые первыми»). Новые поля: `holdingsPage: number`, `more: { holdings, scenarios, orders, actions, deposits, claimable, fairBids?, fairLaunches?: number }` — сколько не показано («+N more»); для `holdings` — сколько на следующих страницах. Позиции на всех страницах упорядочены по mint. Страница + 20 позиций с максимальными значениями гарантированно влезает (тест).
+- **Все паддированные ответы** (`/api/portfolio`, `/api/actions`, `/api/actions/:id`, `/api/verify/proof`, `/api/creator`, ответы чата в `/api/actions`) — `Cache-Control: no-store, no-transform`; публичная лента чата `GET /api/tokens/:mint/chat` — `public, max-age=5, no-transform`. Сервер **никогда не сжимает** их (нет `Content-Encoding`, даже при `Accept-Encoding: gzip, br`): сжатие паддинга вернуло бы зависимость размера от содержимого. Прокси перед API не должен сжимать эти пути — RELAYER.md «Деплой: сжатие».
+
+Изменения v0.20 против v0.19:
 - **Инстанс Robinhood Chain** (`UNZEEN_CHAIN=hood`; свой origin, свой Zcash-кошелёк пула, своя БД; `chainId` `0212` testnet / `0111` mainnet). Для фронта:
   - `PoolInfo.chain = { id: "hood", network: "hood-testnet" | "hood", native: { symbol: "ETH", decimals: 18 }, evmChainId }`, `venues` = `[pons]`, `quotes` = `[]`;
   - **все поля в нативных единицах — wei** вместо лампортов (имена прежние): `rate.lamportsPerZec*` (wei за 1 ZEC), `FeedEvent.solAmount`, `fees.withdrawToken*Lamports`, `claimable[].solAmount`, `launchRules.maxInitialBuyLamports*`, `Candle.volume`; `priceSol`/`marketCapSol` — ETH;
@@ -21,7 +25,7 @@
 
 v0.19 (13.10). (13.10; миграция `0027_scenarios.sql`; сценарии за флагом `UNZEEN_SCENARIOS`, реализованы все блоки S2–S6: create/start/cancel, `Portfolio.scenarios`, исполнитель триггеров, ожиданий, сделок, ордеров, swap/dca/repeat, create/fl_*/claim/withdraw/chat; `fl_*` — только при `features.fairLaunch`, `chat` — при `features.chat`). Изменения против v0.18:
 - **Сценарии** (план из ≤ 12 блоков, одна подпись): раздел «Сценарии (v0.19)» ниже, спека `docs/analysis/scenarios.md`, решения владельца 13.10. Векторы валидации: `core/testdata/scenario-vectors.json` (фронт и core проверяют по одному файлу).
-- **`Portfolio` всегда ровно 65 536 байт** (64 КиБ, поле `pad`; было кратно 4096) — один размер для всех ключей, со сценариями и без. Больше — только у ключа с очень большим числом позиций (тогда следующая кратная 64 КиБ).
+- ~~**`Portfolio` всегда ровно 65 536 байт**~~ (v0.21: 16 КиБ, см. выше) (64 КиБ, поле `pad`; было кратно 4096) — один размер для всех ключей, со сценариями и без. Больше — только у ключа с очень большим числом позиций (тогда следующая кратная 64 КиБ).
 - **`pad` тела `POST /api/actions`**: до 16384 байт (было 8192), чтобы `scenario_create` дополнялся до 16 КиБ. Вступает вместе с S3.
 - Новые коды ошибок: `scenario_invalid` (400), `scenario_rule` (422), `scenario_limit` (422), `scenario_not_active` (409).
 - **Подготовка hood (ревью `review-numeric-hood.md`):** на сервере Solana токен-суммы (`amount`, `minOut`, сумма ордера на продажу) ограничены **u64** (SPL) → больше → `400 bad_request`; у hood-сервера — 38 цифр. Шаг округления суммы покупки D10 зависит от цепочки: 0.001 SOL на Solana, **0.0001 ETH** на hood. Снимок Verify с активом, который нельзя закоммитить (например, `0x…` ERC-20 до Verify v3), пропускается целиком (`skip_reason = unsupported_asset`), а не молча без этого актива.
@@ -145,7 +149,7 @@ v0.18 (13.10; миграция `0026_amounts_numeric.sql`; RELAYER.md v12). Robi
 - **`exec?: "now" | "delayed" | "max"`** — режим исполнения (по умолчанию `"delayed"`; неизвестное значение → 400). См. «Режимы исполнения».
   - buy/sell/create: `now` — без эпохи, исполнение за секунды, плоская комиссия `PoolInfo.fees.nowFeeZat` (входит в hold); `delayed` — эпоха 30–60 с; `max` — эпоха 5–15 мин.
   - withdraw_zec/withdraw_token: `delayed` (по умолчанию) или `max` (задержка 10–60 мин); **`now` → 400**.
-- **Паддинг.** POST `/api/actions` принимает и игнорирует строковое поле `pad` (≤ 8192 байт) — клиент выравнивает размер тела. Подписанные ответы паддятся полем `pad` до кратного 1024 байт (`/api/actions`, `/api/actions/:id`) и 4096 байт (`/api/portfolio`).
+- **Паддинг.** POST `/api/actions` принимает и игнорирует строковое поле `pad` (≤ 8192 байт) — клиент выравнивает размер тела. Подписанные ответы паддятся полем `pad` до кратного 1024 байт (`/api/actions`, `/api/actions/:id`) и ровно 16 384 байт (`/api/portfolio`, v0.21). Паддированные ответы: `Cache-Control: no-store, no-transform`, без сжатия (v0.21).
 - **`Portfolio.actions`** — последние 20 действий владельца, тип `(ActionStatus & { id, kind })[]` (статус `queued` | `sent` | `executed` | `failed`, `error`, `rate`, `fill`, `solanaTx`). Фронт опрашивает только портфель, а не `/api/actions/:id` (эндпоинт остаётся).
 - **Зачисление депозита** — после `K + r` подтверждений, `r` ∈ 0..3 (фиксирован для ноты, не угадывается снаружи). `PoolInfo.confirmations` = K (минимум).
 - **`PoolInfo.rate`** — публичный курс из фонового кэша (без запроса к 1Click): `lamportsPerZec` (mid), `lamportsPerZecBuy`/`lamportsPerZecSell` (со спредом, ровно те, что применит сервер сейчас), `spreadBps`, `source`, `ts`. Нет поля — курса нет (действия → 503). `Cache-Control: max-age=15`.
@@ -373,17 +377,20 @@ interface Portfolio {
   zecBalance: string;       // затоши, доступно
   zecHeld: string;          // затоши, зарезервировано действиями в очереди
   frozen: boolean;          // true — баланс заморожен до ручной проверки (reorg); снимается автоматически, если депозит снова в цепочке с K подтверждениями
-  holdings: { mint: string; amount: string; held: string }[];  // amount — доступно; held — зарезервировано sell/withdraw_token в очереди
+  holdings: { mint: string; amount: string; held: string }[];  // v0.21: страница из 20 по mint (?holdingsPage=N); amount — доступно; held — зарезервировано sell/withdraw_token в очереди
   claimable: { mint: string; solAmount: string; zecAmount: string }[]; // v0.7: creator fees к выплате по mint, созданным этим ключом: лампорты (SOL/USDC/USD1-пары) и v0.14 зат (ZEC-пары); claim → ZEC
-  deposits: DepositInfo[];  // последние 20, новые первыми
-  actions: (ActionStatus & {  // v0.4: последние 20 действий владельца (queued первыми)
+  deposits: DepositInfo[];  // v0.21: ≤ 5 последних, новые первыми
+  actions: (ActionStatus & {  // v0.21: ≤ 8 последних действий владельца (queued первыми)
     id: string;
     kind: "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token" | "claim";   // fl_* сюда НЕ попадают (v0.6); claim (v0.7)
   })[];
-  orders: Order[];               // v0.8: открытые/сработавшие первыми, затем закрытые (суммы и цена живут 24 ч после закрытия); ≤ 20
-  fairBids?: FairBid[];          // v0.6: только при features.fairLaunch; последние 20 заявок ключа
-  fairLaunches?: OwnFairLaunch[];// v0.6: только при features.fairLaunch; запуски, созданные этим ключом (кабинет создателя)
-  pad: string;              // v0.4: пробелы, выравнивают ответ до кратного 4096 байт; игнорировать
+  orders: Order[];               // v0.8: открытые/сработавшие первыми, затем закрытые (суммы и цена живут 24 ч после закрытия); v0.21: ≤ 8
+  fairBids?: FairBid[];          // v0.6: только при features.fairLaunch; v0.21: ≤ 3 последних заявки ключа
+  fairLaunches?: OwnFairLaunch[];// v0.6: только при features.fairLaunch; запуски, созданные этим ключом; v0.21: ≤ 3
+  scenarios?: ScenarioView[];    // v0.19: только при features.scenarios; v0.21: ≤ 3 (активные первыми)
+  holdingsPage: number;          // v0.21: номер страницы holdings (из запроса)
+  more: Record<"holdings" | "scenarios" | "orders" | "actions" | "deposits" | "claimable" | "fairBids" | "fairLaunches", number>; // v0.21: сколько не показано (ключи только у присутствующих списков; holdings — на следующих страницах)
+  pad: string;              // пробелы: ответ всегда ровно 16 384 байт (v0.21); игнорировать
 }
 
 interface DepositInfo {
@@ -1112,7 +1119,7 @@ interface Scenario {                       // Portfolio.scenarios: ≤ 5, акт
 5. `AmountSpec.abs`: токены — до 38 цифр (v0.18), зат — ≤ 2^63−1.
 6. `scenario_cancel {all: true}` отвечает `{ ids: string[], status: "cancelled" }`.
 7. Блок выключенной функции → `bad_request` с `details.code = "feature_disabled"` (в черновике — просто `bad_request`).
-8. `Portfolio` фиксированно 64 КиБ, `pad` тела — до 16384 (в черновике — предложение 8192 для портфеля).
+8. `Portfolio` фиксированно 64 КиБ (v0.21: 16 КиБ), `pad` тела — до 16384 (в черновике — предложение 8192 для портфеля).
 9. Перечислены коды `details.code`; в векторах каждый невалидный план содержит ровно одну ошибку, порядок проверок не входит в контракт.
 10. P1 строже черновика: Now только у шага 1 после `manual_start` (шаг 0 без ручного старта — `now_not_first`); retry Now-шага — `delayed`.
 11. P2 по всем путям графа (goto/skip/repeat), учитывает `order_place` и `{step: swap}`; P8 проверяет `{step: swap}` по его `to` (ревью `docs/analysis/review-numeric-hood.md` п. 1–5, 11).

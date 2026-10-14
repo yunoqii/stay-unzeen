@@ -20,6 +20,7 @@ pub mod launch;
 pub mod limit;
 pub mod market;
 pub mod orders;
+pub mod portfolio;
 pub mod rate;
 pub mod rates;
 pub mod scenarios;
@@ -217,6 +218,9 @@ async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response
     let method = req.method().clone();
     let t = Instant::now();
     let mut res = next.run(req).await;
+    if res.extensions().get::<Padded>().is_some() {
+        res.headers_mut().remove(header::CONTENT_ENCODING);
+    }
     res.headers_mut()
         .insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     res.headers_mut()
@@ -228,21 +232,31 @@ async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response
 /// R-core-6: signed responses are padded with a `pad` string to the next multiple of
 /// `bucket` bytes, so their size does not tell an observer what happened (an action queued vs
 /// executed, how many holdings).
-/// Fixed size of `GET /api/portfolio` (API v0.19): 64 KiB.
-pub const PORTFOLIO_BYTES: usize = 65_536;
+pub use portfolio::PORTFOLIO_BYTES;
+
+/// Marker on padded answers (see [`padded_headers`]).
+#[derive(Clone, Copy)]
+pub(crate) struct Padded;
+
+/// Headers of every padded answer: not stored and not transformed by any cache or proxy, and
+/// never compressed (a compressed pad shrinks back to the content size). The server has no
+/// compression layer; `guard` strips `Content-Encoding` from padded answers in case one is
+/// added later. Deploy note: RELAYER.md "Деплой: сжатие". `cache` is the `Cache-Control` value.
+pub(crate) fn padded_headers(r: &mut Response, cache: &'static str) {
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    r.headers_mut().remove(header::CONTENT_ENCODING);
+    r.extensions_mut().insert(Padded);
+}
+pub(crate) const PADDED_PRIVATE: &str = "no-store, no-transform";
 
 pub(crate) fn padded(mut v: Value, bucket: usize) -> Response {
     let len = serde_json::to_vec(&v).map_or(0, |b| b.len());
     // `,"pad":""` adds 9 bytes (object is never empty here).
     let total = (len + 9).div_ceil(bucket).max(1) * bucket;
     v["pad"] = json!(" ".repeat(total - len - 9));
-    no_store(v)
-}
-
-fn no_store(v: Value) -> Response {
     let mut r = Json(v).into_response();
-    r.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    padded_headers(&mut r, PADDED_PRIVATE);
     r
 }
 
@@ -519,6 +533,7 @@ pub async fn max_initial_buy(st: &AppState) -> ApiResult<u128> {
 
 async fn portfolio(State(st): State<AppState>, method: Method, uri: Uri, headers: HeaderMap) -> ApiResult<Response> {
     let a = auth::verify(&st, &method, &uri, &headers, b"", true).await?;
+    let page = portfolio::holdings_page(uri.query()).map_err(ApiError::bad_request)?;
     let b = st.ledger.balance(&a.pubkey).await?;
     let holdings = st.ledger.token_holdings(&a.pubkey).await?;
     let deposits = st.ledger.recent_deposits(&a.pubkey, 20).await?;
@@ -527,44 +542,62 @@ async fn portfolio(State(st): State<AppState>, method: Method, uri: Uri, headers
     let claimable = st.ledger.claimable(&a.pubkey).await?;
     let own_orders = st.ledger.owner_orders(&a.pubkey).await?;
     let (avail, held, frozen) = b.map_or((0, 0, false), |b| (b.available_zat, b.held_zat, b.frozen));
-    let v = json!({
+    let base = json!({
         "zecBalance": avail.to_string(),
         "zecHeld": held.to_string(),
         "frozen": frozen,
-        "holdings": holdings.iter().map(|h| json!({
-            "mint": h.mint,
-            "amount": h.available.to_string(),
-            "held": h.held.to_string(),
-        })).collect::<Vec<_>>(),
-        "orders": own_orders.iter().map(orders::order_json).collect::<Vec<_>>(),
-        "claimable": claimable.iter().map(|(m, l, z)| json!({ "mint": m, "solAmount": l.to_string(), "zecAmount": z.to_string() })).collect::<Vec<_>>(),
-        "deposits": deposits.iter().map(|d| json!({
-            "id": hex::encode(d.id),
-            "amountZat": d.amount_zat.to_string(),
-            "status": d.status,
-            "ts": d.ts_ms,
-            "publicSource": d.public_source,
-        })).collect::<Vec<_>>(),
-        "actions": actions.iter().map(|x| {
-            let mut o = action_json(&x.view);
-            o["id"] = json!(hex::encode(x.id));
-            o["kind"] = json!(x.kind);
-            o
-        }).collect::<Vec<_>>(),
     });
-    let mut v = v;
-    if let Some((bids, launches)) = fl {
-        v["fairBids"] = bids;
-        v["fairLaunches"] = launches;
+    let holdings: Vec<Value> = holdings
+        .iter()
+        .map(|h| json!({ "mint": h.mint, "amount": h.available.to_string(), "held": h.held.to_string() }))
+        .collect();
+    let mut lists: Vec<(&'static str, Vec<Value>)> = vec![
+        ("orders", own_orders.iter().map(orders::order_json).collect()),
+        (
+            "claimable",
+            claimable
+                .iter()
+                .map(|(m, l, z)| json!({ "mint": m, "solAmount": l.to_string(), "zecAmount": z.to_string() }))
+                .collect(),
+        ),
+        (
+            "deposits",
+            deposits
+                .iter()
+                .map(|d| {
+                    json!({
+                        "id": hex::encode(d.id),
+                        "amountZat": d.amount_zat.to_string(),
+                        "status": d.status,
+                        "ts": d.ts_ms,
+                        "publicSource": d.public_source,
+                    })
+                })
+                .collect(),
+        ),
+        (
+            "actions",
+            actions
+                .iter()
+                .map(|x| {
+                    let mut o = action_json(&x.view);
+                    o["id"] = json!(hex::encode(x.id));
+                    o["kind"] = json!(x.kind);
+                    o
+                })
+                .collect(),
+        ),
+    ];
+    if let Some((Value::Array(bids), Value::Array(launches))) = fl {
+        lists.push(("fairBids", bids));
+        lists.push(("fairLaunches", launches));
     }
     if st.cfg.scenarios.enabled {
         let own = st.ledger.owner_scenarios(&a.pubkey).await?;
-        v["scenarios"] = own.iter().map(scenarios::ops::scenario_json).collect::<Vec<_>>().into();
+        lists.push(("scenarios", own.iter().map(scenarios::ops::scenario_json).collect()));
     }
-    // Same size for every key (review-scenarios п. 10): one fixed bucket sized for the largest
-    // lists the server returns (5 scenarios × 12 steps, 20 actions with fills, 20 orders, 20
-    // deposits, fair-launch bids with proofs, ~50 holdings). Only a key with many more holdings
-    // goes to the next multiple.
+    // Same size for every key (API v0.21): capped lists, trimmed to one fixed 16 KiB bucket.
+    let v = portfolio::assemble(base.as_object().cloned().unwrap_or_default(), holdings, page, lists);
     Ok(padded(v, PORTFOLIO_BYTES))
 }
 
