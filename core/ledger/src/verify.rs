@@ -150,6 +150,10 @@ fn asset_bytes(asset: &str, v3: bool) -> Option<[u8; 32]> {
             .then(|| unzeen_protocol::evm::parse_address(asset).map(|a| unzeen_protocol::evm::asset32(&a)))
             .flatten();
     }
+    // v3 (Robinhood Chain) has only `0x` assets: a base58 Solana mint is never one of them.
+    if v3 {
+        return None;
+    }
     bs58::decode(asset).into_vec().ok()?.try_into().ok()
 }
 

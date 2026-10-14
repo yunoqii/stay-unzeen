@@ -194,6 +194,31 @@ pub fn solana_address(s: &str, field: &str) -> ApiResult<String> {
     }
 }
 
+/// Hood buy/sell guard (review-hood-final п. 7): the job's minOut must never be 0 and the
+/// client's minOut must come from a fresh price, so the token needs a positive pool price set
+/// within `price_max_age_secs` (`tokens.price_at`, migration 0031).
+async fn hood_price_guard(st: &AppState, mint: &str, min_out: u128) -> ApiResult<()> {
+    if min_out == 0 {
+        return Err(ApiError::bad_request("minOut must be positive on this chain"));
+    }
+    let c = st.ledger.pg().get().await.map_err(unzeen_ledger::LedgerError::from)?;
+    let fresh: Option<bool> = c
+        .query_opt(
+            "SELECT price_sol > 0 AND price_at IS NOT NULL
+                    AND price_at > now() - make_interval(secs => $2::float8)
+             FROM tokens WHERE mint = $1",
+            &[&mint, &(st.cfg.rate.price_max_age_secs as f64)],
+        )
+        .await
+        .map_err(unzeen_ledger::LedgerError::from)?
+        .map(|r| r.get(0));
+    if fresh == Some(true) {
+        Ok(())
+    } else {
+        Err(ApiError::stale_price())
+    }
+}
+
 fn is_hood(st: &AppState) -> bool {
     matches!(st.cfg.policy.chain.trade, unzeen_protocol::TradeNet::Hood(_))
 }
@@ -635,6 +660,9 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 return Err(ApiError::below_minimum("zecIn below PoolInfo.minActionZat"));
             }
             let known = check_venue_status(st, &mint, &v).await?;
+            if is_hood(st) {
+                hood_price_guard(st, &mint, min_out).await?;
+            }
             // No public price for a mint outside `tokens`: the user's own minOut is the only
             // protection, so it must be explicit (API v0.10).
             if known.is_none() && min_out == 0 {
@@ -729,6 +757,9 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 (amount, min_zec_out)
             };
             let known = check_venue_status(st, &mint, &v).await?;
+            if is_hood(st) {
+                hood_price_guard(st, &mint, u128::from(min_zec_out)).await?;
+            }
             if known.is_none() && min_zec_out == 0 {
                 return Err(ApiError::bad_request(
                     "minZecOut required for a token without a pool price",

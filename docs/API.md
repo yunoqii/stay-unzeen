@@ -2,7 +2,12 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.21** (14.10; миграция `0030_schema_repair.sql` — только ремонт схемы, контракт не меняет; RELAYER.md v14 + раздел «Деплой: сжатие»). Изменения против v0.20:
+Статус: **v0.22** (14.10; миграция `0031_review_hood.sql`; RELAYER.md v15). Изменения против v0.21 (ревью `review-hood-final.md`):
+- **Подписи Verify на hood** (`digestVersion: 3`), формат для браузера — раздел «Verify» → «Подписи на Robinhood Chain». Векторы с подписями: `core/testdata/verify-v3-vectors.json` → `signatures`. Сверено с viem байт в байт.
+- **Защита от слиппеджа на hood:** `buy`/`sell` с `minOut = 0` / `minZecOut = 0` → `400 bad_request`. Если у токена нет цены пула, она равна 0 или старше `PoolInfo.chain.priceMaxAgeSecs` (по умолчанию 300 с) → **`503 stale_price`** с `Retry-After: 60`. В обоих случаях hold не берётся. Новое поле `PoolInfo.chain.priceMaxAgeSecs` — только у hood-сервера. Фронт считает `minOut` только по свежей цене. Если цена устарела, кнопку покупки/продажи нужно блокировать с подсказкой «price updating».
+- **Сделка, которая легла, но не разобрана** (статус задания `needs_review`, RELAYER v15): ZEC не возвращаются, hold держится. В `Portfolio.actions` действие остаётся в статусе **`sent`** (в ожидании), `zecHeld` не меняется. Когда релейер или оператор разберёт результат, статус станет `executed` или `failed`, как обычно.
+
+Изменения v0.21 против v0.20 (14.10; миграция `0030_schema_repair.sql` — только ремонт схемы, контракт не меняет; RELAYER.md v14 + раздел «Деплой: сжатие»):
 - **`Portfolio` всегда ровно 16 384 байт** (16 КиБ; было 64 КиБ). Списки с лимитами: `holdings` — страница из 20 (`GET /api/portfolio?holdingsPage=N`, N от 0; запрос подписывается вместе с query; другие параметры → 400), `scenarios` ≤ 3, `orders` ≤ 8, `actions` ≤ 8, `deposits` ≤ 5, `claimable` ≤ 5, `fairBids` ≤ 3, `fairLaunches` ≤ 3. Если и так не влезает — с конца обрезаются по порядку `deposits` → `actions` → `fairLaunches` → `claimable` → `orders` → `fairBids` → `scenarios` (списки отсортированы «активные/новые первыми»). Новые поля: `holdingsPage: number`, `more: { holdings, scenarios, orders, actions, deposits, claimable, fairBids?, fairLaunches?: number }` — сколько не показано («+N more»); для `holdings` — сколько на следующих страницах. Позиции на всех страницах упорядочены по mint. Страница + 20 позиций с максимальными значениями гарантированно влезает (тест).
 - **Статусы шагов сценария:** после `scenario_start` шаг 0 (`manual_start`) — `done` (до старта `pending`). У закрытого плана (`done`/`failed`/`cancelled`/`expired`) шаги, которые не исполнялись или ждали (`pending`/`waiting`), — **`skipped`** (терминальный), без `nextAt`; `done`/`failed` сохраняются. `running` остаётся `running`: действие уже отправлено и закроется само (исход — в `Portfolio.actions`).
 - **Все паддированные ответы** (`/api/portfolio`, `/api/actions`, `/api/actions/:id`, `/api/verify/proof`, `/api/creator`, ответы чата в `/api/actions`) — `Cache-Control: no-store, no-transform`; публичная лента чата `GET /api/tokens/:mint/chat` — `public, max-age=5, no-transform`. Сервер **никогда не сжимает** их (нет `Content-Encoding`, даже при `Accept-Encoding: gzip, br`): сжатие паддинга вернуло бы зависимость размера от содержимого. Прокси перед API не должен сжимать эти пути — RELAYER.md «Деплой: сжатие».
@@ -909,8 +914,20 @@ interface VerifyProof {                   // GET /api/verify/proof (подпис
 }
 ```
 
+### Подписи на Robinhood Chain (v0.22, `digestVersion: 3`)
+На hood ed25519 не используется. Адреса (`operator.pubkey`, `vaults[].address`) — `0x` + 40 hex в EIP-55, подписи — `0x` + 130 hex (`r ‖ s ‖ v`, `v` = 27/28). Требуется low-s (core отклоняет high-s, браузер тоже должен).
+- **Оператор:** EIP-191 `personal_sign` над **32 сырыми байтами** `rootsDigest`, а не над hex-строкой. `hash = keccak256("\x19Ethereum Signed Message:\n32" ‖ digest[32])`. viem: `recoverMessageAddress({ message: { raw: "0x" + rootsDigest }, signature })`; адрес сравнивать с захардкоженным адресом ключа аттестаций hood.
+- **Vault (каждая строка `vaults[]`):** EIP-712 (как в `adapters/src/evm/attest.ts`):
+  - домен `{ name: "unzeen-verify", version: "1", chainId: PoolInfo.chain.evmChainId }` (4663 mainnet, 46630 testnet);
+  - тип `Snapshot(string snapshotId,address address,uint256 blockNumber)`;
+  - сообщение `{ snapshotId: String(VerifySnapshot.id), address: vaults[i].address, blockNumber: BigInt(VerifySnapshot.solanaSlot) }`. На hood в поле `solanaSlot` лежит номер блока Robinhood Chain.
+
+  viem: `verifyTypedData({ address, domain, types, primaryType: "Snapshot", message, signature })`. Поле `lamports` у vault на hood — wei, `tokens[].mint` — `0x`-адрес (EIP-55).
+- Якорь: calldata attest-tx = 32 байта дайджеста. Вместо Solana-эксплорера ссылка ведёт в эксплорер Robinhood Chain.
+- Векторы: `core/testdata/verify-v3-vectors.json` → `signatures`. Там тестовый ключ, адрес, подпись оператора над `rootsDigest` векторов, а также домен, типы, сообщение, EIP-712-хеш и подпись vault.
+
 ### Проверка в браузере
-1. `GET /api/verify` (или `/:id`) → пересчитать `rootsDigest` из полей снимка, проверить `operator.sig` (ed25519, `@noble/curves`) и `vault.sig` каждого vault.
+1. `GET /api/verify` (или `/:id`) → пересчитать `rootsDigest` из полей снимка, проверить `operator.sig` (ed25519, `@noble/curves`; на hood — EIP-191, см. выше) и `vault.sig` каждого vault (на hood — EIP-712).
 2. `GET /api/verify/proof` (по кнопке, без автоопроса) → для каждого куска: лист из `(chainId, snapshotId, asset, свой pubkey, piece, value, blind)`, подъём по `path` → совпадает с `trees[asset].root` и `.sum`. Показать «committed ≥ ваш баланс на takenAt» (сумма кусков).
 3. Солвентность: по mint `sum ≤ Σ vault.tokens[mint]` (проверяемо, гранула 1); по ZEC `sum ≤ zecReserve.amountZat + floor((Σ vault.lamports − committedLamports) · 1e8 / rateLamportsPerZecSell) + Σ_vault (ZEC SPL ≥ dustBelow ? ZEC SPL : 0)` (часть ZEC — «attested», часть — «bridged»; v0.13: ZEC SPL только из `quoteAssets` с `counted: true`, USDC/USD1 не засчитываются). Строки SOL нет. Mint quote-активов в деревья обязательств не входят (у пользователей их нет). Пример с числами — `verify-vectors.json` → `creatorSnapshot.solvency`.
 4. Якорь: ссылка на `anchor.solanaTx` в эксплорере (по клику). Доказательство — только «Download JSON», **не в localStorage**.
@@ -1212,6 +1229,7 @@ type ErrorCode =
   | "insufficient_balance" // 422: на балансе anon-ключа не хватает
   | "below_minimum"        // 422: сумма меньше PoolInfo.minActionZat
   | "balance_frozen"       // 423: баланс заморожен до ручной проверки (reorg депозита)
+  | "stale_price"          // 503 (v0.22, hood): у токена нет свежей цены пула (> PoolInfo.chain.priceMaxAgeSecs, 0 или нет) — buy/sell отклонены до hold; Retry-After: 60
   | "graduated"            // 409: токен ушёл с bonding curve этой площадки (pump.fun → AMM); повторить через другую venue
   | "pool_liquidity"       // 503: у vault пула не хватает SOL/ZEC — проблема пула, НЕ баланса юзера (не путать с insufficient_balance)
   | "slippage"             // 422: minOut/minZecOut не выполним по текущей котировке

@@ -16,9 +16,16 @@ pub struct PoolQuote {
 
 impl Ledger {
     /// Core's quote registry for this network (the relayer reads it for the Verify snapshot).
+    /// Replaces the network's list: rows not in `quotes` are removed (a hood instance has none).
     pub async fn set_pool_quotes(&self, network: &str, quotes: &[PoolQuote]) -> Result<()> {
         let mut c = self.pool.get().await?;
         let tx = c.transaction().await?;
+        let keep: Vec<&str> = quotes.iter().map(|q| q.mint.as_str()).collect();
+        tx.execute(
+            "DELETE FROM pool_quotes WHERE network = $1 AND NOT (mint = ANY($2))",
+            &[&network, &keep],
+        )
+        .await?;
         for q in quotes {
             tx.execute(
                 "INSERT INTO pool_quotes (network, mint, quote, decimals, bridged) VALUES ($1, $2, $3, $4, $5)

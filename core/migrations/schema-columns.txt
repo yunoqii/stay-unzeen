@@ -410,6 +410,7 @@ tokens.market_cap_sol numeric
 tokens.mint text
 tokens.name text
 tokens.platform text
+tokens.price_at timestamp with time zone
 tokens.price_quote numeric
 tokens.price_sol numeric
 tokens.quote_mint text

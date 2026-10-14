@@ -82,6 +82,12 @@ const HALF_N: [u8; 32] = [
 
 /// Does `sig_hex` (`0x` + 130 hex) sign `msg` (EIP-191) with the key of `address`?
 pub fn verify_eip191(address: &str, sig_hex: &str, msg: &[u8; 32]) -> bool {
+    verify_prehash(address, sig_hex, &eip191_hash32(msg))
+}
+
+/// Does `sig_hex` sign the 32-byte `hash` (already EIP-191 / EIP-712 encoded) with the key of
+/// `address`? Low-s only, `v` ∈ {27, 28, 0, 1}.
+pub fn verify_prehash(address: &str, sig_hex: &str, hash: &[u8; 32]) -> bool {
     let Some(addr) = parse_address(address) else {
         return false;
     };
@@ -106,8 +112,61 @@ pub fn verify_eip191(address: &str, sig_hex: &str, msg: &[u8; 32]) -> bool {
     let Ok(rs) = RecoverableSignature::from_compact(&sig[..64], rid) else {
         return false;
     };
-    let m = Message::from_digest(eip191_hash32(msg));
-    rs.recover(m).is_ok_and(|pk| address_of(&pk) == addr)
+    rs.recover(Message::from_digest(*hash))
+        .is_ok_and(|pk| address_of(&pk) == addr)
+}
+
+/// `0x` + 130 hex (`r ‖ s ‖ v`, v = 27/28) signature of a 32-byte hash (tests, vectors).
+pub fn sign_prehash(sk: &secp256k1::SecretKey, hash: &[u8; 32]) -> String {
+    let rs = RecoverableSignature::sign_ecdsa_recoverable(Message::from_digest(*hash), sk);
+    let (rid, compact) = rs.serialize_compact();
+    let mut sig = compact.to_vec();
+    sig.push(27 + rid.to_u8());
+    format!("0x{}", hex::encode(sig))
+}
+
+fn u256(x: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[24..].copy_from_slice(&x.to_be_bytes());
+    out
+}
+
+/// Verify v3 vault statement (EIP-712, adapters/src/evm/attest.ts):
+/// domain `{name: "unzeen-verify", version: "1", chainId}`, primary type
+/// `Snapshot(string snapshotId,address address,uint256 blockNumber)`, `snapshotId` = decimal
+/// snapshot id, `blockNumber` = `VerifySnapshot.solanaSlot`. Returns the hash that is signed.
+pub fn eip712_snapshot_hash(evm_chain_id: u64, snapshot_id: &str, address: &[u8; 20], block: u64) -> [u8; 32] {
+    let domain_type = keccak256(b"EIP712Domain(string name,string version,uint256 chainId)");
+    let mut d = Vec::with_capacity(128);
+    d.extend_from_slice(&domain_type);
+    d.extend_from_slice(&keccak256(b"unzeen-verify"));
+    d.extend_from_slice(&keccak256(b"1"));
+    d.extend_from_slice(&u256(evm_chain_id));
+    let domain = keccak256(&d);
+    let ty = keccak256(b"Snapshot(string snapshotId,address address,uint256 blockNumber)");
+    let mut m = Vec::with_capacity(128);
+    m.extend_from_slice(&ty);
+    m.extend_from_slice(&keccak256(snapshot_id.as_bytes()));
+    m.extend_from_slice(&asset32(address));
+    m.extend_from_slice(&u256(block));
+    let st = keccak256(&m);
+    let mut out = Vec::with_capacity(66);
+    out.extend_from_slice(b"\x19\x01");
+    out.extend_from_slice(&domain);
+    out.extend_from_slice(&st);
+    keccak256(&out)
+}
+
+/// Vault signature of a Verify v3 snapshot row.
+pub fn verify_vault_eip712(evm_chain_id: u64, snapshot_id: u32, address: &str, block: u64, sig_hex: &str) -> bool {
+    let Some(a) = parse_address(address) else {
+        return false;
+    };
+    verify_prehash(
+        address,
+        sig_hex,
+        &eip712_snapshot_hash(evm_chain_id, &snapshot_id.to_string(), &a, block),
+    )
 }
 
 #[cfg(test)]

@@ -72,6 +72,17 @@ impl ApiError {
     pub fn internal() -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
     }
+    /// v0.22 (hood): no fresh positive pool price for the token, so no safe minOut.
+    pub fn stale_price() -> Self {
+        Self {
+            retry_after: Some(60),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "stale_price",
+                "no fresh pool price for this token; try again in a minute",
+            )
+        }
+    }
     pub fn rate_limited(retry_after: u64) -> Self {
         Self {
             retry_after: Some(retry_after.max(1)),

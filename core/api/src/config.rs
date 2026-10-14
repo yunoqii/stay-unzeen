@@ -354,6 +354,9 @@ pub struct RateConfig {
     pub spread_bps: u64,
     /// v0.20: the rate is ZEC → ETH on Robinhood Chain (wei per ZEC) instead of ZEC → SOL.
     pub hood: bool,
+    /// v0.22 (hood): buy/sell need a positive token price not older than this
+    /// (UNZEEN_PRICE_MAX_AGE_SECS, default 300; the hood relayer writes prices every 1–2 min).
+    pub price_max_age_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -641,6 +644,7 @@ impl Config {
                 max_stale_secs: num("RATE_MAX_STALE_SECS", 120)?,
                 spread_bps: num::<u64>("UNZEEN_RATE_SPREAD_BPS", 50)?.min(2_000),
                 hood,
+                price_max_age_secs: num::<u64>("UNZEEN_PRICE_MAX_AGE_SECS", 300)?.clamp(60, 3_600),
             },
             exec: ExecConfig {
                 epoch_min_secs: emin,

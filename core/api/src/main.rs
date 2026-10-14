@@ -138,19 +138,7 @@ async fn run() -> anyhow::Result<()> {
 async fn serve(cfg: Config) -> anyhow::Result<()> {
     // RUNBOOK GAP: one database per network (the ledger is not split by network).
     let ledger = connect_checked(&cfg).await?;
-    // v0.13: every quote mint the pool may hold on this network (the relayer snapshots their ATAs
-    // for Verify, enabled or not).
-    let pq: Vec<unzeen_ledger::PoolQuote> = unzeen_api::config::known_quotes(cfg.cluster == "mainnet-beta")
-        .into_iter()
-        .map(|q| unzeen_ledger::PoolQuote {
-            mint: q.mint.into(),
-            quote: q.quote.into(),
-            decimals: i16::from(q.decimals),
-            bridged: q.bridged,
-        })
-        .collect();
-    ledger
-        .set_pool_quotes(cfg.cluster, &pq)
+    unzeen_api::register_pool_quotes(&ledger, &cfg)
         .await
         .map_err(|e| anyhow!("pool quotes: {e}"))?;
     if !cfg.actions_enabled {

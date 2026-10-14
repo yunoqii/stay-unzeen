@@ -66,8 +66,43 @@ fn build() -> Value {
     };
     let quotes: [QuoteAssetFact; 0] = [];
     let digest = verify::roots_digest_v3(&header, &[(verify::ZEC_ASSET, zr), (asset, tr)], &quotes);
-    // Same leaf under v1 rules differs (tags are versioned).
+    // Signatures (API v0.22): operator EIP-191 over the 32 digest bytes, vault EIP-712.
+    let sk = secp256k1::SecretKey::from_secret_bytes([0x11; 32]).unwrap();
+    let signer = evm::to_checksum(&evm::address_of(&secp256k1::PublicKey::from_secret_key(&sk)));
+    let op_sig = evm::sign_prehash(&sk, &evm::eip191_hash32(&digest));
+    assert!(evm::verify_eip191(&signer, &op_sig, &digest));
+    let evm_chain = 46_630u64; // Robinhood Chain testnet
+    let vh = evm::eip712_snapshot_hash(
+        evm_chain,
+        &sid.to_string(),
+        &evm::parse_address(&signer).unwrap(),
+        header.solana_slot,
+    );
+    let v_sig = evm::sign_prehash(&sk, &vh);
+    assert!(evm::verify_vault_eip712(
+        evm_chain,
+        sid,
+        &signer,
+        header.solana_slot,
+        &v_sig
+    ));
     json!({
+        "signatures": {
+            "secretKey": hex::encode([0x11u8; 32]),
+            "address": signer,
+            "operator": { "scheme": "EIP-191 personal_sign over the 32 raw digest bytes", "message": hex::encode(digest), "sig": op_sig },
+            "vault": {
+                "scheme": "EIP-712",
+                "domain": { "name": "unzeen-verify", "version": "1", "chainId": evm_chain },
+                "types": { "Snapshot": [
+                    { "name": "snapshotId", "type": "string" },
+                    { "name": "address", "type": "address" },
+                    { "name": "blockNumber", "type": "uint256" } ] },
+                "message": { "snapshotId": sid.to_string(), "address": signer, "blockNumber": header.solana_slot.to_string() },
+                "hash": hex::encode(vh),
+                "sig": v_sig,
+            },
+        },
         "description": "Verify v3 (API v0.20): u128 leaf values, ERC-20 asset = 12 zero bytes ‖ address, v3 tags for leaf/node/snapshot. Integers big-endian; value u128 = 16 bytes.",
         "tags": { "leaf": "unzeen/verify/v3/leaf", "node": "unzeen/verify/v3/node", "snapshot": "unzeen/verify/v3/snapshot" },
         "chainId": hex::encode(chain),

@@ -260,6 +260,25 @@ pub(crate) fn padded(mut v: Value, bucket: usize) -> Response {
     r
 }
 
+/// v0.13: every quote mint the pool may hold on this network (the relayer snapshots their
+/// balances for Verify, enabled or not). Solana only: a Robinhood Chain instance has no quote
+/// assets, so its list is emptied (review: hood snapshots listed Solana USDC mints).
+pub async fn register_pool_quotes(ledger: &Ledger, cfg: &config::Config) -> Result<(), unzeen_ledger::LedgerError> {
+    let pq: Vec<unzeen_ledger::PoolQuote> = match cfg.policy.chain.trade {
+        unzeen_protocol::TradeNet::Hood(_) => Vec::new(),
+        unzeen_protocol::TradeNet::Solana(_) => config::known_quotes(cfg.cluster == "mainnet-beta")
+            .into_iter()
+            .map(|q| unzeen_ledger::PoolQuote {
+                mint: q.mint.into(),
+                quote: q.quote.into(),
+                decimals: i16::from(q.decimals),
+                bridged: q.bridged,
+            })
+            .collect(),
+    };
+    ledger.set_pool_quotes(cfg.cluster, &pq).await
+}
+
 // ------------------------------------------------------------------ GET /api/pool
 
 async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
@@ -324,6 +343,10 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
         },
     }));
     r.0["venues"] = venues_block(&st);
+    // v0.22 (hood): buy/sell need a token price newer than this (else 503 stale_price).
+    if matches!(p.chain.trade, unzeen_protocol::TradeNet::Hood(_)) {
+        r.0["chain"]["priceMaxAgeSecs"] = json!(st.cfg.rate.price_max_age_secs);
+    }
     // v0.13: enabled non-SOL pairs (venues limited to the enabled ones).
     r.0["quotes"] = Value::Array(
         st.cfg
@@ -844,6 +867,12 @@ pub fn spawn_background(st: &AppState) {
             }
             if let Err(e) = s.ledger.fl_janitor().await {
                 tracing::warn!(error = %e, "fair-launch janitor failed");
+            }
+            // 0031: landed txs whose result was not parsed hold user funds until resolved.
+            match s.ledger.needs_review_count().await {
+                Ok(0) => {}
+                Ok(n) => tracing::warn!(jobs = n, "ALERT: relayer jobs in needs_review; operator needed"),
+                Err(e) => tracing::warn!(error = %e, "needs_review count failed"),
             }
             match s.ledger.janitor().await {
                 Ok(r) => tracing::debug!(

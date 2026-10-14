@@ -66,6 +66,7 @@ fn config(url: &str) -> Config {
             max_stale_secs: 300,
             spread_bps: 0,
             hood: false,
+            price_max_age_secs: 300,
         },
         exec: ExecConfig {
             epoch_min_secs: 30.0,
@@ -606,6 +607,20 @@ async fn buy_flow_hold_retry_settle() {
     .await;
     let s = e.signed(&me, "GET", &path, "").await;
     assert_eq!(s.body["status"], "sent");
+
+    // 0031: tx landed, result not parsed → `needs_review`: not final, no refund, hold kept,
+    // the owner still sees `sent` (pending).
+    let held0 = e.signed(&me, "GET", "/api/portfolio", "").await.body["zecHeld"].clone();
+    e.sql(&format!("UPDATE {}.relayer_jobs SET status = 'needs_review'", e.schema))
+        .await;
+    assert_eq!(e.ledger.settle_ready(50).await.unwrap(), 0);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let s = e.signed(&me, "GET", &path, "").await;
+    assert_eq!(s.body["status"], "sent", "{:?}", s.body);
+    let p = e.signed(&me, "GET", "/api/portfolio", "").await.body;
+    assert_eq!(p["zecHeld"], held0);
+    assert_ne!(p["zecHeld"], "0");
+    assert_eq!(e.ledger.needs_review_count().await.unwrap(), 1);
 
     // Relayer confirms; the background settler closes the hold.
     e.sql(&format!(
@@ -5561,7 +5576,8 @@ async fn hood_instance_deposit_buy_sell_withdraw() {
     assert_eq!(p["chainId"], "0212");
     assert_eq!(
         p["chain"],
-        json!({"id":"hood","network":"hood-testnet","mainnet":false,"native":{"symbol":"ETH","decimals":18},"evmChainId":46630})
+        json!({"id":"hood","network":"hood-testnet","mainnet":false,"native":{"symbol":"ETH","decimals":18},"evmChainId":46630,
+               "priceMaxAgeSecs":300})
     );
     assert_eq!(p["venues"][0]["venue"], "pons");
     assert_eq!(p["quotes"], json!([]));
@@ -5583,6 +5599,45 @@ async fn hood_instance_deposit_buy_sell_withdraw() {
     let bad = json!({"op":"buy","venue":"pons","mint":MINT,"zecIn":"1000000","minOut":"1"}).to_string();
     let r = e.signed(&user(20), "POST", "/api/actions", &bad).await;
     assert_eq!(r.body["error"]["code"], "bad_request", "{:?}", r.body);
+
+    // review-hood-final п. 7: minOut 0, a stale or zero pool price → refused before any hold.
+    let try_buy =
+        |min_out: &str| json!({"op":"buy","venue":"pons","mint":TOKEN,"zecIn":"1000000","minOut":min_out}).to_string();
+    let r = e.signed(&user(20), "POST", "/api/actions", &try_buy("0")).await;
+    assert_eq!(r.body["error"]["code"], "bad_request", "{:?}", r.body);
+    let sell0 = json!({"op":"sell","venue":"pons","mint":TOKEN,"amount":"1000","minZecOut":"0"}).to_string();
+    let r = e.signed(&user(20), "POST", "/api/actions", &sell0).await;
+    assert_eq!(r.body["error"]["code"], "bad_request", "{:?}", r.body);
+    e.sql(&format!(
+        "UPDATE {s}.tokens SET price_at = now() - interval '6 minutes'"
+    ))
+    .await;
+    let r = e.signed(&user(20), "POST", "/api/actions", &try_buy("1")).await;
+    assert_eq!(
+        (r.status, code(&r)),
+        (StatusCode::SERVICE_UNAVAILABLE, "stale_price"),
+        "{:?}",
+        r.body
+    );
+    assert_eq!(r.headers["retry-after"], "60");
+    // A status-only update does not refresh the price time; rewriting the price does.
+    e.sql(&format!("UPDATE {s}.tokens SET status = status, updated_at = now()"))
+        .await;
+    assert_eq!(
+        code(&e.signed(&user(20), "POST", "/api/actions", &try_buy("1")).await),
+        "stale_price"
+    );
+    e.sql(&format!("UPDATE {s}.tokens SET price_sol = 0")).await;
+    assert_eq!(
+        code(&e.signed(&user(20), "POST", "/api/actions", &try_buy("1")).await),
+        "stale_price"
+    );
+    e.sql(&format!("UPDATE {s}.tokens SET price_sol = 0.0000000001")).await;
+    assert_eq!(
+        e.signed(&user(20), "GET", "/api/portfolio", "").await.body["zecHeld"],
+        "0",
+        "no hold taken"
+    );
 
     // Buy 0.1 ZEC → ≈ 0.0485 ETH in 0.0001 ETH steps; the lowercase mint is stored EIP-55.
     let buy = json!({"op":"buy","venue":"pons","mint":TOKEN.to_lowercase(),"zecIn":"10000000",
@@ -5790,6 +5845,24 @@ mod verify_v3 {
             hex::encode(pk1)
         ))
         .await;
+        // Solana quote mints registered under the hood network (old instance start): the hood
+        // registration empties the list, the snapshot has no quote assets.
+        e.sql(&format!(
+            "INSERT INTO {s}.pool_quotes (network, mint, quote, decimals, bridged)
+             VALUES ('hood-testnet', '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', 'USDC', 6, false),
+                    ('devnet', '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', 'USDC', 6, false)
+             ON CONFLICT DO NOTHING"
+        ))
+        .await;
+        unzeen_api::register_pool_quotes(&e.ledger, &e.state.cfg).await.unwrap();
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.pool_quotes WHERE network = 'hood-testnet'"
+            ))
+            .await,
+            0
+        );
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.pool_quotes WHERE network = 'devnet' AND mint = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'")).await, 1, "other networks untouched");
         let id = e
             .ledger
             .verify_request("hood-testnet", "0212", "manual", T)
@@ -5809,6 +5882,11 @@ mod verify_v3 {
         let v = e.get("/api/verify").await.body;
         assert_eq!(v["digestVersion"], 3);
         assert_eq!(v["chainId"], "0212");
+        assert!(
+            v.get("quoteAssets").is_none_or(|q| q == &json!([])),
+            "no Solana quote mints on hood: {:?}",
+            v["quoteAssets"]
+        );
         assert_eq!(v["vaults"][0]["lamports"], "30000000000000000000", "wei beyond u64");
         let tree = v["trees"]
             .as_array()

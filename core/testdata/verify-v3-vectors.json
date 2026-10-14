@@ -24,6 +24,46 @@
     ]
   },
   "rootsDigest": "0599aace63033323a97e37e390bd17f2156e2758e576e0ccb7228dcf450b9ae8",
+  "signatures": {
+    "address": "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A",
+    "operator": {
+      "message": "0599aace63033323a97e37e390bd17f2156e2758e576e0ccb7228dcf450b9ae8",
+      "scheme": "EIP-191 personal_sign over the 32 raw digest bytes",
+      "sig": "0x83f7be0c3ac18cab07f0e206ee72d18f7bb6e1a3857bacb5bf9c18df75fc12491a6ba840f8ff8b57aa7026b52639f9c8afb5667c76a8b70267453c5e171a7d1c1b"
+    },
+    "secretKey": "1111111111111111111111111111111111111111111111111111111111111111",
+    "vault": {
+      "domain": {
+        "chainId": 46630,
+        "name": "unzeen-verify",
+        "version": "1"
+      },
+      "hash": "7c7f37b6ad96e8f5e2de6630009a220acfc4b2f194c27c53e4c467e81b146bdc",
+      "message": {
+        "address": "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A",
+        "blockNumber": "12345678",
+        "snapshotId": "3"
+      },
+      "scheme": "EIP-712",
+      "sig": "0x3d9a20923c88bf26e7fb0c67fd9a51e04fea6a2278373b833ddea8b5cbcf250b4ecc42aab888651fc6dc3d8ead4b0d3fbc1c75f15815f04c06bdca0a877a48b31c",
+      "types": {
+        "Snapshot": [
+          {
+            "name": "snapshotId",
+            "type": "string"
+          },
+          {
+            "name": "address",
+            "type": "address"
+          },
+          {
+            "name": "blockNumber",
+            "type": "uint256"
+          }
+        ]
+      }
+    }
+  },
   "snapshotId": 3,
   "tags": {
     "leaf": "unzeen/verify/v3/leaf",

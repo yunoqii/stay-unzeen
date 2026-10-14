@@ -139,7 +139,7 @@ pub struct JanitorReport {
 /// Columns 0..=6 of an owner view (see [`view_from_row`]). Status `sent` while a tx is in
 /// flight (signature written by the relayer / payout broadcast).
 const VIEW_COLS: &str = "CASE WHEN a.status = 'queued' AND (
-        EXISTS (SELECT 1 FROM relayer_jobs j WHERE j.action_id = a.id AND j.status IN ('sent', 'confirmed'))
+        EXISTS (SELECT 1 FROM relayer_jobs j WHERE j.action_id = a.id AND j.status IN ('sent', 'needs_review', 'confirmed'))
      OR EXISTS (SELECT 1 FROM zec_payouts p WHERE p.action_id = a.id AND p.status = 'sent'))
     THEN 'sent' ELSE a.status END,
     a.error, a.rate_lamports_per_zec, a.rate_source,
@@ -580,6 +580,17 @@ impl Ledger {
             )
             .await?;
         Ok((released, failed))
+    }
+
+    /// Jobs whose tx landed but whose result was not parsed (0031 `needs_review`): their
+    /// actions stay queued with the hold until the relayer or the operator resolves them.
+    pub async fn needs_review_count(&self) -> Result<i64> {
+        let c = self.pool.get().await?;
+        Ok(
+            c.query_one("SELECT count(*) FROM relayer_jobs WHERE status = 'needs_review'", &[])
+                .await?
+                .get(0),
+        )
     }
 
     /// Settle up to `limit` actions whose relayer jobs are all final. Returns how many.
