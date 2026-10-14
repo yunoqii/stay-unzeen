@@ -82,7 +82,7 @@ async function send(network: Network, action: Parameters<typeof api.postAction>[
   return r;
 }
 
-export function MyScenarios({ scenarios, names, tok, network, onBuild }: { scenarios: Scenario[] | null; names: Record<string, SignedName>; tok: TokenLookup; network: Network; onBuild: () => void }) {
+export function MyScenarios({ scenarios, names, tok, network, onBuild, more = 0 }: { scenarios: Scenario[] | null; names: Record<string, SignedName>; tok: TokenLookup; network: Network; onBuild: () => void; more?: number }) {
   const [confirmAll, setConfirmAll] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const now = useNow(1000) ?? 0;
@@ -159,6 +159,7 @@ export function MyScenarios({ scenarios, names, tok, network, onBuild }: { scena
           ))}
         </AnimatePresence>
       </ul>
+      {more > 0 && <p className="mt-2 text-xs text-muted-foreground">+{more} more · the pool lists 3 at a time, running ones first</p>}
       <p className="mt-3 text-[11px] text-pretty text-faint-foreground">
         Cancel stops what hasn&apos;t started and closes the orders a plan placed. A step already in a batch finishes, like a fired order. Closed plans disappear from here 24 h after they end.
       </p>

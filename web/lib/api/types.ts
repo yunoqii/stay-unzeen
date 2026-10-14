@@ -284,8 +284,27 @@ export interface Portfolio {
   fairBids?: FairBid[];
   /** v0.6, only with features.fairLaunch: launches created by this key. */
   fairLaunches?: OwnFairLaunch[];
-  /** v0.19, only with features.scenarios: at most 5, active first, then closed within 24 h. */
+  /** v0.19, only with features.scenarios. v0.21: at most 3, active first. */
   scenarios?: Scenario[];
+  /** v0.21: page of `holdings` (20 per page, by mint; GET /api/portfolio?holdingsPage=N). */
+  holdingsPage?: number;
+  /**
+   * v0.21: how many entries each capped list leaves out ("+N more"); for holdings, how many sit on the next
+   * pages. Lists are capped at holdings 20 / scenarios 3 / orders 8 / actions 8 / deposits 5 / claimable 5 /
+   * fairBids 3 / fairLaunches 3, newest or active first.
+   */
+  more?: PortfolioMore;
+}
+
+export interface PortfolioMore {
+  holdings: number;
+  scenarios: number;
+  orders: number;
+  actions: number;
+  deposits: number;
+  claimable: number;
+  fairBids?: number;
+  fairLaunches?: number;
 }
 
 /** Body of POST /api/actions. anonPubkey/nonce/ts/sig go in x-unzeen-* headers, not here. */

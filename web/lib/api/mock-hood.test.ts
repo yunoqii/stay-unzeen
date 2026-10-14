@@ -21,6 +21,8 @@ beforeAll(async () => {
   unz1 = await import("@/lib/crypto/unz1");
   deposit = await import("@/lib/deposit");
   evm = await import("@/lib/evm");
+  // Load the hood chunk once on the real clock (a dynamic import under fake timers can outlast the test).
+  await mock.handle("hood", "GET", "/api/pool", undefined, {});
 });
 
 const PHRASE = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";

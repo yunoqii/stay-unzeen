@@ -17,10 +17,18 @@ export function HoldingsList({
   holdings,
   tokens,
   onWithdraw,
+  more = 0,
+  onShowMore,
+  loadingMore,
 }: {
   holdings: Portfolio["holdings"] | null;
   tokens: Token[] | null;
   onWithdraw?: (mint: string) => void;
+  /** v0.21: positions on the next pages (Portfolio.more.holdings). */
+  more?: number;
+  /** Fetches the next page: only ever on the user's tap, never on its own (the request count would tell the size). */
+  onShowMore?: () => void;
+  loadingMore?: boolean;
 }) {
   const bySymbol = new Map((tokens ?? []).map((t) => [t.mint, t]));
   const display = useDisplay();
@@ -121,6 +129,21 @@ export function HoldingsList({
           })}
           </AnimatePresence>
         </ul>
+      )}
+      {more > 0 && (
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-border/60 pt-3 text-xs text-muted-foreground">
+          <span>+{more} more {more === 1 ? "position" : "positions"}</span>
+          {onShowMore && (
+            <button
+              type="button"
+              onClick={onShowMore}
+              disabled={loadingMore}
+              className="rounded underline-offset-4 hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50"
+            >
+              {loadingMore ? "Loading…" : "Show more"}
+            </button>
+          )}
+        </div>
       )}
     </section>
   );

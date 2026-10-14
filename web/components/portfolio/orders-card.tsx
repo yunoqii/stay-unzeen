@@ -16,7 +16,7 @@ const EASE = [0.16, 1, 0.3, 1] as const;
  * All your private orders: open ones (with Cancel) from Portfolio.orders, and what triggered, filled,
  * expired, failed or was cancelled, kept for this tab's session (memory only).
  */
-export function OrdersCard({ orders, tokens }: { orders: Order[] | null; tokens: Token[] | null }) {
+export function OrdersCard({ orders, tokens, more = 0 }: { orders: Order[] | null; tokens: Token[] | null; more?: number }) {
   const network = useNetwork();
   const key = useKeyState();
   const session = useSessionOrders(network, key.status === "unlocked" ? key.pubkey : null);
@@ -73,6 +73,7 @@ export function OrdersCard({ orders, tokens }: { orders: Order[] | null; tokens:
         </>
       )}
 
+      {more > 0 && <p className="mt-2 text-xs text-muted-foreground">+{more} more · the pool lists your latest 8 here</p>}
       <p className="mt-3 text-[11px] text-pretty text-faint-foreground">
         {ORDERS_PRIVACY_NOTE} Place new ones from a token page.{" "}
         {live[0] && (

@@ -10,7 +10,7 @@ import { isLiveScenario, StatusPill } from "@/components/scenarios/my-scenarios"
  * Running scenarios at a glance (from the same Portfolio poll), and the way in to build one.
  * Names come from this device's encrypted store; the server never has them.
  */
-export function ScenariosCard({ scenarios }: { scenarios: Scenario[] | null | undefined }) {
+export function ScenariosCard({ scenarios, more = 0 }: { scenarios: Scenario[] | null | undefined; more?: number }) {
   const store = useScenarioStore();
   const live = (scenarios ?? []).filter(isLiveScenario);
   return (
@@ -43,6 +43,7 @@ export function ScenariosCard({ scenarios }: { scenarios: Scenario[] | null | un
           })}
         </ul>
       )}
+      {more > 0 && <p className="mt-1 text-xs text-muted-foreground">+{more} more</p>}
     </section>
   );
 }

@@ -225,7 +225,7 @@ function Scenarios() {
         {tab === "mine" ? (
           <motion.div key="mine" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.25, ease: EASE }}>
             {API_MODE === "mock" && <DemoClock />}
-            <MyScenarios scenarios={portfolio?.scenarios ?? (portfolio ? [] : null)} names={store.file.signed} tok={tok} network={network} onBuild={() => setTab("build")} />
+            <MyScenarios more={portfolio?.more?.scenarios ?? 0} scenarios={portfolio?.scenarios ?? (portfolio ? [] : null)} names={store.file.signed} tok={tok} network={network} onBuild={() => setTab("build")} />
           </motion.div>
         ) : view === "review" ? (
           <motion.div key="review" initial={{ opacity: 0, y: 12, filter: "blur(6px)" }} animate={{ opacity: 1, y: 0, filter: "blur(0px)" }} exit={{ opacity: 0, y: 6 }} transition={{ duration: 0.35, ease: EASE }}>

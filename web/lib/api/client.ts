@@ -108,7 +108,11 @@ export interface Api {
   getPool(): Promise<PoolInfo>;
   /** DRAFT v0.18: public display rates (ZEC/SOL/ETH in USD, ZEC/SOL, ZEC/ETH). Same for everyone; display only. */
   getRates(): Promise<Rates>;
-  getPortfolio(signer: Signer): Promise<Portfolio>;
+  /**
+   * v0.21: page 0 of holdings comes with the regular poll; other pages ONLY on an explicit user action
+   * ("Show more"), never automatically: the number of requests would tell how many positions a key has.
+   */
+  getPortfolio(signer: Signer, holdingsPage?: number): Promise<Portfolio>;
   postAction(signer: Signer, action: SignedAction): Promise<ActionReceipt>;
   /** Owner only (header pubkey = action author), otherwise 404. */
   getAction(signer: Signer, id: string): Promise<ActionStatus>;
@@ -229,7 +233,8 @@ function makeApi(rawSend: <T>(call: Call) => Promise<T>, subscribeFeed: Api["sub
     getPool: () => get("/api/pool"),
     getRates: () => get("/api/rates"),
     // The anon pubkey never goes into a URL path or query (access logs = IP <-> key). Header only.
-    getPortfolio: (signer) => get("/api/portfolio", signer),
+    // v0.21: the query is part of the signed path; page 0 is sent without it, as before.
+    getPortfolio: (signer, holdingsPage = 0) => get(holdingsPage > 0 ? `/api/portfolio${qs({ holdingsPage })}` : "/api/portfolio", signer),
     // Padded to a fixed size bucket before signing: the length must not reveal the op or the mode.
     // Chat and noop: exactly 1024 bytes (chat.md §5.1); a longer one throws before anything is signed.
     postAction: (signer, action) =>

@@ -639,6 +639,71 @@ function account(network: Network, pubkey: string): MockAccount {
   return a;
 }
 
+/** v0.21 caps of Portfolio lists and the fixed body size. */
+export const PORTFOLIO_CAPS = { holdings: 20, scenarios: 3, orders: 8, actions: 8, deposits: 5, claimable: 5 } as const;
+/** The sealed-bid lists are capped at 3 each; their names stay out of builds without that feature. */
+const SEALED_CAP = 3;
+export const PORTFOLIO_BYTES = 16_384;
+
+/** The v0.21 page view of a full portfolio: holdings page by mint, capped lists, "+N more", padded to 16 KiB. */
+export function capPortfolio(full: Portfolio, holdingsPage: number): Portfolio {
+  const C = PORTFOLIO_CAPS;
+  const holdings = [...full.holdings].sort((a, b) => (a.mint < b.mint ? -1 : a.mint > b.mint ? 1 : 0));
+  const start = holdingsPage * C.holdings;
+  const cut = <T,>(xs: T[] | undefined, n: number) => ({ list: (xs ?? []).slice(0, n), more: Math.max(0, (xs ?? []).length - n) });
+  const sc = cut(full.scenarios, C.scenarios);
+  const or = cut(full.orders, C.orders);
+  // Queued first, then newest first.
+  const acts = [...(full.actions ?? [])].reverse().sort((a, b) => Number(b.status === "queued") - Number(a.status === "queued"));
+  const ac = cut(acts, C.actions);
+  const de = cut(full.deposits, C.deposits);
+  const cl = cut(full.claimable, C.claimable);
+  const out: Portfolio & { pad?: string } = {
+    ...full,
+    holdings: holdings.slice(start, start + C.holdings),
+    holdingsPage,
+    deposits: de.list,
+    actions: ac.list,
+    orders: or.list,
+    claimable: cl.list,
+    ...(full.scenarios ? { scenarios: sc.list } : {}),
+    more: {
+      holdings: Math.max(0, holdings.length - (start + C.holdings)),
+      scenarios: sc.more,
+      orders: or.more,
+      actions: ac.more,
+      deposits: de.more,
+      claimable: cl.more,
+    },
+  };
+  if (process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1") {
+    // Literal check: dropped with everything sealed-bid from builds without the feature.
+    const fb = cut(full.fairBids, SEALED_CAP);
+    const fl = cut(full.fairLaunches, SEALED_CAP);
+    if (full.fairBids) {
+      Object.assign(out, { fairBids: fb.list });
+      Object.assign(out.more!, { fairBids: fb.more });
+    }
+    if (full.fairLaunches) {
+      Object.assign(out, { fairLaunches: fl.list });
+      Object.assign(out.more!, { fairLaunches: fl.more });
+    }
+  }
+  // Fixed size: the body never says how much the key holds.
+  const bare = new TextEncoder().encode(JSON.stringify({ ...out, pad: "" })).length;
+  out.pad = " ".repeat(Math.max(0, Math.ceil(bare / PORTFOLIO_BYTES) * PORTFOLIO_BYTES - bare));
+  return out;
+}
+
+/** GET /api/portfolio query: only holdingsPage (v0.21); anything else is a 400. */
+function holdingsPageOf(q: URLSearchParams): number {
+  for (const k of q.keys()) if (k !== "holdingsPage") throw new ApiError("bad_request", `unknown query parameter ${k}`, 400);
+  const raw = q.get("holdingsPage");
+  if (raw === null) return 0;
+  if (!/^\d{1,4}$/.test(raw)) throw new ApiError("bad_request", "holdingsPage: a page number", 400);
+  return Number(raw);
+}
+
 function portfolioOf(network: Network, pubkey: string): Portfolio {
   const a = account(network, pubkey);
   return {
@@ -1865,8 +1930,9 @@ export async function handle(
       return structuredClone(a.parts ? { ...a.status, parts: a.parts } : a.status);
     }
     if (p === "/api/portfolio") {
-      // pubkey comes only from the signed header, never from the path.
-      return portfolioOf(network, authorize(network, method, pathWithQuery, body, headers));
+      // pubkey comes only from the signed header, never from the path (the query is signed with it).
+      const page = holdingsPageOf(q);
+      return capPortfolio(portfolioOf(network, authorize(network, method, pathWithQuery, body, headers)), page);
     }
     // Verify (v0.7): its own chunk, loaded on the first call.
     if (p === "/api/verify" || p.startsWith("/api/verify/")) return (await loadVerify()).get(network, pathWithQuery, headers);
@@ -2427,9 +2493,10 @@ async function hoodRoute(method: "GET" | "POST", pathWithQuery: string, body: st
       return NOT_HOOD;
     }
     if (p === "/api/portfolio") {
+      const page = holdingsPageOf(q);
       const pub = authorize("hood", method, pathWithQuery, body, headers);
       const base = portfolioOf("hood", pub);
-      return { ...base, actions: [...(base.actions ?? []), ...h.actions(pub)], orders: [], scenarios: undefined };
+      return capPortfolio({ ...base, actions: [...(base.actions ?? []), ...h.actions(pub)], orders: [], scenarios: undefined }, page);
     }
     return NOT_HOOD;
   }

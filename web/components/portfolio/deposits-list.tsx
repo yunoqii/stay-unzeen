@@ -8,7 +8,7 @@ import { useNow } from "@/hooks/use-now";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Veiled } from "./peek";
 
-export function DepositsList({ deposits, confirmations }: { deposits: DepositInfo[] | null; confirmations?: number }) {
+export function DepositsList({ deposits, confirmations, more = 0 }: { deposits: DepositInfo[] | null; confirmations?: number; more?: number }) {
   const now = useNow(60_000);
 
   return (
@@ -68,6 +68,7 @@ export function DepositsList({ deposits, confirmations }: { deposits: DepositInf
           })}
         </ul>
       )}
+      {more > 0 && <p className="mt-2 text-[11px] text-faint-foreground">+{more} older {more === 1 ? "deposit" : "deposits"} · the pool lists only the last 5</p>}
     </section>
   );
 }

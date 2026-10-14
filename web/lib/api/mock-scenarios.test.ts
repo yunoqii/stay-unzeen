@@ -101,9 +101,12 @@ describe("mock v0.19 scenarios: API surface", () => {
     await createPlan([w]);
     await expect(createPlan([w])).rejects.toMatchObject({ code: "scenario_limit", status: 422 });
     const b = await post({ op: "scenario_create", plan: { v: 1, steps: [{ id: 0, block: w }] }, replaces: a.id });
-    const list = (await portfolio()).scenarios!;
-    expect(list.find((s) => s.id === a.id)!.status).toBe("cancelled");
-    expect(list.find((s) => s.id === b.id)!.status).toBe("active");
+    // v0.21: at most 3 listed, active first — the replaced (cancelled) plan drops out of the capped list.
+    const p = await portfolio();
+    expect(p.scenarios!.map((s) => s.status)).toEqual(["active", "active", "active"]);
+    expect(p.scenarios!.some((s) => s.id === b.id)).toBe(true);
+    expect(p.scenarios!.some((s) => s.id === a.id)).toBe(false);
+    expect(p.more?.scenarios).toBe(1);
   });
 
   it("manual start: waiting_start until started once", async () => {
