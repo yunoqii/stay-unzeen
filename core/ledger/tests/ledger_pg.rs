@@ -103,6 +103,45 @@ fn note(i: u32, amount: u64, h: Option<u32>, tip: u32, memo: MemoInput) -> NoteO
     }
 }
 
+/// The checked-in column snapshot equals a fresh database after all migrations (the startup
+/// schema check compares any existing database against it).
+#[tokio::test]
+async fn schema_snapshot() {
+    let Some(db) = setup().await else { return };
+    db.admin
+        .batch_execute(&format!("SET search_path = {}", db.schema))
+        .await
+        .unwrap();
+    let cols = unzeen_ledger::migrate::current_columns(&db.admin)
+        .await
+        .unwrap()
+        .join("\n")
+        + "\n";
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../migrations/schema-columns.txt");
+    if std::env::var("UNZEEN_WRITE_SCHEMA").as_deref() == Ok("1") {
+        std::fs::write(path, &cols).unwrap();
+    }
+    assert_eq!(
+        unzeen_ledger::migrate::SCHEMA_COLUMNS,
+        cols,
+        "regenerate with UNZEEN_WRITE_SCHEMA=1"
+    );
+    // Drift is caught: drop a column, the check names it.
+    db.admin
+        .batch_execute("ALTER TABLE verify_snapshots DROP COLUMN anchor_retry_at")
+        .await
+        .unwrap();
+    let e = unzeen_ledger::migrate::check(&db.admin).await.unwrap_err();
+    assert_eq!(e, "verify_snapshots.anchor_retry_at timestamp with time zone");
+    // 0030 repairs it.
+    db.admin
+        .batch_execute(include_str!("../../migrations/0030_schema_repair.sql"))
+        .await
+        .unwrap();
+    unzeen_ledger::migrate::check(&db.admin).await.unwrap();
+    db.drop_schema().await;
+}
+
 #[tokio::test]
 async fn deposit_lifecycle_is_idempotent() {
     let Some(db) = setup().await else { return };

@@ -2,8 +2,9 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.21** (14.10; без миграций; RELAYER.md v14 + раздел «Деплой: сжатие»). Изменения против v0.20:
+Статус: **v0.21** (14.10; миграция `0030_schema_repair.sql` — только ремонт схемы, контракт не меняет; RELAYER.md v14 + раздел «Деплой: сжатие»). Изменения против v0.20:
 - **`Portfolio` всегда ровно 16 384 байт** (16 КиБ; было 64 КиБ). Списки с лимитами: `holdings` — страница из 20 (`GET /api/portfolio?holdingsPage=N`, N от 0; запрос подписывается вместе с query; другие параметры → 400), `scenarios` ≤ 3, `orders` ≤ 8, `actions` ≤ 8, `deposits` ≤ 5, `claimable` ≤ 5, `fairBids` ≤ 3, `fairLaunches` ≤ 3. Если и так не влезает — с конца обрезаются по порядку `deposits` → `actions` → `fairLaunches` → `claimable` → `orders` → `fairBids` → `scenarios` (списки отсортированы «активные/новые первыми»). Новые поля: `holdingsPage: number`, `more: { holdings, scenarios, orders, actions, deposits, claimable, fairBids?, fairLaunches?: number }` — сколько не показано («+N more»); для `holdings` — сколько на следующих страницах. Позиции на всех страницах упорядочены по mint. Страница + 20 позиций с максимальными значениями гарантированно влезает (тест).
+- **Статусы шагов сценария:** после `scenario_start` шаг 0 (`manual_start`) — `done` (до старта `pending`). У закрытого плана (`done`/`failed`/`cancelled`/`expired`) шаги, которые не исполнялись или ждали (`pending`/`waiting`), — **`skipped`** (терминальный), без `nextAt`; `done`/`failed` сохраняются. `running` остаётся `running`: действие уже отправлено и закроется само (исход — в `Portfolio.actions`).
 - **Все паддированные ответы** (`/api/portfolio`, `/api/actions`, `/api/actions/:id`, `/api/verify/proof`, `/api/creator`, ответы чата в `/api/actions`) — `Cache-Control: no-store, no-transform`; публичная лента чата `GET /api/tokens/:mint/chat` — `public, max-age=5, no-transform`. Сервер **никогда не сжимает** их (нет `Content-Encoding`, даже при `Accept-Encoding: gzip, br`): сжатие паддинга вернуло бы зависимость размера от содержимого. Прокси перед API не должен сжимать эти пути — RELAYER.md «Деплой: сжатие».
 
 Изменения v0.20 против v0.19:
@@ -1083,6 +1084,7 @@ interface Scenario {                       // Portfolio.scenarios: ≤ 5, акт
   expiresAt: number;                       // вверх до часа
   cursor: number;
   // `plan` НЕ возвращается (ревью сценариев п. 2/10): план и адреса вывода показывает только устройство, где план подписан (локальный зашифрованный стор). Сервер не хранит даже фрагментов адреса.
+  // v0.21: manual_start после старта — "done"; у закрытого плана pending/waiting → "skipped" (терминальный)
   steps: { id: number; status: "pending" | "waiting" | "running" | "done" | "skipped" | "failed";
            runs: number; nextAt?: number /* вниз до минуты */; actionId?: string; orderId?: string; error?: ErrorCode }[];
   error?: ErrorCode;

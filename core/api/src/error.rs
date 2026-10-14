@@ -133,7 +133,7 @@ impl From<LedgerError> for ApiError {
                 "already_bid",
                 "this key already has a sealed bid on this launch (fl_cancel first)",
             ),
-            LedgerError::Db(_) | LedgerError::Pool(_) => {
+            LedgerError::Db(_) | LedgerError::Pool(_) | LedgerError::Schema(_) => {
                 // Display of LedgerError carries only SQLSTATE / a coarse kind (N3).
                 tracing::error!(error = %e, "ledger failure");
                 Self::internal()

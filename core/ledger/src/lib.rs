@@ -15,7 +15,7 @@ pub mod creator;
 pub mod creator_fees;
 pub mod decide;
 pub mod fair;
-mod migrate;
+pub mod migrate;
 pub mod num;
 pub mod orders;
 pub mod payouts;
@@ -49,6 +49,8 @@ pub use tokio_postgres::Config as PgConfig;
 pub enum LedgerError {
     #[error("database error (SQLSTATE {0})")]
     Db(String),
+    #[error("database schema drift, missing or retyped columns: {0}")]
+    Schema(String),
     #[error("connection pool: {0}")]
     Pool(String),
     #[error("insufficient balance")]
@@ -134,6 +136,7 @@ impl LedgerError {
         match self {
             LedgerError::Db(_) => "db",
             LedgerError::Pool(_) => "pool",
+            LedgerError::Schema(_) => "schema",
             LedgerError::InsufficientBalance => "insufficient_balance",
             LedgerError::Frozen => "frozen",
             LedgerError::BelowMinimum => "below_minimum",
@@ -295,6 +298,10 @@ impl Ledger {
             .map_err(|_| LedgerError::Pool("build".into()))?;
         let mut c = pool.get().await?;
         migrate::run(&mut c).await?;
+        if let Err(missing) = migrate::check(&c).await {
+            tracing::error!(%missing, "database schema differs from the migrations; add a repair migration");
+            return Err(LedgerError::Schema(missing));
+        }
         drop(c);
         Ok(Self {
             pool,

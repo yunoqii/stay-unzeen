@@ -361,16 +361,30 @@ pub async fn submit(
 pub fn scenario_json(v: &ScenarioView) -> Value {
     let n = v.plan["steps"].as_array().map_or(0, Vec::len);
     let st_of = |i: usize| v.state["steps"][i.to_string()].as_str().map(str::to_string);
+    let terminal = !matches!(v.status.as_str(), "waiting_start" | "active");
     let steps: Vec<Value> = (0..n)
         .map(|i| {
             let runs: Vec<_> = v.runs.iter().filter(|r| r.1 as usize == i).collect();
-            let status = st_of(i).unwrap_or_else(|| {
+            let mut status = st_of(i).unwrap_or_else(|| {
                 if v.status == "active" && i == v.cursor {
                     "waiting".into()
                 } else {
                     "pending".into()
                 }
             });
+            // `manual_start` is done once the plan was started (API v0.21).
+            if i == 0
+                && v.plan["steps"][0]["block"]["type"] == "manual_start"
+                && v.status != "waiting_start"
+                && status == "pending"
+            {
+                status = "done".into();
+            }
+            // A closed plan has no waiting steps: what never ran is `skipped` (API v0.21). A
+            // `running` step keeps its status: its action was already sent and settles normally.
+            if terminal && matches!(status.as_str(), "pending" | "waiting") {
+                status = "skipped".into();
+            }
             let mut o = json!({
                 "id": i,
                 "status": status,

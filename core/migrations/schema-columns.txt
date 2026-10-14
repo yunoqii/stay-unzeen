@@ -1,0 +1,495 @@
+actions.amount_zat bigint
+actions.anon_pubkey bytea
+actions.created_at timestamp with time zone
+actions.error text
+actions.fee_zat bigint
+actions.fill jsonb
+actions.gain_est numeric
+actions.gain_mint text
+actions.hold_zat bigint
+actions.id bytea
+actions.kind text
+actions.nonce bytea
+actions.quote_mint text
+actions.rate_lamports_per_zec bigint
+actions.rate_source text
+actions.rate_ts timestamp with time zone
+actions.request_hash bytea
+actions.status text
+actions.token_hold numeric
+actions.token_mint text
+actions.updated_at timestamp with time zone
+api_nonces.anon_pubkey bytea
+api_nonces.expires_at timestamp with time zone
+api_nonces.nonce bytea
+api_nonces.request_hash bytea
+api_nonces.response jsonb
+balances.anon_pubkey bytea
+balances.available_zat bigint
+balances.frozen boolean
+balances.held_zat bigint
+balances.updated_at timestamp with time zone
+chat_messages.hidden_by_creator boolean
+chat_messages.hide_req boolean
+chat_messages.id bytea
+chat_messages.is_creator boolean
+chat_messages.mint text
+chat_messages.nick text
+chat_messages.publish_after timestamp with time zone
+chat_messages.remove_req text
+chat_messages.removed_at timestamp with time zone
+chat_messages.removed_reason text
+chat_messages.seq bigint
+chat_messages.status text
+chat_messages.text text
+chat_messages.ts timestamp with time zone
+chat_mutes.mint text
+chat_mutes.nick text
+chat_mutes.until timestamp with time zone
+chat_reports.created_day date
+chat_reports.msg_id bytea
+chat_reports.reporter_tag bytea
+creator_claimable.anon_pubkey bytea
+creator_claimable.claimed_lamports numeric
+creator_claimable.claimed_zat bigint
+creator_claimable.lamports numeric
+creator_claimable.mint text
+creator_claimable.updated_at timestamp with time zone
+creator_claimable.zat bigint
+creator_fee_sweeps.authority text
+creator_fee_sweeps.created_at timestamp with time zone
+creator_fee_sweeps.credited_at timestamp with time zone
+creator_fee_sweeps.id bigint
+creator_fee_sweeps.kind text
+creator_fee_sweeps.lamports numeric
+creator_fee_sweeps.last_valid_block_height bigint
+creator_fee_sweeps.mint text
+creator_fee_sweeps.network text
+creator_fee_sweeps.pool_lamports numeric
+creator_fee_sweeps.pool_quote_amount numeric
+creator_fee_sweeps.quote_amount numeric
+creator_fee_sweeps.quote_mint text
+creator_fee_sweeps.signature text
+creator_fee_sweeps.slot bigint
+creator_fee_sweeps.status text
+creator_fee_sweeps.swept_at timestamp with time zone
+creator_fee_sweeps.venue text
+creator_tokens.anon_pubkey bytea
+creator_tokens.created_at timestamp with time zone
+creator_tokens.launch_fee_lamports numeric
+creator_tokens.launch_fee_left numeric
+creator_tokens.launch_fee_zat bigint
+creator_tokens.launch_fee_zat_left bigint
+creator_tokens.locked_amount numeric
+creator_tokens.locked_until timestamp with time zone
+creator_tokens.mint text
+deposits.amount_zat bigint
+deposits.anon_pubkey bytea
+deposits.created_at timestamp with time zone
+deposits.credited_zat bigint
+deposits.id bigint
+deposits.mined_height integer
+deposits.note_ref bytea
+deposits.op smallint
+deposits.public_id bytea
+deposits.public_source boolean
+deposits.reason text
+deposits.reorged boolean
+deposits.status text
+deposits.updated_at timestamp with time zone
+fl_bids.action_id bytea
+fl_bids.amount_zat bigint
+fl_bids.anon_pubkey bytea
+fl_bids.charge_zat bigint
+fl_bids.ciphertext text
+fl_bids.created_at timestamp with time zone
+fl_bids.e_lamports numeric
+fl_bids.hold_zat bigint
+fl_bids.id bigint
+fl_bids.launch_id bytea
+fl_bids.leaf bytea
+fl_bids.proof jsonb
+fl_bids.released_zat bigint
+fl_bids.status text
+fl_bids.tokens numeric
+fl_launches.attest_job_id bigint
+fl_launches.attestation jsonb
+fl_launches.beacon_sig bytea
+fl_launches.close_at timestamp with time zone
+fl_launches.commitment_root bytea
+fl_launches.create_action_id bytea
+fl_launches.created_at timestamp with time zone
+fl_launches.creator_pubkey bytea
+fl_launches.failure text
+fl_launches.finished_at timestamp with time zone
+fl_launches.id bytea
+fl_launches.job_id bigint
+fl_launches.lamports_in numeric
+fl_launches.meta jsonb
+fl_launches.network text
+fl_launches.next_try_at timestamp with time zone
+fl_launches.oversubscribed boolean
+fl_launches.published_at timestamp with time zone
+fl_launches.rate_lamports_per_zec bigint
+fl_launches.result jsonb
+fl_launches.round bigint
+fl_launches.round_time timestamp with time zone
+fl_launches.status text
+fl_launches.total_e numeric
+fl_launches.valid_bids integer
+fl_launches.venue text
+fl_launches.window_secs integer
+intel_creates.created_at timestamp with time zone
+intel_creates.creator text
+intel_creates.mint text
+intel_creates.network text
+intel_creates.rug boolean
+intel_creates.rug_checked_at timestamp with time zone
+intel_creates.signature text
+intel_creates.slot bigint
+intel_creates.venue text
+intel_discovery.as_of timestamp with time zone
+intel_discovery.config text
+intel_discovery.created_at timestamp with time zone
+intel_discovery.market_cap_sol numeric
+intel_discovery.mint text
+intel_discovery.name text
+intel_discovery.network text
+intel_discovery.pool text
+intel_discovery.price_sol numeric
+intel_discovery.progress_pct numeric
+intel_discovery.status text
+intel_discovery.symbol text
+intel_discovery.venue text
+intel_meta.key text
+intel_meta.updated_at timestamp with time zone
+intel_meta.value text
+intel_prices.mint text
+intel_prices.prev_price_sol numeric
+intel_prices.prev_tick_at bigint
+intel_prices.price_sol numeric
+intel_prices.status text
+intel_prices.tick_at bigint
+intel_requests.mint text
+intel_requests.queued_at timestamp with time zone
+intel_subscriptions.account text
+intel_subscriptions.kind text
+intel_subscriptions.mint text
+intel_subscriptions.since timestamp with time zone
+intel_tokens.as_of timestamp with time zone
+intel_tokens.created_at timestamp with time zone
+intel_tokens.decimals smallint
+intel_tokens.image text
+intel_tokens.market_cap_sol numeric
+intel_tokens.mint text
+intel_tokens.name text
+intel_tokens.price_sol numeric
+intel_tokens.status text
+intel_tokens.symbol text
+intel_tokens.venue text
+intel_warm.expires_at timestamp with time zone
+intel_warm.hot boolean
+intel_warm.mint text
+intel_warm.pinned boolean
+launch_curves.network text
+launch_curves.real_token_reserves numeric
+launch_curves.token_total_supply numeric
+launch_curves.updated_at timestamp with time zone
+launch_curves.venue text
+launch_curves.virtual_sol_lamports numeric
+launch_curves.virtual_token_reserves numeric
+ledger_ops.action_id bytea
+ledger_ops.anon_pubkey bytea
+ledger_ops.created_at timestamp with time zone
+ledger_ops.delta_available bigint
+ledger_ops.delta_held bigint
+ledger_ops.deposit_id bigint
+ledger_ops.id bigint
+ledger_ops.kind text
+market_trades.decimals smallint
+market_trades.id bigint
+market_trades.ix smallint
+market_trades.kind text
+market_trades.mint text
+market_trades.signature text
+market_trades.slot bigint
+market_trades.sol_amount numeric
+market_trades.symbol text
+market_trades.tags ARRAY
+market_trades.token_amount numeric
+market_trades.trader text
+market_trades.ts timestamp with time zone
+market_trades.unzeen boolean
+market_trades.venue text
+mint_vaults.created_at timestamp with time zone
+mint_vaults.mint text
+mint_vaults.network text
+mint_vaults.vault text
+orders.action_id bytea
+orders.amount numeric
+orders.anon_pubkey bytea
+orders.closed_at timestamp with time zone
+orders.created_at timestamp with time zone
+orders.error text
+orders.exec_mode text
+orders.expires_at timestamp with time zone
+orders.id bytea
+orders.kind text
+orders.last_tick bigint
+orders.leg text
+orders.mint text
+orders.rearm boolean
+orders.rearms smallint
+orders.sl_armed_tick bigint
+orders.sl_price_sol numeric
+orders.sl_slippage_bps integer
+orders.slippage_bps integer
+orders.status text
+orders.trigger_price_sol numeric
+orders.venue text
+pool_meta.key text
+pool_meta.updated_at timestamp with time zone
+pool_meta.value text
+pool_quote_inventory.network text
+pool_quote_inventory.quote_mint text
+pool_quote_inventory.reserve_amount numeric
+pool_quote_inventory.slot bigint
+pool_quote_inventory.updated_at timestamp with time zone
+pool_quote_inventory.vault_amount numeric
+pool_quote_inventory.vault_count integer
+pool_quotes.bridged boolean
+pool_quotes.decimals smallint
+pool_quotes.mint text
+pool_quotes.network text
+pool_quotes.quote text
+pool_rebalances.amount_out numeric
+pool_rebalances.amount_out_quote numeric
+pool_rebalances.created_at timestamp with time zone
+pool_rebalances.deposit_address text
+pool_rebalances.dest_tx text
+pool_rebalances.dry_run boolean
+pool_rebalances.error_code text
+pool_rebalances.expiry_height integer
+pool_rebalances.finished_at timestamp with time zone
+pool_rebalances.forced boolean
+pool_rebalances.fund_attempts integer
+pool_rebalances.fund_job_id bigint
+pool_rebalances.fund_quote_jobs ARRAY
+pool_rebalances.id bigint
+pool_rebalances.lot_zat bigint
+pool_rebalances.min_amount_out numeric
+pool_rebalances.mined_height integer
+pool_rebalances.network text
+pool_rebalances.not_before timestamp with time zone
+pool_rebalances.oc_status text
+pool_rebalances.polled_at timestamp with time zone
+pool_rebalances.quote jsonb
+pool_rebalances.quote_deadline timestamp with time zone
+pool_rebalances.quoted_at timestamp with time zone
+pool_rebalances.status text
+pool_rebalances.submitted_at timestamp with time zone
+pool_rebalances.target text
+pool_rebalances.txid bytea
+pool_rebalances.updated_at timestamp with time zone
+pool_sol_inventory.network text
+pool_sol_inventory.rebalance_lamports numeric
+pool_sol_inventory.slot bigint
+pool_sol_inventory.updated_at timestamp with time zone
+pool_sol_inventory.vault_count integer
+pool_sol_inventory.vault_lamports numeric
+relayer_creator_counter.network text
+relayer_creator_counter.next_index integer
+relayer_jobs.action_id bytea
+relayer_jobs.attempts integer
+relayer_jobs.bundle_legs jsonb
+relayer_jobs.claimed_at timestamp with time zone
+relayer_jobs.claimed_by text
+relayer_jobs.created_at timestamp with time zone
+relayer_jobs.dest text
+relayer_jobs.error_code text
+relayer_jobs.error_message text
+relayer_jobs.exec_mode text
+relayer_jobs.gas_lamports bigint
+relayer_jobs.id bigint
+relayer_jobs.lamports_in numeric
+relayer_jobs.last_valid_block_height bigint
+relayer_jobs.lease_until timestamp with time zone
+relayer_jobs.meta jsonb
+relayer_jobs.min_out numeric
+relayer_jobs.mint text
+relayer_jobs.mint_secret bytea
+relayer_jobs.network text
+relayer_jobs.network_fee bigint
+relayer_jobs.not_before timestamp with time zone
+relayer_jobs.op text
+relayer_jobs.out_block_time bigint
+relayer_jobs.out_creator_fee numeric
+relayer_jobs.out_lamports numeric
+relayer_jobs.out_memo text
+relayer_jobs.out_mint text
+relayer_jobs.out_quote_amount numeric
+relayer_jobs.out_quote_mint text
+relayer_jobs.out_sig text
+relayer_jobs.out_token_amount numeric
+relayer_jobs.part smallint
+relayer_jobs.settled_at timestamp with time zone
+relayer_jobs.signature text
+relayer_jobs.slot bigint
+relayer_jobs.status text
+relayer_jobs.token_amount numeric
+relayer_jobs.updated_at timestamp with time zone
+relayer_jobs.vault text
+relayer_jobs.venue text
+relayer_launches.created_at timestamp with time zone
+relayer_launches.creator_index integer
+relayer_launches.from_block bigint
+relayer_launches.job_id bigint
+relayer_launches.network text
+relayer_vault_usage.last_used_at timestamp with time zone
+relayer_vault_usage.network text
+relayer_vault_usage.vault text
+scenario_runs.action_id bytea
+scenario_runs.attempt smallint
+scenario_runs.error text
+scenario_runs.order_id bytea
+scenario_runs.scenario_id bytea
+scenario_runs.seq smallint
+scenario_runs.status text
+scenario_runs.step smallint
+scenario_sealed.blob bytea
+scenario_sealed.scenario_id bytea
+scenario_sealed.step smallint
+scenarios.anon_pubkey bytea
+scenarios.armed_at timestamp with time zone
+scenarios.armed_tick bigint
+scenarios.attempt smallint
+scenarios.closed_at timestamp with time zone
+scenarios.created_at timestamp with time zone
+scenarios.cursor smallint
+scenarios.error text
+scenarios.expires_at timestamp with time zone
+scenarios.id bytea
+scenarios.last_tick bigint
+scenarios.network text
+scenarios.next_at timestamp with time zone
+scenarios.phase text
+scenarios.plan jsonb
+scenarios.runs smallint
+scenarios.state jsonb
+scenarios.status text
+schema_migrations.applied_at timestamp with time zone
+schema_migrations.name text
+schema_migrations.version integer
+stats_snapshots.created_at timestamp with time zone
+stats_snapshots.data jsonb
+stats_snapshots.day date
+stats_snapshots.network text
+stats_snapshots.zec_deposits bigint
+stats_snapshots.zec_zat bigint
+token_balances.anon_pubkey bytea
+token_balances.available numeric
+token_balances.held numeric
+token_balances.mint text
+token_balances.updated_at timestamp with time zone
+token_ops.action_id bytea
+token_ops.anon_pubkey bytea
+token_ops.created_at timestamp with time zone
+token_ops.delta_available numeric
+token_ops.delta_held numeric
+token_ops.id bigint
+token_ops.kind text
+token_ops.mint text
+token_safety.as_of timestamp with time zone
+token_safety.data jsonb
+token_safety.mint text
+token_safety.missing boolean
+tokens.created_at timestamp with time zone
+tokens.decimals smallint
+tokens.image text
+tokens.market_cap_sol numeric
+tokens.mint text
+tokens.name text
+tokens.platform text
+tokens.price_quote numeric
+tokens.price_sol numeric
+tokens.quote_mint text
+tokens.status text
+tokens.symbol text
+tokens.updated_at timestamp with time zone
+tokens.venue text
+trades.created_at timestamp with time zone
+trades.decimals smallint
+trades.id bigint
+trades.kind text
+trades.mint text
+trades.quote_amount numeric
+trades.quote_mint text
+trades.signature text
+trades.slot bigint
+trades.sol_amount numeric
+trades.symbol text
+trades.token_amount numeric
+trades.ts timestamp with time zone
+trades.venue text
+verify_leaves.anon_pubkey bytea
+verify_leaves.asset text
+verify_leaves.blind bytea
+verify_leaves.leaf_idx integer
+verify_leaves.piece smallint
+verify_leaves.snapshot_id integer
+verify_leaves.value numeric
+verify_nodes.asset text
+verify_nodes.hash bytea
+verify_nodes.idx integer
+verify_nodes.level smallint
+verify_nodes.snapshot_id integer
+verify_nodes.sum text
+verify_snapshots.anchor jsonb
+verify_snapshots.anchor_attempts integer
+verify_snapshots.anchor_retry_at timestamp with time zone
+verify_snapshots.assets_done_at timestamp with time zone
+verify_snapshots.attest_job_id bigint
+verify_snapshots.chain_id text
+verify_snapshots.committed_lamports numeric
+verify_snapshots.digest_version smallint
+verify_snapshots.freeze_until timestamp with time zone
+verify_snapshots.id integer
+verify_snapshots.kind text
+verify_snapshots.leaves integer
+verify_snapshots.min_slot bigint
+verify_snapshots.network text
+verify_snapshots.operator jsonb
+verify_snapshots.quote_assets jsonb
+verify_snapshots.rate_lamports_per_zec_buy bigint
+verify_snapshots.rate_lamports_per_zec_sell bigint
+verify_snapshots.requested_at timestamp with time zone
+verify_snapshots.roots_digest bytea
+verify_snapshots.skip_reason text
+verify_snapshots.solana_slot bigint
+verify_snapshots.status text
+verify_snapshots.taken_at timestamp with time zone
+verify_snapshots.zcash_height integer
+verify_snapshots.zec_reserve_zat bigint
+verify_trees.asset text
+verify_trees.decimals smallint
+verify_trees.granule bigint
+verify_trees.root bytea
+verify_trees.snapshot_id integer
+verify_trees.sum text
+verify_vaults.address text
+verify_vaults.lamports numeric
+verify_vaults.sig text
+verify_vaults.snapshot_id integer
+verify_vaults.tokens jsonb
+zec_payouts.action_id bytea
+zec_payouts.amount_zat bigint
+zec_payouts.approved boolean
+zec_payouts.attempts integer
+zec_payouts.created_at timestamp with time zone
+zec_payouts.error_code text
+zec_payouts.id bigint
+zec_payouts.not_before timestamp with time zone
+zec_payouts.status text
+zec_payouts.to_ua text
+zec_payouts.txid bytea
+zec_payouts.updated_at timestamp with time zone

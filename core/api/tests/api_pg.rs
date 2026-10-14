@@ -4648,6 +4648,64 @@ mod scenarios_v019 {
             {"id":4,"block":{"type":"end"}}]})
     }
 
+    /// API v0.21: before start step 0 is `pending`; once started `manual_start` is `done`; a
+    /// cancelled plan reports never-run steps as `skipped`, finished ones keep `done`.
+    #[tokio::test]
+    async fn step_statuses_after_start_and_cancel() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.fund(7, 0, 50_000_000).await;
+        e.token_with_tick().await;
+        let r = e
+            .signed(
+                &user(7),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_create","plan":plan_buy_wait_sell()})),
+            )
+            .await;
+        let id = r.body["id"].as_str().unwrap().to_string();
+        assert_eq!(e.scenario(7).await["steps"][0]["status"], "pending");
+        let r = e
+            .signed(
+                &user(7),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_start","id":id})),
+            )
+            .await;
+        assert_eq!(r.body["status"], "active", "{:?}", r.body);
+        e.wait_jobs("buy", 1).await;
+        e.sql(&format!(
+            "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'SB', out_token_amount = 90000000000,
+                    out_lamports = lamports_in WHERE op = 'buy'"
+        ))
+        .await;
+        let sc = e.wait_scenario(7, |x| x["steps"][2]["status"] == "waiting").await;
+        assert_eq!(sc["steps"][0]["status"], "done");
+        assert_eq!(sc["steps"][1]["status"], "done");
+        let r = e
+            .signed(
+                &user(7),
+                "POST",
+                "/api/actions",
+                &op(json!({"op":"scenario_cancel","id":id})),
+            )
+            .await;
+        assert_eq!(r.body["status"], "cancelled", "{:?}", r.body);
+        let sc = e.scenario(7).await;
+        assert_eq!(sc["status"], "cancelled");
+        let st: Vec<&str> = sc["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(st, ["done", "done", "skipped", "skipped", "skipped"]);
+        assert!(sc["steps"][2].get("nextAt").is_none());
+        e.drop_schema().await;
+    }
+
     #[tokio::test]
     async fn manual_start_buy_wait_sell_done() {
         let Some(e) = setup().await else { return };
@@ -4684,6 +4742,11 @@ mod scenarios_v019 {
             )
             .await;
         assert_eq!(r.body["status"], "active", "{:?}", r.body);
+        assert_eq!(
+            e.scenario(7).await["steps"][0]["status"],
+            "done",
+            "manual_start done once started"
+        );
         // Now right after the manual start: an ordinary `now` buy with the hold taken at this step.
         e.wait_jobs("buy", 1).await;
         assert_eq!(
