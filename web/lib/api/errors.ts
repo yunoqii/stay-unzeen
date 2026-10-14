@@ -21,6 +21,7 @@ const CODES: BaseCode[] = [
   "graduated",
   "pool_liquidity",
   "slippage",
+  "stale_price",
   "rate_limited",
   "venue_unavailable",
   "feature_disabled",
@@ -50,7 +51,7 @@ export class ApiError extends Error {
     message: string,
     public readonly status: number = 0,
     public readonly details?: unknown,
-    /** Seconds, from Retry-After on 429. */
+    /** Seconds, from Retry-After (429, 503 stale_price). */
     public readonly retryAfter?: number,
   ) {
     super(message);
@@ -118,6 +119,7 @@ const UI_TEXT: Record<BaseCode | ClientErrorCode, string> = {
   graduated: "This token left the bonding curve. Trade it through another venue.",
   pool_liquidity: "The pool is short on liquidity right now. Your balance is untouched. Try again shortly.",
   slippage: "Price moved past your limit. Adjust slippage and try again.",
+  stale_price: "Price updating… The pool is waiting for a fresh price for this token. Nothing was held; it retries by itself.",
   rate_limited: "Too many requests. Wait a moment and try again.",
   venue_unavailable: "The launchpad is not responding right now. Try again shortly.",
   feature_disabled: "This isn't switched on yet.",

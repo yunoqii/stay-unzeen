@@ -167,6 +167,8 @@ export interface ChainInfo {
   /** Gas / quote coin: lamports or wei in the *Lamports fields. */
   native: { symbol: "SOL" | "ETH"; decimals: 9 | 18 };
   evmChainId?: 4663 | 46630;
+  /** v0.22, hood only: a token whose pool price is older (or 0, or missing) can't be bought or sold: 503 stale_price. */
+  priceMaxAgeSecs?: number;
 }
 
 /** GET /api/pool: public, no pubkey, no cookies. Same for every user. */
@@ -630,6 +632,7 @@ export type ErrorCode =
   | "graduated"
   | "pool_liquidity"
   | "slippage"
+  | "stale_price" // 503 (v0.22, hood): no fresh pool price for the token; Retry-After: 60, nothing held
   | "rate_limited"
   | "venue_unavailable"
   | "feature_disabled"

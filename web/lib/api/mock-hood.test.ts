@@ -53,7 +53,7 @@ describe("mock v0.18: Robinhood Chain origin", () => {
     const pool = await call<PoolInfo>("GET", "/api/pool");
     expect(pool.chainId).toBe("0111");
     expect(pool.network).toBe("main");
-    expect(pool.chain).toEqual({ id: "hood", network: "hood", mainnet: true, native: { symbol: "ETH", decimals: 18 }, evmChainId: 4663 });
+    expect(pool.chain).toEqual({ id: "hood", network: "hood", mainnet: true, native: { symbol: "ETH", decimals: 18 }, evmChainId: 4663, priceMaxAgeSecs: 300 });
     expect(pool.venues?.map((v) => v.venue)).toEqual(["pons"]);
     expect(pool.address.startsWith("u1")).toBe(true);
     expect(pool.features?.scenarios).toBeUndefined();
@@ -82,7 +82,7 @@ describe("mock v0.18: Robinhood Chain origin", () => {
     expect((await call<Portfolio>("GET", "/api/portfolio")).zecBalance).toBe("50000000");
 
     const [t] = (await call<TokenListItem[]>("GET", "/api/tokens")).filter((x) => x.status === "curve");
-    const r = await call<ActionReceipt>("POST", "/api/actions", { op: "buy", venue: "pons", mint: t.mint, zecIn: "10000000", minOut: "0", exec: "delayed" });
+    const r = await call<ActionReceipt>("POST", "/api/actions", { op: "buy", venue: "pons", mint: t.mint, zecIn: "10000000", minOut: "1", exec: "delayed" });
     await vi.advanceTimersByTimeAsync(20_000);
     const st = await call<ActionStatus>("GET", `/api/actions/${r.id}`);
     expect(st.status).toBe("executed");
@@ -101,6 +101,18 @@ describe("mock v0.18: Robinhood Chain origin", () => {
     expect(ws.status).toBe("executed");
     // A1: never the exact amount.
     expect(BigInt(ws.fill!.tokenAmount) < BigInt(h.amount)).toBe(true);
+  });
+
+  it("v0.22: a zero price limit is 400, a stale pool price is 503 stale_price with Retry-After 60", async () => {
+    const [t] = (await call<TokenListItem[]>("GET", "/api/tokens")).filter((x) => x.status === "curve");
+    await expect(call("POST", "/api/actions", { op: "buy", venue: "pons", mint: t.mint, zecIn: "10000000", minOut: "0" })).rejects.toMatchObject({ code: "bad_request", status: 400 });
+    await expect(call("POST", "/api/actions", { op: "sell", venue: "pons", mint: t.mint, amount: "1", minZecOut: "0" })).rejects.toMatchObject({ code: "bad_request", status: 400 });
+    // Nothing reprices while nobody listens to the feed: 10 minutes on, every pool price is past 300 s.
+    vi.setSystemTime(vi.getRealSystemTime() + 10 * 60_000);
+    await expect(call("POST", "/api/actions", { op: "buy", venue: "pons", mint: t.mint, zecIn: "10000000", minOut: "1" })).rejects.toMatchObject({ code: "stale_price", status: 503, retryAfter: 60 });
+    // The mock reprices within the Retry-After window, so the automatic retry goes through.
+    vi.setSystemTime(Date.now() + 60_000);
+    await expect(call("POST", "/api/actions", { op: "buy", venue: "pons", mint: t.mint, zecIn: "10000000", minOut: "1" })).resolves.toMatchObject({ status: "queued" });
   });
 
   it("orders and scenarios are not on this chain yet", async () => {

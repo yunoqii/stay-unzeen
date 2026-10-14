@@ -27,7 +27,7 @@ export function SnapshotHeader({ snap, check, isLatest, pinned, network }: { sna
   const vaultsOk = Object.values(check.vaults).filter(Boolean).length;
   // v0.20 Robinhood Chain (digest v3): EVM signatures, a block number instead of a slot, an attest tx.
   const evm = snap.digestVersion === 3;
-  const chainName = evm ? "Robinhood Chain" : "Solana";
+  const chainName = evm && process.env.NEXT_PUBLIC_HOOD === "1" ? "Robinhood Chain" : "Solana";
   const explorer = evm ? (process.env.NEXT_PUBLIC_HOOD !== "1" ? "" : snap.chainId === "0212" ? "https://explorer.testnet.chain.robinhood.com" : "https://robinhoodchain.blockscout.com") : "https://solscan.io";
   const op = check.operator;
   // v0.10: the operator signs before the memo-tx; in between the snapshot is "Signed · Anchor pending".

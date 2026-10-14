@@ -156,7 +156,7 @@ describe("verify vectors: snapshotV2 (API v0.17)", () => {
     expect(quotes.map((q) => bytesToHex(mjs.quoteBytes(q)))).toEqual(S2.quoteBytes);
     expect(mjs.rootsDigest({ ...base(), digestVersion: 2, quoteAssets: [...quotes].reverse() })).toBe(S2.rootsDigest);
     expect(mjs.rootsDigest({ ...base(), quoteAssets: quotes })).toBe(s.rootsDigest);
-    expect(() => mjs.rootsDigest({ ...base(), digestVersion: 3 })).toThrow(/digestVersion/);
+    expect(() => mjs.rootsDigest({ ...base(), digestVersion: 4 })).toThrow(/digestVersion/);
   });
 });
 

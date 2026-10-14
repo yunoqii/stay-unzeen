@@ -146,13 +146,13 @@ function Bar({ r, i }: { r: SolvencyRow; i: number }) {
  * and it is a bridged asset: the bridge issuer could fail it. USDC / USD1 are listed so nothing is hidden,
  * but never counted (conservative: their value in ZEC would need a rate this page can't prove).
  */
-export function QuoteAssetsTable({ rows }: { rows: QuoteHolding[] }) {
+export function QuoteAssetsTable({ rows, native = "SOL" }: { rows: QuoteHolding[]; native?: "SOL" | "ETH" }) {
   if (rows.length === 0) return null;
   return (
     <div className="mt-4 border border-border">
       <div className="flex items-baseline justify-between gap-3 border-b border-border px-4 py-2.5">
         <h3 className="font-mono text-[10px] tracking-wider text-faint-foreground uppercase">Quote assets on the vaults</h3>
-        <span className="text-[11px] text-faint-foreground">pairs not to SOL</span>
+        <span className="text-[11px] text-faint-foreground">pairs not to {native}</span>
       </div>
       <ul className="divide-y divide-border">
         {rows.map((q) => (

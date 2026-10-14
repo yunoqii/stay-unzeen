@@ -44,6 +44,8 @@ const SUPPLY = 1_000_000_000;
 const SPREAD_BPS = BigInt(50);
 const TF_SEC: Record<CandleTimeframe, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14_400, "1d": 86_400 };
 const CREATE_FEE_ZAT = BigInt(100_000);
+/** v0.22: PoolInfo.chain.priceMaxAgeSecs (server default). */
+const PRICE_MAX_AGE_S = 300;
 /** Gas dropped with every withdrawn part on Robinhood Chain (≈ $0.25), wei. */
 const WITHDRAW_GAS_WEI = BigInt("90000000000000");
 
@@ -95,6 +97,10 @@ interface HoodToken {
   price: number; // ETH per whole token
   heat: number;
   progress: number;
+  /** v0.22: when the pool last priced this token (unix ms); older than PRICE_MAX_AGE_S -> 503 stale_price. */
+  priceAt: number;
+  /** Mock only: after a stale_price answer the pool "reprices" the token here, inside the 60 s Retry-After. */
+  refreshAt?: number;
 }
 
 interface HoodAction {
@@ -142,6 +148,8 @@ export function createHoodMock(host: HoodHost): HoodMock {
     price,
     heat,
     progress: i === 4 ? 100 : 18 + i * 13,
+    // The last seed token starts with a stale pool price (demo of 503 stale_price) until a trade reprices it.
+    priceAt: i === SEED.length - 1 ? now0 - 2 * PRICE_MAX_AGE_S * 1000 : now0,
   }));
   const history: FeedEvent[] = [];
   const actions = new Map<string, HoodAction>();
@@ -182,6 +190,7 @@ export function createHoodMock(host: HoodHost): HoodMock {
     if (mutate) {
       t.price *= 1 + (buy ? 1 : -1) * eth * 0.004;
       t.progress = Math.min(99, t.progress + (buy ? eth : -eth) * 0.8);
+      t.priceAt = ts;
     }
     return event(t, buy ? "buy" : "sell", toBase(eth, DEC), toBase(eth / t.price, DEC), ts);
   }
@@ -231,6 +240,7 @@ export function createHoodMock(host: HoodHost): HoodMock {
         const h = holding(t.token.mint);
         h.amount = (BigInt(h.amount) + out).toString();
         t.price *= 1 + toWhole(wei, DEC) * 0.004;
+        t.priceAt = Date.now();
       }
       const e = event(t, x.op === "buy" ? "buy" : "create", wei, out);
       publish(e);
@@ -271,7 +281,7 @@ export function createHoodMock(host: HoodHost): HoodMock {
         ...base,
         chainId: "0111",
         network: "main",
-        chain: { id: "hood", network: "hood", mainnet: true, native: { symbol: "ETH", decimals: 18 }, evmChainId: 4663 },
+        chain: { id: "hood", network: "hood", mainnet: true, native: { symbol: "ETH", decimals: 18 }, evmChainId: 4663, priceMaxAgeSecs: PRICE_MAX_AGE_S },
         venues: [{ venue: "pons", trade: true, create: true, quotes: ["SOL"], atomicFirstBuy: true, creatorFees: true, mainnetOnly: true }],
         quotes: [],
         fees: { ...base.fees, withdrawTokenGasLamports: WITHDRAW_GAS_WEI.toString(), withdrawTokenCostLamports: "0" },
@@ -371,6 +381,13 @@ export function createHoodMock(host: HoodHost): HoodMock {
         const t = find(x.mint);
         if (!t) throw new ApiError("not_found", "unknown token", 404);
         if (t.token.status === "graduated") throw new ApiError("graduated", "token left the bonding curve", 409);
+        // v0.22: no zero price limit on this origin, and no trade on a stale pool price (both before any hold).
+        amountOf(x.op === "buy" ? x.minOut : x.minZecOut, x.op === "buy" ? "minOut" : "minZecOut");
+        if (t.refreshAt !== undefined && Date.now() >= t.refreshAt) [t.priceAt, t.refreshAt] = [t.refreshAt, undefined];
+        if (!(t.price > 0) || Date.now() - t.priceAt > PRICE_MAX_AGE_S * 1000) {
+          t.refreshAt ??= Date.now() + 45_000;
+          throw new ApiError("stale_price", "no fresh pool price for this token", 503, undefined, 60);
+        }
         if (x.op === "buy") {
           const zat = amountOf(x.zecIn, "zecIn");
           if (zat < minAction) throw new ApiError("below_minimum", "zecIn below minActionZat", 422);
@@ -399,6 +416,7 @@ export function createHoodMock(host: HoodHost): HoodMock {
           price: 2.5e-9,
           heat: 3,
           progress: 1,
+          priceAt: Date.now(),
         };
         tokens.push(t);
         a = { id, pubkey, action: x, holdZat: total, holdToken: { mint: t.token.mint, amount: N0 }, status: queued(rate(true)) };

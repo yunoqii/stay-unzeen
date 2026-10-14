@@ -12,6 +12,7 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { toChecksumAddress } from "@/lib/evm";
 
 const enc = new TextEncoder();
+const HALF_N = secp256k1.Point.CURVE().n >> BigInt(1);
 
 function concat(parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
@@ -53,6 +54,8 @@ export function recoverAddress(hash: Uint8Array, sigHex: string): string | null 
   try {
     const sig = hexToBytes(strip0x(sigHex));
     if (sig.length !== 65) return null;
+    // Low-s only (API v0.22): core refuses a high-s signature, so the page must too.
+    if (BigInt("0x" + bytesToHex(sig.subarray(32, 64))) > HALF_N) return null;
     let v = sig[64];
     if (v >= 27) v -= 27;
     if (v !== 0 && v !== 1) return null;

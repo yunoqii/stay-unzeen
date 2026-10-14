@@ -2,32 +2,12 @@ import type { Metadata } from "next";
 import { EyeSlash, Fingerprint, Scales, TreeStructure, UsersThree } from "@phosphor-icons/react/ssr";
 import { PageShell } from "@/components/layout/page-shell";
 import { VerifyApp } from "@/components/verify/verify-app";
+import { VerifyExplainers } from "@/components/verify/verify-explainers";
 
 export const metadata: Metadata = {
   title: "Verify",
   description: "Check that the Unzeen pool owes no more than it holds, and that your own balance is in it, in your browser.",
 };
-
-const STEPS = [
-  {
-    title: "Download your proof",
-    body: "Unlock your key above, run “Check my balance”, then “Download proof”. The file holds this snapshot and your pieces.",
-  },
-  {
-    title: "Run the checker",
-    body: "A single file, no dependencies, Node.js 18 or newer. It recomputes the digest, every signature, every path and the solvency sums.",
-    code: "node verify-proof.mjs unzeen-proof-<chain>-<id>.json --operator <attestation key>",
-  },
-  {
-    title: "Check the vaults on chain",
-    body: "Compare the vault balances with any Solana RPC you trust, at the snapshot slot or later.",
-    code: "solana balance <vault>\nspl-token accounts --owner <vault>",
-  },
-  {
-    title: "Check the anchor",
-    body: "Look up the memo tx (copy it from the snapshot card) in any explorer, ideally over Tor. Its memo must be exactly the roots digest.",
-  },
-];
 
 const HIDDEN = [
   {
@@ -66,79 +46,7 @@ export default function VerifyPage() {
     >
       <VerifyApp />
 
-      <section id="why-attested" aria-labelledby="why-t" className="mt-16 scroll-mt-24">
-        <div className="ledger md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <div className="p-5 sm:p-6">
-            <p className="font-mono text-[10px] tracking-wider text-faint-foreground uppercase">ZEC reserve</p>
-            <h2 id="why-t" className="mt-3 text-lg font-medium tracking-tight">
-              Why the ZEC reserve is attested, not proven
-            </h2>
-            <p className="mt-3 text-sm text-pretty text-muted-foreground">
-              The pool&apos;s ZEC sits in the shielded pool, where balances are invisible by design. Today there is no way to prove a shielded balance
-              without revealing the deposit notes, and revealing them would link deposits to their time and amount, which is the very thing Unzeen
-              exists to hide. So the operator signs a statement of the reserve, rounded down, inside the same digest as the roots.
-            </p>
-          </div>
-          <div className="flex flex-col justify-between gap-5 p-5 sm:p-6">
-            <ul className="space-y-3 text-sm">
-              <li className="flex gap-3">
-                <span className="mt-1.5 size-2 shrink-0 rounded-sm bg-zec" aria-hidden />
-                <span>
-                  <span className="text-foreground">Proven:</span> <span className="text-muted-foreground">every token and the SOL part of the ZEC cover, held by vaults that signed the snapshot.</span>
-                </span>
-              </li>
-              <li className="flex gap-3">
-                <span className="mt-1.5 size-2 shrink-0 rounded-sm bg-zec/55" aria-hidden />
-                <span>
-                  <span className="text-foreground">Bridged:</span>{" "}
-                  <span className="text-muted-foreground">
-                    ZEC SPL on the vaults (what ZEC-paired tokens trade against), counted one to one. It is on Solana and signed, but its value rests on the bridge issuer. USDC and USD1 on
-                    the vaults are listed, never counted.
-                  </span>
-                </span>
-              </li>
-              <li className="flex gap-3">
-                <span className="hatch-zec mt-1.5 size-2 shrink-0 rounded-sm border border-zec/40" aria-hidden />
-                <span>
-                  <span className="text-foreground">Attested:</span> <span className="text-muted-foreground">the ZEC reserve, signed by the operator and anchored on Solana, so it cannot be changed or shown differently later.</span>
-                </span>
-              </li>
-            </ul>
-            <p className="border-t border-border/60 pt-4 text-xs text-pretty text-faint-foreground">
-              Roadmap: a zero-knowledge proof of reserves over the pool&apos;s own shielded notes (the sum is at least X, nothing about the notes is revealed),
-              and threshold custody of the pool keys.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <section aria-labelledby="self-t" className="mt-16">
-        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div className="max-w-2xl">
-            <h2 id="self-t" className="text-lg font-medium tracking-tight">
-              Verify it yourself
-            </h2>
-            <p className="mt-1 text-sm text-pretty text-muted-foreground">Do not take this page&apos;s word for it either. Everything it checks, you can check offline.</p>
-          </div>
-          <a
-            href="/verify/verify-proof.mjs"
-            download
-            className="inline-flex h-10 shrink-0 items-center justify-center rounded-full border border-border px-4 text-sm transition-colors duration-150 hover:border-zec/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-          >
-            Download verify-proof.mjs
-          </a>
-        </div>
-        <ol className="ledger sm:grid-cols-2 lg:grid-cols-4">
-          {STEPS.map((s, i) => (
-            <li key={s.title} className="flex flex-col p-5">
-              <span className="font-mono text-xs text-faint-foreground">0{i + 1}</span>
-              <p className="mt-3 font-medium">{s.title}</p>
-              <p className="mt-1.5 text-sm text-pretty text-muted-foreground">{s.body}</p>
-              {s.code && <pre className="mt-4 overflow-x-auto rounded-md bg-surface-1 px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre text-foreground/85">{s.code}</pre>}
-            </li>
-          ))}
-        </ol>
-      </section>
+      <VerifyExplainers />
 
       <section aria-labelledby="hidden-t" className="mt-16 mb-6">
         <div className="mb-4 max-w-2xl">

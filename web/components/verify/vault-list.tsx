@@ -32,7 +32,7 @@ export function VaultList({ snap, check, symbols }: { snap: VerifySnapshot; chec
                 value={explorer(v.address)}
                 label={evm ? "Copy the vault's explorer link" : "Copy vault address"}
                 toastText={evm ? "Explorer link copied" : "Address copied"}
-                toastDescription={evm ? "Chain 4663 (Robinhood Chain). Open it later, ideally over Tor." : undefined}
+                toastDescription={evm && process.env.NEXT_PUBLIC_HOOD === "1" ? "Chain 4663 (Robinhood Chain). Open it later, ideally over Tor." : undefined}
                 className="gap-1.5 font-mono text-xs text-muted-foreground"
               >
                 {shortAddr(v.address, 5, 5)}

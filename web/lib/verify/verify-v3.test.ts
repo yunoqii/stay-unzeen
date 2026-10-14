@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { VerifySnapshot } from "@/lib/api/types";
 import { assetBytes, climb, leafHash, nodeOf, rootsDigest, type SumNode } from "./merkle-sum";
+import { personalHash, recoverAddress, vaultTypedDigest, verifyOperatorEip191, verifyVaultEip712 } from "./evm-sig";
 
 interface Leaf {
   anonPubkey: string;
@@ -26,6 +27,11 @@ interface V {
   trees: Record<string, { leaves: Leaf[]; root: string; sum: string }>;
   proof: { asset: string; leafIndex: number; path: { hash: string; sum: string }[] };
   rootsDigest: string;
+  signatures?: {
+    address: string;
+    operator: { message: string; sig: string };
+    vault: { domain: { chainId: number }; hash: string; message: { address: string; blockNumber: string; snapshotId: string }; sig: string };
+  };
 }
 
 const file = path.resolve(import.meta.dirname, "../../../core/testdata/verify-v3-vectors.json");
@@ -76,5 +82,17 @@ describe.skipIf(!v)("verify-v3-vectors.json (API v0.20)", () => {
     expect(rootsDigest(snap)).toBe(v!.rootsDigest);
     // The v2 formula over the same fields gives a different digest.
     expect(rootsDigest({ ...snap, digestVersion: 2 })).not.toBe(v!.rootsDigest);
+  });
+
+  it("signatures (API v0.22): EIP-712 vault hash and signature, EIP-191 operator signature", () => {
+    const g = v!.signatures;
+    expect(g).toBeTruthy();
+    const m = g!.vault.message;
+    expect(bytesToHex(vaultTypedDigest(g!.vault.domain.chainId, m.snapshotId, m.address, BigInt(m.blockNumber)))).toBe(g!.vault.hash);
+    expect(recoverAddress(hexToBytes(g!.vault.hash), g!.vault.sig)).toBe(g!.address);
+    expect(verifyVaultEip712(g!.vault.domain.chainId, m.snapshotId, m.address, BigInt(m.blockNumber), g!.vault.sig)).toBe(true);
+    expect(verifyVaultEip712(4663, m.snapshotId, m.address, BigInt(m.blockNumber), g!.vault.sig)).toBe(false);
+    expect(recoverAddress(personalHash(hexToBytes(g!.operator.message)), g!.operator.sig)).toBe(g!.address);
+    expect(verifyOperatorEip191(g!.address, g!.operator.message, g!.operator.sig)).toBe(true);
   });
 });

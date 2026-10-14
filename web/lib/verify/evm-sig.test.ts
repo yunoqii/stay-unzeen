@@ -11,6 +11,15 @@ import hood from "./testdata/hood-snapshot.json";
 
 const snap = hood as unknown as VerifySnapshot;
 
+const N_SECP = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+/** The malleable twin of a signature: s -> n - s, v flipped. Same signer, high s. */
+const highS = (sig: string) => {
+  const h = sig.slice(2);
+  const s = (N_SECP - BigInt("0x" + h.slice(64, 128))).toString(16).padStart(64, "0");
+  const v = parseInt(h.slice(128), 16) === 27 ? "1c" : "1b";
+  return "0x" + h.slice(0, 64) + s + v;
+};
+
 describe("EVM signatures (viem vectors)", () => {
   it("EIP-712 vault statement", () => {
     expect(verifyVaultEip712(viem.chainId, viem.snapshotId, viem.vault, BigInt(viem.blockNumber), viem.vaultSig)).toBe(true);
@@ -29,6 +38,9 @@ describe("EVM signatures (viem vectors)", () => {
 
   it("malformed signatures never throw", () => {
     expect(recoverAddress(personalHash(new Uint8Array(32)), "0x1234")).toBeNull();
+    // The malleable twin (s -> n - s) recovers the same signer; core refuses it, so does the page.
+    expect(verifyVaultEip712(viem.chainId, viem.snapshotId, viem.vault, BigInt(viem.blockNumber), highS(viem.vaultSig))).toBe(false);
+    expect(verifyOperatorEip191(viem.operator, viem.digest, highS(viem.operatorSig))).toBe(false);
     expect(verifyOperatorEip191("nope", viem.digest, viem.operatorSig)).toBe(false);
   });
 });
