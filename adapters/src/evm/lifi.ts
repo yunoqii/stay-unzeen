@@ -84,7 +84,7 @@ export class LifiClient {
 
   /** Rejects anything but a same-chain route through the pinned Diamond for exactly this request. */
   validate(body: unknown, r: LifiQuoteRequest): LifiRoute {
-    const bad = (why: string) => new AdapterError("venue_unavailable", `LI.FI route rejected: ${why}`);
+    const bad = (why: string) => new AdapterError("internal", `LI.FI route rejected: ${why}`); // final, never retried
     const j = body as {
       tool?: string;
       action?: { fromToken?: { address?: string }; toToken?: { address?: string }; fromAddress?: string; toAddress?: string; fromAmount?: string };

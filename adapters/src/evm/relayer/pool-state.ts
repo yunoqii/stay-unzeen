@@ -194,20 +194,27 @@ export async function collectHoodSnapshot(
   }
   const addrs = [...byAddr.keys()].sort();
   const toks = [...new Set(mints.map((m) => getAddress(m)))].sort();
+  // review-hood-final #12: creators never hold pool tokens -> ETH only; token reads only for
+  // always-listed addresses. viem splits the multicall into several eth_calls, all at `block`.
+  const tokenHolders = addrs.filter((a) => byAddr.get(a)!.always);
   const calls = [
     ...addrs.map((a) => ({ address: MULTICALL3, abi: MULTICALL3_ABI, functionName: "getEthBalance", args: [a] }) as const),
-    ...addrs.flatMap((a) => toks.map((t) => ({ address: t, abi: ponsV2TokenAbi, functionName: "balanceOf", args: [a] }) as const)),
+    ...tokenHolders.flatMap((a) => toks.map((t) => ({ address: t, abi: ponsV2TokenAbi, functionName: "balanceOf", args: [a] }) as const)),
   ];
-  const res = (await ex.read.multicall({ allowFailure: true, blockNumber: block, contracts: calls as never })) as { status: string; result?: bigint }[];
+  const res = (await ex.read.multicall({ allowFailure: true, blockNumber: block, batchSize: 16_384, contracts: calls as never })) as { status: string; result?: bigint }[];
   const rows: HoodVaultRow[] = [];
   for (const [i, a] of addrs.entries()) {
     const eth = res[i];
     if (eth?.status !== "success") throw new Error("eth balance unreadable");
     const tokens: HoodVaultRow["tokens"] = [];
-    toks.forEach((t, j) => {
-      const r = res[addrs.length + i * toks.length + j];
-      if (r?.status === "success" && (r.result ?? 0n) > 0n) tokens.push({ mint: t, amount: r.result!.toString() });
-    });
+    const h = tokenHolders.indexOf(a);
+    if (h >= 0) {
+      toks.forEach((t, j) => {
+        const r = res[addrs.length + h * toks.length + j];
+        if (r?.status !== "success") throw new Error("token balance unreadable"); // never under-report
+        if ((r.result ?? 0n) > 0n) tokens.push({ mint: t, amount: r.result!.toString() });
+      });
+    }
     const s = byAddr.get(a)!;
     if (!s.always && eth.result === 0n && tokens.length === 0) continue;
     rows.push({ address: a, wei: eth.result!, tokens, sig: await signVerifySnapshot(s.account, chainId, String(req.id), block) });
@@ -258,4 +265,39 @@ export function hoodSnapshotSigners(kr: EvmKeyring, vaultCount: number, funderCo
 export async function hoodPoolMints(db: Pool, network: HoodNetworkId): Promise<Address[]> {
   const r = await db.query<{ mint: string }>(`SELECT mint FROM mint_vaults WHERE network = $1`, [network]);
   return r.rows.map((x) => getAddress(x.mint));
+}
+
+// ---------------------------------------------------------------------------
+// Token prices (review-hood-final #7): every 1-2 min, for the tokens the pool holds
+// ---------------------------------------------------------------------------
+
+/** Probe size for a v4 price: 0.001 ETH in. */
+export const PRICE_PROBE_WEI = 1_000_000_000_000_000n;
+
+/**
+ * Public price of every pool token: curve tokens from the curve state (spot),
+ * graduated ones from the Uniswap v4 pool through V4Quoter (exact-in probe).
+ * NEVER writes "0": no readable price -> the row is left as it was (core refuses
+ * trades on a stale price). Returns counts only.
+ */
+export async function writeTokenPrices(db: Pool, network: HoodNetworkId, adapter: PonsAdapter): Promise<{ written: number; skipped: number }> {
+  let written = 0;
+  let skipped = 0;
+  for (const mint of await hoodPoolMints(db, network)) {
+    try {
+      const q = await adapter.quote(mint, "buy", PRICE_PROBE_WEI);
+      if (!/^\d+(\.\d+)?$/.test(q.priceEth) || /^0(\.0*)?$/.test(q.priceEth) || q.amountOut === 0n) {
+        skipped++;
+        continue;
+      }
+      await db.query(
+        `UPDATE tokens SET price_sol = $2::numeric, market_cap_sol = $3::numeric, status = $4, updated_at = now() WHERE mint = $1`,
+        [mint, q.priceEth, q.marketCapEth, q.status],
+      );
+      written++;
+    } catch {
+      skipped++;
+    }
+  }
+  return { written, skipped };
 }

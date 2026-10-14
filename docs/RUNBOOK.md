@@ -412,6 +412,60 @@ Web: `NEXT_PUBLIC_API_URL_MAINNET=http://127.0.0.1:8081`, `NEXT_PUBLIC_ATTESTATI
 
 ---
 
+## 5. Robinhood Chain (hood, Pons V2)
+
+Отдельный инстанс: своя БД, свой Zcash-сид пула, свой UA, `chainId 0111` (mainnet) / `0212` (testnet). Pons есть только на mainnet 4663, поэтому живой hood — это mainnet (только с разрешения лида).
+
+### 5.1 Env (имена; значения только в `.env`, в git не попадают)
+| Переменная | Что |
+|---|---|
+| `UNZEEN_HOOD=on` | включает EVM-часть adapters |
+| `HOOD_NETWORK=mainnet` | `mainnet` (4663) / `testnet` (46630, Pons нет) |
+| `HOOD_RPC_URL_MAINNET`, `HOOD_SEND_RPC_URL_MAINNET` | платный RPC для чтения + отдельный провайдер для отправки. Публичный RPC отдаёт 429 (Cloudflare) |
+| `UNZEEN_ALLOW_HOOD_MAINNET=yes` | без него executor только читает и `relayer:hood` не стартует (mainnet-guard) |
+| `HOOD_KEYS_DIR` | по умолчанию `$UNZEEN_HOME/hood-mainnet/evm` (каталог 0700) |
+| `HOOD_KEYS_AGE_KEY_FILE` | age-identity вне каталога ключей, 0600. На mainnet обязателен |
+| `DATABASE_URL_RELAYER` | роль `unzeen_relayer` **БД hood-инстанса** (после миграций перезапустить `infra/relayer-role.sql`) |
+| `HOOD_VAULTS` (2), `HOOD_FUNDERS` (8), `HOOD_FEE_SWEEP=1` | число vault, число funder'ов в ротации, сбор комиссий создателя |
+| `HOOD_MAX_FEE_WEI`, `HOOD_RPC_MAX_RPS` | минимум единого `maxFeePerGas` (0,2 gwei) и лимит запросов |
+
+Core hood-инстанс: `UNZEEN_CHAIN=hood`, `UNZEEN_NETWORK=main`, `UNZEEN_VENUES=pons`, `UNZEEN_REBALANCE_ETH_ADDRESS` (= адрес ребаланса из `evm:keys`). `UNZEEN_ALLOW_MAINNET_REBALANCE` на время прогона не ставить.
+
+### 5.2 Ключи
+1. `cd adapters && HOOD_NETWORK=mainnet pnpm evm:keys 2` — создаёт сид при первом запуске (24 слова, `evm-seed.txt.age`, 0600) и печатает **только адреса**: `vault-*`, `funder-0..7`, `rebalance-0`, `attest`. Если права на файл шире 0600, чтение сида будет отклонено.
+2. Ветки BIP-44 coin 60: vault 0, creator 1, attest 2, rebalance 3, funder 4.
+3. **Откуда ETH** (ни один перевод не с личного кошелька владельца):
+   - **адрес ребаланса** — ZEC → ETH(hood) через NEAR 1Click (ручной лот или ребаланс сканера);
+   - **vault** — задание `fund_vaults` (одна tx Multicall3 с адреса ребаланса);
+   - **funder'ы** — их пополняет только адрес ребаланса (`FunderPool.topUp`, лоты по 0,01 ETH, раз в 1–3 ч);
+   - **ключ аттестаций hood** (`attest`) владелец **пополняет вручную из внешнего источника**: отдельный перевод, не с vault и не с адреса ребаланса. На старте релейер предупреждает, если на ключе < 0,0002 ETH.
+
+### 5.3 Запуск
+```
+cd adapters
+HOOD_NETWORK=mainnet UNZEEN_HOOD=on UNZEEN_ALLOW_HOOD_MAINNET=yes pnpm relayer:hood
+```
+При старте релейер:
+- проверяет роль (`action_id` нечитаем), `mint_vaults` и хеши кода Pons;
+- сверяет `launches reconciled`;
+- пишет `launch_curves (hood,pons)`, затем повторяет раз в 10 мин (без этой строки create на hood отдаёт 503);
+- пишет `pool_sol_inventory` раз в ~5 мин;
+- раз в 1–2 мин обновляет цены токенов пула (graduated — через V4Quoter, «0» не пишет никогда);
+- раз в 1–2 с опрашивает снимок Verify;
+- если `HOOD_FEE_SWEEP=1`, запускает сбор комиссий создателей раз в 6–12 ч.
+
+Состояние рядом с ключами (0600):
+- `creator-counter.json` и `creator-addresses.json` (публичный список creator);
+- `pending-launches.json` — если нет `relayer_launches`;
+- `sent-at.json` — время отправки tx, пока core не добавит `relayer_jobs.sent_at`;
+- `fees-owed.json` — комиссии, полученные из escrow, но ещё не переведённые на vault.
+
+### 5.4 Проверки
+- **Тесты без сети:** `pnpm test`.
+- **Форк mainnet:** `pnpm test:fork` (нужен `anvil`).
+- **Сквозной тест с core:** `HOOD_E2E=1 HOOD_E2E_LOG=/tmp/api.log npx vitest run test/evm/hood-e2e.test.ts` — временная БД, core API, anvil, Verify v3.
+- **Чеклист живого прогона:** `docs/analysis/review-hood-final.md`.
+
 ## GAP — сводка
 1. ~~Нет команды, печатающей публичные ключи аттестаций~~ — **закрыт**: `pnpm keys:attest`.
 2. ~~Ledger не разделён по сети~~ — **закрыт частично**: таблицы общие, но core отказывается стартовать на БД другой сети/кошелька; отдельная mainnet-БД — `infra/pg-mainnet.sh`, `infra/README.md`.

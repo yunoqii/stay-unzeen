@@ -14,8 +14,9 @@ import { EvmWithdrawer } from "../withdraw";
 import { HoodRelayer, type HoodRelayerEvent } from "./engine";
 import { HoodFeeLoop } from "./fees";
 import { FunderPool } from "../funders";
-import { hoodPoolMints, hoodSnapshotSigners, hoodSnapshotTick, readInventory, writeInventory, writePonsLaunchCurve } from "./pool-state";
-import { FileLaunchStore, type LaunchStore } from "./launches";
+import { hoodPoolMints, hoodSnapshotSigners, hoodSnapshotTick, readInventory, writeInventory, writePonsLaunchCurve, writeTokenPrices } from "./pool-state";
+import { FileLaunchStore, FileSentClock, type LaunchStore } from "./launches";
+import { FileOwedStore } from "../pons/creator";
 import { PgHoodQueue, type HoodNetworkId } from "./queue";
 
 /**
@@ -58,6 +59,7 @@ export function buildHoodRelayer(o: HoodRuntimeOptions): { relayer: HoodRelayer;
     mintVaults: new PgMintVaults(o.db, network as never),
     lock: new PgAdvisoryVaultLock(o.lockDb, network as never),
     launches: o.launches ?? FileLaunchStore.inDir(o.cfg.keysDir),
+    sentClock: FileSentClock.inDir(o.cfg.keysDir),
     withdrawer: new EvmWithdrawer({ executor: o.executor, isPoolAddress: (a) => pool.has(getAddress(a)) }),
     ...(o.publishImage ? { publishImage: o.publishImage } : {}),
     ...(o.onEvent ? { onEvent: o.onEvent } : {}),
@@ -72,6 +74,7 @@ export function buildHoodRelayer(o: HoodRuntimeOptions): { relayer: HoodRelayer;
     keyring: o.keyring,
     vaults,
     creatorCount: async () => counter.peek(),
+    owed: new FileOwedStore(path.join(o.cfg.keysDir, "fees-owed.json")),
   });
   return { relayer, fees, vaults };
 }
@@ -124,6 +127,7 @@ export async function runHoodRelayer(o: HoodRuntimeOptions, signal: AbortSignal)
         mints: () => hoodPoolMints(o.db, network),
       }), errs("verify snapshot")),
     every(signal, 3_600_000, 3 * 3_600_000, () => funders.topUp(), errs("funder top-up")),
+    every(signal, 60_000, 120_000, () => writeTokenPrices(o.db, network, o.adapter), errs("token prices")),
   ]);
   o.executor.fees.stop();
 }

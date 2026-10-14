@@ -96,6 +96,24 @@ export class PostgresJobQueue implements JobQueue {
   private bundleLegsCol: Promise<boolean> | null = null;
   private quoteCols: Promise<boolean> | null = null;
   private feedQuoteCols: Promise<boolean> | null = null;
+  private sentAtCol: Promise<boolean> | null = null;
+
+  /**
+   * PROPOSED core column `relayer_jobs.sent_at` (review-hood-final #5, same as hood):
+   * the time the signature was recorded, never moved by claim / retry. Without it
+   * `sentAt` falls back to updated_at (harmless on Solana: expiry is decided by the
+   * blockhash height, not by time). Cached.
+   */
+  private hasSentAt(): Promise<boolean> {
+    this.sentAtCol ??= this.pool
+      .query<{ ok: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'relayer_jobs' AND column_name = 'sent_at')
+                AND has_column_privilege(current_user, 'relayer_jobs', 'sent_at', 'UPDATE') AS ok`,
+      )
+      .then((r) => r.rows[0]?.ok === true)
+      .catch(() => false);
+    return this.sentAtCol;
+  }
 
   constructor(o: PostgresJobQueueOptions) {
     this.pool = o.pool;
@@ -288,6 +306,7 @@ export class PostgresJobQueue implements JobQueue {
           : "";
     const v3 = await this.hasV3();
     const legsCol = v3 && (await this.hasBundleLegs());
+    const sentCol = await this.hasSentAt();
     // RELAYER v4 §1: while a Verify snapshot of this network is freezing/collecting,
     // no NEW job is taken (both lanes, every op incl. fair_create; attest exempt, E21).
     // In-flight rows (claimed/sent, lease ran out) are still driven to the end:
@@ -320,7 +339,7 @@ export class PostgresJobQueue implements JobQueue {
        RETURNING j.id, j.part, j.op, j.venue, j.mint, j.lamports_in, j.token_amount, j.min_out,
                  j.meta, j.dest, j.gas_lamports, j.network, j.attempts, j.status, j.signature,
                  j.last_valid_block_height, j.vault,
-                 (extract(epoch FROM j.updated_at) * 1000)::bigint AS sent_at_ms,
+                 (extract(epoch FROM ${sentCol ? "COALESCE(j.sent_at, j.updated_at)" : "j.updated_at"}) * 1000)::bigint AS sent_at_ms,
                  (extract(epoch FROM j.not_before) * 1000)::bigint AS not_before_ms
                  ${v3 ? ", j.mint_secret" : ""}${legsCol ? ", j.bundle_legs" : ""}`,
       [leaseId, this.network, opts.leaseMs, v3 ? OPS_V3 : OPS],
@@ -381,6 +400,7 @@ export class PostgresJobQueue implements JobQueue {
     }
     // Fair-launch v2: every leg recorded with leg 0 (signatures + vaults only, public data;
     // NULL for a single tx so a previous bundle's legs never stick to a new attempt).
+    if (await this.hasSentAt()) extra += `, sent_at = now()`;
     if (await this.hasBundleLegs()) {
       params.push(a.bundle ? JSON.stringify(a.bundle.legs.map((l) => ({ sig: l.signature, vault: l.vault }))) : null);
       extra += `, bundle_legs = $${params.length}::jsonb`;

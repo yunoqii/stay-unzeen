@@ -239,11 +239,19 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
     expect(t0.escrow > 0n).toBe(true); // graduation swept the curve fees into the escrow
     const vb = async () => (await client.getBalance({ address: kr.vault(0).address })) + (await client.getBalance({ address: kr.vault(1).address }));
     const v0 = await vb();
+    const r0 = await client.getBalance({ address: kr.rebalance(0).address });
     const o0 = await sweeper.sweepOne(t0);
     expect(o0.steps.map((s) => s.kind)).toContain("claim");
-    expect(o0.collected > 0n).toBe(true);
-    expect(o0.collected % 100_000_000_000_000n).toBe(0n);
-    expect((await vb()) - v0).toBe(o0.collected); // vaults only received here
+    // review-hood-final #2: the fee recorded = EXACTLY what the escrow paid (Claimed event), nothing of the funding.
+    const claimed = o0.steps.find((s) => s.kind === "claim")!.value!;
+    expect(claimed).toBe(t0.escrow);
+    expect(o0.collected).toBe(claimed);
+    expect((await vb()) - v0).toBe(o0.collected); // vaults only received the fee
+    // The funding leftover went back to the rebalance address (round amount), not to a vault, not as a fee.
+    const back = o0.steps.find((s) => s.kind === "to_rebalance");
+    expect(back?.value).toBeDefined();
+    expect(back!.value! % 1_000_000_000_000_000n).toBe(0n);
+    expect((await client.getBalance({ address: kr.rebalance(0).address })) - r0).toBe(back!.value!);
     // A second, still-curve launch with some volume.
     const c = await adapter.create({ name: "Fees", symbol: "FEES" }, parseEther("0.02"), { creatorTaxBps: 300, vault: kr.vault(0) });
     const b = await adapter.buy(c.token, parseEther("0.3"), 1n, { vault: kr.vault(1) });
@@ -253,7 +261,8 @@ describe.skipIf(!enabled)("pons adapter on an anvil fork of 4663", () => {
     const res = await sweeper.runOnce([{ creatorIndex: c.creatorIndex!, token: c.token }]);
     expect(res.failed).toBe(0);
     const kinds = res.outcomes[0]!.steps.map((s) => s.kind);
-    expect(kinds).toEqual(["curve_sweep", "claim", "to_vault"]);
+    expect(kinds.slice(0, 3)).toEqual(["curve_sweep", "claim", "to_vault"]);
+    expect(res.outcomes[0]!.collected).toBe(res.outcomes[0]!.steps.find((s) => s.kind === "claim")!.value!);
     for (const st of res.outcomes[0]!.steps) {
       const tx = await client.getTransaction({ hash: st.hash });
       expect(getAddress(tx.from)).toBe(c.creator); // H7: only the creator signs

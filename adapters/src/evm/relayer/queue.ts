@@ -34,8 +34,9 @@ export interface HoodSentAttempt {
   hash: Hex;
   nonce: number;
   vault: Address;
-  /** unix ms */
+  /** unix ms; from `relayer_jobs.sent_at` when core has it (`sentAtReliable`), else updated_at (NOT the send time). */
   sentAt: number;
+  sentAtReliable?: boolean;
   /** attest `meta.purpose = verify`: operator signature over the root, written with the hash. */
   outSig?: string;
 }
@@ -93,6 +94,12 @@ export type HoodExecution =
 
 export type HoodJobResult =
   | { status: "executed"; execution: HoodExecution }
+  /**
+   * RELAYER v15 (0031): the tx LANDED but its result could not be parsed. Not final:
+   * core keeps the hold (no refund) and alerts; the relayer re-parses it hourly, the
+   * operator can settle it by hand.
+   */
+  | { status: "needs_review"; message: string }
   | { status: "failed"; code: ApiErrorCode; message: string }
   | { status: "retry"; code: ApiErrorCode; message: string; notBefore: number };
 
@@ -121,6 +128,7 @@ interface Row {
   last_valid_block_height: string | null;
   vault: string | null;
   sent_at_ms: string | null;
+  sent_at_reliable?: boolean;
   not_before_ms: string;
 }
 
@@ -128,6 +136,19 @@ const OPS = ["buy", "sell", "create", "transfer", "attest", "fund_vaults"];
 
 export class PgHoodQueue implements HoodQueue {
   private leaseMs = 10 * 60_000;
+  private sentAtCol: Promise<boolean> | null = null;
+
+  /** PROPOSED core column `relayer_jobs.sent_at` (written with `sent` only). Cached. */
+  hasSentAt(): Promise<boolean> {
+    this.sentAtCol ??= this.pool
+      .query<{ ok: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'relayer_jobs' AND column_name = 'sent_at')
+                AND has_column_privilege(current_user, 'relayer_jobs', 'sent_at', 'UPDATE') AS ok`,
+      )
+      .then((r) => r.rows[0]?.ok === true)
+      .catch(() => false);
+    return this.sentAtCol;
+  }
   constructor(
     private readonly pool: Pool,
     readonly network: HoodNetworkId,
@@ -142,6 +163,7 @@ export class PgHoodQueue implements HoodQueue {
     else if (o.lane === "batch") laneSql = `AND exec_mode IS DISTINCT FROM 'now' AND op <> 'attest'`;
     const tieBreak = o.lane === "batch" || o.lane === undefined ? "random()" : "id";
     const priority = o.lane === "attest" ? `(meta->>'purpose' IS NOT DISTINCT FROM 'verify'), ` : o.lane === undefined ? `(op <> 'attest'), ` : "";
+    const col = await this.hasSentAt();
     const res = await this.pool.query<Row>(
       `WITH c AS (
          SELECT id FROM relayer_jobs
@@ -149,7 +171,7 @@ export class PgHoodQueue implements HoodQueue {
             AND ((status = 'queued' AND not_before <= now()
                   AND (op = 'attest' OR NOT EXISTS (SELECT 1 FROM verify_snapshots v
                         WHERE v.network = $2 AND v.status IN ('freezing', 'collecting') AND v.freeze_until > now())))
-              OR (status IN ('claimed', 'sent') AND lease_until < now()))
+              OR (status IN ('claimed', 'sent', 'needs_review') AND lease_until < now()))
             ${laneSql}
           ORDER BY ${priority}(status = 'queued'), not_before, ${tieBreak}
           LIMIT 1
@@ -161,7 +183,8 @@ export class PgHoodQueue implements HoodQueue {
          FROM c WHERE j.id = c.id
        RETURNING j.id, j.op, j.venue, j.mint, j.lamports_in, j.token_amount, j.min_out, j.meta, j.dest, j.gas_lamports,
                  j.network, j.attempts, j.signature, j.last_valid_block_height, j.vault,
-                 (extract(epoch FROM j.updated_at) * 1000)::bigint AS sent_at_ms,
+                 (extract(epoch FROM ${col ? "COALESCE(j.sent_at, j.updated_at)" : "j.updated_at"}) * 1000)::bigint AS sent_at_ms,
+                 ${col ? "j.sent_at IS NOT NULL" : "FALSE"} AS sent_at_reliable,
                  (extract(epoch FROM j.not_before) * 1000)::bigint AS not_before_ms`,
       [leaseId, this.network, o.leaseMs, OPS],
     );
@@ -169,7 +192,7 @@ export class PgHoodQueue implements HoodQueue {
     if (!row) return null;
     const sent: HoodSentAttempt | null =
       row.signature && row.last_valid_block_height !== null && row.vault
-        ? { hash: row.signature as Hex, nonce: Number(row.last_valid_block_height), vault: getAddress(row.vault), sentAt: Number(row.sent_at_ms) }
+        ? { hash: row.signature as Hex, nonce: Number(row.last_valid_block_height), vault: getAddress(row.vault), sentAt: Number(row.sent_at_ms), sentAtReliable: row.sent_at_reliable === true }
         : null;
     let spec: HoodJobSpec;
     try {
@@ -193,6 +216,7 @@ export class PgHoodQueue implements HoodQueue {
       params.push(a.outSig);
       extra = `, out_sig = $${params.length}`;
     }
+    if (await this.hasSentAt()) extra += `, sent_at = now()`;
     const res = await this.pool.query(
       `UPDATE relayer_jobs
           SET status = 'sent', signature = $2, last_valid_block_height = $3, vault = $4,
@@ -212,7 +236,7 @@ export class PgHoodQueue implements HoodQueue {
     if (r.status === "failed") {
       const res = await this.pool.query(
         `UPDATE relayer_jobs SET status = 'failed', error_code = $2, error_message = $3, updated_at = now()
-          WHERE id = $1 AND status IN ('claimed', 'sent') AND claimed_by = $4 AND settled_at IS NULL`,
+          WHERE id = $1 AND status IN ('claimed', 'sent', 'needs_review') AND claimed_by = $4 AND settled_at IS NULL`,
         [job.id, r.code, sanitize(r.message), job.leaseId],
       );
       if (res.rowCount !== 1) throw new LeaseLostError(job.id);
@@ -221,8 +245,18 @@ export class PgHoodQueue implements HoodQueue {
     if (r.status === "retry") {
       const res = await this.pool.query(
         `UPDATE relayer_jobs SET lease_until = to_timestamp($2::double precision / 1000), updated_at = now()
-          WHERE id = $1 AND status IN ('claimed', 'sent') AND claimed_by = $3 AND settled_at IS NULL`,
+          WHERE id = $1 AND status IN ('claimed', 'sent', 'needs_review') AND claimed_by = $3 AND settled_at IS NULL`,
         [job.id, r.notBefore, job.leaseId],
+      );
+      if (res.rowCount !== 1) throw new LeaseLostError(job.id);
+      return;
+    }
+    if (r.status === "needs_review") {
+      // Only for a recorded (landed) tx; re-parsed by this relayer after the hour-long lease.
+      const res = await this.pool.query(
+        `UPDATE relayer_jobs SET status = 'needs_review', error_message = $2, lease_until = now() + interval '1 hour', updated_at = now()
+          WHERE id = $1 AND status IN ('sent', 'needs_review') AND signature IS NOT NULL AND claimed_by = $3 AND settled_at IS NULL`,
+        [job.id, sanitize(r.message), job.leaseId],
       );
       if (res.rowCount !== 1) throw new LeaseLostError(job.id);
       return;
@@ -236,14 +270,14 @@ export class PgHoodQueue implements HoodQueue {
         // Pool-internal: out_lamports = wei that reached the vaults; no feed rows.
         res = await client.query(
           `UPDATE relayer_jobs SET status = 'confirmed', slot = $2, out_lamports = $3::numeric, network_fee = $4, updated_at = now()
-            WHERE id = $1 AND status = 'sent' AND signature = $5 AND claimed_by = $6 AND settled_at IS NULL`,
+            WHERE id = $1 AND status IN ('sent', 'needs_review') AND signature = $5 AND claimed_by = $6 AND settled_at IS NULL`,
           [job.id, e.block.toString(), e.wei.toString(), e.networkFee.toString(), e.hash, job.leaseId],
         );
       } else if (e.kind === "attest") {
         res = await client.query(
           `UPDATE relayer_jobs SET status = 'confirmed', slot = $2, out_memo = $3, network_fee = $4, out_block_time = $5,
                   vault = $6, out_sig = COALESCE($7, out_sig), updated_at = now()
-            WHERE id = $1 AND status = 'sent' AND signature = $8 AND claimed_by = $9 AND settled_at IS NULL`,
+            WHERE id = $1 AND status IN ('sent', 'needs_review') AND signature = $8 AND claimed_by = $9 AND settled_at IS NULL`,
           [job.id, e.block.toString(), e.memo, e.networkFee.toString(), e.blockTime, e.vault, e.outSig, e.hash, job.leaseId],
         );
       } else {
@@ -254,7 +288,7 @@ export class PgHoodQueue implements HoodQueue {
           `UPDATE relayer_jobs
               SET status = 'confirmed', slot = $2, out_mint = $3, out_token_amount = $4::numeric, out_lamports = $5::numeric,
                   network_fee = $6, out_creator_fee = COALESCE($9::numeric, out_creator_fee), updated_at = now()
-            WHERE id = $1 AND status = 'sent' AND signature = $7 AND claimed_by = $8 AND settled_at IS NULL`,
+            WHERE id = $1 AND status IN ('sent', 'needs_review') AND signature = $7 AND claimed_by = $8 AND settled_at IS NULL`,
           [job.id, e.block.toString(), e.token, outTokens.toString(), outWei.toString(), e.networkFee.toString(), e.hash, job.leaseId, fee],
         );
       }

@@ -1,4 +1,7 @@
 import {
+  BaseError,
+  TransactionNotFoundError,
+  TransactionReceiptNotFoundError,
   keccak256,
   type Abi,
   type Address,
@@ -188,20 +191,33 @@ export class EvmExecutor {
     return this.send(from, { to, data: "0x", value }, opts);
   }
 
-  /** Re-reads a landed tx: receipt (null = unknown to the node) and, if pending, the tx itself. */
+  /**
+   * State of a recorded tx, asked of EVERY provider we have (read and send):
+   * - "landed" as soon as one of them has the receipt;
+   * - "pending" if one knows the tx but has no receipt;
+   * - "unknown" ONLY when every provider answered "not found"
+   *   (viem TransactionReceiptNotFoundError / TransactionNotFoundError).
+   * Any other error (429, timeout, 5xx, Cloudflare) THROWS: the caller must
+   * retry later and never treat it as "not sent" (review-hood-final #1).
+   */
   async lookup(hash: Hex): Promise<{ state: "landed"; receipt: TransactionReceipt } | { state: "pending" } | { state: "unknown" }> {
-    try {
-      const receipt = await this.read.getTransactionReceipt({ hash });
-      return { state: "landed", receipt };
-    } catch {
-      // not mined (or not found)
+    const clients = this.sendClient === this.read ? [this.read] : [this.read, this.sendClient];
+    let pending = false;
+    for (const c of clients) {
+      try {
+        const receipt = await c.getTransactionReceipt({ hash });
+        return { state: "landed", receipt };
+      } catch (e) {
+        if (!isNotFound(e, "receipt")) throw new AdapterError("venue_unavailable", "RPC error while reading a recorded tx", { cause: e, signature: hash });
+      }
+      try {
+        await c.getTransaction({ hash });
+        pending = true;
+      } catch (e) {
+        if (!isNotFound(e, "tx")) throw new AdapterError("venue_unavailable", "RPC error while reading a recorded tx", { cause: e, signature: hash });
+      }
     }
-    try {
-      await this.read.getTransaction({ hash });
-      return { state: "pending" };
-    } catch {
-      return { state: "unknown" };
-    }
+    return pending ? { state: "pending" } : { state: "unknown" };
   }
 
   /** Why a landed tx reverted: replays it (eth_call) one block earlier. */
@@ -219,4 +235,11 @@ export class EvmExecutor {
   async balance(addr: Address): Promise<bigint> {
     return this.read.getBalance({ address: addr });
   }
+}
+
+/** True only for viem's "not found" errors of a receipt / a tx (never for transport errors). */
+export function isNotFound(e: unknown, what: "receipt" | "tx"): boolean {
+  if (!(e instanceof BaseError)) return false;
+  const want = what === "receipt" ? TransactionReceiptNotFoundError : TransactionNotFoundError;
+  return e.walk((x) => x instanceof want) !== null;
 }

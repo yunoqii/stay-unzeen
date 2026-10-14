@@ -131,3 +131,87 @@ export class PgLaunchStore implements LaunchStore {
     return new Map(r.rows.map((x) => [x.id, { creatorIndex: x.i, fromBlock: BigInt(x.b) }]));
   }
 }
+
+// ---------------------------------------------------------------------------
+// Send time of a recorded tx (review-hood-final #5)
+// ---------------------------------------------------------------------------
+
+/**
+ * When the main tx of a job was signed + recorded (BEFORE broadcast), keyed by
+ * job id + hash. `relayer_jobs.updated_at` cannot be used: every claim / retry
+ * moves it, so "not visible for 60 s" was never reached and a tx dropped by the
+ * sequencer kept its job waiting forever. PROPOSED to core: `relayer_jobs.sent_at`
+ * (written with `sent`, never touched by claim); until then a 0600 file next to
+ * the keys (one relayer host per network).
+ */
+export interface SentClock {
+  mark(jobId: string, hash: string, at: number): Promise<void>;
+  get(jobId: string, hash: string): Promise<number | null>;
+  /** Every hash ever signed for the job (a base-fee retry re-signs the same nonce). */
+  hashes(jobId: string): Promise<string[]>;
+  forget(jobId: string): Promise<void>;
+}
+
+export class MemorySentClock implements SentClock {
+  private readonly m = new Map<string, number>();
+  async mark(id: string, h: string, at: number) {
+    if (!this.m.has(`${id}:${h}`)) this.m.set(`${id}:${h}`, at);
+  }
+  async get(id: string, h: string) {
+    return this.m.get(`${id}:${h}`) ?? null;
+  }
+  async hashes(id: string) {
+    return [...this.m.keys()].filter((k) => k.startsWith(`${id}:`)).map((k) => k.slice(id.length + 1));
+  }
+  async forget(id: string) {
+    for (const k of [...this.m.keys()]) if (k.startsWith(`${id}:`)) this.m.delete(k);
+  }
+}
+
+export class FileSentClock implements SentClock {
+  constructor(readonly file: string) {}
+  static inDir(keysDir: string): FileSentClock {
+    return new FileSentClock(path.join(keysDir, "sent-at.json"));
+  }
+  private read(): Record<string, number> {
+    return fs.existsSync(this.file) ? (JSON.parse(fs.readFileSync(this.file, "utf8")) as Record<string, number>) : {};
+  }
+  private write(v: Record<string, number>): void {
+    const tmp = `${this.file}.${process.pid}.tmp`;
+    const fd = fs.openSync(tmp, "w", 0o600);
+    try {
+      fs.writeSync(fd, JSON.stringify(v));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, this.file);
+  }
+  async mark(id: string, h: string, at: number) {
+    const v = this.read();
+    const k = `${id}:${h}`;
+    if (v[k] === undefined) {
+      v[k] = at;
+      this.write(v);
+    }
+  }
+  async get(id: string, h: string) {
+    return this.read()[`${id}:${h}`] ?? null;
+  }
+  async hashes(id: string) {
+    return Object.keys(this.read())
+      .filter((k) => k.startsWith(`${id}:`))
+      .map((k) => k.slice(id.length + 1));
+  }
+  async forget(id: string) {
+    const v = this.read();
+    let changed = false;
+    for (const k of Object.keys(v)) if (k.startsWith(`${id}:`)) (delete v[k], (changed = true));
+    if (changed) this.write(v);
+  }
+}
+
+export const PROPOSED_SENT_AT_SQL = `
+ALTER TABLE relayer_jobs ADD COLUMN sent_at TIMESTAMPTZ;  -- set with status 'sent' (relayer), never by claim/retry
+GRANT UPDATE (sent_at) ON relayer_jobs TO unzeen_relayer;
+`;

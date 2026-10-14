@@ -1,4 +1,5 @@
-import { encodeFunctionData, getAddress, type Address, type Hex, type LocalAccount } from "viem";
+import fs from "node:fs";
+import { encodeFunctionData, getAddress, parseEventLogs, type Address, type Hex, type LocalAccount } from "viem";
 import { AdapterError } from "../../errors";
 import type { EvmExecutor, SignedEvmTx } from "../executor";
 import { quantizeGasLimit } from "../fees";
@@ -51,10 +52,12 @@ export interface PonsFeeTarget extends PonsLaunchRef {
   escrow: bigint;
   /** ETH on the creator address (wei). */
   balance: bigint;
+  /** Claimed from the escrow earlier, not forwarded yet (wei). */
+  owed?: bigint;
 }
 
 export interface SweepStep {
-  kind: "curve_sweep" | "pool_sweep" | "claim" | "to_vault";
+  kind: "curve_sweep" | "pool_sweep" | "claim" | "to_vault" | "to_rebalance";
   hash: Hex;
   networkFee: bigint;
   value?: bigint;
@@ -69,6 +72,45 @@ export interface SweepOutcome {
   skipped?: "below_threshold" | "no_gas";
 }
 
+/**
+ * Fees claimed from the escrow but not yet forwarded to a vault, per creator
+ * (review-hood-final #2). Written right after the claim lands, cleared when the
+ * forward lands: a crash in between never turns creator fees into "leftover".
+ */
+export interface OwedStore {
+  get(creatorIndex: number): Promise<bigint>;
+  set(creatorIndex: number, wei: bigint): Promise<void>;
+}
+
+export class MemoryOwedStore implements OwedStore {
+  private readonly m = new Map<number, bigint>();
+  async get(i: number) {
+    return this.m.get(i) ?? 0n;
+  }
+  async set(i: number, w: bigint) {
+    if (w === 0n) this.m.delete(i);
+    else this.m.set(i, w);
+  }
+}
+
+export class FileOwedStore implements OwedStore {
+  constructor(readonly file: string) {}
+  private read(): Record<string, string> {
+    return fs.existsSync(this.file) ? (JSON.parse(fs.readFileSync(this.file, "utf8")) as Record<string, string>) : {};
+  }
+  async get(i: number) {
+    return BigInt(this.read()[String(i)] ?? "0");
+  }
+  async set(i: number, w: bigint) {
+    const v = this.read();
+    if (w === 0n) delete v[String(i)];
+    else v[String(i)] = w.toString();
+    const tmp = `${this.file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(v), { mode: 0o600 });
+    fs.renameSync(tmp, this.file);
+  }
+}
+
 export interface PonsFeeSweeperOptions {
   adapter: PonsAdapter;
   executor: EvmExecutor;
@@ -77,6 +119,10 @@ export interface PonsFeeSweeperOptions {
   pickVault: () => LocalAccount;
   /** Sweep only when the creator would collect at least this much (wei). Default 0.0005 ETH. */
   minCollectWei?: bigint;
+  /** Claimed-not-forwarded fees (durable in production: FileOwedStore). Default in memory. */
+  owed?: OwedStore;
+  /** Funding leftover above `keepWei` goes back to the rebalance address when at least this much. Default 0.001 ETH. */
+  minReturnWei?: bigint;
   /** ETH left on the creator for future claims. Default 0.0005 ETH. */
   keepWei?: bigint;
   /** Transfers to the vault are rounded down to this step (round amounts). Default 0.0001 ETH. */
@@ -93,7 +139,9 @@ export interface PonsFeeSweeperOptions {
 }
 
 export class PonsFeeSweeper {
-  private readonly o: Required<Omit<PonsFeeSweeperOptions, "sleep" | "random" | "jitterMs" | "onTransferSigned">> & {
+  private readonly o: Required<Omit<PonsFeeSweeperOptions, "sleep" | "random" | "jitterMs" | "onTransferSigned" | "owed" | "minReturnWei">> & {
+    owed: OwedStore;
+    minReturnWei: bigint;
     onTransferSigned?: PonsFeeSweeperOptions["onTransferSigned"];
     sleep: (ms: number) => Promise<void>;
     random: () => number;
@@ -107,6 +155,8 @@ export class PonsFeeSweeper {
       keepWei: o.keepWei ?? 500_000_000_000_000n,
       transferStepWei: o.transferStepWei ?? 100_000_000_000_000n,
       jitterMs: o.jitterMs ?? [5_000, 60_000],
+      owed: o.owed ?? new MemoryOwedStore(),
+      minReturnWei: o.minReturnWei ?? 1_000_000_000_000_000n,
       sleep: o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
       random: o.random ?? Math.random,
     };
@@ -154,7 +204,8 @@ export class PonsFeeSweeper {
       poolPendingEth = fEth - (fEth * protocolShareBps) / 10_000n + tEth;
       poolPendingToken = fTok + tTok;
     }
-    return { ...ref, token: info.token, creator: getAddress(creator), phase: info.phase, curvePending, poolPendingEth, poolPendingToken, escrow, balance };
+    const owed = await this.o.owed.get(ref.creatorIndex);
+    return { ...ref, token: info.token, creator: getAddress(creator), phase: info.phase, curvePending, poolPendingEth, poolPendingToken, escrow, balance, owed };
   }
 
   /** Discovers the targets worth sweeping now (threshold on what would reach the vault). */
@@ -162,16 +213,27 @@ export class PonsFeeSweeper {
     const out: PonsFeeTarget[] = [];
     for (const r of refs) {
       const t = await this.inspect(r).catch(() => null);
-      if (t && this.collectable(t) >= this.o.minCollectWei) out.push(t);
+      if (t && (this.collectable(t) >= this.o.minCollectWei || this.returnable(t) >= this.o.minReturnWei)) out.push(t);
     }
     return out;
   }
 
+  /**
+   * Creator FEES only: curve / pool pending (go through the escrow), escrow balance,
+   * and claimed-not-forwarded. ETH the creator holds from its funding is NOT a fee
+   * (review-hood-final #2): it goes back to the rebalance address, never to
+   * `creator_fee_sweeps`.
+   */
   collectable(t: PonsFeeTarget): bigint {
     // Pool ETH is only sweepable by us when no memecoin conversion is pending.
     const pool = t.poolPendingToken === 0n ? t.poolPendingEth : 0n;
-    const spare = t.balance > this.o.keepWei ? t.balance - this.o.keepWei : 0n;
-    return t.curvePending + pool + t.escrow + spare;
+    return t.curvePending + pool + t.escrow + (t.owed ?? 0n);
+  }
+
+  /** Funding leftover on the creator (balance - owed fees - keep), returnable to the rebalance address. */
+  returnable(t: PonsFeeTarget): bigint {
+    const free = t.balance - (t.owed ?? 0n) - this.o.keepWei;
+    return free > 0n ? free : 0n;
   }
 
   /** One target: sweep -> claim -> move to a vault. Every tx signed by the creator only. */
@@ -180,40 +242,60 @@ export class PonsFeeSweeper {
     const a = this.o.adapter;
     const creator = this.o.keyring.account("creator", t0.creatorIndex);
     const steps: SweepStep[] = [];
-    if (this.collectable(t0) < this.o.minCollectWei) return { target: t0, steps, collected: 0n, vault: null, skipped: "below_threshold" };
+    const sweepFees = this.collectable(t0) >= this.o.minCollectWei;
+    if (!sweepFees && this.returnable(t0) < this.o.minReturnWei) return { target: t0, steps, collected: 0n, vault: null, skipped: "below_threshold" };
     const minGas = quantizeGasLimit(200_000n) * ex.fees.maxFeePerGas;
     if (t0.balance < minGas) return { target: t0, steps, collected: 0n, vault: null, skipped: "no_gas" };
 
-    const info = await a.launchInfo(t0.token);
-    if (info.phase === PHASE.NotGraduated && t0.curvePending > 0n) {
-      const s = await ex.send(creator, { to: info.curve, data: encodeFunctionData({ abi: ponsV2CurveAbi, functionName: "sweepFees", args: [0n] }) });
-      steps.push({ kind: "curve_sweep", hash: s.hash, networkFee: s.networkFee });
-    } else if (info.phase === PHASE.PoolCreated && t0.poolPendingEth > 0n && t0.poolPendingToken === 0n) {
-      const id = poolIdOf(a.poolKey(info));
-      const s = await ex.send(creator, {
-        to: a.deployment.memeHook,
-        data: encodeFunctionData({ abi: ponsV2MemeHookAbi, functionName: "sweepPoolFees", args: [id, 0n, 0n] }),
-      });
-      steps.push({ kind: "pool_sweep", hash: s.hash, networkFee: s.networkFee });
+    let owed = await this.o.owed.get(t0.creatorIndex);
+    if (sweepFees) {
+      const info = await a.launchInfo(t0.token);
+      if (info.phase === PHASE.NotGraduated && t0.curvePending > 0n) {
+        const s = await ex.send(creator, { to: info.curve, data: encodeFunctionData({ abi: ponsV2CurveAbi, functionName: "sweepFees", args: [0n] }) });
+        steps.push({ kind: "curve_sweep", hash: s.hash, networkFee: s.networkFee });
+      } else if (info.phase === PHASE.PoolCreated && t0.poolPendingEth > 0n && t0.poolPendingToken === 0n) {
+        const id = poolIdOf(a.poolKey(info));
+        const s = await ex.send(creator, {
+          to: a.deployment.memeHook,
+          data: encodeFunctionData({ abi: ponsV2MemeHookAbi, functionName: "sweepPoolFees", args: [id, 0n, 0n] }),
+        });
+        steps.push({ kind: "pool_sweep", hash: s.hash, networkFee: s.networkFee });
+      }
+      const escrow = await this.read.readContract({ address: a.deployment.feeEscrow, abi: ponsV2FeeEscrowAbi, functionName: "balanceOf", args: [creator.address] });
+      if (escrow > 0n) {
+        const s = await ex.send(creator, { to: a.deployment.feeEscrow, data: encodeFunctionData({ abi: ponsV2FeeEscrowAbi, functionName: "claim", args: [] }) });
+        // Exactly what the escrow paid (Claimed event), not a balance read.
+        const claimed = parseEventLogs({ abi: ponsV2FeeEscrowAbi, logs: s.receipt.logs, eventName: "Claimed" })
+          .filter((l) => getAddress(l.args.recipient) === getAddress(creator.address))
+          .reduce((x, l) => x + l.args.amount, 0n);
+        owed += claimed;
+        await this.o.owed.set(t0.creatorIndex, owed); // durable before forwarding
+        steps.push({ kind: "claim", hash: s.hash, networkFee: s.networkFee, value: claimed });
+      }
     }
-    const escrow = await this.read.readContract({ address: a.deployment.feeEscrow, abi: ponsV2FeeEscrowAbi, functionName: "balanceOf", args: [creator.address] });
-    if (escrow > 0n) {
-      const s = await ex.send(creator, { to: a.deployment.feeEscrow, data: encodeFunctionData({ abi: ponsV2FeeEscrowAbi, functionName: "claim", args: [] }) });
-      steps.push({ kind: "claim", hash: s.hash, networkFee: s.networkFee, value: escrow });
-    }
-    const bal = await ex.balance(creator.address);
-    const gasCost = quantizeGasLimit(21_000n) * ex.fees.maxFeePerGas;
-    const spare = bal > this.o.keepWei + gasCost ? bal - this.o.keepWei - gasCost : 0n;
-    const value = (spare / this.o.transferStepWei) * this.o.transferStepWei;
+    let collected = 0n;
     let vault: LocalAccount | null = null;
-    if (value > 0n) {
+    if (owed > 0n) {
+      // Forward the fees, exactly (no rounding: creator_fee_sweeps.lamports must equal what the escrow paid).
       vault = this.o.pickVault();
       const v = vault;
+      const value = owed;
       const hook = this.o.onTransferSigned;
       const s = await ex.transfer(creator, v.address, value, hook ? { onSigned: (tx) => hook(t0, tx, value, getAddress(v.address)) } : {});
+      await this.o.owed.set(t0.creatorIndex, 0n);
       steps.push({ kind: "to_vault", hash: s.hash, networkFee: s.networkFee, value });
+      collected = value;
     }
-    return { target: t0, steps, collected: value, vault: vault ? getAddress(vault.address) : null };
+    // Funding leftover (pool money, not a fee): back to the rebalance address, round amount, unrecorded.
+    const bal = await ex.balance(creator.address);
+    const gasCost = quantizeGasLimit(21_000n) * ex.fees.maxFeePerGas;
+    const free = bal - this.o.keepWei - gasCost;
+    const back = free > 0n ? (free / this.o.minReturnWei) * this.o.minReturnWei : 0n;
+    if (back > 0n) {
+      const s = await ex.transfer(creator, this.o.keyring.rebalance(0).address, back);
+      steps.push({ kind: "to_rebalance", hash: s.hash, networkFee: s.networkFee, value: back });
+    }
+    return { target: t0, steps, collected, vault: vault ? getAddress(vault.address) : null };
   }
 
   /** One global pass: plan, shuffle, sweep each with a random pause. Errors of one target never stop the pass. */

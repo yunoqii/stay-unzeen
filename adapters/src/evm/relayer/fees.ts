@@ -5,7 +5,7 @@ import type { FeeSweepStore } from "../../relayer/fee-sweeper";
 import type { EvmExecutor } from "../executor";
 import type { EvmKeyring } from "../keys";
 import type { PonsAdapter } from "../pons/adapter";
-import { PonsFeeSweeper, type PonsLaunchRef } from "../pons/creator";
+import { PonsFeeSweeper, type OwedStore, type PonsLaunchRef } from "../pons/creator";
 import type { HoodNetworkId } from "./queue";
 
 /**
@@ -27,6 +27,8 @@ export interface HoodFeeLoopOptions {
   /** Creator indexes ever allocated (file / Postgres counter). */
   creatorCount: () => Promise<number>;
   minCollectWei?: bigint;
+  /** Claimed-not-forwarded fees (production: FileOwedStore in the keys dir). */
+  owed?: OwedStore;
   /** Random interval between runs, ms. Default 6-12 h. */
   intervalMs?: [number, number];
   jitterMs?: [number, number];
@@ -43,6 +45,7 @@ export class HoodFeeLoop {
       keyring: o.keyring,
       pickVault: () => this.pickVault(),
       ...(o.minCollectWei !== undefined ? { minCollectWei: o.minCollectWei } : {}),
+      ...(o.owed ? { owed: o.owed } : {}),
       ...(o.jitterMs ? { jitterMs: o.jitterMs } : {}),
       onTransferSigned: async (t, tx, _value, _vault) => {
         await o.store.recordSent({
@@ -86,7 +89,12 @@ export class HoodFeeLoop {
   async resolvePending(): Promise<number> {
     let n = 0;
     for (const row of await this.o.store.pending(this.o.network as never)) {
-      const st = await this.o.executor.lookup(row.signature as `0x${string}`);
+      let st: Awaited<ReturnType<EvmExecutor["lookup"]>>;
+      try {
+        st = await this.o.executor.lookup(row.signature as `0x${string}`);
+      } catch {
+        continue; // RPC error (429, timeout): never "not sent"; resolved on a later run (review-hood-final #1)
+      }
       if (st.state === "landed") {
         if (st.receipt.status === "success") {
           const tx = await this.o.executor.read.getTransaction({ hash: st.receipt.transactionHash });

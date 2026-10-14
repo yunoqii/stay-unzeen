@@ -484,12 +484,12 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     const launched = parseEventLogs({ abi: ponsV2LaunchFactoryAbi, logs, eventName: "TokenLaunched" }).find(
       (l) => getAddress(l.address) === getAddress(this.deployment.factory),
     );
-    if (!launched) throw new AdapterError("internal", "launch landed but TokenLaunched not found", { signature: sent.hash });
+    if (!launched) throw new AdapterError("internal", "launch landed but TokenLaunched not found", { signature: sent.hash, stage: "confirm" });
     const token = getAddress(launched.args.token);
     const curve = getAddress(launched.args.curve);
     this.curves.set(token.toLowerCase(), curve);
     const trade = initialBuyWei > 0n ? this.buyFromLogs(logs, curve) : null;
-    if (initialBuyWei > 0n && !trade) throw new AdapterError("internal", "launch landed but CurveBuy not found", { signature: sent.hash });
+    if (initialBuyWei > 0n && !trade) throw new AdapterError("internal", "launch landed but CurveBuy not found", { signature: sent.hash, stage: "confirm" });
 
     if (trade && trade.tokensOut > 0n && opts.approveAfterBuy !== false) {
       const a = await this.ensureAllowance(vault, token, curve, maxUint256 >> 1n).catch(() => null);
@@ -530,7 +530,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
       value: weiIn,
     }, sendOpts(opts));
     const trade = this.buyFromLogs(sent.receipt.logs, info.curve);
-    if (!trade) throw new AdapterError("internal", "buy landed but CurveBuy not found", { signature: sent.hash });
+    if (!trade) throw new AdapterError("internal", "buy landed but CurveBuy not found", { signature: sent.hash, stage: "confirm" });
 
     const sideTxs: EvmSideTx[] = [];
     if (opts.approveAfterBuy !== false) {
@@ -571,7 +571,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     const ev = parseEventLogs({ abi: ponsV2CurveAbi, logs: sent.receipt.logs, eventName: "CurveSell" }).find(
       (l) => getAddress(l.address) === info.curve,
     );
-    if (!ev) throw new AdapterError("internal", "sell landed but CurveSell not found", { signature: sent.hash });
+    if (!ev) throw new AdapterError("internal", "sell landed but CurveSell not found", { signature: sent.hash, stage: "confirm" });
     return {
       ...(await this.baseResult("sell", sent, info.token, info.curve, vault.address, sideTxs)),
       tokenAmount: ev.args.tokensIn,
@@ -761,7 +761,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     const swap = parseEventLogs({ abi: V4_EVENTS_ABI, logs, eventName: "Swap" }).find(
       (l) => getAddress(l.address) === this.uniswap.poolManager && l.args.id === id,
     );
-    if (!swap) throw new AdapterError("internal", "v4 swap landed but Swap not found", { signature: sent.hash });
+    if (!swap) throw new AdapterError("internal", "v4 swap landed but Swap not found", { signature: sent.hash, stage: "confirm" });
     const skim = parseEventLogs({ abi: V4_EVENTS_ABI, logs, eventName: "HookFeeCollected" }).find(
       (l) => getAddress(l.address) === this.deployment.memeHook && l.args.poolId === id,
     );
@@ -880,7 +880,7 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
       const launched = parseEventLogs({ abi: ponsV2LaunchFactoryAbi, logs, eventName: "TokenLaunched" }).find(
         (l) => getAddress(l.address) === getAddress(this.deployment.factory),
       );
-      if (!launched) throw new AdapterError("internal", "launch receipt without TokenLaunched", { signature: receipt.transactionHash });
+      if (!launched) throw new AdapterError("internal", "launch receipt without TokenLaunched", { signature: receipt.transactionHash, stage: "confirm" });
       const token = getAddress(launched.args.token);
       const curve = getAddress(launched.args.curve);
       const trade = this.buyFromLogs(logs, curve);

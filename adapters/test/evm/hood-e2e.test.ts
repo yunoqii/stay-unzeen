@@ -23,6 +23,7 @@ import { checkVerifySnapshot } from "../../src/evm/attest";
  */
 interface WebVerify {
   rootsDigest(s: unknown): string;
+  checkSnapshot(s: unknown, pinnedOperator: string | null): { digestOk: boolean; operator: string; allVaultsOk: boolean; anchor: string };
   checkProof(s: unknown, proof: unknown, anonPubkeyB58: string): { ok: boolean; assets: { asset: string; committed: bigint }[] };
 }
 const WEB_VERIFY = path.join(__dirname, "../../../web/lib/verify/merkle-sum.ts");
@@ -296,7 +297,12 @@ describe.skipIf(!enabled)("hood e2e: core API + hood relayer + anvil fork", () =
       await sleep(1_000);
     }
     expect(snap?.digestVersion).toBe(3);
-    const { rootsDigest, checkProof } = await loadWebVerify();
+    const { rootsDigest, checkProof, checkSnapshot } = await loadWebVerify();
+    // The whole browser check (digest v3, EIP-191 operator vs the pinned attestation address, EIP-712 vaults).
+    const sc = checkSnapshot(snap, kr.attest("verify").address);
+    expect(sc.digestOk).toBe(true);
+    expect(sc.operator).toBe("verified");
+    expect(sc.allVaultsOk).toBe(true);
     const digest = rootsDigest(snap);
     expect(digest).toBe(String(snap.rootsDigest).toLowerCase());
     expect(snap.operator, JSON.stringify(snap).slice(0, 500)).toBeTruthy();

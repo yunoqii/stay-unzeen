@@ -35,7 +35,8 @@
     "evm:keys": "tsx scripts/evm-keys.ts",
     "evm:abi": "tsx scripts/evm-fetch-abi.ts",
     "evm:fixtures": "tsx scripts/evm-record-fixtures.ts",
-    "test:fork": "HOOD_FORK=1 vitest run test/evm/pons-fork.test.ts test/evm/hood-relayer-fork.test.ts"
+    "test:fork": "HOOD_FORK=1 vitest run test/evm/pons-fork.test.ts test/evm/hood-relayer-fork.test.ts",
+    "relayer:hood": "tsx scripts/relayer-hood.ts"
   },
   "engines": {
     "node": ">=20"

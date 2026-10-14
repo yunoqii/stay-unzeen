@@ -13,7 +13,7 @@ import { reconcileCreator } from "../pons/creator";
 import { readyToGraduate, spot } from "../pons/math";
 import type { EvmTxResult } from "../types";
 import type { EvmWithdrawer } from "../withdraw";
-import type { LaunchStore } from "./launches";
+import { MemorySentClock, type LaunchStore, type SentClock } from "./launches";
 import { fundVaults } from "./pool-state";
 import type { HoodClaimedJob, HoodExecution, HoodJobResult, HoodJobSpec, HoodMarket, HoodQueue } from "./queue";
 
@@ -36,7 +36,7 @@ import type { HoodClaimedJob, HoodExecution, HoodJobResult, HoodJobSpec, HoodMar
  */
 
 export interface HoodRelayerEvent {
-  event: "executed" | "failed" | "retry";
+  event: "executed" | "failed" | "retry" | "needs_review";
   kind: HoodJobSpec["kind"];
   code?: ApiErrorCode;
 }
@@ -51,6 +51,8 @@ export interface HoodRelayerOptions {
   mintVaults: MintVaults;
   lock: VaultLock;
   launches: LaunchStore;
+  /** Send time of every signed main tx (default: in memory; production: FileSentClock). */
+  sentClock?: SentClock;
   withdrawer: EvmWithdrawer;
   /** Publishes the user's data-URL image server-side, returns its URL (on-chain `logo`). Default: no logo. */
   publishImage?: (dataUrl: string) => Promise<string | null>;
@@ -68,6 +70,7 @@ export interface HoodRelayerOptions {
 export class HoodRelayer {
   private readonly o: HoodRelayerOptions & Required<Pick<HoodRelayerOptions, "workerId" | "leaseMs" | "maxClaims" | "dropGraceMs" | "now" | "sleep">>;
   private readonly byAddress: Map<string, LocalAccount>;
+  private readonly clock: SentClock;
 
   constructor(o: HoodRelayerOptions) {
     this.o = {
@@ -81,6 +84,7 @@ export class HoodRelayer {
     };
     if (o.vaults.length === 0) throw new Error("hood relayer: no vaults");
     this.byAddress = new Map(o.vaults.map((v) => [getAddress(v.address), v]));
+    this.clock = o.sentClock ?? new MemorySentClock();
   }
 
   /** Claims and processes one due job. False when nothing was due. */
@@ -100,8 +104,11 @@ export class HoodRelayer {
       if (!(e instanceof LeaseLostError)) throw e;
       return true;
     }
+    if (result.status === "executed" || result.status === "failed") await this.clock.forget(job.id).catch(() => undefined);
     if (result.status === "executed" && job.spec.kind === "create") await this.o.launches.delete(job.id).catch(() => undefined);
-    this.o.onEvent?.({ event: result.status, kind: job.spec.kind, ...(result.status !== "executed" ? { code: result.code } : {}) });
+    // review-hood-final #10: a failed create returns its creator's ETH now, not at the next restart.
+    if (result.status === "failed" && job.spec.kind === "create") await this.reconcileOne(job.id).catch(() => undefined);
+    this.o.onEvent?.({ event: result.status, kind: job.spec.kind, ...(result.status === "failed" || result.status === "retry" ? { code: result.code } : {}) });
     return true;
   }
 
@@ -117,6 +124,11 @@ export class HoodRelayer {
   }
 
   // -------------------------------------------------------------------------
+
+  /** RELAYER v15: a LANDED tx whose result could not be read -> needs_review (never failed: no refund). */
+  private review(message: string): HoodJobResult {
+    return { status: "needs_review", message };
+  }
 
   private retry(code: ApiErrorCode, message: string, ms: number): HoodJobResult {
     return { status: "retry", code, message, notBefore: this.o.now() + ms };
@@ -134,7 +146,14 @@ export class HoodRelayer {
 
   private async process(job: HoodClaimedJob): Promise<HoodJobResult> {
     if (job.sent) {
-      const r = await this.resolveSent(job);
+      let r: HoodJobResult | null;
+      try {
+        r = await this.resolveSent(job);
+      } catch (e) {
+        // RPC trouble -> later; anything else here happens AFTER the tx was found landed
+        // (receipt / logs not parseable): needs_review, never failed (review-hood-final #8).
+        r = e instanceof AdapterError && e.apiCode === "venue_unavailable" ? this.retry("venue_unavailable", "RPC error", 15_000) : this.review("landed tx could not be parsed");
+      }
       if (r) return r;
     } else if (job.claims > this.o.maxClaims) {
       return { status: "failed", code: "venue_unavailable", message: "too many attempts" };
@@ -181,6 +200,8 @@ export class HoodRelayer {
 
   private onSigned(job: HoodClaimedJob, vault: Address, outSig?: string): OnSigned {
     return async (tx) => {
+      // Clock first: a hash we may have broadcast is never forgotten (reportSent only keeps the last one).
+      await this.clock.mark(job.id, tx.hash, this.o.now());
       await this.o.queue.reportSent(job, { hash: tx.hash, nonce: tx.nonce, vault: getAddress(vault), sentAt: this.o.now(), ...(outSig ? { outSig } : {}) });
     };
   }
@@ -270,24 +291,70 @@ export class HoodRelayer {
   // Recorded tx resolution
   // -------------------------------------------------------------------------
 
+  /**
+   * A recorded main tx is resolved BEFORE anything new is signed (review-hood-final #1, #5):
+   * - every hash ever signed for the job is looked up on every provider;
+   * - an RPC error (429, timeout...) is never "not sent": retry later;
+   * - "unknown" on every provider -> wait `dropGraceMs` from the SEND time (SentClock,
+   *   not updated_at), look again, and only then execute anew (nonce cache reset).
+   */
   private async resolveSent(job: HoodClaimedJob): Promise<HoodJobResult | null> {
     const sent = job.sent!;
-    const st = await this.o.executor.lookup(sent.hash);
-    if (st.state === "landed") {
-      if (st.receipt.status !== "success") {
-        const err = await this.o.executor.explainRevert(st.receipt);
+    const hashes = [...new Set([sent.hash, ...((await this.clock.hashes(job.id)) as Hex[])])];
+    // RPC part only (errors -> retry); parsing a landed receipt happens outside (errors -> needs_review).
+    type Seen = { landed: TransactionReceipt } | "pending" | "unknown";
+    const look = async (): Promise<Seen> => {
+      let pending = false;
+      for (const h of hashes) {
+        const st = await this.o.executor.lookup(h);
+        if (st.state === "landed") return { landed: st.receipt };
+        if (st.state === "pending") pending = true;
+      }
+      return pending ? "pending" : "unknown";
+    };
+    const settle = async (seen: Exclude<Seen, "unknown">): Promise<HoodJobResult> => {
+      if (seen === "pending") return this.retry("venue_unavailable", "tx pending", 2_000);
+      if (seen.landed.status !== "success") {
+        const err = await this.o.executor.explainRevert(seen.landed);
         return { status: "failed", code: err.apiCode, message: err.message };
       }
-      return this.fromReceipt(job, st.receipt);
+      return this.fromReceipt(job, seen.landed);
+    };
+    let first: Seen;
+    try {
+      first = await look();
+    } catch {
+      return this.retry("venue_unavailable", "RPC error while resolving a recorded tx", 10_000 + randomInt(10_000));
     }
-    if (st.state === "pending") return this.retry("venue_unavailable", "tx pending", 2_000);
-    // Unknown to the node: dropped, or not propagated yet.
+    if (first !== "unknown") return settle(first);
+    let at = sent.sentAtReliable ? sent.sentAt : await this.clock.get(job.id, sent.hash);
+    if (at === null) {
+      // Recorded by an older build / another host: start the grace now.
+      await this.clock.mark(job.id, sent.hash, this.o.now());
+      at = this.o.now();
+    }
     const signer = await this.signerAddressOf(job);
-    const used = await this.o.executor.read.getTransactionCount({ address: signer, blockTag: "latest" });
+    let used: number;
+    try {
+      used = await this.o.executor.read.getTransactionCount({ address: signer, blockTag: "latest" });
+    } catch {
+      return this.retry("venue_unavailable", "RPC error while reading the nonce", 10_000);
+    }
     const nonceTaken = used > sent.nonce;
-    if (!nonceTaken && this.o.now() - sent.sentAt < this.o.dropGraceMs) return this.retry("venue_unavailable", "tx not visible yet", 5_000);
+    if (!nonceTaken && this.o.now() - at < this.o.dropGraceMs) return this.retry("venue_unavailable", "tx not visible yet", 5_000);
+    // Second look, a moment later, every provider, every hash of the job: is the tx in that nonce ours?
+    await this.o.sleep(2_000);
+    let second: Seen;
+    try {
+      second = await look();
+    } catch {
+      return this.retry("venue_unavailable", "RPC error while resolving a recorded tx", 10_000 + randomInt(10_000));
+    }
+    if (second !== "unknown") return settle(second);
+    // Proven not ours / never accepted: it can never land. Re-read the nonce from chain next send.
+    this.o.executor.nonces.reset(signer);
     // create: executeCreate sees the used creator and reconciles it (finds the launch if it landed).
-    return null; // can never land: execute anew (same nonce if still free -> a ghost copy cannot also land)
+    return null;
   }
 
   private async signerAddressOf(job: HoodClaimedJob): Promise<Address> {
@@ -315,7 +382,7 @@ export class HoodRelayer {
         const amount = parseEventLogs({ abi: ponsV2TokenAbi, logs: receipt.logs, eventName: "Transfer" })
           .filter((l) => getAddress(l.address) === s.token && getAddress(l.args.to) === to)
           .reduce((x, l) => x + l.args.value, 0n);
-        if (amount === 0n) return this.retry("internal", "withdraw transfer not readable", 60_000);
+        if (amount === 0n) return this.review("landed withdraw: transfer not readable");
         return {
           status: "executed",
           execution: { kind: "withdraw", hash: receipt.transactionHash, block: receipt.blockNumber, vault, token: s.token, to, amount, networkFee: receipt.gasUsed * receipt.effectiveGasPrice },
@@ -346,7 +413,7 @@ export class HoodRelayer {
   // -------------------------------------------------------------------------
 
   private async tradeResult(r: EvmTxResult): Promise<HoodJobResult> {
-    if (!r.amountsKnown) return this.retry("internal", "amounts not readable yet (re-read before crediting)", 60_000);
+    if (!r.amountsKnown) return this.review("landed tx: amounts not readable (re-read before crediting)");
     return {
       status: "executed",
       execution: {
@@ -398,7 +465,8 @@ export class HoodRelayer {
     if (r.route !== "curve") return null;
     try {
       const info = await this.o.adapter.launchInfo(r.token);
-      if (info.phase !== PHASE.NotGraduated) return { priceEth: "0", marketCapEth: "0", status: "graduated" };
+      // Never "0": graduated prices come from the v4 price loop (pool-state.writeTokenPrices).
+      if (info.phase !== PHASE.NotGraduated) return null;
       const { state } = await this.o.adapter.curveState(r.curve, r.blockNumber);
       const sp = spot(state);
       return { priceEth: sp.price, marketCapEth: sp.marketCap, status: state.graduated || readyToGraduate(state) ? "graduated" : "curve" };
@@ -428,6 +496,13 @@ export class HoodRelayer {
    * the entry; failed / gone -> reconcile the creator (refund to the funder if it
    * never launched). In-flight jobs are left to `tick`. Returns counts only.
    */
+  private async reconcileOne(id: string): Promise<void> {
+    const pl = await this.o.launches.get(id);
+    if (!pl) return;
+    await reconcileCreator({ adapter: this.o.adapter, executor: this.o.executor, keyring: this.o.keyring }, pl.creatorIndex, { fromBlock: pl.fromBlock, abandon: true });
+    await this.o.launches.delete(id);
+  }
+
   async reconcileLaunches(): Promise<{ kept: number; dropped: number; refunded: number; orphanLaunches: number }> {
     const out = { kept: 0, dropped: 0, refunded: 0, orphanLaunches: 0 };
     for (const [id, pl] of await this.o.launches.all()) {

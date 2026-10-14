@@ -178,7 +178,10 @@ describe("fee sweeper policy", () => {
   it("pool ETH counts only when no memecoin conversion (operator-only) is pending", () => {
     expect(sw.collectable({ ...base, poolPendingEth: 900n })).toBe(900n);
     expect(sw.collectable({ ...base, poolPendingEth: 900n, poolPendingToken: 1n })).toBe(0n);
-    expect(sw.collectable({ ...base, curvePending: 10n, escrow: 20n, balance: 150n })).toBe(80n);
+    // review-hood-final #2: the creator's own ETH (funding leftover) is never a fee.
+    expect(sw.collectable({ ...base, curvePending: 10n, escrow: 20n, balance: 150n })).toBe(30n);
+    expect(sw.collectable({ ...base, escrow: 20n, owed: 7n, balance: 150n })).toBe(27n);
+    expect(sw.returnable({ ...base, balance: 150n, owed: 7n })).toBe(43n); // 150 - 7 owed - 100 keep
   });
 
   it("below threshold: nothing is sent", async () => {
