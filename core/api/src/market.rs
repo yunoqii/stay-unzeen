@@ -70,7 +70,7 @@ const TOKEN_COLS: &str = "mint, symbol, name, image, venue, status, decimals,
 /// `tokens` only (v0.13): + quote pair, quote price, LaunchLab platform.
 const TOKEN_COLS_Q: &str = "mint, symbol, name, image, venue, status, decimals,
      trim_scale(price_sol)::text, trim_scale(market_cap_sol)::text, (extract(epoch FROM created_at) * 1000)::bigint,
-     quote_mint, trim_scale(price_quote)::text, platform";
+     quote_mint, trim_scale(price_quote)::text, platform, (floor(extract(epoch FROM price_at) / 10) * 10000)::bigint AS price_ts";
 
 /// v0.13 `Token.quote` / `quoteMint` / `priceQuote` / `platform` from columns at `i..i+3`.
 fn quote_fields(v: &mut Value, r: &Row, i: usize) {
@@ -99,6 +99,17 @@ fn quote_fields(v: &mut Value, r: &Row, i: usize) {
     }
 }
 
+/// v0.23 `Token.priceTs`: when the pool price was last written (`tokens.price_at`, migration
+/// 0031), unix ms rounded down to 10 s; absent when the token has no positive price. Hood
+/// buy/sell need it within `PoolInfo.chain.priceMaxAgeSecs`.
+fn price_ts_field(v: &mut Value, r: &Row) {
+    if let Some(i) = r.columns().iter().position(|c| c.name() == "price_ts")
+        && let Some(t) = r.get::<_, Option<i64>>(i)
+    {
+        v["priceTs"] = json!(t);
+    }
+}
+
 fn token_json(r: &Row) -> Value {
     let mut v = json!({
         "mint": r.get::<_, String>(0),
@@ -115,6 +126,7 @@ fn token_json(r: &Row) -> Value {
         v["image"] = json!(img);
     }
     quote_fields(&mut v, r, 10);
+    price_ts_field(&mut v, r);
     v
 }
 
@@ -203,7 +215,8 @@ pub async fn tokens(State(st): State<AppState>, Query(q): Query<HashMap<String, 
                     EXISTS (SELECT 1 FROM trades c WHERE c.mint = t.mint AND c.kind = 'create'),
                     COALESCE(a.vol, 0), COALESCE(a.n, 0)::bigint,
                     CASE WHEN t.status = 'curve' THEN s.data->'market'->>'curveProgressPct' END,
-                    t.quote_mint, trim_scale(t.price_quote)::text, t.platform
+                    t.quote_mint, trim_scale(t.price_quote)::text, t.platform,
+                    (floor(extract(epoch FROM t.price_at) / 10) * 10000)::bigint AS price_ts
              FROM tokens t
              LEFT JOIN LATERAL (SELECT sum(x.sol_amount) AS vol, count(*) AS n FROM trades x
                                 WHERE x.mint = t.mint AND x.kind IN ('buy', 'sell')

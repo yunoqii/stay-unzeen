@@ -2,7 +2,10 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.22** (14.10; миграция `0031_review_hood.sql`; RELAYER.md v15). Изменения против v0.21 (ревью `review-hood-final.md`):
+Статус: **v0.23** (14.10; без миграций, RELAYER.md v16). Изменения против v0.22:
+- **`Token.priceTs?: number`** — когда пул последний раз записал цену токена (`tokens.price_at`), unix мс, округлено вниз до 10 с. Есть в `GET /api/tokens` и `GET /api/tokens/:mint` для токенов из `tokens`, если цена > 0. Нет поля или `now − priceTs > PoolInfo.chain.priceMaxAgeSecs` → на hood фронт блокирует buy/sell до отправки (сервер ответил бы `503 stale_price`). Запас на огрубление и расхождение часов — 10–20 с.
+
+Изменения v0.22 против v0.21 (ревью `review-hood-final.md`):
 - **Подписи Verify на hood** (`digestVersion: 3`), формат для браузера — раздел «Verify» → «Подписи на Robinhood Chain». Векторы с подписями: `core/testdata/verify-v3-vectors.json` → `signatures`. Сверено с viem байт в байт.
 - **Защита от слиппеджа на hood:** `buy`/`sell` с `minOut = 0` / `minZecOut = 0` → `400 bad_request`. Если у токена нет цены пула, она равна 0 или старше `PoolInfo.chain.priceMaxAgeSecs` (по умолчанию 300 с) → **`503 stale_price`** с `Retry-After: 60`. В обоих случаях hold не берётся. Новое поле `PoolInfo.chain.priceMaxAgeSecs` — только у hood-сервера. Фронт считает `minOut` только по свежей цене. Если цена устарела, кнопку покупки/продажи нужно блокировать с подсказкой «price updating».
 - **Сделка, которая легла, но не разобрана** (статус задания `needs_review`, RELAYER v15): ZEC не возвращаются, hold держится. В `Portfolio.actions` действие остаётся в статусе **`sent`** (в ожидании), `zecHeld` не меняется. Когда релейер или оператор разберёт результат, статус станет `executed` или `failed`, как обычно.
@@ -248,6 +251,7 @@ interface Token {
   venue: Venue; status: "curve" | "graduated";
   decimals: number;      // decimals SPL-токена
   priceSol: string;      // десятичная строка: SOL за 1 целый токен (UI-единицы)
+  priceTs?: number;      // v0.23: время последней записи цены пулом, unix мс, вниз до 10 с; нет — цены нет (hood: сравнивать с PoolInfo.chain.priceMaxAgeSecs)
   marketCapSol: string;  // десятичная строка, SOL (UI-единицы)
   createdAt: number;     // unix ms
   quote: Quote;          // v0.13: пара кривой ("SOL" у всех старых токенов)

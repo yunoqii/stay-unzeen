@@ -5633,6 +5633,13 @@ async fn hood_instance_deposit_buy_sell_withdraw() {
         "stale_price"
     );
     e.sql(&format!("UPDATE {s}.tokens SET price_sol = 0.0000000001")).await;
+    // v0.23: Token.priceTs (10 s granularity) lets the client block before sending.
+    let one = e.get(&format!("/api/tokens/{TOKEN}")).await.body;
+    let ts = one["priceTs"].as_i64().unwrap();
+    assert_eq!(ts % 10_000, 0);
+    assert!(ts <= now_ms() as i64 && ts > now_ms() as i64 - 20_000, "{ts}");
+    let list = e.get("/api/tokens").await.body;
+    assert_eq!(list[0]["priceTs"], ts);
     assert_eq!(
         e.signed(&user(20), "GET", "/api/portfolio", "").await.body["zecHeld"],
         "0",
