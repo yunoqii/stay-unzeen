@@ -37,7 +37,7 @@
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
 
 ## В работе
-- adapters: hood — launch_curves pons, fund_vaults (ETH с адреса ребаланса), verify_vaults v3, сквозной тест с core hood-инстансом на anvil-форке
+- ничего не в работе: ждём средства/ключи владельца для живых прогонов (devnet e2e Solana, mainnet hood). Hood по коду готов: ревью review-hood-final закрыто, сквозной тест с core 10/10, Verify v3/EVM в браузере
 - (день 3) Готово 13–14.10: суммы NUMERIC/u128; chainId 0111/0212, venue pons, /api/rates; сценарии S0–S7 + 2 аудита закрыты (полы по времени последней сделки, адрес не хранится на сервере); Verify v3; hood-инстанс core; адаптер+релейер Pons (v4 после graduation, вывод, fee sweep, ротация funder); UI сценариев и Robinhood (за NEXT_PUBLIC_HOOD); Portfolio ровно 16 КиБ без сжатия; проверка схемы БД при старте
 - Ждёт: живой mainnet hood (RPC-ключ 4663, ~0.02 ETH, разрешение); devnet e2e (SOL на devnet); аналитик — финальное ревью hood после adapters
 
