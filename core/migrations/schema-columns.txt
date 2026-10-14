@@ -332,6 +332,7 @@ relayer_jobs.out_quote_mint text
 relayer_jobs.out_sig text
 relayer_jobs.out_token_amount numeric
 relayer_jobs.part smallint
+relayer_jobs.sent_at timestamp with time zone
 relayer_jobs.settled_at timestamp with time zone
 relayer_jobs.signature text
 relayer_jobs.slot bigint

@@ -32,13 +32,14 @@ GRANT SELECT (id, part, op, venue, mint, lamports_in, token_amount, min_out, met
               out_block_time,          -- 0012: block time of attest
               out_creator_fee,         -- 0013: exact creator fee of a create / fair_create tx
               bundle_legs,             -- 0017: fair-launch v2 legs [{sig, vault}]
-              out_quote_mint, out_quote_amount) -- 0019: quote units of a non-SOL pair job
+              out_quote_mint, out_quote_amount, -- 0019: quote units of a non-SOL pair job
+              sent_at)                 -- 0032: first transition into 'sent' (set by a trigger)
     ON relayer_jobs TO unzeen_relayer;
 -- not_before: backoff only; a trigger (0003) refuses to move it earlier.
 GRANT UPDATE (status, attempts, claimed_by, claimed_at, lease_until, not_before, signature,
               last_valid_block_height, vault, slot, out_mint, out_token_amount,
               out_lamports, network_fee, error_code, error_message, updated_at, out_memo, out_sig, out_block_time,
-              out_creator_fee, bundle_legs, out_quote_mint, out_quote_amount)
+              out_creator_fee, bundle_legs, out_quote_mint, out_quote_amount, sent_at)
     ON relayer_jobs TO unzeen_relayer;
 
 -- mint -> vault pinning (0003): the relayer owns it (re-pin = UPDATE of vault only).

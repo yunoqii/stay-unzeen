@@ -142,6 +142,57 @@ async fn schema_snapshot() {
     db.drop_schema().await;
 }
 
+/// 0032: `sent_at` is set only on the transition into 'sent'; claim / retry never touch it.
+#[tokio::test]
+async fn relayer_jobs_sent_at() {
+    let Some(db) = setup().await else { return };
+    let s = db.schema.clone();
+    let c = &db.admin;
+    let n = |cond: &str| format!("SELECT count(*) FROM {s}.relayer_jobs WHERE {cond}");
+    c.batch_execute(&format!(
+        "INSERT INTO {s}.relayer_jobs (op, network, status, not_before, sent_at)
+         VALUES ('attest', 'devnet', 'queued', now(), now())"
+    ))
+    .await
+    .unwrap();
+    let count = |q: String| async move { c.query_one(&q, &[]).await.unwrap().get::<_, i64>(0) };
+    assert_eq!(count(n("sent_at IS NULL")).await, 1, "insert as queued: none");
+    c.batch_execute(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'claimed', sent_at = now()"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(count(n("sent_at IS NULL")).await, 1, "claim never sets it");
+    c.batch_execute(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'sent', sent_at = '2000-01-01'"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        count(n("sent_at > now() - interval '1 minute'")).await,
+        1,
+        "set by the db on 'sent'"
+    );
+    c.batch_execute(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'queued';
+         UPDATE {s}.relayer_jobs SET status = 'claimed', sent_at = NULL;"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        count(n("sent_at IS NOT NULL")).await,
+        1,
+        "retry / claim keep the last value"
+    );
+    c.batch_execute(&format!(
+        "UPDATE {s}.relayer_jobs SET status = 'confirmed', signature = 'S1', sent_at = NULL"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(count(n("sent_at IS NOT NULL")).await, 1, "later statuses keep it");
+    db.drop_schema().await;
+}
+
 #[tokio::test]
 async fn deposit_lifecycle_is_idempotent() {
     let Some(db) = setup().await else { return };
