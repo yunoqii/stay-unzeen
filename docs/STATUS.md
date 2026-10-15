@@ -37,9 +37,8 @@
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
 
 ## В работе
-- ничего не в работе: ждём средства/ключи владельца для живых прогонов (devnet e2e Solana, mainnet hood). Hood по коду готов: ревью review-hood-final закрыто, сквозной тест с core 10/10, Verify v3/EVM в браузере
-- (день 3) Готово 13–14.10: суммы NUMERIC/u128; chainId 0111/0212, venue pons, /api/rates; сценарии S0–S7 + 2 аудита закрыты (полы по времени последней сделки, адрес не хранится на сервере); Verify v3; hood-инстанс core; адаптер+релейер Pons (v4 после graduation, вывод, fee sweep, ротация funder); UI сценариев и Robinhood (за NEXT_PUBLIC_HOOD); Portfolio ровно 16 КиБ без сжатия; проверка схемы БД при старте
-- Ждёт: живой mainnet hood (RPC-ключ 4663, ~0.02 ETH, разрешение); devnet e2e (SOL на devnet); аналитик — финальное ревью hood после adapters
+- ничего: devnet e2e (15.10) пройден вживую целиком — депозит, pump.fun/DBC create/buy/sell, ордера, выводы токенов и ZEC, сценарии, Verify с якорем, чат, creator fees, fair-launch с 3 tlock-заявками, UI в браузере. Найденные баги закрыты (sub-lamport оценка, minOut=0 после перезагрузки и на сервере, минимум до среза, импакт и комиссии кривой из FeeConfig, выбор vault для нового mint, порядок actions, диапазон initial buy).
+- Ждёт владельца: mainnet Solana (~0.5 SOL, 0.05–0.1 ZEC), Robinhood (~0.022 ETH, RPC 4663, решение по сабмиту), подготовка деплоя.
 
 ## Решения
 - 13.10 (лид): Zcash-кошелёк пула — отдельный на каждый инстанс (Solana/hood); Now в сценариях — только шаг 1 после manual_start, retry Now → delayed; ордера плана отменяются и при failed; адреса вывода сценариев не хранятся на сервере даже маской; вывод ETH пользователю не делаем (баланс только ZEC); Portfolio — фикс. 16 КиБ, доп. страницы позиций только по действию пользователя; на деплое прокси не сжимает паддированные пути (проверка curl -sI); флаг сценариев требует ключ K_scn (0600, ≠ K_chat) на VPS
