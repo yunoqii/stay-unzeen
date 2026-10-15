@@ -12,7 +12,7 @@ import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, unitsToNumber, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
 import { NETWORK_CONFIG, nativeOf, useNetwork } from "@/lib/network";
 import { nowFee as poolNowFee, resolveExec, useDefaultExec, withExec, type ExecMode, type NowFee } from "@/lib/exec";
-import { isPriceStale, lamportsToZatCeil, quoteBuy, quoteRate, saleBelowMinimum, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
+import { isPriceStale, lamportsToZatCeil, PUMPFUN_CURVE, quoteBuy, quoteRate, saleBelowMinimum, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
 import { useRecentBuys } from "@/hooks/use-recent-buys";
 import { useNow } from "@/hooks/use-now";
 import { usePriceTs } from "@/hooks/use-price-ts";
@@ -150,6 +150,12 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
   const zecPair = pair === "ZEC";
   const spread = zecSpreadBps(pool);
   const pairDecimals = quoteAsset(pool, pair, token.venue)?.decimals ?? QUOTE_DECIMALS[pair];
+  // v0.25 (B2): SOL-paired pump.fun tokens still on the curve are quoted on the curve itself (price impact
+  // included), like the pool's own checks; anything else keeps the spot estimate.
+  const curve =
+    !hood && venue === "pumpfun" && token.venue === "pumpfun" && token.status === "curve" && pair === "SOL" && (network === "devnet" || network === "mainnet")
+      ? PUMPFUN_CURVE[network]
+      : null;
 
   const zecBalance = portfolio ? BigInt(portfolio.zecBalance) : null;
   const own = portfolio?.holdings.find((h) => h.mint === token.mint);
@@ -187,8 +193,8 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
               ? quoteBuyZecPair(parsed, spread, priceQuote, token.decimals, pairDecimals, slippage)
               : quoteSellZecPair(parsed, spread, priceQuote, token.decimals, pairDecimals, slippage)
           : isBuy
-            ? quoteBuy(parsed, rate, priceSol, token.decimals, slippage)
-            : quoteSell(parsed, rate, priceSol, token.decimals, slippage);
+            ? quoteBuy(parsed, rate, priceSol, token.decimals, slippage, curve)
+            : quoteSell(parsed, rate, priceSol, token.decimals, slippage, curve);
     // A sale worth less than the pool minimum at the current price is refused (422 below_minimum): say so first.
     if (!isBuy && !inputError && quote && "zecOut" in quote && saleBelowMinimum(quote.zecOut, minAction) && minAction !== null)
       inputError = `Worth about ${formatZec(quote.zecOut.toString())} ZEC, under the pool minimum of ${formatZec(minAction.toString())} ZEC for a sale. Sell more of it.`;

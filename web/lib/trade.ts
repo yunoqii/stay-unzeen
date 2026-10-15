@@ -1,6 +1,7 @@
 // Quote math for actions from the balance, in integers (bigint) so what we sign is exact.
 // Prices come as decimal strings (SOL per whole token); amounts as base-unit integer strings.
-// Estimates use the current token price (no curve impact): slippage covers the rest.
+// Estimates use the current token price; on a pump.fun curve (SOL pair) the curve's own constant-product formula
+// adds the price impact (API v0.25 B2, same math as core/ledger/src/curve.rs). Slippage covers the rest.
 
 import { base58 } from "@scure/base";
 import type { SolRateUsed } from "@/lib/api/types";
@@ -67,10 +68,10 @@ export interface BuyQuote {
   minOut: bigint;
 }
 
-export function quoteBuy(zecIn: bigint, rate: SolRateUsed | null, priceSol: string, decimals: number, slippageBps: number): BuyQuote | null {
+export function quoteBuy(zecIn: bigint, rate: SolRateUsed | null, priceSol: string, decimals: number, slippageBps: number, curve: CurveParams | null = null): BuyQuote | null {
   if (!rate) return null;
   const lamports = zatToLamports(zecIn, BigInt(rate.lamportsPerZec));
-  const tokensOut = lamportsToTokens(lamports, priceSol, decimals);
+  const tokensOut = (curve && curveBuyOut(curve, priceSol, decimals, lamports)) ?? lamportsToTokens(lamports, priceSol, decimals);
   return { lamports, tokensOut, minOut: withSlippage(tokensOut, slippageBps) };
 }
 
@@ -80,9 +81,9 @@ export interface SellQuote {
   minZecOut: bigint;
 }
 
-export function quoteSell(amount: bigint, rate: SolRateUsed | null, priceSol: string, decimals: number, slippageBps: number): SellQuote | null {
+export function quoteSell(amount: bigint, rate: SolRateUsed | null, priceSol: string, decimals: number, slippageBps: number, curve: CurveParams | null = null): SellQuote | null {
   if (!rate) return null;
-  const lamports = tokensToLamports(amount, priceSol, decimals);
+  const lamports = (curve && curveSellOut(curve, priceSol, decimals, amount)) ?? tokensToLamports(amount, priceSol, decimals);
   const zecOut = lamportsToZat(lamports, BigInt(rate.lamportsPerZec));
   return { lamports, zecOut, minZecOut: withSlippage(zecOut, slippageBps) };
 }
@@ -233,4 +234,62 @@ export function quoteRate(
 /** A sale whose value at the current price is under minActionZat is refused by the pool (422 below_minimum). */
 export function saleBelowMinimum(zecOut: bigint | null | undefined, minActionZat: bigint | null): boolean {
   return zecOut !== null && zecOut !== undefined && minActionZat !== null && zecOut < minActionZat;
+}
+
+// ---- pump.fun curve impact (API v0.25 B2, port of core/ledger/src/curve.rs) ----
+// Constant product over virtual reserves: S·T = k, k = S0·T0 from the venue's launch parameters. The spot price
+// p = S/T (lamports per base unit) gives the current reserves: S = √(k·p), T = k/S. A sell of a base units
+// returns S·a/(T+a) lamports, a buy of x lamports T·x/(S+x) base units (venue fees left to the slippage).
+// The pool does not publish the curve parameters, so they are pinned here per network; any missing or odd
+// input falls back to the spot estimate.
+
+export interface CurveParams {
+  virtualSol: bigint;
+  virtualTokens: bigint;
+  /** Venue fee taken on the SOL side of every trade, bps. core leaves it to the slippage; the quote counts it so
+   *  the default 1 % slippage holds (live run 15.10: a sale landed 1.2 % under the fee-less curve estimate). */
+  feeBps?: number;
+}
+
+/** pump.fun Global (initial virtual reserves): devnet 0.3 SOL / 1.073e15 (docs/API.md v0.25), mainnet 30 SOL / 1.073e15. */
+export const PUMPFUN_CURVE: Record<"devnet" | "mainnet", CurveParams> = {
+  devnet: { virtualSol: BigInt(300_000_000), virtualTokens: BigInt("1073000000000000"), feeBps: 100 },
+  mainnet: { virtualSol: BigInt(30_000_000_000), virtualTokens: BigInt("1073000000000000"), feeBps: 100 },
+};
+
+/** Integer square root (floor). */
+export function isqrt(n: bigint): bigint {
+  if (n < BigInt(2)) return n;
+  let x = BigInt(1) << BigInt(Math.floor(n.toString(2).length / 2) + 1);
+  for (;;) {
+    const y = (x + n / x) / BigInt(2);
+    if (y >= x) return x;
+    x = y;
+  }
+}
+
+/** Current (S lamports, T base units) at spot `priceSol` (SOL per whole token) of a token with `decimals`. */
+export function curveReserves(c: CurveParams, priceSol: string, decimals: number): { s: bigint; t: bigint } | null {
+  const p = parseDecimal(priceSol);
+  if (!p || p.num === ZERO || c.virtualSol <= ZERO || c.virtualTokens <= ZERO) return null;
+  const k = c.virtualSol * c.virtualTokens;
+  // p lamports per base unit = num · 10^9 / (10^scale · 10^decimals)
+  const s = isqrt((k * p.num * TEN ** BigInt(9)) / (TEN ** BigInt(p.scale) * TEN ** BigInt(decimals)));
+  return s === ZERO ? null : { s, t: k / s };
+}
+
+/** Lamports a sell of `amount` base units returns at spot `priceSol`, impact included; null -> use the spot estimate. */
+export function curveSellOut(c: CurveParams, priceSol: string, decimals: number, amount: bigint): bigint | null {
+  const r = curveReserves(c, priceSol, decimals);
+  if (!r) return null;
+  const out = (r.s * amount) / (r.t + amount);
+  return (out * (BPS - BigInt(c.feeBps ?? 0))) / BPS;
+}
+
+/** Base units a buy of `lamports` returns at spot `priceSol`, impact included; null -> use the spot estimate. */
+export function curveBuyOut(c: CurveParams, priceSol: string, decimals: number, lamports: bigint): bigint | null {
+  const r = curveReserves(c, priceSol, decimals);
+  if (!r) return null;
+  const x = (lamports * (BPS - BigInt(c.feeBps ?? 0))) / BPS;
+  return (r.t * x) / (r.s + x);
 }

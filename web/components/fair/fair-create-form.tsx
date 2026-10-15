@@ -118,7 +118,7 @@ export function FairCreateForm({ pool, meta, onMeta }: { pool: PoolInfo; meta: M
             <SummaryRow label="Pair" value={`$${meta.symbol || "TICKER"}/SOL`} />
             <SummaryRow label="Launch fee" value={fee === null ? "—" : `${formatZec(fee.toString())} ZEC`} strong />
             <SummaryRow label="If nothing launches" value="fee returned" />
-            <SummaryRow label="Your own bid" value={capTier !== null ? `up to ${formatZec(capTier.toString())} ZEC hold` : "next step"} />
+            <SummaryRow label="Held for your own bid" value={capTier !== null ? `${formatZec(capTier.toString())} ZEC tier, unused part returns` : "next step"} />
             <SummaryRow label="Balance" value={!unlocked ? "locked" : balance === null ? "…" : `${formatZec(balance.toString())} ZEC`} className={cn(short && "[&_dd]:text-sell")} />
           </dl>
           <p className="text-[11px] text-pretty text-faint-foreground">Sealed launches pair with SOL on pump.fun. For a ZEC, USDC or USD1 pair, use an instant launch.</p>
@@ -165,7 +165,7 @@ export function FairCreateForm({ pool, meta, onMeta }: { pool: PoolInfo; meta: M
       </div>
 
       <div className="mt-10 border border-border">
-        <LaunchRulesCard extra={["Bids time-locked to a drand round: unreadable until it fires", "One transaction, one price for every bidder"]} firstBuyLabel="Your own bid" />
+        <LaunchRulesCard extra={["Bids time-locked to a drand round: unreadable until it fires", "One transaction, one price for every bidder"]} firstBuyLabel="Most your own bid can buy" />
       </div>
 
       <h2 className="mt-12 mb-3 text-sm font-medium">How the reveal works</h2>

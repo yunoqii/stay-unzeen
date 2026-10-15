@@ -27,10 +27,18 @@ export function getLaunches(q: { status?: FairLaunchStatus; limit?: number } = {
   return api.request<FairLaunch[]>(`/api/launches${s ? `?${s}` : ""}`);
 }
 
-/** null on 404 (unknown, or not published yet). */
-export async function getLaunch(id: string): Promise<FairLaunch | null> {
+/** v0.25 (B4): a launch not published yet answers 200 { id, status: "scheduled" } and nothing else. */
+export interface ScheduledLaunch {
+  id: string;
+  status: "scheduled";
+}
+
+export const isScheduled = (l: FairLaunch | ScheduledLaunch): l is ScheduledLaunch => l.status === "scheduled";
+
+/** The public launch, its bare "scheduled" stub before publication, or null on 404 (unknown or cancelled). */
+export async function getLaunch(id: string): Promise<FairLaunch | ScheduledLaunch | null> {
   try {
-    return await api.request<FairLaunch>(`/api/launches/${encodeURIComponent(id)}`);
+    return await api.request<FairLaunch | ScheduledLaunch>(`/api/launches/${encodeURIComponent(id)}`);
   } catch (e) {
     if (e instanceof ApiError && e.code === "not_found") return null;
     throw e;

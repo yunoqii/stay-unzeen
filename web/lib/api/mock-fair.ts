@@ -298,7 +298,13 @@ export function createFairMock(host: FairHost): FairMock {
     const m = path.match(/^\/api\/launches\/([^/]+)$/);
     if (m) {
       const l = launches.get(decodeURIComponent(m[1]));
-      if (!l || l.network !== network || l.pub.publishedAt > now) throw new ApiError("not_found", "unknown launch", 404);
+      if (!l || l.network !== network) throw new ApiError("not_found", "unknown launch", 404);
+      // v0.25 (B4): before publication the id answers a bare "scheduled" (only the creator knows it); a launch
+      // cancelled before publication is unknown.
+      if (l.pub.publishedAt > now) {
+        if (publicView(l).status === "cancelled") throw new ApiError("not_found", "unknown launch", 404);
+        return { id: l.pub.id, status: "scheduled" };
+      }
       return publicView(l);
     }
     throw new ApiError("not_found", path, 404);

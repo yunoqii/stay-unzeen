@@ -8,7 +8,7 @@ import { ArrowLeft, CircleNotch, Info } from "@phosphor-icons/react";
 import { errorText } from "@/lib/api/client";
 import type { FairBid, FairLaunch, PoolInfo } from "@/lib/api/types";
 import { useKeyState } from "@/lib/crypto/session";
-import { getLaunch, LAUNCH_POLL_MS, postFair } from "@/lib/fair/api";
+import { isScheduled, getLaunch, LAUNCH_POLL_MS, postFair } from "@/lib/fair/api";
 import { useLocalBids, usePruneLocalBids } from "@/lib/fair/bid-store";
 import { formatZec } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
@@ -32,7 +32,7 @@ const FAILURE: Record<NonNullable<FairLaunch["failure"]>, string> = {
   internal: "The bids the pool held did not match the published commitment, so nothing was bought.",
 };
 
-type Load = { id: string; state: "loading" } | { id: string; state: "missing" } | { id: string; state: "error"; error: string } | { id: string; state: "ready"; launch: FairLaunch };
+type Load = { id: string; state: "loading" } | { id: string; state: "missing" } | { id: string; state: "scheduled" } | { id: string; state: "error"; error: string } | { id: string; state: "ready"; launch: FairLaunch };
 
 /** Polls the public launch on a fixed rhythm shared by every viewer. */
 function useLaunch(id: string): Load {
@@ -43,7 +43,7 @@ function useLaunch(id: string): Load {
     let t: ReturnType<typeof setTimeout>;
     const run = () => {
       getLaunch(id)
-        .then((l) => alive && setSt(l ? { id, network, state: "ready", launch: l } : { id, network, state: "missing" }))
+        .then((l) => alive && setSt(!l ? { id, network, state: "missing" } : isScheduled(l) ? { id, network, state: "scheduled" } : { id, network, state: "ready", launch: l }))
         .catch((e: unknown) => alive && setSt((p) => (p.id === id && p.network === network && p.state === "ready" ? p : { id, network, state: "error", error: errorText(e) })))
         .finally(() => {
           if (alive) t = setTimeout(run, LAUNCH_POLL_MS);
@@ -72,10 +72,14 @@ export default function FairLaunchView({ id, pool }: { id: string; pool: PoolInf
 
   if (load.state === "loading" || now === null) return <ViewSkeleton />;
   if (load.state === "error") return <ErrorState error={load.error} title="Could not load this launch" />;
-  if (load.state === "missing")
-    return own?.status === "scheduled" ? (
+  if (load.state === "scheduled")
+    return own ? (
       <Scheduled id={id} publishedAt={own.publishedAt} closeAt={own.closeAt} now={now} onCancelled={() => void refresh()} />
     ) : (
+      <EmptyState title="Scheduled">This launch goes public at the next batch boundary. Its bid window opens then.</EmptyState>
+    );
+  if (load.state === "missing")
+    return (
       <EmptyState title="No launch here">
         It may not be published yet: new launches appear at the next batch boundary.{" "}
         <Link href="/launch" className="text-foreground underline underline-offset-4 hover:text-zec">

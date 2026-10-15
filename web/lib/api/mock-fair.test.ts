@@ -88,7 +88,7 @@ describe("mock fair-launch: full cycle", () => {
     const id = r.launchId!;
     expect(id).toMatch(/^[0-9a-f]{32}$/);
     // Not public before the epoch boundary; the creator sees it as scheduled.
-    expect(await code(call("GET", `/api/launches/${id}`))).toBe("not_found");
+    expect(await call("GET", `/api/launches/${id}`)).toEqual({ id, status: "scheduled" });
     expect((await call<Portfolio>("GET", "/api/portfolio")).fairLaunches?.find((x) => x.launchId === id)?.status).toBe("scheduled");
     await vi.advanceTimersByTimeAsync(11_000);
     let l = await call<FairLaunch>("GET", `/api/launches/${id}`);

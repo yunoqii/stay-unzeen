@@ -125,3 +125,16 @@ export function formatDay(ts: number, now: number): string {
   if (d === 1) return "Yesterday";
   return dayFmt.format(ts);
 }
+
+/**
+ * Stats amounts (volumes after the ZEC conversion): never a "0" that isn't zero. Under 0.01 reads "<0.01",
+ * under 10 keeps up to 3 significant digits, larger ones one decimal, very large ones compact.
+ */
+export function formatStatAmount(n: number): string {
+  if (!Number.isFinite(n)) return "—";
+  if (n === 0) return "0";
+  if (n < 0.01) return "<0.01";
+  if (n < 10) return n.toLocaleString("en-US", { maximumSignificantDigits: 3 });
+  if (n >= 10_000) return formatCompact(n);
+  return n.toLocaleString("en-US", { maximumFractionDigits: 1 });
+}

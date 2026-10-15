@@ -21,5 +21,6 @@ export const NAV_SECONDARY: NavItem[] = [
 ];
 
 export function isActive(pathname: string, href: string) {
-  return href === "/" ? pathname === "/" || pathname.startsWith("/token/") : pathname.startsWith(href);
+  // A token page is not the feed: no tab is lit there (owner review 15.10).
+  return href === "/" ? pathname === "/" : pathname.startsWith(href);
 }

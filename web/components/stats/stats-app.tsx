@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { api, ApiError, errorText } from "@/lib/api/client";
 import type { KAmount, KCount, PlatformStats, Venue } from "@/lib/api/types";
-import { formatCompact, formatPrice } from "@/lib/format";
+import { formatPrice, formatStatAmount } from "@/lib/format";
 import { useNetwork } from "@/lib/network";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/layout/page-shell";
@@ -33,7 +33,8 @@ function K({ v, format }: { v: KAmount | KCount; format?: (n: number) => string 
   return <>{format ? format(n) : n.toLocaleString("en-US")}</>;
 }
 
-const sol = (n: number) => (n >= 10_000 ? formatCompact(n) : n.toLocaleString("en-US", { maximumFractionDigits: 1 }));
+/** 0.1 SOL is ≈ 0.0087 ZEC: small volumes read "<0.01" or with enough digits, never "0". */
+const sol = formatStatAmount;
 
 /**
  * Public, daily stats: one snapshot built after 00:00 UTC, the same for everyone. Nothing moves when
