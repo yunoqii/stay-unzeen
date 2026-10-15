@@ -517,12 +517,21 @@ pub async fn impact_curve(
     if is_hood(st) || t.quote_mint.is_some() || t.status != "curve" || t.venue != venue {
         return Ok(None);
     }
-    let (c, _, own) = crate::rules_curve(st, venue).await?;
-    Ok(own.then_some(unzeen_ledger::curve::CurveParams {
+    let (c, supply, own) = crate::rules_curve(st, venue).await?;
+    if !own {
+        return Ok(None);
+    }
+    let curve = unzeen_ledger::curve::CurveParams {
         virtual_sol: c.virtual_sol,
         virtual_tokens: c.virtual_tokens,
         fee_bps: trade_fee_bps(st, venue),
-    }))
+    };
+    // v0.26: the fee of the tier this token's curve is in (relayer-read FeeConfig tiers); the
+    // configured fee only when the relayer did not write tiers.
+    let tiers = st.ledger.launch_curve_fees(st.cfg.cluster, venue).await?;
+    let p18 = crate::config::eth_to_wei(&truncate_decimals(&t.price_sol, 18)).unwrap_or(0);
+    let dec = u32::try_from(t.decimals).unwrap_or(0);
+    Ok(Some(curve.with_tier_fee(tiers.as_deref(), p18, dec, supply)))
 }
 
 /// Venue trade fee used in curve estimates (API v0.26 `PoolInfo.venues[].curve.feeBps`).

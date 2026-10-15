@@ -379,7 +379,9 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   // RELAYER v10: + the Bags curve (mainnet, shared Bags config, read-only); its failure never blocks pump's row.
   const bagsCurveConfig = env.BAGS_CURVE_CONFIG?.trim() ? new PublicKey(env.BAGS_CURVE_CONFIG.trim()) : BAGS_CURVE_CONFIG;
   const launchCurves = new LaunchCurveWriter(o.db, o.network, async () => {
-    const out: LaunchCurve[] = [pumpLaunchCurve(await online.fetchGlobal())];
+    // v0.27: + the trade fee from chain (FeeConfig market-cap tiers; Global when it is absent).
+    const [global, feeConfig] = await Promise.all([online.fetchGlobal(), online.fetchFeeConfig().catch(() => null)]);
+    const out: LaunchCurve[] = [pumpLaunchCurve(global, feeConfig)];
     if (o.cfg.cluster === "mainnet-beta") {
       try {
         out.push(await bagsLaunchCurve(o.connection, bagsCurveConfig));

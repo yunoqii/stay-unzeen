@@ -1,4 +1,4 @@
-import type { Global } from "@pump-fun/pump-sdk";
+import type { FeeConfig, Global } from "@pump-fun/pump-sdk";
 import type { Pool } from "pg";
 import { toBig } from "../math";
 import type { SolanaNetwork } from "./postgres-queue";
@@ -15,12 +15,53 @@ export interface LaunchCurve {
   virtualTokenReserves: bigint;
   realTokenReserves: bigint;
   tokenTotalSupply: bigint;
+  /**
+   * core 0034 / API v0.27: the venue's trade fee as read from chain with the reserves, market-cap
+   * tiers ascending (pump.fun: protocol + creator bps of a SOL bonding curve). Absent: core uses
+   * its configured fallback (UNZEEN_TRADE_FEE_BPS_PUMPFUN).
+   */
+  feeTiers?: FeeTierBps[];
+}
+
+export interface FeeTierBps {
+  marketCapLamports: bigint;
+  bps: number;
 }
 
 const I64_MAX = (1n << 63n) - 1n;
 
+/**
+ * Trade fee of a SOL pump.fun bonding curve, the way pump-fees charges it (SDK `computeFeesBps`
+ * / `selectCurveFeeSchedule`): the FeeConfig market-cap tiers `feeTiers` (protocol + creator bps;
+ * the lp share is AMM-only) when the FeeConfig exists, else Global `feeBasisPoints` +
+ * `creatorFeeBasisPoints`. Verified on devnet 15.10: FeeConfig one tier 95 + 30 = 125 bps, and the
+ * TradeEvent of tx 4s5DKdb8 charged exactly that (Global itself says 95 + 5).
+ */
+export function pumpFeeTiers(
+  g: Pick<Global, "feeBasisPoints" | "creatorFeeBasisPoints">,
+  fc: Pick<FeeConfig, "feeTiers"> | null,
+): FeeTierBps[] {
+  const num = (x: { toString(): string }) => Number(BigInt(x.toString()));
+  const tiers = (fc?.feeTiers ?? []).map((t) => ({
+    marketCapLamports: BigInt(t.marketCapLamportsThreshold.toString()),
+    bps: num(t.fees.protocolFeeBps) + num(t.fees.creatorFeeBps),
+  }));
+  const out = tiers.length > 0 ? tiers : [{ marketCapLamports: 0n, bps: num(g.feeBasisPoints) + num(g.creatorFeeBasisPoints) }];
+  out.sort((a, b) => (a.marketCapLamports < b.marketCapLamports ? -1 : a.marketCapLamports > b.marketCapLamports ? 1 : 0));
+  for (const [i, t] of out.entries()) {
+    if (!Number.isInteger(t.bps) || t.bps < 0 || t.bps > 5_000) throw new Error("pump fees: bps out of range");
+    if (i > 0 && out[i - 1]!.marketCapLamports === t.marketCapLamports) throw new Error("pump fees: duplicate tier");
+  }
+  if (out.length > 32) throw new Error("pump fees: too many tiers");
+  return out;
+}
+
 /** pump.fun `Global` -> launch curve (initial reserves of a new coin). Throws on values core would reject. */
-export function pumpLaunchCurve(g: Pick<Global, "initialVirtualSolReserves" | "initialVirtualTokenReserves" | "initialRealTokenReserves" | "tokenTotalSupply">): LaunchCurve {
+export function pumpLaunchCurve(
+  g: Pick<Global, "initialVirtualSolReserves" | "initialVirtualTokenReserves" | "initialRealTokenReserves" | "tokenTotalSupply"> &
+    Partial<Pick<Global, "feeBasisPoints" | "creatorFeeBasisPoints">>,
+  feeConfig?: Pick<FeeConfig, "feeTiers"> | null,
+): LaunchCurve {
   const c: LaunchCurve = {
     venue: "pumpfun",
     virtualSolLamports: toBig(g.initialVirtualSolReserves),
@@ -33,6 +74,9 @@ export function pumpLaunchCurve(g: Pick<Global, "initialVirtualSolReserves" | "i
   }
   if (c.realTokenReserves > c.virtualTokenReserves || c.virtualTokenReserves > c.tokenTotalSupply * 2n) {
     throw new Error("pump Global: inconsistent token reserves");
+  }
+  if (feeConfig !== undefined && g.feeBasisPoints !== undefined && g.creatorFeeBasisPoints !== undefined) {
+    c.feeTiers = pumpFeeTiers({ feeBasisPoints: g.feeBasisPoints, creatorFeeBasisPoints: g.creatorFeeBasisPoints }, feeConfig);
   }
   return c;
 }
@@ -94,7 +138,17 @@ ON CONFLICT (network, venue) DO UPDATE
        token_total_supply = EXCLUDED.token_total_supply,
        updated_at = now()`;
 
+/** core 0034: fee tiers next to the reserves (JSON, thresholds as decimal strings). */
+export const LAUNCH_CURVE_FEES_UPDATE = `UPDATE launch_curves SET fee_tiers = $3::jsonb WHERE network = $1 AND venue = $2`;
+
+export function feeTiersJson(t: readonly FeeTierBps[]): string {
+  return JSON.stringify(t.map((x) => ({ marketCapLamports: x.marketCapLamports.toString(), bps: x.bps })));
+}
+
 export class LaunchCurveWriter {
+  /** false once the DB answered "no column fee_tiers" (core before 0034): reserves only. */
+  private feesColumn = true;
+
   constructor(
     private readonly pool: Pool,
     private readonly network: SolanaNetwork,
@@ -113,6 +167,14 @@ export class LaunchCurveWriter {
         c.realTokenReserves.toString(),
         c.tokenTotalSupply.toString(),
       ]);
+      if (c.feeTiers && this.feesColumn) {
+        try {
+          await this.pool.query(LAUNCH_CURVE_FEES_UPDATE, [this.network, c.venue, feeTiersJson(c.feeTiers)]);
+        } catch (e) {
+          if ((e as { code?: string }).code !== "42703") throw e;
+          this.feesColumn = false; // undefined_column: core without 0034
+        }
+      }
     }
     return curves.length;
   }

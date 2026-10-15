@@ -192,6 +192,7 @@ intel_warm.expires_at timestamp with time zone
 intel_warm.hot boolean
 intel_warm.mint text
 intel_warm.pinned boolean
+launch_curves.fee_tiers jsonb
 launch_curves.network text
 launch_curves.real_token_reserves numeric
 launch_curves.token_total_supply numeric

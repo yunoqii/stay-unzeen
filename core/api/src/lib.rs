@@ -352,11 +352,30 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
                 continue;
             };
             if let Some(c) = st.ledger.launch_curve(st.cfg.cluster, &name).await? {
-                v["curve"] = json!({
+                // v0.27: fee tiers as the relayer read them from chain (pump.fun FeeConfig);
+                // `feeBps` = the tier of a fresh curve; config fallback only without tiers.
+                let tiers = st.ledger.launch_curve_fees(st.cfg.cluster, &name).await?;
+                let fresh =
+                    unzeen_fair::alloc::mul_div(c.virtual_sol, c.total_supply, c.virtual_tokens.max(1)).unwrap_or(0);
+                let (fee, source) = match tiers.as_deref().and_then(|t| unzeen_ledger::curve::tier_bps(t, fresh)) {
+                    Some(b) => (b, "chain"),
+                    None => (actions::trade_fee_bps(&st, &name), "config"),
+                };
+                let mut curve = json!({
                     "virtualSol": c.virtual_sol.to_string(),
                     "virtualTokens": c.virtual_tokens.to_string(),
-                    "feeBps": actions::trade_fee_bps(&st, &name),
+                    "tokenTotalSupply": c.total_supply.to_string(),
+                    "feeBps": fee,
+                    "feeSource": source,
                 });
+                if let Some(t) = &tiers {
+                    curve["feeTiers"] = Value::Array(
+                        t.iter()
+                            .map(|t| json!({ "marketCapLamports": t.market_cap_lamports.to_string(), "bps": t.bps }))
+                            .collect(),
+                    );
+                }
+                v["curve"] = curve;
             }
         }
     }

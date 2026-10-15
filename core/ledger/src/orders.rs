@@ -178,10 +178,12 @@ async fn order_curve<C: GenericClient>(
     network: &str,
     mint: &str,
     fee_bps: u32,
+    price_e18: u128,
+    decimals: u32,
 ) -> Result<Option<crate::curve::CurveParams>> {
     let r = tx
         .query_opt(
-            "SELECT c.virtual_sol_lamports, c.virtual_token_reserves
+            "SELECT c.virtual_sol_lamports, c.virtual_token_reserves, c.fee_tiers, c.token_total_supply
                FROM launch_curves c
               WHERE c.network = $1 AND c.venue = 'pumpfun'
                 AND NOT EXISTS (SELECT 1 FROM tokens t WHERE t.mint = $2 AND (t.quote_mint IS NOT NULL OR t.venue <> 'pumpfun'))",
@@ -193,6 +195,14 @@ async fn order_curve<C: GenericClient>(
             virtual_sol: r.get::<_, Option<Num>>(0)?.to_u128().ok()?,
             virtual_tokens: r.get::<_, Option<Num>>(1)?.to_u128().ok()?,
             fee_bps,
+        })
+        .map(|c| {
+            // v0.26: the fee of the tier the curve is in, as read from chain by the relayer.
+            let tiers = r
+                .get::<_, Option<serde_json::Value>>(2)
+                .and_then(|v| crate::curve::parse_fee_tiers(&v));
+            let supply = r.get::<_, Option<Num>>(3).and_then(|n| n.to_u128().ok()).unwrap_or(0);
+            c.with_tier_fee(tiers.as_deref(), price_e18, decimals, supply)
         })
     }))
 }
@@ -727,7 +737,7 @@ impl Ledger {
         // B2 (devnet run 15.10): on a SOL-paired pump.fun curve with known launch parameters,
         // min_out is the curve's output for this size at the tick price (price impact
         // included) minus the slippage; otherwise the tick price itself, as before.
-        let curve = order_curve(tx, network, &mint, p.trade_fee_bps_pumpfun).await?;
+        let curve = order_curve(tx, network, &mint, p.trade_fee_bps_pumpfun, price_e18, dec).await?;
         let keep = |x: u128| x.saturating_mul(10_000 - u128::from(slip.min(10_000))) / 10_000;
         let (lamports, zat, min_out) = if buy {
             let full = (hold.max(0) as u128) * (rate.lamports_per_zec as u128) / ZAT_PER_ZEC;

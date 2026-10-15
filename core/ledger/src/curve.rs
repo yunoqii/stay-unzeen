@@ -45,7 +45,61 @@ pub fn isqrt(n: u128) -> u128 {
     }
 }
 
+/// One market-cap tier of the venue's trade fee (`launch_curves.fee_tiers`, 0034): from
+/// `market_cap_lamports` up (pump.fun FeeConfig `feeTiers`: protocol + creator bps).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeTier {
+    pub market_cap_lamports: u128,
+    pub bps: u32,
+}
+
+/// `launch_curves.fee_tiers` JSON → tiers, thresholds ascending; `None` if malformed or empty.
+pub fn parse_fee_tiers(v: &serde_json::Value) -> Option<Vec<FeeTier>> {
+    let mut out = Vec::new();
+    for t in v.as_array()? {
+        let m: u128 = t["marketCapLamports"].as_str()?.parse().ok()?;
+        let bps = u32::try_from(t["bps"].as_u64()?).ok().filter(|b| *b <= 5_000)?;
+        if out.last().is_some_and(|p: &FeeTier| p.market_cap_lamports >= m) {
+            return None;
+        }
+        out.push(FeeTier {
+            market_cap_lamports: m,
+            bps,
+        });
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The tier a curve at `market_cap` lamports pays, as pump's `calculateFeeTier`: the last tier
+/// whose threshold is ≤ the market cap, the first one below every threshold.
+pub fn tier_bps(tiers: &[FeeTier], market_cap: u128) -> Option<u32> {
+    let first = tiers.first()?;
+    Some(
+        tiers
+            .iter()
+            .rev()
+            .find(|t| market_cap >= t.market_cap_lamports)
+            .unwrap_or(first)
+            .bps,
+    )
+}
+
 impl CurveParams {
+    /// Market cap in lamports (`S · supply / T`, as pump's `bondingCurveMarketCap`) at spot
+    /// `price_e18`, for a token supply in base units.
+    pub fn market_cap_at(&self, price_e18: u128, decimals: u32, supply: u128) -> Option<u128> {
+        let (s, t) = self.reserves_at(price_e18, decimals)?;
+        mul_div(s, supply, t)
+    }
+
+    /// This curve with the fee of the tier its market cap falls in (no tiers: unchanged).
+    pub fn with_tier_fee(self, tiers: Option<&[FeeTier]>, price_e18: u128, decimals: u32, supply: u128) -> Self {
+        let fee = tiers
+            .and_then(|t| tier_bps(t, self.market_cap_at(price_e18, decimals, supply).unwrap_or(0)))
+            .unwrap_or(self.fee_bps);
+        Self { fee_bps: fee, ..self }
+    }
+
     /// Current `(S lamports, T base units)` at the spot price `price_e18` (SOL per whole token
     /// × 1e18) of a token with `decimals`.
     pub fn reserves_at(&self, price_e18: u128, decimals: u32) -> Option<(u128, u128)> {
@@ -89,6 +143,51 @@ mod tests {
         virtual_tokens: 1_073_000_000_000_000,
         fee_bps: 0,
     };
+
+    #[test]
+    fn fee_tiers_parse_and_select() {
+        let v = serde_json::json!([{"marketCapLamports":"0","bps":125},{"marketCapLamports":"420000000000","bps":105}]);
+        let t = parse_fee_tiers(&v).unwrap();
+        assert_eq!(tier_bps(&t, 0), Some(125));
+        assert_eq!(tier_bps(&t, 419_999_999_999), Some(125));
+        assert_eq!(tier_bps(&t, 420_000_000_000), Some(105));
+        let below = [
+            FeeTier {
+                market_cap_lamports: 10,
+                bps: 90,
+            },
+            FeeTier {
+                market_cap_lamports: 20,
+                bps: 80,
+            },
+        ];
+        assert_eq!(tier_bps(&below, 5), Some(90), "below the first threshold: first tier");
+        assert!(parse_fee_tiers(&serde_json::json!([])).is_none());
+        assert!(
+            parse_fee_tiers(&serde_json::json!([{"marketCapLamports":"5","bps":1},{"marketCapLamports":"5","bps":2}]))
+                .is_none()
+        );
+        assert!(parse_fee_tiers(&serde_json::json!([{"marketCapLamports":"0","bps":9000}])).is_none());
+        // Market cap of the fresh devnet curve: 0.3 SOL × 1e15 / 1.073e15 ≈ 0.2796 SOL.
+        let p = price_e18(DEVNET.virtual_sol, DEVNET.virtual_tokens, 6);
+        let m = DEVNET.market_cap_at(p, 6, 1_000_000_000_000_000).unwrap();
+        assert!(m.abs_diff(279_589_934) < 1_000, "{m}");
+        assert_eq!(DEVNET.with_tier_fee(Some(&t), p, 6, 1_000_000_000_000_000).fee_bps, 125);
+        assert_eq!(DEVNET.with_tier_fee(None, p, 6, 1).fee_bps, 0);
+    }
+
+    /// Devnet 15.10, tx 4s5DKdb8 (a buy of 0.011 SOL) and ERSUoF7t (a sell): the pump TradeEvent
+    /// reported fee 95 bps + creator fee 30 bps; the formula reproduces what the chain charged.
+    #[test]
+    fn matches_devnet_trades() {
+        let fee = CurveParams { fee_bps: 125, ..DEVNET };
+        // buy: 11 000 000 lamports spent, 10 864 197 into the curve (event solAmount).
+        let net = mul_div(11_000_000, 10_000, 10_125).unwrap();
+        assert!(net.abs_diff(10_864_197) <= 1, "{net}");
+        // sell: event solAmount (gross) 560 356 234, the vault got 553 351 780.
+        let out = mul_div(560_356_234, 10_000 - u128::from(fee.fee_bps), 10_000).unwrap();
+        assert!(out.abs_diff(553_351_780) <= 2, "{out}");
+    }
 
     #[test]
     fn fee_lowers_both_sides() {

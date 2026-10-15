@@ -489,6 +489,20 @@ impl Ledger {
         }))
     }
 
+    /// The venue's trade-fee tiers as the relayer read them from chain (0034); `None` when
+    /// the row or the column is empty (core then uses its configured fee).
+    pub async fn launch_curve_fees(&self, network: &str, venue: &str) -> Result<Option<Vec<crate::curve::FeeTier>>> {
+        let c = self.pool.get().await?;
+        let r = c
+            .query_opt(
+                "SELECT fee_tiers FROM launch_curves WHERE network = $1 AND venue = $2",
+                &[&network, &venue],
+            )
+            .await?;
+        Ok(r.and_then(|r| r.get::<_, Option<serde_json::Value>>(0))
+            .and_then(|v| crate::curve::parse_fee_tiers(&v)))
+    }
+
     /// `fl_create`: hold the creation fee and schedule the launch (hidden until published_at).
     pub async fn fl_create(
         &self,

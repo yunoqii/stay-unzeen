@@ -6173,7 +6173,25 @@ async fn pool_info_venue_curve() {
     assert_eq!(v["venues"][0]["venue"], "pumpfun");
     assert_eq!(
         v["venues"][0]["curve"],
-        json!({"virtualSol":"300000000","virtualTokens":"1073000000000000","feeBps":125})
+        json!({"virtualSol":"300000000","virtualTokens":"1073000000000000","tokenTotalSupply":"1000000000000000",
+               "feeBps":125,"feeSource":"config"})
+    );
+    // v0.27: tiers read from chain by the relayer win over the config; feeBps = fresh-curve tier.
+    e.sql(&format!(
+        "UPDATE {}.launch_curves SET fee_tiers = '[{{\"marketCapLamports\":\"0\",\"bps\":120}},
+                                                 {{\"marketCapLamports\":\"500000000\",\"bps\":100}}]'",
+        e.schema
+    ))
+    .await;
+    let v = e.get("/api/pool").await.body;
+    assert_eq!(
+        v["venues"][0]["curve"]["feeBps"], 120,
+        "fresh curve 0.28 SOL < 0.5 SOL tier"
+    );
+    assert_eq!(v["venues"][0]["curve"]["feeSource"], "chain");
+    assert_eq!(
+        v["venues"][0]["curve"]["feeTiers"][1],
+        json!({"marketCapLamports":"500000000","bps":100})
     );
     e.drop_schema().await;
 }

@@ -2,7 +2,13 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.26** (15.10; без миграций). Изменения против v0.25:
+Статус: **v0.27** (15.10; миграция `0034_launch_curve_fees.sql`). Изменения против v0.26:
+- **Комиссия кривой — из цепочки, а не из env.** Релейер вместе с резервами читает pump.fun `FeeConfig.feeTiers` (уровни по market cap: protocol + creator bps; lp — только у AMM). Если FeeConfig нет — Global `feeBasisPoints + creatorFeeBasisPoints`. Результат пишется в `launch_curves.fee_tiers`. `UNZEEN_TRADE_FEE_BPS_PUMPFUN` остаётся только запасным значением, когда уровней нет.
+- **`PoolInfo.venues[].curve`** += `tokenTotalSupply: string`, `feeSource: "chain" | "config"`, `feeTiers?: { marketCapLamports: string; bps: number }[]` (по возрастанию; есть при `feeSource = "chain"`). `feeBps` = уровень свежей кривой (market cap `virtualSol · tokenTotalSupply / virtualTokens`).
+- **Уровень выбирает market cap токена** — как `calculateFeeTier` в SDK: последний уровень с порогом ≤ market cap, а ниже первого порога — первый уровень. Market cap = `S · tokenTotalSupply / T` при текущих резервах (формула v0.26). Core выбирает уровень так же для проверки минимума sell, ордеров и сценариев; фронт должен делать то же.
+- Сверка с цепочкой (devnet 15.10): FeeConfig — один уровень 95 + 30 = 125 bps (Global отдаёт 95 + 5, поэтому из одного Global брать нельзя). TradeEvent buy tx 4s5DKdb8: потрачено 11 000 000, в кривую ушло 10 864 197, `fee` 103 210 (95 bps) + `creatorFee` 32 593 (30 bps) — совпадает с `x / (1 + 0.0125)`. Sell ERSUoF7t: gross 560 356 234 → vault получил 553 351 780 = gross · (1 − 0.0125). На mainnet FeeConfig сейчас такой же: один уровень 125.
+
+Изменения v0.26 против v0.25 (15.10; без миграций):
 - **`PoolInfo.venues[].curve?: { virtualSol: string; virtualTokens: string; feeBps: number }`** — начальные виртуальные резервы кривой площадки (лампорты / базовые единицы токена) из `launch_curves`. Их пишет релейер из живого конфига площадки: у pump.fun — Global (devnet 15.10: `300000000` / `1073000000000000`). Поле `feeBps` — торговая комиссия площадки, которую core закладывает в оценки (pump.fun: 125 = 0.95 % протокол + 0.30 % создатель; `UNZEEN_TRADE_FEE_BPS_PUMPFUN`). Есть только у площадок со своей строкой кривой (сейчас pump.fun), у остальных поля нет — там оценка по споту. Фронт берёт числа отсюда, а не из констант по сети.
 - **Формула оценки (одна у core и UI)**, для SOL-токена на кривой при спот-цене `p` (лампорты за базовую единицу): `k = virtualSol · virtualTokens`, `S = √(k·p)`, `T = k / S`.
   - Sell `a` базовых единиц: `S·a / (T + a) · (1 − feeBps/10⁴)`.
@@ -404,7 +410,10 @@ interface VenueInfo {        // v0.16: PoolInfo.venues[]
   curve?: {                 // v0.26: только у площадок со своей строкой launch_curves (pump.fun); формула — в «Изменения v0.26»
     virtualSol: string;     // начальные виртуальные резервы SOL, лампорты
     virtualTokens: string;  // начальные виртуальные резервы токена, базовые единицы
-    feeBps: number;         // торговая комиссия площадки в оценках core (pump.fun 125)
+    feeBps: number;         // торговая комиссия площадки в оценках core (pump.fun 125); v0.27: уровень свежей кривой
+    tokenTotalSupply: string; // v0.27: саплай, базовые единицы (для market cap уровня)
+    feeSource: "chain" | "config"; // v0.27: chain — уровни прочитаны релейером из FeeConfig/Global; config — запасное UNZEEN_TRADE_FEE_BPS_PUMPFUN
+    feeTiers?: { marketCapLamports: string; bps: number }[]; // v0.27: при feeSource = "chain"; уровень = последний с порогом ≤ market cap
   };
 }
 
