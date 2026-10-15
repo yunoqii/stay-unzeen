@@ -469,6 +469,7 @@ fn action(kind: &str, amount: u64, fee: u64, token: Option<(&str, u64)>, jobs: V
         payout: None,
         gain: None,
         quote_mint: None,
+        min_check_zat: None,
     }
 }
 

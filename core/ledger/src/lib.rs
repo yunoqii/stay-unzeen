@@ -13,6 +13,7 @@ pub mod actions;
 pub mod chat;
 pub mod creator;
 pub mod creator_fees;
+pub mod curve;
 pub mod decide;
 pub mod fair;
 pub mod migrate;
@@ -490,6 +491,7 @@ impl Ledger {
             payout: None,
             gain: None,
             quote_mint: None,
+            min_check_zat: None,
         };
         self.submit(pk, nonce, request_hash, &a).await
     }

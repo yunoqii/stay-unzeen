@@ -1018,6 +1018,19 @@ async fn submit_trade(
     } else {
         st.cfg.rate.spread_bps
     };
+    // B2 (devnet run 15.10): with a slippage guard on a curve whose launch parameters are known,
+    // the floor is the curve's output for this size at the tick price (price impact included),
+    // minus the slippage; otherwise the tick price itself, as before. A limit price stays a
+    // limit on the average price.
+    let curve = if slip > 0 && !zec_pair {
+        match crate::actions::token_info(st, mint).await {
+            Ok(Some(t)) => crate::actions::impact_curve(st, venue, &t).await.ok().flatten(),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let keep = |x: u128| x.saturating_mul(10_000 - u128::from(slip.min(10_000))) / 10_000;
     let body = match t {
         Trade::Buy { zat } => {
             let zat = u64::try_from(zat).unwrap_or(u64::MAX);
@@ -1027,7 +1040,12 @@ async fn submit_trade(
             } else {
                 rate::zat_to_lamports(zat, rate::apply_spread(r.lamports_per_zec, spread, true))
             };
-            let min_out = buy_min_out(units, e18, dec, slip).unwrap_or(0).max(1);
+            let min_out = curve
+                .and_then(|c| c.buy_out(e18, dec, units))
+                .map(keep)
+                .or_else(|| buy_min_out(units, e18, dec, slip))
+                .unwrap_or(0)
+                .max(1);
             json!({ "op": "buy", "venue": venue, "mint": mint, "zecIn": zat.to_string(),
                     "minOut": min_out.to_string(), "exec": exec })
         }
@@ -1036,7 +1054,11 @@ async fn submit_trade(
                 // A5: a retried sell never repeats the amount of its failed attempt.
                 amount = unzeen_ledger::actions::fuzz_token_amount_rand(amount);
             }
-            let quote = sell_min_out(amount, e18, dec, slip).unwrap_or(0);
+            let quote = curve
+                .and_then(|c| c.sell_out(e18, dec, amount))
+                .map(keep)
+                .or_else(|| sell_min_out(amount, e18, dec, slip))
+                .unwrap_or(0);
             let min_zat = if zec_pair {
                 quote / 10
             } else {
@@ -1044,7 +1066,7 @@ async fn submit_trade(
                 quote.saturating_mul(100_000_000) / u128::from(sell.max(1))
             };
             json!({ "op": "sell", "venue": venue, "mint": mint, "amount": amount.to_string(),
-                    "minZecOut": min_zat.min(i64::MAX as u128).to_string(), "exec": exec })
+                    "minZecOut": min_zat.clamp(1, i64::MAX as u128).to_string(), "exec": exec })
         }
     };
     submit_built(st, tx, row, steps, rep, body, Some(mint), None).await

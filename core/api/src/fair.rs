@@ -354,7 +354,19 @@ pub async fn one(State(st): State<AppState>, Path(id): Path<String>) -> ApiResul
     }
     let id = launch_id(&id).map_err(|_| ApiError::not_found())?;
     let rows = st.ledger.fl_public(st.cfg.cluster, Some(&id), None, 1).await?;
-    let l = rows.first().ok_or_else(ApiError::not_found)?;
+    let Some(l) = rows.first() else {
+        // v0.25 (devnet run 15.10, B4): before publication the creator, who alone holds the
+        // random id, gets `scheduled` with no other field (no meta, no publication time); the
+        // launch is still absent from `GET /api/launches`. Not cached: it flips to the full
+        // launch at the boundary.
+        if st.ledger.fl_is_scheduled(st.cfg.cluster, &id).await? {
+            let mut r = Json(json!({ "id": hex::encode(id), "status": "scheduled" })).into_response();
+            r.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            return Ok(r);
+        }
+        return Err(ApiError::not_found());
+    };
     Ok(public(launch_json(&st, l)))
 }
 

@@ -1476,11 +1476,14 @@ mod fair {
             assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
             assert_eq!(r.body["status"], "queued");
             let id = r.body["launchId"].as_str().unwrap().to_string();
-            // Not published before the epoch boundary.
-            assert_eq!(
-                self.get(&format!("/api/launches/{id}")).await.status,
-                StatusCode::NOT_FOUND
-            );
+            // v0.25: before the epoch boundary the id holder sees `scheduled` and nothing else;
+            // the public list does not have it.
+            let r = self.get(&format!("/api/launches/{id}")).await;
+            assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+            assert_eq!(r.body, json!({ "id": id, "status": "scheduled" }));
+            assert_eq!(r.headers["cache-control"], "no-store");
+            let list = self.get("/api/launches").await.body;
+            assert!(!list.to_string().contains(&id), "scheduled launch listed: {list}");
             self.sql(&format!(
                 "UPDATE {s}.fl_launches SET published_at = now() - interval '1 second',
                         close_at = now() + interval '1 hour', round = 1000,
@@ -2745,6 +2748,52 @@ mod orders_v08 {
     fn create(kind: &str, amount: u64, trigger: &str) -> Value {
         json!({"op":"order_create","venue":"pumpfun","mint":MINT,"kind":kind,"triggerPriceSol":trigger,
                "amount":amount.to_string()})
+    }
+
+    /// B2 (devnet run 15.10): with the venue's `launch_curves` row, a fired sell order's min_out
+    /// comes from the curve at the tick price (impact of this size included) minus slippage;
+    /// a take_profit of a big position no longer fails `slippage` on a thin curve.
+    #[tokio::test]
+    async fn order_min_out_includes_curve_impact() {
+        let Some(e) = setup().await else { return };
+        let s = e.schema.clone();
+        e.fund(3, 0, 10_000_000).await;
+        let pk = hex::encode(user(3).verifying_key().to_bytes());
+        let curve = unzeen_ledger::curve::CurveParams {
+            virtual_sol: 300_000_000,
+            virtual_tokens: 1_073_000_000_000_000,
+        };
+        e.sql(&format!(
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals) VALUES ('{MINT}', 'pumpfun', 'T', 'T', 6);
+             INSERT INTO {s}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{pk}', '{MINT}', 200000000000000);
+             INSERT INTO {s}.launch_curves (network, venue, virtual_sol_lamports, virtual_token_reserves,
+                                            real_token_reserves, token_total_supply)
+             VALUES ('devnet', 'pumpfun', 300000000, 1073000000000000, 793100000000000, 1000000000000000);"
+        ))
+        .await;
+        // 200M tokens, take profit at/below 1e-9 SOL (spot value 0.2 SOL; the curve pays ~25 % less).
+        e.tick(1, "0.0000000009", "curve").await;
+        let body = create("take_profit", 200_000_000_000_000, "0.000000001").to_string();
+        let r = e.signed(&user(3), "POST", "/api/actions", &body).await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        let id = r.body["id"].as_str().unwrap().to_string();
+        e.tick(2, "0.0000000011", "curve").await;
+        e.wait_order(3, &id, |o| o["status"] == "triggered").await;
+        let m = e
+            .one_i64(&format!("SELECT min_out FROM {s}.relayer_jobs WHERE op = 'sell'"))
+            .await as u128;
+        // The sold amount may be shaved (A5/A6); the floor follows the amount actually sold.
+        let amt = e
+            .one_i64(&format!(
+                "SELECT token_amount::bigint FROM {s}.relayer_jobs WHERE op = 'sell'"
+            ))
+            .await as u128;
+        let p = parse_e18("0.0000000011").unwrap();
+        let spot = sell_min_out(amt, p, 6, 500).unwrap();
+        let want = quantize_min_out(curve.sell_out(p, 6, amt).unwrap() * 9_500 / 10_000);
+        assert_eq!(m, want);
+        assert!(m * 10 < spot * 9, "curve floor {m} well below the spot floor {spot}");
+        e.drop_schema().await;
     }
 
     #[tokio::test]
@@ -6007,5 +6056,96 @@ async fn initial_buy_range_matches_create() {
         .await,
         2
     );
+    e.drop_schema().await;
+}
+
+/// v0.25 (devnet run 15.10):
+/// - buy `minOut = 0` / sell `minZecOut = 0` are refused on Solana too, also for pool tokens;
+/// - B1: a buy of exactly `minActionZat` is accepted at a rate where the D10 shave takes the
+///   charged amount below it (11.4425 SOL/ZEC);
+/// - B2: the sell minimum is checked with the curve's price impact when `launch_curves` has
+///   the venue (0.3 SOL devnet curve): a sell worth the minimum at spot but not on the curve
+///   is `below_minimum`.
+#[tokio::test]
+async fn trade_guards_minimum_and_curve_impact() {
+    let Some(e) = setup_with(|c| c.rate.fixed_lamports_per_zec = Some(11_442_500_000)).await else {
+        return;
+    };
+    let s = e.schema.clone();
+    let me = user(21);
+    e.fund(21, 0, 100_000_000).await;
+    // Devnet curve: 0.3 SOL / 1.073e15; the token sits on it after +0.627 SOL of buys
+    // (S = 0.927 SOL, T = k / S), price = S/T per base unit.
+    let (s0, t0) = (300_000_000u128, 1_073_000_000_000_000u128);
+    let sol = 927_000_000u128;
+    let tok = s0 * t0 / sol;
+    let price = format!("{:.18}", sol as f64 * 1e6 / tok as f64 / 1e9);
+    e.sql(&format!(
+        "INSERT INTO {s}.launch_curves (network, venue, virtual_sol_lamports, virtual_token_reserves,
+                                        real_token_reserves, token_total_supply)
+         VALUES ('devnet', 'pumpfun', {s0}, {t0}, 793100000000000, 1000000000000000);
+         INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol, status)
+         VALUES ('{MINT}', 'pumpfun', 'IMP', 'Impact', 6, {price}, 1, 'curve');
+         INSERT INTO {s}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{}', '{MINT}', {tok})",
+        hex::encode(me.verifying_key().to_bytes())
+    ))
+    .await;
+    let post = |b: Value| {
+        let e = &e;
+        let me = &me;
+        async move { e.signed(me, "POST", "/api/actions", &b.to_string()).await }
+    };
+    // 1. Zero guards, before any hold.
+    let r = post(json!({"op":"buy","venue":"pumpfun","mint":MINT,"zecIn":"1000000","minOut":"0"})).await;
+    assert_eq!(
+        (r.status, code(&r)),
+        (StatusCode::BAD_REQUEST, "bad_request"),
+        "{:?}",
+        r.body
+    );
+    let r = post(json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":"1000000000","minZecOut":"0"})).await;
+    assert_eq!(
+        (r.status, code(&r)),
+        (StatusCode::BAD_REQUEST, "bad_request"),
+        "{:?}",
+        r.body
+    );
+    assert_eq!(e.one_i64(&format!("SELECT held_zat FROM {s}.balances")).await, 0);
+    // 2. B1: exactly minActionZat (0.0114425 SOL, shaved to 0.011 SOL = 96 133 zat) is accepted.
+    for _ in 0..5 {
+        let r = post(json!({"op":"buy","venue":"pumpfun","mint":MINT,"zecIn":"100000","minOut":"1"})).await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    }
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {s}.relayer_jobs WHERE op = 'buy' AND min_out >= 1"
+        ))
+        .await,
+        5
+    );
+    // 3. B2: with minZecOut = 1 the server's estimate decides the minimum check.
+    let spot_per_base = sol as f64 / tok as f64; // lamports per base unit
+    let min_l = 100_000u128 * 11_442_500_000 / 100_000_000; // 11 442 500 lamports
+    // amount with spot value = 1.02 × min: impact of a sell that size is tiny (< 1 %), passes.
+    let small = (min_l as f64 * 1.02 / spot_per_base) as u128;
+    let r = post(json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":small.to_string(),"minZecOut":"1"})).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    // Now the same check where the impact matters: drop the curve to a tiny one so that the
+    // same spot value is far below the minimum on the curve.
+    e.sql(&format!(
+        "UPDATE {s}.launch_curves SET virtual_sol_lamports = 30000, virtual_token_reserves = 1073000000"
+    ))
+    .await;
+    let r = post(json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":small.to_string(),"minZecOut":"1"})).await;
+    assert_eq!(
+        (r.status, code(&r)),
+        (StatusCode::UNPROCESSABLE_ENTITY, "below_minimum"),
+        "{:?}",
+        r.body
+    );
+    // Without a curve row: the spot estimate, as before.
+    e.sql(&format!("DELETE FROM {s}.launch_curves")).await;
+    let r = post(json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":small.to_string(),"minZecOut":"1"})).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
     e.drop_schema().await;
 }

@@ -372,7 +372,7 @@ pub struct TokenFacts {
     pub price_quote: Option<String>,
 }
 
-async fn token_info(st: &AppState, mint: &str) -> ApiResult<Option<TokenFacts>> {
+pub async fn token_info(st: &AppState, mint: &str) -> ApiResult<Option<TokenFacts>> {
     let c = st.ledger.pg().get().await.map_err(unzeen_ledger::LedgerError::from)?;
     let r = c
         .query_opt(
@@ -506,6 +506,38 @@ fn estimate_zat_on(
     Some(zat.min(u64::MAX as u128) as u64)
 }
 
+/// B2 (devnet run 15.10): launch parameters of the token's curve when its price impact can be
+/// computed — a SOL-paired curve token of a venue with its own `launch_curves` row (pump.fun).
+/// `None`: spot estimate (other venues, pairs, graduated tokens, Robinhood Chain).
+pub async fn impact_curve(
+    st: &AppState,
+    venue: &str,
+    t: &TokenFacts,
+) -> ApiResult<Option<unzeen_ledger::curve::CurveParams>> {
+    if is_hood(st) || t.quote_mint.is_some() || t.status != "curve" || t.venue != venue {
+        return Ok(None);
+    }
+    let (c, _, own) = crate::rules_curve(st, venue).await?;
+    Ok(own.then_some(unzeen_ledger::curve::CurveParams {
+        virtual_sol: c.virtual_sol,
+        virtual_tokens: c.virtual_tokens,
+    }))
+}
+
+/// Zat value of selling `amount` base units on `curve` at spot `price` (decimal SOL per whole
+/// token), price impact included.
+fn curve_sell_zat(
+    curve: &unzeen_ledger::curve::CurveParams,
+    price: &str,
+    decimals: i16,
+    amount: u128,
+    lamports_per_zec: u64,
+) -> Option<u64> {
+    let p18 = crate::config::eth_to_wei(&truncate_decimals(price, 18))?;
+    let lamports = curve.sell_out(p18, u32::try_from(decimals).ok()?, amount)?;
+    Some(mul_div(lamports, 100_000_000, u128::from(lamports_per_zec.max(1))).min(u128::from(u64::MAX)) as u64)
+}
+
 fn truncate_decimals(s: &str, n: usize) -> String {
     match s.split_once('.') {
         Some((i, f)) => format!("{i}.{}", &f[..f.len().min(n)]),
@@ -600,12 +632,12 @@ pub fn fuzzed_buy_step(
     }
     // minOut × lamports / full, exact for any u128 minOut (review-numeric-hood п. 6: a 1e27 minOut
     // times wei would saturate a plain product and silently drop the slippage guard).
-    let min_out = mul_div(min_out, lamports, full.max(1));
+    // A positive minOut stays positive (a guard of 1 must not round to "no guard").
+    let scaled = mul_div(min_out, lamports, full.max(1));
+    let min_out = if min_out > 0 { scaled.max(1) } else { 0 };
     Ok((zat, lamports, min_out))
 }
 
-/// `floor(a × b / d)` with a 256-bit intermediate (`unzeen_fair::alloc::mul_div`); 0 for `d = 0`,
-/// `u128::MAX` if the quotient does not fit.
 /// Accepted `create.initialBuyZec` range in zat at the buy rate `applied` (native units per
 /// ZEC, spread applied), for a creator cap of `max_units` native units (`maxInitialBuyLamports`)
 /// and the D10 rounding `step`. `None`: the cap is below one step, no initial buy is possible.
@@ -629,6 +661,8 @@ pub fn initial_buy_zat_range(max_units: u128, step: u64, applied: u64) -> Option
     Some((min, max.max(min)))
 }
 
+/// `floor(a × b / d)` with a 256-bit intermediate (`unzeen_fair::alloc::mul_div`); 0 for `d = 0`,
+/// `u128::MAX` if the quotient does not fit.
 pub fn mul_div(a: u128, b: u128, d: u128) -> u128 {
     if d == 0 {
         return 0;
@@ -684,6 +718,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
         payout: None,
         gain: None,
         quote_mint: None,
+        min_check_zat: None,
     };
     Ok(match a {
         SignedAction::Buy {
@@ -700,22 +735,22 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             if zec_in < min_action {
                 return Err(ApiError::below_minimum("zecIn below PoolInfo.minActionZat"));
             }
+            // v0.25 (devnet run 15.10): no buy without a slippage guard, on every chain (was
+            // hood only, and mints without a pool price). Checked before any hold.
+            if min_out == 0 {
+                return Err(ApiError::bad_request("minOut must be positive"));
+            }
             let known = check_venue_status(st, &mint, &v).await?;
             if is_hood(st) {
                 hood_price_guard(st, &mint, min_out).await?;
             }
-            // No public price for a mint outside `tokens`: the user's own minOut is the only
-            // protection, so it must be explicit (API v0.10).
-            if known.is_none() && min_out == 0 {
-                return Err(ApiError::bad_request(
-                    "minOut required for a token without a pool price",
-                ));
-            }
             if let Some(q) = zec_pair(st, known.as_ref(), &v)? {
                 // v0.13 ZEC SPL pair: 1:1 to ZEC, no SOL rate; job amounts in ZEC SPL units.
                 let applied = zec_units_per_zec(st.cfg.quotes.zec_spread_bps, true);
-                let (amount_zat, units, min_out) =
-                    fuzzed_buy_step(zec_in, min_out, applied, min_action, ZEC_UNITS_STEP)?;
+                // B1: the minimum is checked on the signed zecIn above; after the D10 shave
+                // only one step is required (the ledger checks `min_check_zat`).
+                let floor = lamports_to_zat_ceil(u128::from(ZEC_UNITS_STEP), applied);
+                let (amount_zat, units, min_out) = fuzzed_buy_step(zec_in, min_out, applied, floor, ZEC_UNITS_STEP)?;
                 let spot = known.as_ref().and_then(|t| {
                     let p = t.price_quote.as_deref()?;
                     let upw = crate::config::sol_to_lamports(&truncate_decimals(p, 9))? / 10;
@@ -724,6 +759,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 return Ok(NewAction {
                     gain: Some((mint.clone(), spot.unwrap_or(min_out).max(min_out))),
                     amount_zat,
+                    min_check_zat: Some(zec_in),
                     fee_zat: now_fee(mode),
                     rate: Some(parity_used(applied)),
                     quote_mint: Some(q.mint.to_string()),
@@ -740,13 +776,13 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             let known = known.map(|t| (t.price_sol, t.decimals));
             let r = rate(st).await?;
             let applied = apply_spread(r.lamports_per_zec, spread(&r), true);
-            let (amount_zat, lamports, min_out) = fuzzed_buy_step(
-                zec_in,
-                min_out,
-                applied,
-                min_action,
-                rate::buy_step(st.cfg.policy.chain.trade),
-            )?;
+            // B1 (devnet run 15.10): a buy of exactly minActionZat was refused because the
+            // D10 shave (0–1 %, down to 0.001 SOL) took the charged amount below it. The
+            // minimum applies to the signed zecIn (checked above, and by the ledger through
+            // `min_check_zat`); after the shave one step is enough.
+            let step = rate::buy_step(st.cfg.policy.chain.trade);
+            let floor = lamports_to_zat_ceil(u128::from(step), applied);
+            let (amount_zat, lamports, min_out) = fuzzed_buy_step(zec_in, min_out, applied, floor, step)?;
             // Creator cap (v0.5): upper-bound token estimate; the ledger applies it only if
             // this key created the mint.
             let spot = known.and_then(|(p, d)| {
@@ -757,6 +793,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             NewAction {
                 gain: Some((mint.clone(), gain.max(min_out))),
                 amount_zat,
+                min_check_zat: Some(zec_in),
                 fee_zat: now_fee(mode),
                 rate: Some(used(&r, applied)),
                 jobs: vec![NewJob {
@@ -780,6 +817,10 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             let mint = chain_address(st, &mint, "mint")?;
             let amount = token_cap(st, positive_tokens(&amount, "amount")?, "amount")?;
             let min_zec_out = parse_amount(&min_zec_out, "minZecOut")?;
+            // v0.25: no sell without a floor, on every chain (devnet run 15.10).
+            if min_zec_out == 0 {
+                return Err(ApiError::bad_request("minZecOut must be positive"));
+            }
             // A6: a sell that mirrors this key's public buy (±1 %) is shaved 0.5–2 % and
             // rounded to 3 significant digits (the rest stays available); minZecOut shrinks in
             // proportion (same minimum price). Other sells are left exact.
@@ -800,11 +841,6 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             let known = check_venue_status(st, &mint, &v).await?;
             if is_hood(st) {
                 hood_price_guard(st, &mint, u128::from(min_zec_out)).await?;
-            }
-            if known.is_none() && min_zec_out == 0 {
-                return Err(ApiError::bad_request(
-                    "minZecOut required for a token without a pool price",
-                ));
             }
             if let Some(q) = zec_pair(st, known.as_ref(), &v)? {
                 // v0.13 ZEC SPL pair: proceeds in ZEC SPL units, credited 1:1 minus the spread.
@@ -833,13 +869,22 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                     ..base("sell")
                 });
             }
+            let curve = match &known {
+                Some(t) => impact_curve(st, &v, t).await?,
+                None => None,
+            };
             let known = known.map(|t| (t.price_sol, t.decimals));
             let r = rate(st).await?;
             let applied = apply_spread(r.lamports_per_zec, spread(&r), false);
             // N7: sells are checked against the minimum too (by the signed floor, or by the
-            // current price when the token is known).
+            // current price when the token is known). B2: on a curve with known launch
+            // parameters, with the price impact of this sell.
             let est = known
-                .and_then(|(p, d)| estimate_zat_on(st.cfg.policy.chain.trade, &p, d, amount, applied))
+                .and_then(|(p, d)| {
+                    curve
+                        .and_then(|c| curve_sell_zat(&c, &p, d, amount, applied))
+                        .or_else(|| estimate_zat_on(st.cfg.policy.chain.trade, &p, d, amount, applied))
+                })
                 .unwrap_or(0);
             if signed_floor < min_action && est < min_action {
                 return Err(ApiError::below_minimum(

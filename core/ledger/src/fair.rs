@@ -539,6 +539,20 @@ impl Ledger {
         })
     }
 
+    /// A launch of this network created but not yet published (`fl_create` waits for the next
+    /// Delayed epoch boundary) and still open. Only the creator knows its random id.
+    pub async fn fl_is_scheduled(&self, network: &str, id: &[u8; 16]) -> Result<bool> {
+        let id_s: &[u8] = id;
+        let c = self.pool.get().await?;
+        Ok(c.query_opt(
+            "SELECT 1 FROM fl_launches
+             WHERE id = $1 AND network = $2 AND published_at > clock_timestamp() AND status = 'open'",
+            &[&id_s, &network],
+        )
+        .await?
+        .is_some())
+    }
+
     /// Published launch of this network that a key may bid on; `None` = unknown/unpublished.
     pub async fn fl_bid_target(&self, network: &str, id: &[u8; 16], pk: &[u8; 32]) -> Result<Option<BidTarget>> {
         let (id_s, pk_s): (&[u8], &[u8]) = (id, pk);

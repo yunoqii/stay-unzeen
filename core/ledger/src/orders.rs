@@ -169,6 +169,26 @@ pub fn sell_min_out(amount: u128, trigger_e18: u128, decimals: u32, slippage_bps
     unzeen_fair::alloc::mul_div(amount, k, den)
 }
 
+/// Launch parameters of an order's curve when its price impact can be computed: a SOL-paired
+/// pump.fun token (orders are pump.fun only) and the relayer's `launch_curves` row.
+async fn order_curve<C: GenericClient>(tx: &C, network: &str, mint: &str) -> Result<Option<crate::curve::CurveParams>> {
+    let r = tx
+        .query_opt(
+            "SELECT c.virtual_sol_lamports, c.virtual_token_reserves
+               FROM launch_curves c
+              WHERE c.network = $1 AND c.venue = 'pumpfun'
+                AND NOT EXISTS (SELECT 1 FROM tokens t WHERE t.mint = $2 AND (t.quote_mint IS NOT NULL OR t.venue <> 'pumpfun'))",
+            &[&network, &mint],
+        )
+        .await?;
+    Ok(r.and_then(|r| {
+        Some(crate::curve::CurveParams {
+            virtual_sol: r.get::<_, Option<Num>>(0)?.to_u128().ok()?,
+            virtual_tokens: r.get::<_, Option<Num>>(1)?.to_u128().ok()?,
+        })
+    }))
+}
+
 fn id16(v: Vec<u8>) -> [u8; 16] {
     v.try_into().unwrap_or([0; 16])
 }
@@ -696,6 +716,11 @@ impl Ledger {
         } else {
             amount
         };
+        // B2 (devnet run 15.10): on a SOL-paired pump.fun curve with known launch parameters,
+        // min_out is the curve's output for this size at the tick price (price impact
+        // included) minus the slippage; otherwise the tick price itself, as before.
+        let curve = order_curve(tx, network, &mint).await?;
+        let keep = |x: u128| x.saturating_mul(10_000 - u128::from(slip.min(10_000))) / 10_000;
         let (lamports, zat, min_out) = if buy {
             let full = (hold.max(0) as u128) * (rate.lamports_per_zec as u128) / ZAT_PER_ZEC;
             let shave = (rand::random::<u64>() >> 11) as f64 / (1u64 << 53) as f64;
@@ -703,8 +728,14 @@ impl Ledger {
             let zat = (lamports * ZAT_PER_ZEC)
                 .div_ceil(rate.lamports_per_zec.max(1) as u128)
                 .min(hold.max(0) as u128) as u64;
-            match buy_min_out(lamports, price_e18, dec, slip) {
-                Some(m) if lamports > 0 && zat >= self.policy.min_action_zat => (lamports, zat, m),
+            // B1: the minimum applied to the order's signed amount at creation; the D10 shave
+            // here only has to leave a positive buy.
+            let m = curve
+                .and_then(|c| c.buy_out(price_e18, dec, lamports))
+                .map(keep)
+                .or_else(|| buy_min_out(lamports, price_e18, dec, slip));
+            match m {
+                Some(m) if lamports > 0 && zat > 0 => (lamports, zat, m.max(1)),
                 _ => {
                     close_order(tx, &id, "failed", Some("below_minimum")).await?;
                     rep.failed += 1;
@@ -712,8 +743,12 @@ impl Ledger {
                 }
             }
         } else {
-            match sell_min_out(amount, price_e18, dec, slip) {
-                Some(m) => (0, 0, m),
+            let m = curve
+                .and_then(|c| c.sell_out(price_e18, dec, amount))
+                .map(keep)
+                .or_else(|| sell_min_out(amount, price_e18, dec, slip));
+            match m {
+                Some(m) => (0, 0, m.max(1)),
                 None => {
                     close_order(tx, &id, "failed", Some("bad_request")).await?;
                     rep.failed += 1;

@@ -113,6 +113,10 @@ pub struct NewAction {
     /// SOL). The rate column then holds ZEC SPL units per ZEC (source "parity") and the job
     /// amounts are ZEC SPL units (RELAYER v8).
     pub quote_mint: Option<String>,
+    /// Amount checked against `min_action_zat` instead of `amount_zat` (buy: the signed
+    /// `zecIn`, before the D10 shave lowers the charged amount; devnet run 15.10 B1). None:
+    /// `amount_zat`.
+    pub min_check_zat: Option<u64>,
 }
 
 /// What the owner sees in `GET /api/actions/:id`.
@@ -235,6 +239,7 @@ impl Ledger {
         } else {
             a.amount_zat
         };
+        let counted = a.min_check_zat.unwrap_or(counted);
         if a.amount_zat > 0 && counted < self.policy.min_action_zat {
             return Err(LedgerError::BelowMinimum);
         }
