@@ -245,16 +245,63 @@ export function saleBelowMinimum(zecOut: bigint | null | undefined, minActionZat
 export interface CurveParams {
   virtualSol: bigint;
   virtualTokens: bigint;
-  /** Venue trade fee on the SOL side, bps (pump.fun 125). */
+  /** Venue trade fee on the SOL side, bps (pump.fun 125). v0.27: only the fallback when there are no tiers. */
   feeBps: number;
+  /** v0.27: token supply in base units (market cap = S · supply / T). */
+  tokenTotalSupply?: bigint;
+  /** v0.27: market-cap fee tiers, thresholds strictly ascending (pump.fun FeeConfig, protocol + creator bps). */
+  feeTiers?: FeeTier[];
+}
+
+export interface FeeTier {
+  marketCapLamports: bigint;
+  bps: number;
+}
+
+type CurveWire = { virtualSol: string; virtualTokens: string; feeBps: number; tokenTotalSupply?: string; feeSource?: "chain" | "config"; feeTiers?: { marketCapLamports: string; bps: number }[] };
+
+/** PoolInfo feeTiers -> tiers, as core parse_fee_tiers: strictly ascending, bps <= 5000, non-empty; else null. */
+export function parseFeeTiers(v: unknown): FeeTier[] | null {
+  if (!Array.isArray(v) || v.length === 0) return null;
+  const out: FeeTier[] = [];
+  for (const t of v as { marketCapLamports?: unknown; bps?: unknown }[]) {
+    if (typeof t?.marketCapLamports !== "string" || !/^\d{1,38}$/.test(t.marketCapLamports)) return null;
+    if (typeof t.bps !== "number" || !Number.isInteger(t.bps) || t.bps < 0 || t.bps > 5_000) return null;
+    const m = BigInt(t.marketCapLamports);
+    if (out.length && out[out.length - 1].marketCapLamports >= m) return null;
+    out.push({ marketCapLamports: m, bps: t.bps });
+  }
+  return out;
+}
+
+/** As pump's calculateFeeTier / core tier_bps: the last tier with threshold <= market cap, else the first. */
+export function tierBps(tiers: FeeTier[], marketCap: bigint): number | null {
+  if (tiers.length === 0) return null;
+  for (let i = tiers.length - 1; i >= 0; i--) if (marketCap >= tiers[i].marketCapLamports) return tiers[i].bps;
+  return tiers[0].bps;
 }
 
 /** The curve the pool publishes for `venue` (v0.26), or null (no row, or malformed: use the spot estimate). */
-export function curveOf(pool: { venues?: { venue: string; curve?: { virtualSol: string; virtualTokens: string; feeBps: number } }[] } | null | undefined, venue: string): CurveParams | null {
+export function curveOf(pool: { venues?: { venue: string; curve?: CurveWire }[] } | null | undefined, venue: string): CurveParams | null {
   const c = pool?.venues?.find((v) => v.venue === venue)?.curve;
   if (!c || !/^[1-9]\d{0,30}$/.test(c.virtualSol) || !/^[1-9]\d{0,30}$/.test(c.virtualTokens)) return null;
   if (!Number.isInteger(c.feeBps) || c.feeBps < 0 || c.feeBps >= 10_000) return null;
-  return { virtualSol: BigInt(c.virtualSol), virtualTokens: BigInt(c.virtualTokens), feeBps: c.feeBps };
+  const supply = typeof c.tokenTotalSupply === "string" && /^[1-9]\d{0,38}$/.test(c.tokenTotalSupply) ? BigInt(c.tokenTotalSupply) : undefined;
+  const tiers = parseFeeTiers(c.feeTiers) ?? undefined;
+  return { virtualSol: BigInt(c.virtualSol), virtualTokens: BigInt(c.virtualTokens), feeBps: c.feeBps, tokenTotalSupply: supply, feeTiers: tiers };
+}
+
+/** Market cap in lamports at the current reserves (S · supply / T), as core market_cap_at. */
+export function curveMarketCap(c: CurveParams, priceSol: string, decimals: number): bigint | null {
+  const r = curveReserves(c, priceSol, decimals);
+  return r && c.tokenTotalSupply ? (r.s * c.tokenTotalSupply) / r.t : null;
+}
+
+/** Fee of the tier the token's market cap falls in (core with_tier_fee: no market cap -> 0 -> first tier); no tiers: feeBps. */
+export function effectiveFeeBps(c: CurveParams, reserves: { s: bigint; t: bigint }): number {
+  if (!c.feeTiers) return c.feeBps;
+  const mc = c.tokenTotalSupply ? (reserves.s * c.tokenTotalSupply) / reserves.t : ZERO;
+  return tierBps(c.feeTiers, mc) ?? c.feeBps;
 }
 
 /** Integer square root (floor). */
@@ -283,13 +330,13 @@ export function curveSellOut(c: CurveParams, priceSol: string, decimals: number,
   const r = curveReserves(c, priceSol, decimals);
   if (!r) return null;
   const gross = (r.s * amount) / (r.t + amount);
-  return (gross * (BPS - BigInt(c.feeBps))) / BPS;
+  return (gross * (BPS - BigInt(effectiveFeeBps(c, r)))) / BPS;
 }
 
 /** Base units a buy of `lamports` returns at spot `priceSol`, impact included; null -> use the spot estimate. */
 export function curveBuyOut(c: CurveParams, priceSol: string, decimals: number, lamports: bigint): bigint | null {
   const r = curveReserves(c, priceSol, decimals);
   if (!r) return null;
-  const net = (lamports * BPS) / (BPS + BigInt(c.feeBps));
+  const net = (lamports * BPS) / (BPS + BigInt(effectiveFeeBps(c, r)));
   return (r.t * net) / (r.s + net);
 }

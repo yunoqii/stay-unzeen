@@ -1,6 +1,6 @@
 // API v0.26: the curve impact estimate, the formula of docs/API.md and core/ledger/src/curve.rs (same cases as its tests).
 import { describe, expect, it } from "vitest";
-import { curveBuyOut, curveOf, curveReserves, curveSellOut, isqrt, quoteSell, type CurveParams } from "./trade";
+import { curveBuyOut, curveMarketCap, curveOf, curveReserves, curveSellOut, effectiveFeeBps, isqrt, parseFeeTiers, quoteSell, tierBps, type CurveParams } from "./trade";
 
 /** pump.fun devnet Global 15.10, fee off for the AMM cases (as core's DEVNET); the fee is checked on its own. */
 const DEVNET: CurveParams = { virtualSol: BigInt(300_000_000), virtualTokens: BigInt("1073000000000000"), feeBps: 0 };
@@ -90,5 +90,39 @@ describe("pump.fun curve impact (devnet 0.3 SOL / 1.073e15)", () => {
     const q = quoteSell(BigInt("38100000000000"), rate, "0.000000000344", 6, 100, curveOf(POOL, "pumpfun"))!;
     expect(q.minZecOut <= BigInt(107_854)).toBe(true); // what the pool actually credited
     expect(q.zecOut > BigInt(105_000)).toBe(true);
+  });
+
+  it("v0.27 fee tiers, as core fee_tiers_parse_and_select", () => {
+    const t = parseFeeTiers([{ marketCapLamports: "0", bps: 125 }, { marketCapLamports: "420000000000", bps: 105 }])!;
+    expect(tierBps(t, BigInt(0))).toBe(125);
+    expect(tierBps(t, BigInt("419999999999"))).toBe(125);
+    expect(tierBps(t, BigInt("420000000000"))).toBe(105);
+    const below = [{ marketCapLamports: BigInt(10), bps: 90 }, { marketCapLamports: BigInt(20), bps: 80 }];
+    expect(tierBps(below, BigInt(5))).toBe(90); // below the first threshold: first tier
+    expect(parseFeeTiers([])).toBeNull();
+    expect(parseFeeTiers([{ marketCapLamports: "5", bps: 1 }, { marketCapLamports: "5", bps: 2 }])).toBeNull();
+    expect(parseFeeTiers([{ marketCapLamports: "0", bps: 9000 }])).toBeNull();
+    // Market cap of the fresh devnet curve: 0.3 SOL × 1e15 / 1.073e15 ≈ 0.2796 SOL.
+    const fresh = { ...DEVNET, tokenTotalSupply: BigInt("1000000000000000"), feeTiers: t };
+    const p = priceSol(DEVNET.virtualSol, DEVNET.virtualTokens);
+    expect(absDiff(curveMarketCap(fresh, p, 6)!, BigInt(279_589_934)) < BigInt(1_000)).toBe(true);
+    expect(effectiveFeeBps(fresh, curveReserves(fresh, p, 6)!)).toBe(125);
+    expect(effectiveFeeBps({ ...DEVNET }, curveReserves(DEVNET, p, 6)!)).toBe(0); // no tiers: feeBps
+  });
+
+  it("the tier, not feeBps, sets the fee once the market cap passes a threshold", () => {
+    const c = curveOf({ venues: [{ venue: "pumpfun", curve: { virtualSol: "300000000", virtualTokens: "1073000000000000", feeBps: 125, tokenTotalSupply: "1000000000000000", feeSource: "chain", feeTiers: [{ marketCapLamports: "0", bps: 125 }, { marketCapLamports: "1000000000", bps: 50 }] } }] }, "pumpfun")!;
+    const s = BigInt(800_000_000);
+    const t = K / s;
+    const p = priceSol(s, t); // market cap ≈ 0.8·1e15/(K/0.8) ≈ 1.99 SOL > 1 SOL
+    const a = BigInt("10000000000000");
+    expect(curveSellOut(c, p, 6, a)).toBe((curveSellOut(DEVNET, p, 6, a)! * BigInt(9_950)) / BigInt(10_000));
+  });
+
+  it("as core matches_devnet_trades: buy net and sell after 125 bps reproduce the chain", () => {
+    const net = (BigInt(11_000_000) * BigInt(10_000)) / BigInt(10_125);
+    expect(absDiff(net, BigInt(10_864_197)) <= BigInt(1)).toBe(true);
+    const out = (BigInt(560_356_234) * BigInt(10_000 - 125)) / BigInt(10_000);
+    expect(absDiff(out, BigInt(553_351_780)) <= BigInt(2)).toBe(true);
   });
 });

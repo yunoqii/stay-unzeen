@@ -30,7 +30,17 @@ export interface VenueInfo {
   creatorFees: boolean;
   mainnetOnly: boolean;
   /** v0.26: the venue's curve (launch_curves) and trade fee, for the impact estimate; only venues with their own row (pump.fun). */
-  curve?: { virtualSol: string; virtualTokens: string; feeBps: number };
+  curve?: {
+    virtualSol: string;
+    virtualTokens: string;
+    /** Fee of the fresh curve's tier; the fallback when feeTiers is absent. */
+    feeBps: number;
+    /** v0.27 */
+    tokenTotalSupply?: string;
+    feeSource?: "chain" | "config";
+    /** v0.27: ascending market-cap tiers (protocol + creator bps); with feeSource "chain". */
+    feeTiers?: { marketCapLamports: string; bps: number }[];
+  };
 }
 
 /** v0.13: PoolInfo.quotes[]: a non-SOL pair enabled on this network. No entry = pair unavailable. */
