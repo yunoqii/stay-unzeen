@@ -130,7 +130,8 @@ export function mockVenues(network: Network): VenueInfo[] {
   const pairs = (v: Venue): Quote[] => ["SOL", ...(["ZEC", "USDC", "USD1"] as const).filter((q) => quotes.some((x) => x.quote === q && x.venues.includes(v)))];
   const pad = (v: Venue): VenueInfo => ({ venue: v, trade: true, create: CREATE_ENABLED, quotes: CREATE_ENABLED ? pairs(v) : [], atomicFirstBuy: true, creatorFees: true, mainnetOnly: false });
   return [
-    pad("pumpfun"),
+    // v0.26: pump.fun publishes its curve (devnet Global 15.10, fee 0.95 % + 0.30 %).
+    { ...pad("pumpfun"), curve: { virtualSol: main ? "30000000000" : "300000000", virtualTokens: "1073000000000000", feeBps: 125 } },
     pad("meteora-dbc"),
     pad("raydium-launchlab"),
     { venue: "bags", trade: main, create: main && CREATE_ENABLED, quotes: main && CREATE_ENABLED ? ["SOL"] : [], atomicFirstBuy: false, creatorFees: false, mainnetOnly: true },

@@ -1,9 +1,10 @@
-// API v0.25 B2: the pump.fun curve impact, ported from core/ledger/src/curve.rs (same cases as its tests).
+// API v0.26: the curve impact estimate, the formula of docs/API.md and core/ledger/src/curve.rs (same cases as its tests).
 import { describe, expect, it } from "vitest";
-import { curveBuyOut, curveReserves, curveSellOut, isqrt, PUMPFUN_CURVE, quoteSell } from "./trade";
+import { curveBuyOut, curveOf, curveReserves, curveSellOut, isqrt, quoteSell, type CurveParams } from "./trade";
 
-// The AMM cases compare with core's fee-less math; the fee is checked on its own below.
-const DEVNET = { ...PUMPFUN_CURVE.devnet, feeBps: 0 };
+/** pump.fun devnet Global 15.10, fee off for the AMM cases (as core's DEVNET); the fee is checked on its own. */
+const DEVNET: CurveParams = { virtualSol: BigInt(300_000_000), virtualTokens: BigInt("1073000000000000"), feeBps: 0 };
+const POOL = { venues: [{ venue: "pumpfun", curve: { virtualSol: "300000000", virtualTokens: "1073000000000000", feeBps: 125 } }, { venue: "meteora-dbc" }] };
 const K = DEVNET.virtualSol * DEVNET.virtualTokens;
 const absDiff = (a: bigint, b: bigint) => (a > b ? a - b : b - a);
 /** SOL per whole token (6 decimals) as a decimal string with 18 fraction digits: S/T · 10^6 / 10^9. */
@@ -63,10 +64,31 @@ describe("pump.fun curve impact (devnet 0.3 SOL / 1.073e15)", () => {
     expect(quoteSell(BigInt(1000), rate, "0", 6, 100, DEVNET)!.zecOut).toBe(BigInt(0));
   });
 
-  it("live run 15.10: with the 1 % venue fee the default 1 % slippage covers the real sale", () => {
+  it("fee as core (fee_lowers_both_sides): sell × (1 − fee), buy through net = x / (1 + fee)", () => {
+    const s0 = DEVNET.virtualSol + BigInt(13_000_000);
+    const t0 = K / s0;
+    const p = priceSol(s0, t0);
+    const fee = { ...DEVNET, feeBps: 125 };
+    const a = BigInt("10000000000000");
+    expect(curveSellOut(fee, p, 6, a)).toBe((curveSellOut(DEVNET, p, 6, a)! * BigInt(9_875)) / BigInt(10_000));
+    const x = BigInt(50_000_000);
+    const net = (x * BigInt(10_000)) / BigInt(10_125);
+    expect(curveBuyOut(fee, p, 6, x)).toBe(curveBuyOut(DEVNET, p, 6, net));
+    expect(curveBuyOut(fee, p, 6, x)! < curveBuyOut(DEVNET, p, 6, x)!).toBe(true);
+  });
+
+  it("parameters only from PoolInfo.venues[].curve; no row or a bad one: spot", () => {
+    expect(curveOf(POOL, "pumpfun")).toEqual({ virtualSol: BigInt(300_000_000), virtualTokens: BigInt("1073000000000000"), feeBps: 125 });
+    expect(curveOf(POOL, "meteora-dbc")).toBeNull();
+    expect(curveOf({}, "pumpfun")).toBeNull();
+    expect(curveOf({ venues: [{ venue: "pumpfun", curve: { virtualSol: "0", virtualTokens: "1", feeBps: 125 } }] }, "pumpfun")).toBeNull();
+    expect(curveOf({ venues: [{ venue: "pumpfun", curve: { virtualSol: "1", virtualTokens: "1", feeBps: 10_000 } }] }, "pumpfun")).toBeNull();
+  });
+
+  it("live run 15.10: with the published 1.25 % fee the default 1 % slippage covers the real sale", () => {
     const rate = { lamportsPerZec: "11557500000", source: "fixed" as const, ts: 0 };
-    const q = quoteSell(BigInt("38100000000000"), rate, "0.000000000344", 6, 100, PUMPFUN_CURVE.devnet)!;
+    const q = quoteSell(BigInt("38100000000000"), rate, "0.000000000344", 6, 100, curveOf(POOL, "pumpfun"))!;
     expect(q.minZecOut <= BigInt(107_854)).toBe(true); // what the pool actually credited
-    expect(q.zecOut > BigInt(105_000)).toBe(true); // and not absurdly low
+    expect(q.zecOut > BigInt(105_000)).toBe(true);
   });
 });

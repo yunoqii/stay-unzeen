@@ -236,26 +236,26 @@ export function saleBelowMinimum(zecOut: bigint | null | undefined, minActionZat
   return zecOut !== null && zecOut !== undefined && minActionZat !== null && zecOut < minActionZat;
 }
 
-// ---- pump.fun curve impact (API v0.25 B2, port of core/ledger/src/curve.rs) ----
-// Constant product over virtual reserves: S·T = k, k = S0·T0 from the venue's launch parameters. The spot price
-// p = S/T (lamports per base unit) gives the current reserves: S = √(k·p), T = k/S. A sell of a base units
-// returns S·a/(T+a) lamports, a buy of x lamports T·x/(S+x) base units (venue fees left to the slippage).
-// The pool does not publish the curve parameters, so they are pinned here per network; any missing or odd
-// input falls back to the spot estimate.
+// ---- curve impact (API v0.26, the formula of docs/API.md and core/ledger/src/curve.rs) ----
+// Constant product over virtual reserves: S·T = k, k = virtualSol · virtualTokens. The spot price p = S/T
+// (lamports per base unit) gives the current reserves: S = √(k·p), T = k/S. A sell of a base units returns
+// S·a/(T+a) · (1 − fee) lamports; a buy of x lamports in total puts net = x/(1 + fee) into the curve and returns
+// T·net/(S+net) base units. The parameters come only from PoolInfo.venues[].curve; without it: spot estimate.
 
 export interface CurveParams {
   virtualSol: bigint;
   virtualTokens: bigint;
-  /** Venue fee taken on the SOL side of every trade, bps. core leaves it to the slippage; the quote counts it so
-   *  the default 1 % slippage holds (live run 15.10: a sale landed 1.2 % under the fee-less curve estimate). */
-  feeBps?: number;
+  /** Venue trade fee on the SOL side, bps (pump.fun 125). */
+  feeBps: number;
 }
 
-/** pump.fun Global (initial virtual reserves): devnet 0.3 SOL / 1.073e15 (docs/API.md v0.25), mainnet 30 SOL / 1.073e15. */
-export const PUMPFUN_CURVE: Record<"devnet" | "mainnet", CurveParams> = {
-  devnet: { virtualSol: BigInt(300_000_000), virtualTokens: BigInt("1073000000000000"), feeBps: 100 },
-  mainnet: { virtualSol: BigInt(30_000_000_000), virtualTokens: BigInt("1073000000000000"), feeBps: 100 },
-};
+/** The curve the pool publishes for `venue` (v0.26), or null (no row, or malformed: use the spot estimate). */
+export function curveOf(pool: { venues?: { venue: string; curve?: { virtualSol: string; virtualTokens: string; feeBps: number } }[] } | null | undefined, venue: string): CurveParams | null {
+  const c = pool?.venues?.find((v) => v.venue === venue)?.curve;
+  if (!c || !/^[1-9]\d{0,30}$/.test(c.virtualSol) || !/^[1-9]\d{0,30}$/.test(c.virtualTokens)) return null;
+  if (!Number.isInteger(c.feeBps) || c.feeBps < 0 || c.feeBps >= 10_000) return null;
+  return { virtualSol: BigInt(c.virtualSol), virtualTokens: BigInt(c.virtualTokens), feeBps: c.feeBps };
+}
 
 /** Integer square root (floor). */
 export function isqrt(n: bigint): bigint {
@@ -282,14 +282,14 @@ export function curveReserves(c: CurveParams, priceSol: string, decimals: number
 export function curveSellOut(c: CurveParams, priceSol: string, decimals: number, amount: bigint): bigint | null {
   const r = curveReserves(c, priceSol, decimals);
   if (!r) return null;
-  const out = (r.s * amount) / (r.t + amount);
-  return (out * (BPS - BigInt(c.feeBps ?? 0))) / BPS;
+  const gross = (r.s * amount) / (r.t + amount);
+  return (gross * (BPS - BigInt(c.feeBps))) / BPS;
 }
 
 /** Base units a buy of `lamports` returns at spot `priceSol`, impact included; null -> use the spot estimate. */
 export function curveBuyOut(c: CurveParams, priceSol: string, decimals: number, lamports: bigint): bigint | null {
   const r = curveReserves(c, priceSol, decimals);
   if (!r) return null;
-  const x = (lamports * (BPS - BigInt(c.feeBps ?? 0))) / BPS;
-  return (r.t * x) / (r.s + x);
+  const net = (lamports * BPS) / (BPS + BigInt(c.feeBps));
+  return (r.t * net) / (r.s + net);
 }

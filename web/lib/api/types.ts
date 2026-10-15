@@ -29,6 +29,8 @@ export interface VenueInfo {
   /** false (bags, jupiter): no creator fees reach claimable. */
   creatorFees: boolean;
   mainnetOnly: boolean;
+  /** v0.26: the venue's curve (launch_curves) and trade fee, for the impact estimate; only venues with their own row (pump.fun). */
+  curve?: { virtualSol: string; virtualTokens: string; feeBps: number };
 }
 
 /** v0.13: PoolInfo.quotes[]: a non-SOL pair enabled on this network. No entry = pair unavailable. */

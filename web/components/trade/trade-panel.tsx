@@ -12,7 +12,7 @@ import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, unitsToNumber, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
 import { NETWORK_CONFIG, nativeOf, useNetwork } from "@/lib/network";
 import { nowFee as poolNowFee, resolveExec, useDefaultExec, withExec, type ExecMode, type NowFee } from "@/lib/exec";
-import { isPriceStale, lamportsToZatCeil, PUMPFUN_CURVE, quoteBuy, quoteRate, saleBelowMinimum, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
+import { curveOf, isPriceStale, lamportsToZatCeil, quoteBuy, quoteRate, saleBelowMinimum, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
 import { useRecentBuys } from "@/hooks/use-recent-buys";
 import { useNow } from "@/hooks/use-now";
 import { usePriceTs } from "@/hooks/use-price-ts";
@@ -150,12 +150,9 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
   const zecPair = pair === "ZEC";
   const spread = zecSpreadBps(pool);
   const pairDecimals = quoteAsset(pool, pair, token.venue)?.decimals ?? QUOTE_DECIMALS[pair];
-  // v0.25 (B2): SOL-paired pump.fun tokens still on the curve are quoted on the curve itself (price impact
-  // included), like the pool's own checks; anything else keeps the spot estimate.
-  const curve =
-    !hood && venue === "pumpfun" && token.venue === "pumpfun" && token.status === "curve" && pair === "SOL" && (network === "devnet" || network === "mainnet")
-      ? PUMPFUN_CURVE[network]
-      : null;
+  // v0.26: a SOL-paired token still on a curve the pool publishes (PoolInfo.venues[].curve, pump.fun today) is
+  // quoted on that curve, impact and venue fee included, like the pool's own checks; anything else: spot.
+  const curve = !hood && venue === token.venue && token.status === "curve" && pair === "SOL" ? curveOf(pool, venue) : null;
 
   const zecBalance = portfolio ? BigInt(portfolio.zecBalance) : null;
   const own = portfolio?.holdings.find((h) => h.mint === token.mint);
