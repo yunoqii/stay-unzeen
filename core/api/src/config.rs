@@ -301,6 +301,9 @@ pub struct LaunchConfig {
     /// UNZEEN_LAUNCH_CREATOR_FEE_BPS_DBC (40).
     pub launch_fee_bps_pumpfun: u32,
     pub launch_fee_bps_dbc: u32,
+    /// API v0.26: pump.fun bonding-curve trade fee in curve estimates and in
+    /// `PoolInfo.venues[].curve.feeBps` (UNZEEN_TRADE_FEE_BPS_PUMPFUN, 125).
+    pub trade_fee_bps_pumpfun: u32,
     /// MIN_CLAIM_ZAT: smallest claim, zat (default 10 000 = 0.0001 ZEC, never above
     /// MIN_ACTION_ZAT).
     pub min_claim_zat: u64,
@@ -575,6 +578,11 @@ impl Config {
             curve_from_env: var("UNZEEN_LAUNCH_VIRTUAL_SOL_LAMPORTS").is_some(),
             launch_fee_bps_pumpfun: num::<u32>("UNZEEN_LAUNCH_CREATOR_FEE_BPS_PUMPFUN", 30)?.min(10_000),
             launch_fee_bps_dbc: num::<u32>("UNZEEN_LAUNCH_CREATOR_FEE_BPS_DBC", 40)?.min(10_000),
+            trade_fee_bps_pumpfun: num::<u32>(
+                "UNZEEN_TRADE_FEE_BPS_PUMPFUN",
+                unzeen_ledger::curve::PUMPFUN_TRADE_FEE_BPS,
+            )?
+            .min(5_000),
             min_claim_zat: num::<u64>("MIN_CLAIM_ZAT", 10_000)?.clamp(1, policy.min_action_zat.max(1)),
         };
         let fair = FairConfig {

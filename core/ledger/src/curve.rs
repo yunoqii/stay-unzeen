@@ -5,7 +5,8 @@
 //! The spot price is `p = S / T` (lamports per token base unit), so the current reserves follow
 //! from the spot price alone: `S = √(k·p)`, `T = √(k/p)`. A sell of `a` base units then returns
 //! `S·a / (T + a)` lamports and a buy of `x` lamports returns `T·x / (S + x)` base units
-//! (venue fees ignored: the slippage tolerance covers them, as it did with the spot estimate).
+//! (API v0.26: minus the venue's trade fee `fee_bps`, the same number `PoolInfo.venues[].curve`
+//! publishes, so the server and the UI estimate alike).
 //!
 //! A spot estimate ignores the impact: selling 100 % of a position on the 0.3 SOL devnet curve
 //! landed 6.7 % below it. Only for SOL-paired curve tokens of the venue the row describes; any
@@ -16,12 +17,18 @@ use unzeen_fair::alloc::mul_div;
 /// Lamports have 9 decimals; prices are decimal SOL per whole token × 1e18.
 const NATIVE_DECIMALS: u32 = 9;
 
-/// Initial virtual reserves of the venue's curve (`launch_curves`).
+/// Initial virtual reserves of the venue's curve (`launch_curves`) and its trade fee.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CurveParams {
     pub virtual_sol: u128,
     pub virtual_tokens: u128,
+    /// Venue trade fee, b.p. of the SOL side (pump.fun: protocol + creator). 0 = fees ignored.
+    pub fee_bps: u32,
 }
+
+/// pump.fun bonding-curve trade fee assumed by core (0.95 % protocol + 0.30 % creator):
+/// default of `UNZEEN_TRADE_FEE_BPS_PUMPFUN`.
+pub const PUMPFUN_TRADE_FEE_BPS: u32 = 125;
 
 /// Integer square root (floor).
 pub fn isqrt(n: u128) -> u128 {
@@ -55,16 +62,20 @@ impl CurveParams {
         Some((s, k / s))
     }
 
-    /// Lamports a sell of `amount` base units returns at spot `price_e18`, impact included.
+    /// Lamports a sell of `amount` base units returns at spot `price_e18`, impact included,
+    /// minus the fee (taken from the SOL out).
     pub fn sell_out(&self, price_e18: u128, decimals: u32, amount: u128) -> Option<u128> {
         let (s, t) = self.reserves_at(price_e18, decimals)?;
-        mul_div(s, amount, t.checked_add(amount)?)
+        let gross = mul_div(s, amount, t.checked_add(amount)?)?;
+        mul_div(gross, 10_000 - u128::from(self.fee_bps.min(10_000)), 10_000)
     }
 
-    /// Base units a buy of `lamports` returns at spot `price_e18`, impact included.
+    /// Base units a buy spending `lamports` in total returns at spot `price_e18`, impact
+    /// included; the fee comes on top of the curve input (`lamports = net · (1 + fee)`).
     pub fn buy_out(&self, price_e18: u128, decimals: u32, lamports: u128) -> Option<u128> {
         let (s, t) = self.reserves_at(price_e18, decimals)?;
-        mul_div(t, lamports, s.checked_add(lamports)?)
+        let net = mul_div(lamports, 10_000, 10_000 + u128::from(self.fee_bps))?;
+        mul_div(t, net, s.checked_add(net)?)
     }
 }
 
@@ -76,7 +87,23 @@ mod tests {
     const DEVNET: CurveParams = CurveParams {
         virtual_sol: 300_000_000,
         virtual_tokens: 1_073_000_000_000_000,
+        fee_bps: 0,
     };
+
+    #[test]
+    fn fee_lowers_both_sides() {
+        let k = DEVNET.virtual_sol * DEVNET.virtual_tokens;
+        let (s, t) = (400_000_000u128, k / 400_000_000);
+        let p = price_e18(s, t, 6);
+        let fee = CurveParams { fee_bps: 125, ..DEVNET };
+        let (a, x) = (10_000_000_000_000u128, 50_000_000u128);
+        let sell0 = DEVNET.sell_out(p, 6, a).unwrap();
+        assert_eq!(fee.sell_out(p, 6, a).unwrap(), sell0 * 9_875 / 10_000);
+        // buy: 0.05 SOL in total, 0.04938 SOL of it into the curve.
+        let net = x * 10_000 / 10_125;
+        assert_eq!(fee.buy_out(p, 6, x).unwrap(), DEVNET.buy_out(p, 6, net).unwrap());
+        assert!(fee.buy_out(p, 6, x).unwrap() < DEVNET.buy_out(p, 6, x).unwrap());
+    }
 
     fn price_e18(s: u128, t: u128, decimals: u32) -> u128 {
         // SOL per whole token × 1e18 = S/T · 10^(decimals) / 1e9 · 1e18
@@ -141,11 +168,13 @@ mod tests {
         let zero = CurveParams {
             virtual_sol: 0,
             virtual_tokens: 1,
+            fee_bps: 0,
         };
         assert_eq!(zero.sell_out(10, 6, 1), None);
         let huge = CurveParams {
             virtual_sol: u128::MAX,
             virtual_tokens: 2,
+            fee_bps: 0,
         };
         assert_eq!(huge.sell_out(10, 6, 1), None);
     }

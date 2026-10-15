@@ -105,6 +105,7 @@ fn config(url: &str) -> Config {
             curve_from_env: false,
             launch_fee_bps_pumpfun: 30,
             launch_fee_bps_dbc: 40,
+            trade_fee_bps_pumpfun: 125,
             min_claim_zat: 100_000,
         },
         intel: IntelConfig {
@@ -2762,6 +2763,7 @@ mod orders_v08 {
         let curve = unzeen_ledger::curve::CurveParams {
             virtual_sol: 300_000_000,
             virtual_tokens: 1_073_000_000_000_000,
+            fee_bps: 125,
         };
         e.sql(&format!(
             "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals) VALUES ('{MINT}', 'pumpfun', 'T', 'T', 6);
@@ -3098,6 +3100,7 @@ mod orders_v08 {
             rate_sell: Some(r),
             delay_delayed: 30.0,
             delay_max: 300.0,
+            trade_fee_bps_pumpfun: 125,
         }
     }
 
@@ -6126,8 +6129,8 @@ async fn trade_guards_minimum_and_curve_impact() {
     // 3. B2: with minZecOut = 1 the server's estimate decides the minimum check.
     let spot_per_base = sol as f64 / tok as f64; // lamports per base unit
     let min_l = 100_000u128 * 11_442_500_000 / 100_000_000; // 11 442 500 lamports
-    // amount with spot value = 1.02 × min: impact of a sell that size is tiny (< 1 %), passes.
-    let small = (min_l as f64 * 1.02 / spot_per_base) as u128;
+    // amount with spot value = 1.05 × min: impact (< 1 %) and the 1.25 % fee leave it above.
+    let small = (min_l as f64 * 1.05 / spot_per_base) as u128;
     let r = post(json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":small.to_string(),"minZecOut":"1"})).await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
     // Now the same check where the impact matters: drop the curve to a tiny one so that the
@@ -6147,5 +6150,30 @@ async fn trade_guards_minimum_and_curve_impact() {
     e.sql(&format!("DELETE FROM {s}.launch_curves")).await;
     let r = post(json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":small.to_string(),"minZecOut":"1"})).await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    e.drop_schema().await;
+}
+
+/// v0.26: `PoolInfo.venues[].curve` mirrors the venue's `launch_curves` row and the fee core
+/// uses in its curve estimates; venues without a row have no `curve`.
+#[tokio::test]
+async fn pool_info_venue_curve() {
+    let Some(e) = setup().await else { return };
+    e.ledger.set_pool_meta("network", "test").await.unwrap();
+    e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+    let v = e.get("/api/pool").await.body;
+    assert!(v["venues"][0].get("curve").is_none(), "{v}");
+    e.sql(&format!(
+        "INSERT INTO {}.launch_curves (network, venue, virtual_sol_lamports, virtual_token_reserves,
+                                       real_token_reserves, token_total_supply)
+         VALUES ('devnet', 'pumpfun', 300000000, 1073000000000000, 793100000000000, 1000000000000000)",
+        e.schema
+    ))
+    .await;
+    let v = e.get("/api/pool").await.body;
+    assert_eq!(v["venues"][0]["venue"], "pumpfun");
+    assert_eq!(
+        v["venues"][0]["curve"],
+        json!({"virtualSol":"300000000","virtualTokens":"1073000000000000","feeBps":125})
+    );
     e.drop_schema().await;
 }

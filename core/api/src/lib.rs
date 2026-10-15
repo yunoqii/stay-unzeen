@@ -343,6 +343,23 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
         },
     }));
     r.0["venues"] = venues_block(&st);
+    // v0.26: the launch curve of each venue that has its own `launch_curves` row (written by the
+    // relayer from the live venue config, e.g. the pump.fun Global), with the trade fee core
+    // uses in its curve estimates, so the UI quotes with the same numbers.
+    if let Some(list) = r.0["venues"].as_array_mut() {
+        for v in list.iter_mut() {
+            let Some(name) = v["venue"].as_str().map(str::to_string) else {
+                continue;
+            };
+            if let Some(c) = st.ledger.launch_curve(st.cfg.cluster, &name).await? {
+                v["curve"] = json!({
+                    "virtualSol": c.virtual_sol.to_string(),
+                    "virtualTokens": c.virtual_tokens.to_string(),
+                    "feeBps": actions::trade_fee_bps(&st, &name),
+                });
+            }
+        }
+    }
     // v0.22 (hood): buy/sell need a token price newer than this (else 503 stale_price).
     if matches!(p.chain.trade, unzeen_protocol::TradeNet::Hood(_)) {
         r.0["chain"]["priceMaxAgeSecs"] = json!(st.cfg.rate.price_max_age_secs);

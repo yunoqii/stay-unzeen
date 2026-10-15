@@ -521,7 +521,16 @@ pub async fn impact_curve(
     Ok(own.then_some(unzeen_ledger::curve::CurveParams {
         virtual_sol: c.virtual_sol,
         virtual_tokens: c.virtual_tokens,
+        fee_bps: trade_fee_bps(st, venue),
     }))
+}
+
+/// Venue trade fee used in curve estimates (API v0.26 `PoolInfo.venues[].curve.feeBps`).
+pub fn trade_fee_bps(st: &AppState, venue: &str) -> u32 {
+    match venue {
+        "pumpfun" => st.cfg.launch.trade_fee_bps_pumpfun,
+        _ => 0,
+    }
 }
 
 /// Zat value of selling `amount` base units on `curve` at spot `price` (decimal SOL per whole

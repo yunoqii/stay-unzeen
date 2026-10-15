@@ -334,6 +334,7 @@ pub async fn evaluator_loop(st: AppState) {
             rate_sell: rates.as_ref().map(|r| rate(&st, r, false)),
             delay_delayed: st.epochs.delay(false),
             delay_max: st.epochs.delay(true),
+            trade_fee_bps_pumpfun: st.cfg.launch.trade_fee_bps_pumpfun,
         };
         match st.ledger.orders_tick(st.cfg.cluster, &p).await {
             Ok(r) if r.triggered + r.failed + r.expired + r.closed + r.rearmed + r.errors > 0 => tracing::info!(

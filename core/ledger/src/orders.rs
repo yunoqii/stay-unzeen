@@ -98,6 +98,8 @@ pub struct EvalParams {
     /// Seconds to the next epoch boundary: (`delayed`, `max`).
     pub delay_delayed: f64,
     pub delay_max: f64,
+    /// pump.fun trade fee for curve estimates (API v0.26 `PoolInfo.venues[].curve.feeBps`).
+    pub trade_fee_bps_pumpfun: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -171,7 +173,12 @@ pub fn sell_min_out(amount: u128, trigger_e18: u128, decimals: u32, slippage_bps
 
 /// Launch parameters of an order's curve when its price impact can be computed: a SOL-paired
 /// pump.fun token (orders are pump.fun only) and the relayer's `launch_curves` row.
-async fn order_curve<C: GenericClient>(tx: &C, network: &str, mint: &str) -> Result<Option<crate::curve::CurveParams>> {
+async fn order_curve<C: GenericClient>(
+    tx: &C,
+    network: &str,
+    mint: &str,
+    fee_bps: u32,
+) -> Result<Option<crate::curve::CurveParams>> {
     let r = tx
         .query_opt(
             "SELECT c.virtual_sol_lamports, c.virtual_token_reserves
@@ -185,6 +192,7 @@ async fn order_curve<C: GenericClient>(tx: &C, network: &str, mint: &str) -> Res
         Some(crate::curve::CurveParams {
             virtual_sol: r.get::<_, Option<Num>>(0)?.to_u128().ok()?,
             virtual_tokens: r.get::<_, Option<Num>>(1)?.to_u128().ok()?,
+            fee_bps,
         })
     }))
 }
@@ -719,7 +727,7 @@ impl Ledger {
         // B2 (devnet run 15.10): on a SOL-paired pump.fun curve with known launch parameters,
         // min_out is the curve's output for this size at the tick price (price impact
         // included) minus the slippage; otherwise the tick price itself, as before.
-        let curve = order_curve(tx, network, &mint).await?;
+        let curve = order_curve(tx, network, &mint, p.trade_fee_bps_pumpfun).await?;
         let keep = |x: u128| x.saturating_mul(10_000 - u128::from(slip.min(10_000))) / 10_000;
         let (lamports, zat, min_out) = if buy {
             let full = (hold.max(0) as u128) * (rate.lamports_per_zec as u128) / ZAT_PER_ZEC;
