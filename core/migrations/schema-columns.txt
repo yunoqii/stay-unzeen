@@ -8,6 +8,7 @@ actions.gain_est numeric
 actions.gain_mint text
 actions.hold_zat bigint
 actions.id bytea
+actions.key_seq bigint
 actions.kind text
 actions.nonce bytea
 actions.quote_mint text

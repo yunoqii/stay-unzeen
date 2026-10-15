@@ -1147,3 +1147,57 @@ async fn numeric_amounts_beyond_u64() {
     );
     db.drop_schema().await;
 }
+
+/// Devnet run 15.10: `created_at` keeps only the day (N5), so with more than 8 actions in a day
+/// the newest one could fall off `Portfolio.actions` (ordered by random id). The per-key
+/// counter `key_seq` (0033) keeps them newest first, without any time finer than the day.
+#[tokio::test]
+async fn ninth_action_of_the_day_is_listed_first() {
+    let Some(db) = setup().await else { return };
+    let l = &db.ledger;
+    fund(l, 31, 0, 5_000_000).await;
+    fund(l, 32, 1, 5_000_000).await;
+    let me = pk(31);
+    let other = pk(32);
+    let mut ids = Vec::new();
+    for i in 0..9u8 {
+        let a = l
+            .submit_action(&me, &[i + 1; 16], &[i + 1; 32], "buy", 100_000)
+            .await
+            .unwrap();
+        // interleave another key: its actions never shift this key's counter
+        l.submit_action(&other, &[i + 50; 16], &[i + 50; 32], "buy", 100_000)
+            .await
+            .unwrap();
+        l.settle_action(&a.id).await.unwrap();
+        ids.push(a.id);
+    }
+    let listed = l.recent_actions(&me, 8).await.unwrap();
+    assert_eq!(listed.len(), 8);
+    let got: Vec<_> = listed.iter().map(|a| a.id).collect();
+    let want: Vec<_> = ids.iter().rev().take(8).copied().collect();
+    assert_eq!(got, want, "newest first, the 9th action is visible");
+    // Per-key counter 1..=9, same day for all, nothing finer stored.
+    let q = format!(
+        "SELECT min(key_seq), max(key_seq), count(DISTINCT created_at), count(DISTINCT updated_at)
+           FROM {}.actions WHERE anon_pubkey = $1",
+        db.schema
+    );
+    let r = db.admin.query_one(&q, &[&&me[..]]).await.unwrap();
+    assert_eq!((r.get::<_, i64>(0), r.get::<_, i64>(1)), (1, 9));
+    assert!(
+        r.get::<_, i64>(2) <= 2 && r.get::<_, i64>(3) <= 2,
+        "day-truncated times only"
+    );
+    // An update never changes the counter.
+    db.admin
+        .execute(
+            &format!("UPDATE {}.actions SET key_seq = 77 WHERE anon_pubkey = $1", db.schema),
+            &[&&me[..]],
+        )
+        .await
+        .unwrap();
+    let r = db.admin.query_one(&q, &[&&me[..]]).await.unwrap();
+    assert_eq!(r.get::<_, i64>(1), 9);
+    db.drop_schema().await;
+}

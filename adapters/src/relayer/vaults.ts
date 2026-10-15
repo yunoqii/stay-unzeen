@@ -105,6 +105,14 @@ export interface VaultRequest {
    * at or below the median load are preferred (then LRU rotation).
    */
   load?: ReadonlyMap<string, number>;
+  /**
+   * Choosing a vault for a NEW mint (create / fair_create / first buy): the mint is pinned
+   * to the vault for good (D4), so every later buy of it needs SOL there. Vaults holding at
+   * least `minSol + newMintReserve` are preferred; when none does, only the richest eligible
+   * vault is used (devnet run 15.10: a DBC launch pinned to a 0.04 SOL vault made every later
+   * buy fail with pool_liquidity). Ignored with `only`.
+   */
+  newMintReserve?: bigint;
 }
 
 /**
@@ -149,6 +157,17 @@ export function leastLoaded(keys: readonly string[], load: ReadonlyMap<string, n
   const sorted = [...keys].sort((a, b) => (load.get(a) ?? 0) - (load.get(b) ?? 0));
   const median = load.get(sorted[Math.floor((sorted.length - 1) / 2)]!) ?? 0;
   return new Set(sorted.filter((k) => (load.get(k) ?? 0) <= median));
+}
+
+/**
+ * Vaults fit to receive a new mint: those with `minSol + reserve`, else the richest one(s).
+ * Never empty when `eligible` is not.
+ */
+export function withNewMintReserve<T extends { sol: bigint }>(eligible: readonly T[], minSol: bigint, reserve: bigint): T[] {
+  const rich = eligible.filter((b) => b.sol >= minSol + reserve);
+  if (rich.length > 0) return rich;
+  const max = eligible.reduce((m, b) => (b.sol > m ? b.sol : m), 0n);
+  return eligible.filter((b) => b.sol === max);
 }
 
 /** Thrown when every eligible vault is busy with another job (retry soon). */
@@ -228,9 +247,12 @@ export class VaultPool {
     if (withTokens.length === 0) {
       throw new AdapterError("insufficient_tokens", "no vault holds enough of this token");
     }
-    const eligible = withTokens.filter((b) => b.sol >= req.minSol);
+    let eligible = withTokens.filter((b) => b.sol >= req.minSol);
     if (eligible.length === 0) {
       throw new AdapterError("insufficient_sol", "no vault has enough SOL");
+    }
+    if (req.only === undefined && req.newMintReserve !== undefined && req.newMintReserve > 0n) {
+      eligible = withNewMintReserve(eligible, req.minSol, req.newMintReserve);
     }
     const last = await this.usage.lastUsed(eligible.map((b) => b.key));
     const withAge = eligible.map((b) => ({ key: b.key, lastUsed: last.get(b.key) }));

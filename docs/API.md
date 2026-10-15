@@ -2,7 +2,12 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.23** (14.10; без миграций, RELAYER.md v16). Изменения против v0.22:
+Статус: **v0.24** (15.10; миграция `0033_actions_key_seq.sql`, по итогам живого devnet-прогона). Изменения против v0.23:
+- **`PoolInfo.launchRules.minInitialBuyZat: string`** и **`maxInitialBuyZatByVenue: Record<string, string>`** — принимаемый диапазон `create.initialBuyZec` в зат по текущему курсу buy (SOL/ETH-пары; ZEC-пары — по-прежнему `maxInitialBuyZecUnitsByVenue`). Есть, только когда есть `rate` и `capBps > 0`. Значения меняются вместе с курсом, как любые суммы в ZEC. `min` = зат одного шага округления D10 (0.001 SOL / 0.0001 ETH), `max` = последняя сумма, которая после округления вниз до шага не превышает `maxInitialBuyLamportsByVenue[venue]`. Диапазон никогда не пуст; `"0"` у площадки — кап меньше одного шага, первая покупка невозможна (только create без `initialBuyZec`). Граница включительно: `max + 1` → `422 creator_cap`, `min − 1` → `422 below_minimum`.
+- **Минимум первой покупки `create` — один шаг, а не `minActionZat`.** На devnet (виртуальные резервы pump.fun 0.3 SOL, кап 0.014 SOL) окно «≥ minActionZat и ≤ кап» было шириной в сотни зат. Действие `create` целиком (первая покупка + `createFeeZat`) по-прежнему ≥ `minActionZat`.
+- **`Portfolio.actions` — новые первыми и внутри дня.** `created_at` хранит только день (N5), поэтому раньше действия одного дня шли по случайному id, и только что выполненное действие могло не попасть в 8 видимых. Теперь порядок: `queued` первыми, затем по дню, затем по счётчику действий ключа (`actions.key_seq`). Счётчик свой у каждого ключа, общей последовательности по пулу нет, времени точнее дня нет. Поля ответа не менялись.
+
+Изменения v0.23 против v0.22 (14.10; без миграций, RELAYER.md v16):
 - **`Token.priceTs?: number`** — когда пул последний раз записал цену токена (`tokens.price_at`), unix мс, округлено вниз до 10 с. Есть в `GET /api/tokens` и `GET /api/tokens/:mint` для токенов из `tokens`, если цена > 0. Нет поля или `now − priceTs > PoolInfo.chain.priceMaxAgeSecs` → на hood фронт блокирует buy/sell до отправки (сервер ответил бы `503 stale_price`). Запас на огрубление и расхождение часов — 10–20 с.
 
 Изменения v0.22 против v0.21 (ревью `review-hood-final.md`):
@@ -344,6 +349,8 @@ interface PoolInfo {
     maxInitialBuyLamportsByVenue: Record<string, string>; // v0.6: то же по каждой включённой площадке-лаунчпаду
                                    // (meteora-dbc: комиссия 1 % вместо ~1,25 % → кап сужен в 5/5,013 раза, пока у DBC нет своей строки кривой)
     maxInitialBuyZecUnitsByVenue: Record<string, string>; // v0.17: ZEC-пары — единицы ZEC SPL (= зат), шаг 0.0001 ZEC; только площадки с включённой ZEC-парой
+    minInitialBuyZat?: string;     // v0.24: минимум create.initialBuyZec (зат одного шага D10 по курсу buy); есть при rate и capBps > 0
+    maxInitialBuyZatByVenue?: Record<string, string>; // v0.24: максимум create.initialBuyZec в зат по площадке (включительно); "0" — первая покупка невозможна
   };
   rate?: {                  // v0.4: из фонового кэша (обновление 30–60 с); нет поля → курса нет
     lamportsPerZec: string;     // mid
@@ -390,7 +397,7 @@ interface Portfolio {
   holdings: { mint: string; amount: string; held: string }[];  // v0.21: страница из 20 по mint (?holdingsPage=N); amount — доступно; held — зарезервировано sell/withdraw_token в очереди
   claimable: { mint: string; solAmount: string; zecAmount: string }[]; // v0.7: creator fees к выплате по mint, созданным этим ключом: лампорты (SOL/USDC/USD1-пары) и v0.14 зат (ZEC-пары); claim → ZEC
   deposits: DepositInfo[];  // v0.21: ≤ 5 последних, новые первыми
-  actions: (ActionStatus & {  // v0.21: ≤ 8 последних действий владельца (queued первыми)
+  actions: (ActionStatus & {  // v0.21: ≤ 8 последних действий владельца (queued первыми); v0.24: затем новые первыми и внутри дня
     id: string;
     kind: "buy" | "sell" | "create" | "withdraw_zec" | "withdraw_token" | "claim";   // fl_* сюда НЕ попадают (v0.6); claim (v0.7)
   })[];
@@ -662,7 +669,7 @@ interface TokenTrade extends FeedEvent {
 - **minOut всех сделок (v0.10):** сервер округляет `minOut`/`minLamports` задания вниз до 3 значащих цифр (≤ 1 % мягче подписанного), чтобы по цепочке нельзя было восстановить точную опорную цену.
 - **Токен без цены пула (v0.10):** mint, которого нет в `GET /api/tokens`: `buy` с `minOut = "0"` и `sell` с `minZecOut = "0"` → `400 bad_request` (защита — только явный минимум пользователя). `venue: "jupiter"` на devnet → `503 venue_unavailable` до hold.
 - **sell:** держит `amount` токенов (v0.17 A6: при совпадении с покупкой — срезанную сумму, см. выше); выручка зачисляется в ZEC по курсу действия; непроданный остаток возвращается. Минимум: `minZecOut ≥ minActionZat` **или** оценка по текущей цене токена ≥ `minActionZat`, иначе `below_minimum`.
-- **create:** *(сейчас `503 venue_unavailable`, см. выше)* hold = `initialBuyZec` (округление как у buy, если есть, ≥ `minActionZat`) + комиссия запуска (`CREATE_FEE_ZAT`, по умолчанию 100 000 зат). `meta.name` 1–32 символа, `meta.symbol` 1–10 ASCII букв/цифр, `meta.image` — только `data:image/(png|jpeg|webp);base64,…` до 512 КиБ (тело запроса ≤ 1 МиБ). `venue: "jupiter"` → 400.
+- **create:** *(сейчас `503 venue_unavailable`, см. выше)* hold = `initialBuyZec` (округление как у buy, если есть; v0.24: в диапазоне `launchRules.minInitialBuyZat..maxInitialBuyZatByVenue[venue]`, а не ≥ `minActionZat`) + комиссия запуска (`CREATE_FEE_ZAT`, по умолчанию 100 000 зат). `meta.name` 1–32 символа, `meta.symbol` 1–10 ASCII букв/цифр, `meta.image` — только `data:image/(png|jpeg|webp);base64,…` до 512 КиБ (тело запроса ≤ 1 МиБ). `venue: "jupiter"` → 400.
 - **withdraw_zec:** hold = `amount` + комиссия сети (`WITHDRAW_ZEC_FEE_ZAT`, 15 000 зат); выплата с задержкой 1–10 мин (`exec: "max"` — 10–60 мин), готовые выплаты объединяются в одну tx (до 5). `executed` после K подтверждений выплаты; если tx истекла не попав в блок — выплата переотправляется новой tx (двойной выплаты нет). Сумма выплаты ровно `amount`, комиссию сети платит пул из `WITHDRAW_ZEC_FEE_ZAT`.
 - **withdraw_token:** v0.17 (A1): держит сумму частей после среза 0,5–2 % и округления каждой части до 3 значащих цифр (не `amount`); комиссия в ZEC = частей × (капля SOL получателю + рента ATA + fee) по курсу; без `smart` — `to` строка или массив из 1 адреса, задержка 30 с–5 мин (`exec: "max"` — 10–60 мин); со `smart` — длина `to` = `parts`, адреса разные, суммы частей неравные (±20 %), задержка каждой части до `maxDelayMin`.
 - **claim** (v0.7): весь `claimable` (или одного `mint`) → `zecBalance` по `lamportsPerZecSell` (`floor`), сразу, без tx в сети. Сбор комиссий в сети делает пул глобально по своему расписанию, не по запросу (запрос claim ничего не делает в Solana, поэтому не связывает токены одного создателя).

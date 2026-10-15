@@ -414,6 +414,25 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
             "source": rate.source,
             "ts": rate.ts_ms,
         });
+        // v0.24: accepted `create.initialBuyZec` range at the current buy rate (SOL / ETH
+        // pairs), so the UI can show it; moves with the rate like any ZEC amount here.
+        if st.cfg.launch.cap_bps > 0 {
+            let applied = rate::apply_spread(rate.lamports_per_zec, spread, true);
+            let step = rate::buy_step(st.cfg.policy.chain.trade);
+            let mut by = serde_json::Map::new();
+            let mut min = None;
+            if let Some(o) = v["launchRules"]["maxInitialBuyLamportsByVenue"].as_object() {
+                for (venue, max) in o {
+                    let max: u128 = max.as_str().and_then(|m| m.parse().ok()).unwrap_or(0);
+                    let range = actions::initial_buy_zat_range(max, step, applied);
+                    by.insert(venue.clone(), json!(range.map_or(0, |r| r.1).to_string()));
+                    min = min.or(range.map(|r| r.0));
+                }
+            }
+            let min = min.unwrap_or_else(|| rate::lamports_to_zat_ceil(u128::from(step), applied));
+            v["launchRules"]["minInitialBuyZat"] = json!(min.to_string());
+            v["launchRules"]["maxInitialBuyZatByVenue"] = Value::Object(by);
+        }
         r = Json(v).into_response();
     }
     r.headers_mut()

@@ -250,6 +250,25 @@ export function relayerCreatorCounter(keysDir: string, db: pg.Pool | null, netwo
   return new PgCreatorIndexCounter(db, network, file.peek());
 }
 
+/** Default SOL reserve a vault must keep to receive a new mint (D4 pin): a few typical buys. */
+export const NEW_MINT_RESERVE_DEFAULT: Readonly<Record<string, bigint>> = {
+  devnet: 250_000_000n, // ~2 buys of 0.01 TAZ at 11.5 SOL/ZEC
+  "mainnet-beta": 100_000_000n, // ~2 buys of 0.004 ZEC; mainnet vaults hold ~0.3 SOL in total
+};
+
+/**
+ * RELAYER_NEW_MINT_RESERVE_LAMPORTS (integer lamports, 0 = off) or the cluster default.
+ * An invalid value is a config error (fail at start, not a silent default).
+ */
+export function newMintReserveLamports(cluster: string, env: NodeJS.ProcessEnv = process.env): bigint {
+  const raw = env.RELAYER_NEW_MINT_RESERVE_LAMPORTS?.trim();
+  if (raw) {
+    if (!/^\d{1,15}$/.test(raw)) throw new Error("RELAYER_NEW_MINT_RESERVE_LAMPORTS must be an integer number of lamports");
+    return BigInt(raw);
+  }
+  return NEW_MINT_RESERVE_DEFAULT[cluster] ?? NEW_MINT_RESERVE_DEFAULT.devnet!;
+}
+
 export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   const env = o.env ?? process.env;
   const pgState = env.RELAYER_STATE?.trim() === "postgres";
@@ -426,6 +445,7 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
     },
     probe,
     mintVaults,
+    newMintReserveLamports: newMintReserveLamports(o.cfg.cluster, env),
     ...(o.leaseMs ? { leaseMs: o.leaseMs } : {}),
     ...(o.onEvent ? { onEvent: o.onEvent } : {}),
   });

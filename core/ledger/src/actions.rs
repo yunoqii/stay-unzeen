@@ -228,7 +228,14 @@ impl Ledger {
         request_hash: &[u8; 32],
         a: &NewAction,
     ) -> Result<ActionReceipt> {
-        if a.amount_zat > 0 && a.amount_zat < self.policy.min_action_zat {
+        // `create`: the initial buy rides on the launch, whose fee keeps the action above the
+        // minimum; it is only held to one rounding step (API v0.24 `minInitialBuyZat`).
+        let counted = if a.kind == "create" {
+            a.amount_zat.saturating_add(a.fee_zat)
+        } else {
+            a.amount_zat
+        };
+        if a.amount_zat > 0 && counted < self.policy.min_action_zat {
             return Err(LedgerError::BelowMinimum);
         }
         let hold = to_i64(a.amount_zat.checked_add(a.fee_zat).ok_or(LedgerError::Range)?)?;
@@ -463,7 +470,8 @@ impl Ledger {
     }
 
     /// Last `limit` actions of a key with their owner view (R-core-6: the client polls the
-    /// portfolio instead of per-action URLs). Queued first, then most recent day.
+    /// portfolio instead of per-action URLs). Queued first, then newest first: by day, then by
+    /// the key's own insertion counter (`key_seq`, 0033; no time finer than the day).
     pub async fn recent_actions(&self, pk: &[u8; 32], limit: i64) -> Result<Vec<ActionBrief>> {
         let pk_s: &[u8] = pk;
         let c = self.pool.get().await?;
@@ -473,7 +481,7 @@ impl Ledger {
                     "SELECT {VIEW_COLS}, a.id, a.kind FROM actions a
                      WHERE a.anon_pubkey = $1 AND a.kind NOT LIKE 'fl\\_%' AND a.kind NOT LIKE 'order\\_%'
                        AND a.kind NOT LIKE 'scenario\\_%'
-                     ORDER BY (a.status = 'queued') DESC, a.created_at DESC, a.id LIMIT $2"
+                     ORDER BY (a.status = 'queued') DESC, a.created_at DESC, a.key_seq DESC, a.id LIMIT $2"
                 ),
                 &[&pk_s, &limit],
             )

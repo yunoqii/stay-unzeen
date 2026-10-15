@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { AdapterError } from "../../src/errors";
 import { cryptoRng, seededRng } from "../../src/relayer/random";
-import { VaultPool, VaultsBusyError, chooseVault } from "../../src/relayer/vaults";
+import { VaultPool, VaultsBusyError, chooseVault, withNewMintReserve } from "../../src/relayer/vaults";
+import { newMintReserveLamports } from "../../src/relayer/runtime";
 import { FakeInventory, MINT, vaults } from "./fakes";
 
 describe("chooseVault rotation", () => {
@@ -89,5 +90,46 @@ describe("VaultPool", () => {
     await expect(pool.acquire({ minSol: 1n })).rejects.toBeInstanceOf(VaultsBusyError);
     pool.release(v);
     await expect(pool.acquire({ minSol: 1n })).resolves.toBeTruthy();
+  });
+
+  it("newMintReserve: a new mint goes to a vault that can carry later buys (devnet run 15.10)", async () => {
+    const inv = new FakeInventory();
+    const [rich, poor, mid] = vaults(3, inv);
+    inv.sol.set(rich!.publicKey.toBase58(), 4_000_000_000n);
+    inv.sol.set(poor!.publicKey.toBase58(), 60_000_000n);
+    inv.sol.set(mid!.publicKey.toBase58(), 300_000_000n);
+    // poor is the least loaded and would be preferred without the reserve
+    const load = new Map([[rich!.publicKey.toBase58(), 5], [mid!.publicKey.toBase58(), 5], [poor!.publicKey.toBase58(), 0]]);
+    for (let i = 0; i < 40; i++) {
+      const pool = new VaultPool([rich!, poor!, mid!], inv, seededRng(100 + i));
+      const v = await pool.acquire({ minSol: 47_000_000n, load, newMintReserve: 250_000_000n });
+      expect(v.publicKey.equals(poor!.publicKey)).toBe(false);
+    }
+    // without the reserve the poor vault does get new mints
+    let poorPicks = 0;
+    for (let i = 0; i < 40; i++) {
+      const p = new VaultPool([rich!, poor!, mid!], inv, seededRng(200 + i));
+      if ((await p.acquire({ minSol: 47_000_000n, load })).publicKey.equals(poor!.publicKey)) poorPicks++;
+    }
+    expect(poorPicks).toBeGreaterThan(0);
+    const pool = new VaultPool([rich!, poor!, mid!], inv, seededRng(7));
+    // `only` (pinned mint) ignores the reserve
+    const w = await pool.acquire({ minSol: 1n, only: poor!.publicKey.toBase58(), newMintReserve: 10n ** 12n });
+    expect(w.publicKey.equals(poor!.publicKey)).toBe(true);
+  });
+
+  it("newMintReserve: falls back to the richest vault, never fails a launch the pool can pay", () => {
+    const vs = [{ k: "a", sol: 60n }, { k: "b", sol: 90n }, { k: "c", sol: 90n }, { k: "d", sol: 70n }];
+    expect(withNewMintReserve(vs, 50n, 100n).map((v) => v.k)).toEqual(["b", "c"]);
+    expect(withNewMintReserve(vs, 50n, 20n).map((v) => v.k)).toEqual(["b", "c", "d"]);
+    expect(withNewMintReserve([], 50n, 20n)).toEqual([]);
+  });
+
+  it("RELAYER_NEW_MINT_RESERVE_LAMPORTS: cluster default, override, 0 = off, junk = error", () => {
+    expect(newMintReserveLamports("devnet", {})).toBe(250_000_000n);
+    expect(newMintReserveLamports("mainnet-beta", {})).toBe(100_000_000n);
+    expect(newMintReserveLamports("devnet", { RELAYER_NEW_MINT_RESERVE_LAMPORTS: "5000" })).toBe(5000n);
+    expect(newMintReserveLamports("devnet", { RELAYER_NEW_MINT_RESERVE_LAMPORTS: "0" })).toBe(0n);
+    expect(() => newMintReserveLamports("devnet", { RELAYER_NEW_MINT_RESERVE_LAMPORTS: "0.1" })).toThrow();
   });
 });

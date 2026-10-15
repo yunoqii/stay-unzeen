@@ -353,7 +353,11 @@ async fn pool_info() {
                           "atomicFirstBuy":true,"creatorFees":true,"mainnetOnly":false}],
                "launchRules":{"lockSecs":86400,"capBps":500,"maxInitialBuyLamports":"1466000000",
                               "maxInitialBuyLamportsByVenue":{"pumpfun":"1466000000"},
-                              "maxInitialBuyZecUnitsByVenue":{}},
+                              "maxInitialBuyZecUnitsByVenue":{},
+                              // v0.24: initialBuyZec range at the buy rate (10 SOL/ZEC, spread 0):
+                              // one 0.001 SOL step .. last amount below 1.467 SOL.
+                              "minInitialBuyZat":"10000",
+                              "maxInitialBuyZatByVenue":{"pumpfun":"14669999"}},
                "fees":{"createFeeZat":"100000","withdrawZecFeeZat":"15000",
                        "withdrawTokenGasLamports":"2000000","withdrawTokenCostLamports":"2100000",
                        "nowFeeZat":"500"},
@@ -5949,4 +5953,59 @@ mod verify_v3 {
         assert_eq!(total, 1_000_000_000_000_000_000_000_000_007);
         e.drop_schema().await;
     }
+}
+
+/// v0.24 (devnet run 15.10): `PoolInfo.launchRules.minInitialBuyZat ..= maxInitialBuyZatByVenue`
+/// is exactly the accepted `initialBuyZec` range, and it is not empty.
+#[tokio::test]
+async fn initial_buy_range_matches_create() {
+    let Some(e) = setup().await else { return };
+    let me = user(7);
+    e.fund(7, 0, 100_000_000).await;
+    e.ledger.set_pool_meta("network", "test").await.unwrap();
+    e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+    let p = e.get("/api/pool").await;
+    let rules = &p.body["launchRules"];
+    let min: u64 = rules["minInitialBuyZat"].as_str().unwrap().parse().unwrap();
+    let max: u64 = rules["maxInitialBuyZatByVenue"]["pumpfun"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        min <= max && min < 100_000,
+        "below minActionZat is allowed: {min}..{max}"
+    );
+    let create = |n: u64, sym: &str| {
+        json!({"op":"create","venue":"pumpfun","meta":{"name":"Range","symbol":sym},"initialBuyZec":n.to_string()})
+            .to_string()
+    };
+    let r = e.signed(&me, "POST", "/api/actions", &create(min - 1, "LO")).await;
+    assert_eq!(
+        (r.status, code(&r)),
+        (StatusCode::UNPROCESSABLE_ENTITY, "below_minimum"),
+        "{:?}",
+        r.body
+    );
+    let r = e.signed(&me, "POST", "/api/actions", &create(max + 1, "HI")).await;
+    assert_eq!(
+        (r.status, code(&r)),
+        (StatusCode::UNPROCESSABLE_ENTITY, "creator_cap"),
+        "{:?}",
+        r.body
+    );
+    for (n, sym) in [(min, "MIN"), (max, "MAX")] {
+        let r = e.signed(&me, "POST", "/api/actions", &create(n, sym)).await;
+        assert_eq!(r.status, StatusCode::OK, "{n}: {:?}", r.body);
+    }
+    // The minimum charges one 0.001 SOL step (+ the create fee), never 0 lamports.
+    assert_eq!(
+        e.one_i64(&format!(
+            "SELECT count(*) FROM {}.relayer_jobs WHERE op = 'create' AND lamports_in >= 1000000",
+            e.schema
+        ))
+        .await,
+        2
+    );
+    e.drop_schema().await;
 }

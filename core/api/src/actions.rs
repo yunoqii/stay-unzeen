@@ -584,7 +584,8 @@ pub fn fuzzed_buy_step(
     let full = zat_to_lamports(zec_in, applied);
     let mut lamports = rate::fuzz_units(full, rand_unit(), step);
     // Never charge less than the minimum action because of rounding: step back up if possible.
-    while lamports > 0 && lamports_to_zat_ceil(lamports, applied) < min_action {
+    // From 0 too: a shave that floors a one-step amount to 0 steps back up to one step.
+    while lamports_to_zat_ceil(lamports, applied) < min_action {
         let up = lamports + u128::from(step);
         if up > full {
             break;
@@ -605,6 +606,29 @@ pub fn fuzzed_buy_step(
 
 /// `floor(a × b / d)` with a 256-bit intermediate (`unzeen_fair::alloc::mul_div`); 0 for `d = 0`,
 /// `u128::MAX` if the quotient does not fit.
+/// Accepted `create.initialBuyZec` range in zat at the buy rate `applied` (native units per
+/// ZEC, spread applied), for a creator cap of `max_units` native units (`maxInitialBuyLamports`)
+/// and the D10 rounding `step`. `None`: the cap is below one step, no initial buy is possible.
+///
+/// - min: the zat of exactly one step (rounded up). The create fee keeps the whole action above
+///   `minActionZat`, so the initial buy itself is not held to it (devnet run 15.10: with a
+///   0.014 SOL cap and 0.0114 SOL minimum action the window was a few hundred zat wide).
+/// - max: the largest amount whose stepped-down native value stays within the cap (the
+///   check in `create` runs on the requested amount before the shave).
+///
+/// Never empty when `Some`: max ≥ min whenever the cap holds one step.
+pub fn initial_buy_zat_range(max_units: u128, step: u64, applied: u64) -> Option<(u64, u64)> {
+    let step128 = u128::from(step.max(1));
+    let m = max_units - max_units % step128;
+    if m < step128 || applied == 0 {
+        return None;
+    }
+    let min = lamports_to_zat_ceil(step128, applied);
+    let max = ((m + step128) * 100_000_000 - 1) / u128::from(applied);
+    let max = max.min(u128::from(u64::MAX)) as u64;
+    Some((min, max.max(min)))
+}
+
 pub fn mul_div(a: u128, b: u128, d: u128) -> u128 {
     if d == 0 {
         return 0;
@@ -908,9 +932,6 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 Some(s) => parse_amount(s, "initialBuyZec")?,
                 None => 0,
             };
-            if initial > 0 && initial < min_action {
-                return Err(ApiError::below_minimum("initialBuyZec below PoolInfo.minActionZat"));
-            }
             let zec = qcfg.filter(|q| q.is_zec());
             let (applied, rate_used) = match zec {
                 Some(_) => {
@@ -945,8 +966,16 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
             } else {
                 rate::buy_step(st.cfg.policy.chain.trade)
             };
+            // The initial buy needs one D10 step, not minActionZat (the create fee keeps the
+            // action above it): PoolInfo.launchRules.minInitialBuyZat.
+            let min_initial = lamports_to_zat_ceil(u128::from(step), applied);
+            if initial > 0 && initial < min_initial {
+                return Err(ApiError::below_minimum(
+                    "initialBuyZec below PoolInfo.launchRules.minInitialBuyZat",
+                ));
+            }
             let (amount_zat, lamports, _) = if initial > 0 {
-                fuzzed_buy_step(initial, 0, applied, min_action, step)?
+                fuzzed_buy_step(initial, 0, applied, min_initial, step)?
             } else {
                 (0, 0, 0)
             };
@@ -1185,6 +1214,60 @@ mod tests {
             Some(10_000_000)
         );
         assert_eq!(estimate_zat("0.00000000012345", 6, 1, 1), Some(0));
+    }
+
+    #[test]
+    fn initial_buy_range_is_never_empty() {
+        // Devnet run 15.10: cap 0.014 SOL, buy rate 11.4425 SOL/ZEC, step 0.001 SOL.
+        let rate = 11_442_500_000;
+        let (min, max) = initial_buy_zat_range(14_000_000, rate::LAMPORTS_STEP, rate).unwrap();
+        assert_eq!(min, 8_740); // one step, rounded up
+        assert_eq!(max, 131_090); // < 0.015 SOL: stepped down to 0.014
+        // Both ends pass the same checks as `create` (cap on the stepped requested amount, then
+        // the shave never drops below one step), for every shave.
+        for zat in [min, min + 1, (min + max) / 2, max] {
+            let full = zat_to_lamports(zat, rate);
+            assert!(full - full % 1_000_000 <= 14_000_000, "{zat}");
+            for u in [0.0, 0.3, 0.999_999] {
+                let lamports = rate::fuzz_units(full, u, rate::LAMPORTS_STEP);
+                let lamports = if lamports == 0 { 1_000_000 } else { lamports };
+                assert!((1_000_000..=14_000_000).contains(&lamports), "{zat} {u}");
+            }
+        }
+        let full = zat_to_lamports(max + 1, rate);
+        assert!(full - full % 1_000_000 > 14_000_000, "max is the last accepted amount");
+        assert!(
+            zat_to_lamports(min - 1, rate) < 1_000_000,
+            "min is the first accepted amount"
+        );
+        // Any cap of one step or more gives a non-empty range, at any rate.
+        for cap in [
+            1_000_000u128,
+            1_999_999,
+            2_000_000,
+            13_000_000,
+            48_000_000,
+            30_000_000_000,
+        ] {
+            for r in [1_000_000_000u64, 11_442_500_000, 300_000_000_000] {
+                let (a, b) = initial_buy_zat_range(cap, rate::LAMPORTS_STEP, r).unwrap();
+                assert!(a <= b, "{cap} {r}");
+            }
+        }
+        assert_eq!(initial_buy_zat_range(999_999, rate::LAMPORTS_STEP, rate), None);
+        assert_eq!(initial_buy_zat_range(0, rate::LAMPORTS_STEP, rate), None);
+    }
+
+    #[test]
+    fn fuzzed_buy_steps_up_from_zero() {
+        // One step exactly: a shave that floors to 0 steps back up to one step.
+        let rate = 11_442_500_000;
+        let zat = rate::lamports_to_zat_ceil(1_000_000, rate);
+        for _ in 0..50 {
+            let (charged, lamports, _) = fuzzed_buy_step(zat, 0, rate, zat, rate::LAMPORTS_STEP).unwrap();
+            assert_eq!(lamports, 1_000_000);
+            assert_eq!(charged, zat);
+        }
     }
 
     #[test]

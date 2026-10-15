@@ -41,7 +41,17 @@ dev-user, скорее всего, зашифрован тем же `~/.unzeen/s
 | `DEVNET_ZEC_SOL_RATE` | `11.5` (см. 0.4 про экономию SOL) | на devnet идёт живая котировка 1Click; при её сбое все действия `503` |
 | `UNZEEN_METADATA_BASE_URL` | `http://127.0.0.1:8080/media` — ровно origin API + `/media` | relayer: «no metadata store», все `create` падают |
 | `FEE_SWEEP_STORE` | `postgres` | сборы пишутся в `fee-sweeps.json`, core их не видит → создатель никогда не получит `claimable` |
-| `UNZEEN_CREATOR_LOCK_SECS` | `300` на время прогона (по умолчанию 86400) | продажа токенов первой покупки создателя → `423 creator_locked` сутки |
+| `UNZEEN_CREATOR_LOCK_SECS` | `300` на время прогона (по умолчанию 86400) | продажа токенов первой покупки создателя → `423 creator_locked` сутки. **Фактический конец лока** = начало часа (`now + lockSecs`) + 1 ч, то есть от `lockSecs` до `lockSecs + 1 ч`. С 300 с лок длится от 5 до 65 мин (прогон 15.10: create в 16:23, лок до 17:00) |
+| `UNZEEN_CHAT=1` + `UNZEEN_CHAT_KEY_FILE` | `~/.unzeen/devnet/chat.key` | чата нет (`features.chat` отсутствует) |
+| `UNZEEN_SCENARIOS=1` + `UNZEEN_SCENARIO_KEY_FILE` | `~/.unzeen/devnet/scenario.key` | сценариев нет; с флагом и без ключа API не стартует |
+
+Ключи чата и сценариев — **два разных** файла по 32 байта hex, режим 0600, вне репо и `.env`. Одинаковый ключ в обоих → API не стартует. Создать один раз (значения не печатаются):
+```bash
+cd ~/.unzeen/devnet && umask 077 && for f in chat.key scenario.key; do [ -f $f ] || openssl rand -hex 32 > $f; done
+```
+Созданы 15.10.
+
+Релейер: `RELAYER_NEW_MINT_RESERVE_LAMPORTS` — сколько SOL vault должен иметь **сверх** нужд самой задачи, чтобы на него закрепили новый mint (create, fair_create, первая покупка mint без закрепления, D4). По умолчанию 0.25 SOL на devnet и 0.1 SOL на mainnet, `0` — выключено. Если ни у одного vault столько нет, берётся самый богатый подходящий vault. Причина (прогон 15.10): DBC-токен закрепился за vault-1 с 0.04 SOL, и все покупки по нему падали с `pool_liquidity`.
 
 Полезно на время прогона (необязательно): `UNZEEN_CONFIRMATIONS_JITTER=0` (зачисление ровно через K блоков, testnet ≈ 75 с/блок); `WITHDRAW_TOKEN_DELAY_MIN_SECS=10`, `WITHDRAW_TOKEN_DELAY_MAX_SECS=30`, `ZEC_PAYOUT_DELAY_MIN_SECS=10`, `ZEC_PAYOUT_DELAY_MAX_SECS=30` (диапазон в коде не проверяется). `UNZEEN_CONFIRMATIONS` читают и scanner, и API: значение должно быть одно.
 
@@ -99,7 +109,7 @@ cd $R
 docker compose -f infra/docker-compose.yml --env-file .env exec -T postgres \
   psql -U unzeen -d unzeen -c 'SELECT version, name FROM schema_migrations ORDER BY 1'
 ```
-Ожидается 1…15 и 17 (`0015_rebalance`, `0017_fair_bundle`; номер 16 зарезервирован за чатом — пропуск нормален). Руками ничего не накатывать.
+Ожидается 1…33 (на 15.10 последняя — `0033_actions_key_seq`). Руками ничего не накатывать.
 **После первого старта новых бинарей (миграции 0015/0017) обязательно перезапустить `infra/relayer-role.sql` (1.4)** — иначе у релейера нет прав на `bundle_legs` и `pool_sol_inventory`.
 
 **Защита от смешения сетей (GAP закрыт):** сканер пишет в `pool_meta` `network`, `solana_cluster`, `pool_ua`. `unzeen-scanner serve`, `unzeen-api serve`, ручные `verify-snapshot`/`stats-snapshot` и `rebalance` **отказываются стартовать** на БД другой сети («refusing to start: this database belongs to …»); сканер — и на БД другого кошелька пула (`UNZEEN_ALLOW_POOL_UA_CHANGE=1` только после осознанного re-init). Для mainnet — отдельная БД (раздел 4.1).
@@ -265,10 +275,12 @@ docker compose -f infra/docker-compose.yml --env-file .env exec -T postgres psql
 ### B. Launch токена (pump.fun и Meteora DBC)
 Нужно: `UNZEEN_CREATE_ENABLED=1`, `UNZEEN_METADATA_BASE_URL`, для Meteora — `meteora-dbc` в `UNZEEN_VENUES` (config devnet `5MHT8F…` зашит по умолчанию в `adapters/src/meteora.ts`, `pnpm meteora:config` повторно не нужен).
 1. `/launch` → площадка pump.fun → name (1–32), symbol (1–10 A–Z0–9), картинка png/jpeg/webp ≤ 512 КиБ, initial buy.
-2. **Кап создателя 5 % саплая.** На devnet виртуальные резервы кривой 1 SOL → 5 % ≈ 0.049 SOL ≈ **0.004 TAZ** при курсе 11.5. Больше → `422 creator_cap`. Точный предел — `GET /api/pool` → `launchRules.maxInitialBuyLamportsByVenue`.
+2. **Кап создателя 5 % саплая.** Релейер читает живой Global pump.fun devnet. На 15.10 там **виртуальные резервы 0.3 SOL** (а не 1 SOL), поэтому кап = 0.014 SOL (pump.fun) / 0.013 SOL (DBC) ≈ **0.0012 TAZ** при курсе 11.5. Больше → `422 creator_cap`.
+   - Принимаемый диапазон `initialBuyZec` (API v0.24) — `GET /api/pool` → `launchRules.minInitialBuyZat` … `maxInitialBuyZatByVenue[venue]`, включительно, по текущему курсу. При 11.5 это примерно 0.0000874 … 0.00131 TAZ (pump.fun).
+   - Минимум — один шаг 0.001 SOL, а не `minActionZat`: всё действие с комиссией запуска и так выше минимума. До v0.24 рабочее окно было ≈ 0.00105–0.00131 TAZ, а 0.001 TAZ давал `below_minimum`.
 3. Hold = initial buy + `CREATE_FEE_ZAT` (0.001). Эпоха → релейер делает одну v0-tx create+buy со свежего creator-адреса.
 4. Ожидается: в ленте `create` + `buy` с одной подписью, токен в `GET /api/tokens` с картинкой `http://127.0.0.1:8080/media/<sha>.jpg`, `/creator` показывает токен (позиция, лок, кап), `~/.unzeen/devnet/solana/creator-pubkeys.json` пополнился.
-5. Продажа токенов первой покупки до конца лока → `423 creator_locked` (ожидаемо; поэтому на прогон `UNZEEN_CREATOR_LOCK_SECS=300`).
+5. Продажа токенов первой покупки до конца лока → `423 creator_locked` (ожидаемо; поэтому на прогон `UNZEEN_CREATOR_LOCK_SECS=300`). Конец лока — `GET /api/creator` → `tokens[].lock.until` (начало часа + 1 ч, см. 0.3). Покупки создателя по своему токену сверх капа → `422 creator_cap`, в том числе `limit_buy` (ожидаемо).
 6. Повторить с площадкой **Meteora DBC**. Кап считается по кривой DBC (свой `maxInitialBuyLamportsByVenue`). Ссылка explorer: tx `initialize_virtual_pool` + swap.
 
 ### C. Ордера (limit buy / stop-loss)

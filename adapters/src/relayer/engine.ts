@@ -83,6 +83,12 @@ export interface RelayerOptions {
   pollMs?: number;
   resolveTimeoutMs?: number;
   onEvent?: (e: RelayerEvent) => void;
+  /**
+   * SOL a vault must keep above the job's own need to receive a NEW mint (create,
+   * fair_create, first buy of an unpinned mint), see `VaultRequest.newMintReserve`.
+   * Unset / 0: no preference (tests, legacy).
+   */
+  newMintReserveLamports?: bigint;
 }
 
 /** Codes worth retrying later (pool can be topped up, RPC can recover). */
@@ -111,6 +117,7 @@ export class Relayer {
       maxClaims: 3, // RELAYER.md §4: unsent jobs fail after 3 claims
       pollMs: 2_000,
       resolveTimeoutMs: 120_000,
+      newMintReserveLamports: 0n,
       ...opts,
     };
   }
@@ -202,7 +209,8 @@ export class Relayer {
     const req = (ex.vaultRequestAsync ? await ex.vaultRequestAsync(spec) : null) ?? ex.vaultRequest(spec);
     const mv = this.o.mintVaults;
     if (!mv) return { req, pinFor: null };
-    if (spec.kind === "create") return { req: { ...req, load: await mv.load() }, pinFor: null };
+    const fresh = this.o.newMintReserveLamports ? { newMintReserve: this.o.newMintReserveLamports } : {};
+    if (spec.kind === "create") return { req: { ...req, load: await mv.load(), ...fresh }, pinFor: null };
     // attest / fund_vaults sign with their own key; consolidate is pinned to its leg vault
     // (`only: from` from the executor), NOT to the mint's vault (that is the recipient).
     if (spec.kind === "attest" || spec.kind === "fund_vaults" || spec.kind === "consolidate" || spec.kind === "fund_quote") return { req, pinFor: null };
@@ -212,11 +220,11 @@ export class Relayer {
       const mint = spec.mintKeypair.publicKey.toBase58();
       const pinned = await mv.get(mint);
       if (pinned) return { req: { ...req, only: pinned }, pinFor: null };
-      return { req: { ...req, load: await mv.load() }, pinFor: mint };
+      return { req: { ...req, load: await mv.load(), ...fresh }, pinFor: mint };
     }
     const pinned = await mv.get(spec.mint);
     if (pinned) return { req: { ...req, only: pinned }, pinFor: null };
-    if (spec.kind === "buy") return { req: { ...req, load: await mv.load() }, pinFor: spec.mint };
+    if (spec.kind === "buy") return { req: { ...req, load: await mv.load(), ...fresh }, pinFor: spec.mint };
     return { req, pinFor: null };
   }
 
