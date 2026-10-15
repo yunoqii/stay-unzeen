@@ -442,10 +442,24 @@ fn parity_used(applied: u64) -> RateUsed {
 
 /// Estimated zat of `amount` base units at `price_quote` (decimal ZEC per whole token).
 fn estimate_zat_zec(price_quote: &str, decimals: i16, amount: u128, units_per_zec: u64) -> Option<u64> {
-    // sol_to_lamports gives price × 1e9; ZEC SPL has 8 decimals.
-    let units_per_whole = crate::config::sol_to_lamports(&truncate_decimals(price_quote, 9))? / 10;
-    let units = amount.checked_mul(units_per_whole as u128)? / 10u128.checked_pow(decimals.max(0) as u32)?;
-    Some((units * 100_000_000 / (units_per_zec.max(1) as u128)).min(u64::MAX as u128) as u64)
+    // ZEC SPL has 8 decimals. Full price precision: a sub-unit price per whole token
+    // (cheap tokens) must not truncate to 0 (devnet run 15.10).
+    let units = value_in_units(price_quote, decimals, amount, 8)?;
+    Some(mul_div(units, 100_000_000, units_per_zec.max(1) as u128).min(u64::MAX as u128) as u64)
+}
+
+/// Value of `amount` base units (token `decimals`) at `price` (decimal native coin per whole
+/// token, ≤ 18 fractional digits, longer is truncated) in the smallest units of a coin with
+/// `native_decimals` (SOL 9, ZEC SPL 8, ETH 18). Exact to the last unit: the price is not first
+/// rounded to whole native units per token, which made every token cheaper than 1 lamport per
+/// whole token worth 0 (sells of such tokens were rejected as `below_minimum`).
+fn value_in_units(price: &str, decimals: i16, amount: u128, native_decimals: u32) -> Option<u128> {
+    let p18 = crate::config::eth_to_wei(&truncate_decimals(price, 18))?;
+    let shift = u32::try_from(decimals.max(0))
+        .ok()?
+        .checked_add(18)?
+        .checked_sub(native_decimals)?;
+    Some(mul_div(amount, p18, 10u128.checked_pow(shift)?))
 }
 
 async fn rate(st: &AppState) -> ApiResult<rate::Rate> {
@@ -483,8 +497,11 @@ fn estimate_zat_on(
     amount: u128,
     units_per_zec: u64,
 ) -> Option<u64> {
-    let per_whole = crate::config::price_to_units(&truncate_decimals(price, 18), trade)?;
-    let units = mul_div(amount, per_whole, 10u128.checked_pow(decimals.max(0) as u32)?);
+    let native_decimals = match trade {
+        unzeen_protocol::TradeNet::Solana(_) => 9,
+        unzeen_protocol::TradeNet::Hood(_) => 18,
+    };
+    let units = value_in_units(price, decimals, amount, native_decimals)?;
     let zat = mul_div(units, 100_000_000, units_per_zec.max(1) as u128);
     Some(zat.min(u64::MAX as u128) as u64)
 }
@@ -1168,6 +1185,29 @@ mod tests {
             Some(10_000_000)
         );
         assert_eq!(estimate_zat("0.00000000012345", 6, 1, 1), Some(0));
+    }
+
+    #[test]
+    fn estimate_keeps_sub_lamport_prices() {
+        // Devnet run 15.10: pump.fun token at 3.94e-10 SOL per whole token (< 1 lamport),
+        // 50M tokens (6 decimals) ≈ 0.0197 SOL ≈ 172k zat at 11.4425 SOL/ZEC. Before the fix the
+        // price truncated to 0 lamports and every such sell was `below_minimum`.
+        let z = estimate_zat("0.000000000394367964", 6, 50_000_000_000_000, 11_442_500_000).unwrap();
+        assert_eq!(z, 172_325);
+        // Mainnet-like 2.87e-8 SOL: the old per-whole truncation lost 3 % (28 vs 28.7 lamports).
+        let z = estimate_zat("0.0000000287", 6, 1_000_000_000_000, 10_000_000_000).unwrap();
+        assert_eq!(z, 287_000);
+        // ZEC SPL pairs: 1.5e-9 ZEC per whole token, 1e9 tokens (6 decimals) = 1.5 ZEC = 1.5e8 units.
+        assert_eq!(
+            estimate_zat_zec("0.0000000015", 6, 10u128.pow(15), 100_000_000),
+            Some(150_000_000)
+        );
+        // Hood: ETH with 18 decimals stays exact.
+        let hood = unzeen_protocol::TradeNet::Hood(unzeen_protocol::HoodNet::Mainnet);
+        assert_eq!(
+            estimate_zat_on(hood, "0.000000000000000001", 18, 10u128.pow(18), 1),
+            Some(100_000_000)
+        );
     }
 
     #[test]
