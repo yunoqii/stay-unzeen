@@ -12,7 +12,7 @@ import { useKeyState } from "@/lib/crypto/session";
 import { nowFee, useDefaultExec, withExec, type ExecMode } from "@/lib/exec";
 import { formatSol, formatUnits, formatZec, lamportsToSol, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
 import { BAGS_NO_CURVE_TEXT, checkInitialBuy, isBagsNotReady, validateMeta, type MetaInput } from "@/lib/launch";
-import { maxInitialBuyLamports, maxInitialBuyZat } from "@/lib/launch-rules";
+import { maxInitialBuyLamports, maxInitialBuyZat, minInitialBuyZat } from "@/lib/launch-rules";
 import { useNetwork } from "@/lib/network";
 import { launchQuotes, PLATFORM_LABEL, venueInfo, venueLabel } from "@/lib/quotes";
 import { cn } from "@/lib/utils";
@@ -233,6 +233,10 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
   // ZEC pairs (v0.17): their own cap in ZEC SPL units, per venue; not published (devnet) -> the server checks it.
   const maxZat = maxInitialBuyZat(pool, venue, quote);
   const maxLamports = maxInitialBuyLamports(pool, venue);
+  // v0.24: the inclusive range the pool accepts (one D10 step .. the venue cap), shown in the field.
+  const minZat = minInitialBuyZat(pool, quote);
+  const noFirstBuy = maxZat === ZERO;
+  const range = maxZat !== null && maxZat > ZERO && minZat !== null && minZat <= maxZat ? `${formatZec(minZat.toString())}–${formatZec(maxZat.toString())}` : null;
   const fee = pool?.fees?.createFeeZat && /^\d+$/.test(pool.fees.createFeeZat) ? BigInt(pool.fees.createFeeZat) : null;
   const nf = exec === "now" ? nowFee(pool) : null;
   const nowZat = nf && "zat" in nf ? nf.zat : ZERO;
@@ -385,10 +389,10 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
               inputMode="decimal"
               autoComplete="off"
               spellCheck={false}
-              placeholder="0.00"
+              placeholder={noFirstBuy ? "Not available" : (range ?? "0.00")}
               value={buy}
-              disabled={busy}
-              aria-label="First buy in ZEC"
+              disabled={busy || (noFirstBuy && buy === "")}
+              aria-label={range ? `First buy in ZEC, ${range}` : "First buy in ZEC"}
               aria-invalid={!initial.ok}
               aria-describedby={`${ids}-buy-h`}
               onChange={(e) => {
@@ -416,6 +420,10 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
                 ? maxZat !== null
                   ? `Up to ${formatZec(maxZat.toString())} ZEC on the ZEC curve of ${VENUE_LABEL[venue]}, in the same transaction as the launch. Locked for the rule period.`
                   : `Spent in ZEC on the ZEC curve, in the same transaction as the launch. Capped at ${capPct(pool)} of supply; the pool checks the cap when it accepts.`
+                : noFirstBuy
+                ? `No first buy on ${VENUE_LABEL[venue]} right now: the creator cap is smaller than one trade step. Launch without one, then buy like anyone else.`
+                : range && maxLamports
+                ? `${range} ZEC on ${VENUE_LABEL[venue]} (up to ≈ ${formatSol(lamportsToSol(maxLamports))} ${native} on its curve). Bought in the same transaction as the launch, locked for the rule period.`
                 : maxZat !== null && maxLamports
                 ? `Up to ${formatZec(maxZat.toString())} ZEC on ${VENUE_LABEL[venue]} (≈ ${formatSol(lamportsToSol(maxLamports))} ${native} on its curve). Bought in the same transaction as the launch, locked for the rule period.`
                 : "Bought in the same transaction as the launch."}
@@ -480,7 +488,11 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
               style={{ overflow: "hidden" }}
               className="text-xs text-sell"
             >
-              {isBagsNotReady(error, venue) ? BAGS_NO_CURVE_TEXT : errorText(error)}
+              {isBagsNotReady(error, venue)
+                ? BAGS_NO_CURVE_TEXT
+                : error.code === "below_minimum" && minZat !== null
+                  ? `The first buy is below one trade step: at least ${formatZec(minZat.toString())} ZEC, or launch without a first buy.`
+                  : errorText(error)}
             </motion.p>
           )}
         </AnimatePresence>

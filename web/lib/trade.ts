@@ -210,3 +210,27 @@ export function isPriceStale(priceTs: number | undefined, maxAgeSecs: number | u
   if (priceTs === undefined || !Number.isFinite(priceTs)) return true;
   return now - priceTs > ((maxAgeSecs ?? PRICE_MAX_AGE_DEFAULT_S) - PRICE_SLACK_S) * 1000;
 }
+
+// ---- live devnet run (15.10) ----
+
+/**
+ * The rate a quote is computed with: the one the pool used for this tab's last order, else the public
+ * PoolInfo.rate (buy or sell side). Never null while the pool publishes a rate, so a trade is never signed
+ * with minOut / minZecOut 0 just because the page was reloaded.
+ */
+export function quoteRate(
+  last: SolRateUsed | null,
+  pool: { rate?: { lamportsPerZecBuy: string; lamportsPerZecSell: string; source: SolRateUsed["source"]; ts: number } } | null | undefined,
+  side: "buy" | "sell",
+): SolRateUsed | null {
+  if (last) return last;
+  const r = pool?.rate;
+  if (!r) return null;
+  const v = side === "buy" ? r.lamportsPerZecBuy : r.lamportsPerZecSell;
+  return /^[1-9]\d*$/.test(v) ? { lamportsPerZec: v, source: r.source, ts: r.ts } : null;
+}
+
+/** A sale whose value at the current price is under minActionZat is refused by the pool (422 below_minimum). */
+export function saleBelowMinimum(zecOut: bigint | null | undefined, minActionZat: bigint | null): boolean {
+  return zecOut !== null && zecOut !== undefined && minActionZat !== null && zecOut < minActionZat;
+}

@@ -230,3 +230,14 @@ export function sealedFields(plan: ScenarioPlan): { step: number; what: string; 
 
 /** Mask the way Portfolio echoes it: Ab3d…9xYz. */
 export const maskAddr = (a: string) => (a.length <= 10 ? a : `${a.slice(0, 4)}…${a.slice(-4)}`);
+
+/**
+ * scenario_create needs an available balance of at least minActionZat (docs/API.md v0.19), even for a plan that
+ * starts by waiting for a deposit. Text for the review when it is short, else null. Unknown balance: null (the
+ * server still checks).
+ */
+export function startBalanceShort(balanceZat: string | null | undefined, minActionZat: string | null | undefined): string | null {
+  if (!balanceZat || !minActionZat || !/^\d+$/.test(balanceZat) || !/^\d+$/.test(minActionZat)) return null;
+  if (BigInt(balanceZat) >= BigInt(minActionZat)) return null;
+  return `A plan needs at least ${zecText(minActionZat)} available on your balance to start, even one that waits for a deposit. Top up first; nothing is held for it.`;
+}

@@ -8,7 +8,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { ArrowLeft, Eye, EyeSlash, LockKey, ShieldCheck, Signature, WarningCircle } from "@phosphor-icons/react";
 import type { PoolInfo, ScenarioPlan } from "@/lib/api/types";
 import { formatSecs } from "@/lib/scenarios/catalog";
-import { describeBlock, maskAddr, onFailText, planTotals, sealedFields, stepTitle, zecText, type TokenLookup } from "@/lib/scenarios/describe";
+import { describeBlock, maskAddr, onFailText, planTotals, sealedFields, startBalanceShort, stepTitle, zecText, type TokenLookup } from "@/lib/scenarios/describe";
 import type { PlanCheck } from "@/lib/scenarios/validate";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -25,6 +25,7 @@ export function Review({
   tok,
   busy,
   error,
+  balanceZat,
   onBack,
   onSign,
 }: {
@@ -35,6 +36,8 @@ export function Review({
   tok: TokenLookup;
   busy: boolean;
   error: string | null;
+  /** Available ZEC of the key (Portfolio.zecBalance), for the start minimum. */
+  balanceZat?: string | null;
   onBack: () => void;
   onSign: () => void;
 }) {
@@ -43,6 +46,7 @@ export function Review({
   const sealed = sealedFields(plan);
   const manual = plan.steps[0]?.block.type === "manual_start";
   const ttl = check.ttlSecs;
+  const short = startBalanceShort(balanceZat, pool?.minActionZat);
 
   return (
     <div className="ledger lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
@@ -180,6 +184,17 @@ export function Review({
         )}
 
         <section aria-label="Sign" className="flex flex-1 flex-col justify-end gap-3 p-5 sm:p-6">
+          {short && !error && (
+            <p role="note" className="flex gap-2 rounded-lg border border-zec/30 bg-zec-soft px-3 py-2 text-xs text-pretty text-zec">
+              <WarningCircle size={14} weight="light" className="mt-px shrink-0" aria-hidden />
+              <span>
+                {short}{" "}
+                <a href="/pay" className="underline underline-offset-4">
+                  Top up
+                </a>
+              </span>
+            </p>
+          )}
           <AnimatePresence>
             {error && (
               <motion.p role="alert" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-pretty">
@@ -188,7 +203,7 @@ export function Review({
               </motion.p>
             )}
           </AnimatePresence>
-          <Button onClick={onSign} disabled={busy || !check.ok} className="h-12 w-full rounded-full text-base" aria-busy={busy}>
+          <Button onClick={onSign} disabled={busy || !check.ok || !!short} className="h-12 w-full rounded-full text-base" aria-busy={busy}>
             <Signature weight="duotone" className="size-5!" />
             {busy ? "Signing…" : manual ? "Sign once — start it later" : "Sign once & start"}
           </Button>

@@ -6,13 +6,13 @@ import { useEffect, useId, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { CaretDown, Info, Key, LockKey, ShieldCheck, SlidersHorizontal } from "@phosphor-icons/react";
 import { ApiError } from "@/lib/api/client";
-import type { SignedAction, SolRateUsed, Token, Venue } from "@/lib/api/types";
+import type { SignedAction, Token, Venue } from "@/lib/api/types";
 import { lastRate, submitAction, useAction, useActivityVersion } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, unitsToNumber, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
 import { NETWORK_CONFIG, nativeOf, useNetwork } from "@/lib/network";
 import { nowFee as poolNowFee, resolveExec, useDefaultExec, withExec, type ExecMode, type NowFee } from "@/lib/exec";
-import { isPriceStale, lamportsToZatCeil, quoteBuy, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
+import { isPriceStale, lamportsToZatCeil, quoteBuy, quoteRate, saleBelowMinimum, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
 import { useRecentBuys } from "@/hooks/use-recent-buys";
 import { useNow } from "@/hooks/use-now";
 import { usePriceTs } from "@/hooks/use-price-ts";
@@ -133,12 +133,11 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
   const graduated = token.status === "graduated";
   // v0.13: Jupiter routes SOL / USDC / USD1 pairs after graduation, never ZEC pairs (400).
   const venue: Venue = graduated && token.venue !== "jupiter" && tokenQuote(token) !== "ZEC" ? "jupiter" : token.venue;
-  // v0.22 (hood): a buy / sell must carry a real price limit (minOut / minZecOut 0 -> 400), so without a rate
-  // from an earlier order the quote falls back to the pool's published one (docs/API.md D10).
+  // Without a rate from an earlier order in this tab the quote uses the pool's published one (PoolInfo.rate,
+  // docs/API.md D10), on every chain: otherwise the first trade after a reload was signed with minOut 0, i.e. no
+  // price limit at all (found on the live devnet run). On hood a zero limit is even refused (v0.22: 400).
   const hood = NETWORK_CONFIG[network].chain === "hood";
-  const poolRate: SolRateUsed | null =
-    hood && pool?.rate ? { lamportsPerZec: isBuy ? pool.rate.lamportsPerZecBuy : pool.rate.lamportsPerZecSell, source: pool.rate.source, ts: pool.rate.ts } : null;
-  const rate = lastRate(network, side) ?? poolRate;
+  const rate = quoteRate(lastRate(network, side), pool, side);
   // v0.22: 503 stale_price -> the button waits for Retry-After, then the same amount is re-quoted and re-signed.
   const [stale, setStale] = useState<{ left: number; value: string; tries: number } | null>(null);
   // v0.23: block before sending when the pool's price is missing or older than priceMaxAgeSecs − 20 s.
@@ -190,6 +189,9 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
           : isBuy
             ? quoteBuy(parsed, rate, priceSol, token.decimals, slippage)
             : quoteSell(parsed, rate, priceSol, token.decimals, slippage);
+    // A sale worth less than the pool minimum at the current price is refused (422 below_minimum): say so first.
+    if (!isBuy && !inputError && quote && "zecOut" in quote && saleBelowMinimum(quote.zecOut, minAction) && minAction !== null)
+      inputError = `Worth about ${formatZec(quote.zecOut.toString())} ZEC, under the pool minimum of ${formatZec(minAction.toString())} ZEC for a sale. Sell more of it.`;
     return { parsed, inputError, quote };
   };
   const { parsed, inputError, quote } = evaluate(amount);

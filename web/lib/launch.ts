@@ -3,7 +3,7 @@
 
 import type { PoolInfo, Quote } from "@/lib/api/types";
 import { formatZec, parseUnits, ZEC_DECIMALS } from "@/lib/format";
-import { maxInitialBuyZat } from "@/lib/launch-rules";
+import { minInitialBuyZat, maxInitialBuyZat } from "@/lib/launch-rules";
 
 export const NAME_MAX = 32;
 export const SYMBOL_MAX = 10;
@@ -61,7 +61,8 @@ export function checkInitialBuy(value: string, pool: Pick<PoolInfo, "launchRules
     return { ok: false, error: "Enter an amount in ZEC, up to 8 decimals." };
   }
   if (zat === BigInt(0)) return { ok: true, zat: null };
-  if (pool && zat < BigInt(pool.minActionZat)) return { ok: false, error: `At least ${formatZec(pool.minActionZat)} ZEC, or leave it empty.` };
+  const min = minInitialBuyZat(pool, quote);
+  if (min !== null && zat < min) return { ok: false, error: `At least ${formatZec(min.toString())} ZEC, or leave it empty.` };
   if (quote === "ZEC") {
     // v0.17: the pool publishes the ZEC-pair cap per venue (ZEC SPL units = zatoshis). Not published: the server checks it.
     const capZec = maxInitialBuyZat(pool, venue, "ZEC");
@@ -70,6 +71,7 @@ export function checkInitialBuy(value: string, pool: Pick<PoolInfo, "launchRules
   }
   const max = maxInitialBuyZat(pool, venue);
   if (max === null) return { ok: false, error: "The pool has not published its first-buy limit yet. Launch without a first buy, or try again shortly." };
+  if (max === BigInt(0)) return { ok: false, error: "No first buy on this venue right now: the creator cap is smaller than one trade step. Launch without a first buy." };
   if (zat > max) return { ok: false, error: `Up to ${formatZec(max.toString())} ZEC: the creator can hold at most the capped share of supply.` };
   return { ok: true, zat };
 }

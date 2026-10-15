@@ -50,6 +50,16 @@ export function maxInitialBuyZecUnits(pool: Pick<PoolInfo, "launchRules"> | null
 }
 
 /**
+ * v0.24: smallest initialBuyZec (zatoshis). SOL / ETH pairs: one D10 rounding step, as the pool publishes it
+ * (launchRules.minInitialBuyZat); older servers and ZEC pairs: minActionZat.
+ */
+export function minInitialBuyZat(pool: Pick<PoolInfo, "launchRules" | "minActionZat"> | null | undefined, quote: string = "SOL"): bigint | null {
+  const v = pool?.launchRules?.minInitialBuyZat;
+  if (quote !== "ZEC" && v && /^\d{1,20}$/.test(v)) return BigInt(v);
+  return pool?.minActionZat && /^\d{1,20}$/.test(pool.minActionZat) ? BigInt(pool.minActionZat) : null;
+}
+
+/**
  * Largest initialBuyZec (zatoshis) that stays under the venue's cap; null if unknown. SOL pairs: the
  * lamport cap at the pool's buy rate. ZEC pairs (v0.17): maxInitialBuyZecUnitsByVenue as is.
  */
@@ -62,6 +72,9 @@ export function maxInitialBuyZat(pool: Pick<PoolInfo, "launchRules" | "rate" | "
     const unitsPerZec = (ZAT_PER_ZEC * BigInt(10_000 - Math.floor(bps))) / BigInt(10_000);
     return unitsPerZec === BigInt(0) ? null : (cap * ZAT_PER_ZEC) / unitsPerZec;
   }
+  // v0.24: the pool publishes the exact inclusive range per venue ("0" = no first buy possible there).
+  const published = venue ? pool?.launchRules?.maxInitialBuyZatByVenue?.[venue] : undefined;
+  if (published !== undefined && /^\d{1,20}$/.test(published)) return BigInt(published);
   const max = maxInitialBuyLamports(pool, venue);
   const rate = pool?.rate?.lamportsPerZecBuy;
   if (!max || !/^\d+$/.test(max) || max === "0" || !rate || !/^\d+$/.test(rate) || rate === "0") return null;

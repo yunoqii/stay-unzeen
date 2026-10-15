@@ -237,6 +237,10 @@ export interface PoolInfo {
     maxInitialBuyLamportsByVenue?: Record<string, Lamports>;
     /** v0.17: ZEC pairs: max first buy of `create` in ZEC SPL units (= zatoshis), step 0.0001 ZEC; only venues with the ZEC pair on (`{}` on devnet). */
     maxInitialBuyZecUnitsByVenue?: Record<string, string>;
+    /** v0.24: smallest create.initialBuyZec (zat of one D10 rounding step at the buy rate); with rate and capBps > 0. */
+    minInitialBuyZat?: string;
+    /** v0.24: largest create.initialBuyZec per venue, zat, inclusive; "0" = no first buy possible there. SOL / ETH pairs. */
+    maxInitialBuyZatByVenue?: Record<string, string>;
   };
   /** v0.4: public rate from the background cache. Absent = no rate (actions -> 503). */
   rate?: {

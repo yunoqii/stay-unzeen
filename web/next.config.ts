@@ -81,6 +81,9 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_MOCK_DISCOVERY: process.env.NEXT_PUBLIC_MOCK_DISCOVERY ?? "",
     NEXT_PUBLIC_COVER_TRAFFIC: process.env.NEXT_PUBLIC_COVER_TRAFFIC ?? "",
   },
+  // Dev server only: the live devnet stand is opened at http://127.0.0.1:3100 (API CORS lists that origin).
+  // Without this Next 16 refuses its HMR socket from 127.0.0.1 and the page never hydrates.
+  allowedDevOrigins: ["127.0.0.1"],
   cacheComponents: true,
   partialPrefetching: true,
   poweredByHeader: false,

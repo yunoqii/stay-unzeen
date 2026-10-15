@@ -32,6 +32,7 @@ import { isLiveScenario, MyScenarios } from "./my-scenarios";
 import { Palette } from "./palette";
 import { Review } from "./review";
 import { TemplatePicker } from "./template-picker";
+import { startBalanceShort } from "@/lib/scenarios/describe";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 const H = 3600;
@@ -183,7 +184,11 @@ function Scenarios() {
         setView("edit");
         toast.error(`Step ${d.step + 1}: ${errorText(e)}`);
       }
-      setSignError(errorText(e));
+      setSignError(
+        e instanceof ApiError && e.code === "insufficient_balance"
+          ? (startBalanceShort("0", pool?.minActionZat) ?? errorText(e))
+          : errorText(e),
+      );
     } finally {
       setBusy(false);
     }
@@ -229,7 +234,7 @@ function Scenarios() {
           </motion.div>
         ) : view === "review" ? (
           <motion.div key="review" initial={{ opacity: 0, y: 12, filter: "blur(6px)" }} animate={{ opacity: 1, y: 0, filter: "blur(0px)" }} exit={{ opacity: 0, y: 6 }} transition={{ duration: 0.35, ease: EASE }}>
-            <Review name={draft.name} plan={plan} check={check} pool={pool} tok={tok} busy={busy} error={signError} onBack={() => setView("edit")} onSign={() => void sign()} />
+            <Review name={draft.name} plan={plan} check={check} pool={pool} tok={tok} busy={busy} error={signError} balanceZat={portfolio?.zecBalance ?? null} onBack={() => setView("edit")} onSign={() => void sign()} />
           </motion.div>
         ) : view === "signed" && signed ? (
           <motion.div key="signed" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.35, ease: EASE }}>

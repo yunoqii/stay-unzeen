@@ -456,6 +456,15 @@ const MOCK_MAX_INITIAL_BUY_LAMPORTS = BigInt(1_500_000_000);
 /** v0.6 per-venue cap: meteora-dbc narrowed by 5/5.013 (its 1 % fee vs ~1.25 %), as core does for now. */
 const mockVenueCap = (venue: string) => (venue === "meteora-dbc" ? (MOCK_MAX_INITIAL_BUY_LAMPORTS * BigInt(5000)) / BigInt(5013) : MOCK_MAX_INITIAL_BUY_LAMPORTS);
 
+/** v0.24: one D10 rounding step of a buy (0.001 SOL) in zat at the buy rate: the smallest first buy of create. */
+const D10_STEP_LAMPORTS = BigInt(1_000_000);
+const mockMinInitialBuyZat = () => (D10_STEP_LAMPORTS * ZAT + BigInt(mockRate(true).lamportsPerZec) - BigInt(1)) / BigInt(mockRate(true).lamportsPerZec);
+/** v0.24: largest first buy whose lamports, rounded down to the step, stay within the venue cap (inclusive). */
+const mockMaxInitialBuyZat = (venue: string) => {
+  const cap = mockVenueCap(venue);
+  return cap < D10_STEP_LAMPORTS ? N0 : ((cap - (cap % D10_STEP_LAMPORTS) + D10_STEP_LAMPORTS - BigInt(1)) * ZAT) / BigInt(mockRate(true).lamportsPerZec);
+};
+
 /** v0.11 PoolInfo.minClaimZat (core default MIN_CLAIM_ZAT = 10 000). */
 const MIN_CLAIM_ZAT = BigInt(10_000);
 
@@ -589,6 +598,11 @@ export function mockPool(network: Network): PoolInfo {
         "raydium-launchlab": mockVenueCap("raydium-launchlab").toString(),
         ...(network === "mainnet" ? { bags: mockVenueCap("meteora-dbc").toString() } : {}),
       },
+      // v0.24: the accepted first-buy range of SOL pairs, in zat.
+      minInitialBuyZat: mockMinInitialBuyZat().toString(),
+      maxInitialBuyZatByVenue: Object.fromEntries(
+        ["pumpfun", "meteora-dbc", "raydium-launchlab", ...(network === "mainnet" ? ["bags"] : [])].map((v) => [v, mockMaxInitialBuyZat(v).toString()]),
+      ),
       // v0.17: ZEC-pair cap in ZEC SPL units (step 0.0001 ZEC), only venues with the ZEC pair on (core: `{}` without one).
       maxInitialBuyZecUnitsByVenue: Object.fromEntries(
         (mockQuotes(network).find((q) => q.quote === "ZEC")?.venues ?? []).map((v) => [v, (MOCK_MAX_INITIAL_BUY_ZEC_UNITS - (MOCK_MAX_INITIAL_BUY_ZEC_UNITS % ZEC_UNITS_STEP)).toString()]),
@@ -1080,12 +1094,13 @@ function accept(network: Network, pubkey: string, action: SignedAction): Omit<Mo
       }
       if (action.platform !== undefined && (action.venue !== "raydium-launchlab" || !["unzeen", "bonk", "stonk"].includes(action.platform)))
         throw new ApiError("bad_request", "platform: unzeen | bonk | stonk, raydium-launchlab only", 400);
-      if (initial > N0 && initial < minAction) throw new ApiError("below_minimum", "initialBuyZec below PoolInfo.minActionZat", 422);
+      // v0.24: the first buy of a SOL pair needs one D10 step; a ZEC pair still minActionZat. The whole create stays >= minActionZat.
+      if (initial > N0 && initial < (quote === "ZEC" ? minAction : mockMinInitialBuyZat())) throw new ApiError("below_minimum", "initialBuyZec below launchRules.minInitialBuyZat", 422);
       if (quote === "ZEC") {
         // ZEC curve: same token reserves, ZEC virtual reserves (core: UNZEEN_LAUNCH_VIRTUAL_ZEC_UNITS).
         const full = (initial * (BPS - ZEC_SPREAD_BPS)) / BPS;
         if (initial > N0 && full - (full % ZEC_UNITS_STEP) > MOCK_MAX_INITIAL_BUY_ZEC_UNITS - (MOCK_MAX_INITIAL_BUY_ZEC_UNITS % ZEC_UNITS_STEP)) throw new ApiError("creator_cap", "initial buy above the ZEC curve cap", 422);
-      } else if ((initial * BigInt(mockRate(true).lamportsPerZec)) / ZAT > mockVenueCap(action.venue)) throw new ApiError("creator_cap", "initial buy above launchRules.maxInitialBuyLamportsByVenue", 422);
+      } else if (initial > mockMaxInitialBuyZat(action.venue)) throw new ApiError("creator_cap", "initial buy above launchRules.maxInitialBuyLamportsByVenue", 422);
       const total = initial + CREATE_FEE_ZAT;
       if (a.zecBalance < total) throw new ApiError("insufficient_balance", "not enough ZEC", 422);
       a.zecBalance -= total;
