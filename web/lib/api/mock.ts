@@ -12,7 +12,7 @@ import { isExecMode } from "@/lib/exec";
 import { isSolanaAddress, MIRROR_WINDOW_MS, PAYOUT_REVIEW_ABOVE_ZAT, sellMirrorsBuy } from "@/lib/trade";
 import { checkWithdrawUa } from "@/lib/zcash/ua";
 import { checkUnz1, decodeUnz1, type ChainId } from "@/lib/crypto/unz1";
-import type { Network } from "@/lib/network";
+import { NETWORK_CONFIG, type Network } from "@/lib/network";
 import { memoText, parseZip321 } from "@/lib/zip321";
 import { ApiError } from "./errors";
 import { CHAT_OPS, createChatMock, mockChatParams } from "./mock-chat";
@@ -551,28 +551,46 @@ const CHAT_FEATURES = {
   ...(SCENARIOS_ON ? { scenarios: true as const } : {}),
 };
 
+/** Offline fallback of the display rates: live 1Click values of 16.10 (our /api/rates), not a price feed. */
+export const OFFLINE_RATES = { ZEC: "1233", SOL: "106", ETH: "2456", "ZEC/SOL": "11.59", "ZEC/ETH": "0.502" } as const;
+
 /**
- * DRAFT v0.18 display rates: one public answer per minute, the same for everyone. ZEC/SOL drifts within
- * ±0.6% around the pool's mid rate so converted figures stay close to what trades actually pay.
+ * Display rates of the in-browser mock when our API is out of reach: the static OFFLINE_RATES, marked
+ * `offline` so the strip says so. Same answer within a minute (ts), like the server's timer.
  */
 export function mockRates(now: number): Rates {
-  const minute = Math.floor(now / 60_000);
-  const wave = (k: number, amp: number) => 1 + amp * Math.sin(minute / k) * Math.cos(minute / (k * 2.7));
-  const solUsd = 141.37 * wave(23, 0.012);
-  const zecSol = (Number(MID_LAMPORTS_PER_ZEC) / 1e9) * wave(37, 0.006);
-  const zecUsd = solUsd * zecSol;
-  const ethUsd = 3_912.5 * wave(29, 0.01);
-  const fix = (n: number, d: number) => n.toFixed(d);
-  // v0.18 shape: USD prices and the two pairs, 6 significant digits.
-  const sig6 = (n: number) => String(Number(n.toPrecision(6)));
-  void fix;
   return {
-    usd: { ZEC: sig6(zecUsd), SOL: sig6(solUsd), ETH: sig6(ethUsd) },
-    pairs: { "ZEC/SOL": sig6(zecSol), "ZEC/ETH": sig6(zecUsd / ethUsd) },
+    usd: { ZEC: OFFLINE_RATES.ZEC, SOL: OFFLINE_RATES.SOL, ETH: OFFLINE_RATES.ETH },
+    pairs: { "ZEC/SOL": OFFLINE_RATES["ZEC/SOL"], "ZEC/ETH": OFFLINE_RATES["ZEC/ETH"] },
     approximate: true,
     source: "near-1click",
-    ts: minute * 60_000,
+    ts: Math.floor(now / 60_000) * 60_000,
+    offline: true,
   };
+}
+
+/**
+ * Mock mode still shows live rates when it can: GET /api/rates on our own API for this network
+ * (NEXT_PUBLIC_API_URL_*, already in the CSP), never a third-party service. No API configured, an error,
+ * a 503 or a malformed answer -> the offline fallback.
+ */
+export async function mockRatesFor(network: Network, now: number, doFetch: typeof fetch = fetch, base: string = NETWORK_CONFIG[network].apiUrl): Promise<Rates> {
+  if (base) {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 4_000);
+      const r = await doFetch(`${base}/api/rates`, { cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer", signal: ctl.signal });
+      clearTimeout(t);
+      if (r.ok) {
+        const j = (await r.json()) as Rates;
+        const ok = (v: unknown) => typeof v === "string" && Number(v) > 0;
+        if (j && ok(j.usd?.ZEC) && ok(j.usd?.SOL) && ok(j.pairs?.["ZEC/SOL"])) return { ...j, offline: undefined };
+      }
+    } catch {
+      /* unreachable: offline fallback */
+    }
+  }
+  return mockRates(now);
 }
 
 export function mockPool(network: Network): PoolInfo {
@@ -890,7 +908,8 @@ export function mockResetStats() {
 // ---- actions from the balance (rules of docs/API.md "Правила исполнения действий" and core/api) ----
 
 /** Mid rate, SOL per ZEC (devnet "fixed" source); the pool spread is applied per side. */
-const MID_LAMPORTS_PER_ZEC = BigInt(1_800_000_000);
+/** The pool's mid ZEC/SOL rate in the mock = the offline display rate (OFFLINE_RATES["ZEC/SOL"]). */
+const MID_LAMPORTS_PER_ZEC = BigInt(11_590_000_000);
 const SPREAD_BPS = BigInt(50);
 const ZAT = BigInt(100_000_000);
 const N0 = BigInt(0);
@@ -1936,7 +1955,7 @@ export async function handle(
       return candles(s, tf, num("from"), num("to"), quote === "1");
     }
     if (p === "/api/pool") return mockPool(network);
-    if (p === "/api/rates") return mockRates(Date.now());
+    if (p === "/api/rates") return mockRatesFor(network, Date.now());
     if (process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1" && fair && (p === "/api/launches" || p.startsWith("/api/launches/"))) return fair.get(network, p, q);
     if ((m = p.match(/^\/api\/actions\/([^/]+)$/))) {
       const pub = authorize(network, method, pathWithQuery, body, headers);

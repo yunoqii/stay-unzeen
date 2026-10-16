@@ -16,7 +16,8 @@ import { CoinIcon } from "@/components/icons/coin";
 export function RatesStrip() {
   const { rates, loading } = useRates();
   const now = useNow(10_000);
-  const usd = rates?.source === "rates" ? rates : null;
+  const usd = rates?.source === "rates" || rates?.source === "offline" ? rates : null;
+  const offline = rates?.source === "offline";
   const eth = useNative().symbol === "ETH";
 
   return (
@@ -41,7 +42,11 @@ export function RatesStrip() {
               <Rate label="ZEC/SOL" value={rates?.zecSol ? formatRate(rates.zecSol, 4) : null} loading={loading} />
             </>
           )}
-          {rates && rates.ts > 0 && now !== null && (
+          {offline ? (
+            <span className="text-faint-foreground/80" title="Our rates API is out of reach from this demo, so these are fixed reference values. Trades use the pool's own quote.">
+              offline rates
+            </span>
+          ) : rates && rates.ts > 0 && now !== null && (
             <span className="text-faint-foreground/80" title="Public reference rate, refreshed every minute. Trades use the pool's own quote.">
               ≈ {timeAgo(rates.ts, now)} ago
             </span>

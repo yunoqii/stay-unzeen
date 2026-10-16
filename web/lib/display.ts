@@ -31,7 +31,8 @@ export interface DisplayRates {
   /** Unix ms of the server's refresh. */
   ts: number;
   /** "rates": the public display endpoint; "pool": fallback from PoolInfo.rate (mid), no USD. */
-  source: "rates" | "pool";
+  /** "offline": the mock's static fallback (our API out of reach). */
+  source: "rates" | "pool" | "offline";
 }
 
 const pos = (v: string | number | undefined | null): number | null => {
@@ -52,7 +53,7 @@ export function parseRates(r: Rates | null | undefined): DisplayRates | null {
     ethUsd,
     zecEth: pos(r.pairs?.["ZEC/ETH"]) ?? (zecUsd && ethUsd ? zecUsd / ethUsd : null),
     ts: Number.isFinite(r.ts) ? r.ts : 0,
-    source: "rates",
+    source: r.offline ? "offline" : "rates",
   };
   return out.zecSol || out.zecUsd || out.zecEth ? out : null;
 }
@@ -136,7 +137,7 @@ export function formatUsd(n: number | null): string {
   return "$" + new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
 }
 
-/** Rate figures for the strip: "$252.41", "1.8021". */
+/** Rate figures for the strip: "$1,232.94", "11.5903". */
 export function formatRate(n: number | null, digits = 2): string {
   if (n === null || !Number.isFinite(n)) return "—";
   return new Intl.NumberFormat("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(n);

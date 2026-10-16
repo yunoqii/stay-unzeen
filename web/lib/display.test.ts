@@ -1,38 +1,56 @@
 import { describe, expect, it } from "vitest";
 import type { PoolInfo, Rates } from "@/lib/api/types";
-import { mockRates } from "@/lib/api/mock";
+import { mockRates, mockRatesFor } from "@/lib/api/mock";
 import { formatUsd, makeDisplay, parseRates, ratesFromPool } from "./display";
 
-const RATES: Rates = { usd: { ZEC: "252", SOL: "140", ETH: "3900" }, pairs: { "ZEC/SOL": "1.8", "ZEC/ETH": "0.064615" }, approximate: true, source: "near-1click", ts: 1 };
+// Live 1Click values of 16.10.
+const RATES: Rates = { usd: { ZEC: "1233", SOL: "106", ETH: "2456" }, pairs: { "ZEC/SOL": "11.59", "ZEC/ETH": "0.502" }, approximate: true, source: "near-1click", ts: 1 };
 
 describe("display rates", () => {
   it("parses the v0.18 answer", () => {
     const r = parseRates(RATES)!;
-    expect(r.zecSol).toBe(1.8);
-    expect(r.zecUsd).toBe(252);
+    expect(r.zecSol).toBe(11.59);
+    expect(r.zecUsd).toBe(1233);
     expect(r.source).toBe("rates");
   });
 
   it("derives ZEC/SOL from USD when the cross is missing, rejects zero and garbage", () => {
-    expect(parseRates({ ...RATES, pairs: { ...RATES.pairs, "ZEC/SOL": "0" } })!.zecSol).toBeCloseTo(1.8);
+    expect(parseRates({ ...RATES, pairs: { ...RATES.pairs, "ZEC/SOL": "0" } })!.zecSol).toBeCloseTo(1233 / 106);
     expect(parseRates({ ...RATES, pairs: { "ZEC/SOL": "x", "ZEC/ETH": "0" }, usd: { ZEC: "0", SOL: "0", ETH: "0" } })).toBeNull();
     expect(parseRates(null)).toBeNull();
   });
 
   it("falls back to the pool's mid rate, without USD", () => {
-    const pool = { rate: { lamportsPerZec: "1800000000", lamportsPerZecBuy: "1", lamportsPerZecSell: "1", spreadBps: 0, source: "fixed", ts: 5 } } as unknown as PoolInfo;
+    const pool = { rate: { lamportsPerZec: "11590000000", lamportsPerZecBuy: "1", lamportsPerZecSell: "1", spreadBps: 0, source: "fixed", ts: 5 } } as unknown as PoolInfo;
     const r = ratesFromPool(pool)!;
-    expect(r.zecSol).toBe(1.8);
+    expect(r.zecSol).toBe(11.59);
     expect(r.zecUsd).toBeNull();
     expect(r.source).toBe("pool");
   });
 
-  it("mock rates stay near the pool's mid rate and are the same within a minute", () => {
+  it("offline mock rates: the 16.10 values, marked offline, the same within a minute", () => {
     const a = mockRates(1_760_000_000_000);
-    const b = mockRates(1_760_000_030_000 - (1_760_000_000_000 % 60_000));
-    expect(Math.abs(Number(a.pairs["ZEC/SOL"]) / 1.8 - 1)).toBeLessThan(0.01);
-    expect(Number(a.usd.ZEC)).toBeCloseTo(Number(a.usd.SOL) * Number(a.pairs["ZEC/SOL"]), 0);
-    expect(b.ts % 60_000).toBe(0);
+    expect(a.usd).toEqual({ ZEC: "1233", SOL: "106", ETH: "2456" });
+    expect(a.pairs).toEqual({ "ZEC/SOL": "11.59", "ZEC/ETH": "0.502" });
+    expect(a.offline).toBe(true);
+    expect(a.ts % 60_000).toBe(0);
+    expect(parseRates(a)!.source).toBe("offline");
+  });
+
+  it("mock mode asks our own API first and only falls back when it is out of reach", async () => {
+    const live = { usd: { ZEC: "1240.5", SOL: "107", ETH: "2460" }, pairs: { "ZEC/SOL": "11.6", "ZEC/ETH": "0.5043" }, approximate: true, source: "near-1click", ts: 7 };
+    const calls: string[] = [];
+    const ok = (async (u: string) => (calls.push(String(u)), new Response(JSON.stringify(live), { status: 200 }))) as unknown as typeof fetch;
+    const r = await mockRatesFor("devnet", 0, ok, "http://127.0.0.1:8080");
+    expect(calls).toEqual(["http://127.0.0.1:8080/api/rates"]); // our API only, never a third party
+    expect(r.usd.ZEC).toBe("1240.5");
+    expect(parseRates(r)!.source).toBe("rates");
+    const down = (async () => new Response("{}", { status: 503 })) as unknown as typeof fetch;
+    expect((await mockRatesFor("devnet", 0, down, "http://127.0.0.1:8080")).offline).toBe(true);
+    const boom = (async () => { throw new TypeError("network"); }) as unknown as typeof fetch;
+    expect((await mockRatesFor("devnet", 0, boom, "http://127.0.0.1:8080")).offline).toBe(true);
+    const never = (async () => { throw new Error("must not be called"); }) as unknown as typeof fetch;
+    expect((await mockRatesFor("devnet", 0, never, "")).offline).toBe(true); // no API configured: no request at all
   });
 });
 
@@ -43,10 +61,10 @@ describe("makeDisplay", () => {
     const d = makeDisplay("zec", r, false);
     expect(d.unit).toBe("ZEC");
     expect(d.converted).toBe(true);
-    expect(d.sol(0.9)).toBeCloseTo(0.5);
+    expect(d.sol(1.159)).toBeCloseTo(0.1);
     expect(d.zecUnit).toBe("ZEC");
     expect(d.zec(2)).toBe(2);
-    expect(d.usd(2)).toBe(504);
+    expect(d.usd(2)).toBe(2466);
   });
 
   it("native: SOL as it is, ZEC valuations converted to SOL", () => {
@@ -56,8 +74,8 @@ describe("makeDisplay", () => {
     expect(d.sol(0.9)).toBe(0.9);
     expect(d.zecUnit).toBe("SOL");
     expect(d.zecConverted).toBe(true);
-    expect(d.zec(2)).toBeCloseTo(3.6);
-    expect(d.usdOfSol(1)).toBe(140);
+    expect(d.zec(2)).toBeCloseTo(23.18);
+    expect(d.usdOfSol(1)).toBe(106);
   });
 
   it("ZEC pick while the first rate loads: placeholder, never SOL labelled ZEC", () => {
@@ -93,12 +111,12 @@ describe("display on Robinhood Chain (v0.18)", () => {
     expect(d.unit).toBe("ETH");
     const z = makeDisplay("zec", r, false, "ETH");
     expect(z.unit).toBe("ZEC");
-    expect(z.sol(0.064615)).toBeCloseTo(1, 6);
-    expect(z.usdOfSol(1)).toBe(3900);
+    expect(z.sol(0.502)).toBeCloseTo(1, 6);
+    expect(z.usdOfSol(1)).toBe(2456);
   });
 
   it("falls back to the pool's wei-per-ZEC rate", () => {
-    const pool = { chain: { id: "hood", network: "hood", mainnet: true, native: { symbol: "ETH", decimals: 18 } }, rate: { lamportsPerZec: "65000000000000000", ts: 1 } } as unknown as PoolInfo;
-    expect(ratesFromPool(pool)).toMatchObject({ zecEth: 0.065, zecSol: null });
+    const pool = { chain: { id: "hood", network: "hood", mainnet: true, native: { symbol: "ETH", decimals: 18 } }, rate: { lamportsPerZec: "502000000000000000", ts: 1 } } as unknown as PoolInfo;
+    expect(ratesFromPool(pool)).toMatchObject({ zecEth: 0.502, zecSol: null });
   });
 });

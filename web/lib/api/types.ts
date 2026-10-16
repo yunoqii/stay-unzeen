@@ -171,6 +171,8 @@ export interface Rates {
   source: "near-1click";
   /** Unix ms when the server's timer got the prices. */
   ts: number;
+  /** Client-only, never from the API: the in-browser mock could not reach our API and shows static rates. */
+  offline?: true;
 }
 
 /** v0.18 PoolInfo.chain: the chain of this origin. */
