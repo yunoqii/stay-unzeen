@@ -45,7 +45,7 @@ export function setupGate(i: SetupGateInput): SetupGate {
   const simulate = i.argv.includes("--simulate");
   if (!send) return { mode: simulate ? "simulate" : "dry", mainnet, confirm: null };
   if (!mainnet) return { mode: "send", mainnet, confirm: null };
-  if (i.env.UNZEEN_ALLOW_MAINNET !== "yes" || i.env.UNZEEN_ALLOW_MAINNET_SETUP?.trim() !== "yes") {
+  if (i.env.UNZEEN_ALLOW_MAINNET?.trim() !== "yes" || i.env.UNZEEN_ALLOW_MAINNET_SETUP?.trim() !== "yes") {
     throw new Error("mainnet --send refused: set UNZEEN_ALLOW_MAINNET=yes and UNZEEN_ALLOW_MAINNET_SETUP=yes for this run only (lead's approval)");
   }
   return { mode: "send", mainnet, confirm: argValue(i.argv, "--confirm-mainnet") };

@@ -14,6 +14,8 @@ describe("GAP-3/4: mainnet setup gate (meteora:config, launchlab:platform)", () 
   it("mainnet --send needs both env flags", () => {
     expect(() => setupGate({ cluster: "mainnet-beta", argv: ["--send"], env: { UNZEEN_ALLOW_MAINNET: "yes" } })).toThrow(/UNZEEN_ALLOW_MAINNET_SETUP=yes/);
     expect(() => setupGate({ cluster: "mainnet-beta", argv: ["--send"], env: { UNZEEN_ALLOW_MAINNET_SETUP: "yes" } })).toThrow(/refused/);
+    // Both flags tolerate surrounding whitespace (env files with trailing spaces).
+    expect(setupGate({ cluster: "mainnet-beta", argv: ["--send"], env: { UNZEEN_ALLOW_MAINNET: " yes ", UNZEEN_ALLOW_MAINNET_SETUP: "yes " } }).mode).toBe("send");
     expect(setupGate({ cluster: "mainnet-beta", argv: ["--send"], env: MAIN_ENV })).toEqual({ mode: "send", mainnet: true, confirm: null });
     expect(setupGate({ cluster: "mainnet-beta", argv: ["--send", "--confirm-mainnet", "Abc"], env: MAIN_ENV }).confirm).toBe("Abc");
     expect(setupGate({ cluster: "mainnet-beta", argv: ["--send", "--confirm-mainnet=Xyz"], env: MAIN_ENV }).confirm).toBe("Xyz");

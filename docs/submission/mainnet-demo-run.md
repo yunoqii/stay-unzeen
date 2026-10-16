@@ -141,6 +141,7 @@
 | S15 | Withdraw ZEC: остаток минус 0.0001 → свежий UA ZODL (О, **снимаем**) | задержка 60–600 с + K. T1: `payouts sent=1`, затем `confirmed=1` | ZODL видит приход | `ALERT payouts above UNZEEN_MAX_PAYOUT_ZAT` → `payout approve <id>` |
 | S16 | `FEE_SWEEP_STORE=postgres pnpm fees:sweep --dry-run`, затем `--min-lamports 50000` (О) | `collected pumpfun/… N lamports` | `/creator` → `claimable` > 0 на ближайшей эпохе | claimable < `MIN_CLAIM_ZAT` → нужен ещё объём по T2 |
 | S17 | `/creator` → Claim (О, B-roll) | `claimable` → `zecBalance` мгновенно | — | `422 below_minimum` |
+| S17a | Только если был refund 1Click (§4.2): `unzeen-scanner shield` и дождаться K подтверждений **до** S18 (О) | `wallet-balance` → spendable вырос | refund-UTXO в reserve Verify не входят | — |
 | S18 | `unzeen-api verify-snapshot --allow-mainnet` (О) | заморозка ≤ 120 с → `operator` → `anchor` | `/verify`: «pinned», «Anchored», нет красных строк; **Check my balance** — зелёный | `reserve_stale`/`assets_timeout`/`busy` (RUNBOOK §3), нет `anchor` → пополнить `verify` |
 | S19 | (опционально) `unzeen-api stats-snapshot --include-today --allow-mainnet` (О) | `/stats` | — | — |
 
@@ -160,6 +161,7 @@
 | H6 | Buy 0.002 ZEC по Pons-токену (Delayed), затем Sell 50 % (О, **снимаем buy**) | `lamports_in % 1e14 == 0`, `minOut > 0`, лента | Blockscout: signer vault | `stale_price`, двойная tx с одного nonce (→ стоп всего hood) |
 | H7 | Withdraw токена (не залоченные) → свежий EOA (О) | капля 0.00005 ETH с того же vault + transfer | Blockscout | контрактный адрес → 400 (ожидаемо) |
 | H8 | Withdraw ZEC → ZODL (О) | `confirmed=1` | ZODL | — |
+| H8a | Только если был refund 1Click по hood-лоту: `unzeen-scanner shield` (hood.env), K подтверждений **до** H9 (О) | spendable вырос | — | — |
 | H9 | Verify v3: `unzeen-api verify-snapshot --allow-mainnet` (hood.env) (О) | EIP-191 оператор, EIP-712 vault, якорь на hood | `/verify` (Robinhood): зелёный, «pinned» | красный оператор → `NEXT_PUBLIC_ATTESTATION_PUBKEY_HOOD` |
 | H10 | Аудит логов H-T1..T3 (А) | нет `0x`, хешей, сумм | grep | есть — стоп и фикс |
 
@@ -199,10 +201,11 @@
 Признак — в логе API `ALERT: relayer jobs in needs_review`. Пользователь видит `sent`, hold держится, ZEC **не** возвращать. Разбор:
 1. `unzeen-api review-job` (hood.env) — список; `review-job <id> --reparse` — релейер сразу перечитает receipt из цепочки.
 2. Если задание снова `needs_review`: `review-job <id> --show-signature`, tx — в Blockscout.
-3. Средства потрачены → `review-job <id> --confirm --out-token-amount … --out-lamports <wei> [--out-mint …] --yes` (суммы проверяются против задания). Не потрачены → `review-job <id> --fail --yes`. Без SQL (GAP-11 закрыт, RUNBOOK §6.2). На время разбора дальнейшие hood-действия остановить.
+3. Средства потрачены → `review-job <id> --confirm --out-token-amount … --out-lamports <wei> --yes` (суммы проверяются против задания; create — только `--reparse`). Не потрачены → `review-job <id> --fail --yes` (`--hash` для transfer): команда сама проверяет receipt, `failed` только при reverted. Без SQL (GAP-11 закрыт, RUNBOOK §6.2). На время разбора дальнейшие hood-действия остановить.
 
 ### 4.2 Refund 1Click на t-адрес
 - Признак: `rebalance status` → `refunded`/`attention`. Закрыть: `rebalance close <id> --status refunded`.
+- **Шилдить до снимка Verify** (S17a/H8a): refund-UTXO в reserve не входят.
 - ZEC приходит **прозрачно** на собственный t-адрес кошелька пула (GAP-2 закрыт; в UA и UI его нет). `unzeen-scanner shield --dry-run`, затем `UNZEEN_ALLOW_MAINNET_SEND=1 unzeen-scanner shield` (тот же env, что у сканера): одна tx t→Ironwood пула, `OvkPolicy::Discard`, через send-lightwalletd. Сумма шилда видна публично, адресат нет. Через K подтверждений средства снова оборотные (`wallet-balance`), повторить S2/H2. RUNBOOK §6.1.
 
 ### 4.3 Застрявший ETH на creator (hood)
@@ -252,7 +255,7 @@
 | # | Sev | Что | Статус / как теперь |
 |---|---|---|---|
 | 1 | **critical (процесс)** | Ребаланс требует ZEC пула сверх обязательств (`core/scanner/src/rebalance.rs`, `reserve_short`) | Открыт (процесс): оборотный перевод без memo (S1/H1). Лиду — подтвердить подход (Q2) |
-| 2 | ~~high~~ | Нет t-адреса пула для refund 1Click | **Закрыт.** Свой t-адрес кошелька пула (внешний P2PKH того же аккаунта, не в UA): `unzeen-scanner address --transparent`; на mainnet это refund по умолчанию, если env пуст. `unzeen-scanner shield [--dry-run]` — t→Ironwood пула, `OvkPolicy::Discard`, UTXO и отправка через `LIGHTWALLETD_SEND_URL`. RUNBOOK §6.1 |
+| 2 | ~~high~~ | Нет t-адреса пула для refund 1Click | **Закрыт** (+ ревью: на mainnet `shield` без `LIGHTWALLETD_SEND_URL` отказывает, `--dry-run` не пишет в БД, депозиты — только external scope). Свой t-адрес кошелька пула (внешний P2PKH того же аккаунта, не в UA): `unzeen-scanner address --transparent`; на mainnet это refund по умолчанию, если env пуст. `unzeen-scanner shield [--dry-run]` — t→Ironwood пула, `OvkPolicy::Discard`, UTXO и отправка через `LIGHTWALLETD_SEND_URL`. RUNBOOK §6.1 |
 | 3 | ~~high~~ | Meteora DBC mainnet | **Закрыт.** `pnpm meteora:config` на mainnet: `--simulate` / `--send` + `UNZEEN_ALLOW_MAINNET_SETUP=yes` + подтверждение адресом partner; partner пополняется из внешнего кошелька (скрипт печатает адрес и недостающую сумму), из vault — никогда. `METEORA_DBC_CONFIG_MAINNET` подхватывается релейером. RUNBOOK §6.3 |
 | 4 | ~~medium~~ | LaunchLab «Unzeen» на mainnet | **Закрыт.** Создание реально (≈0.0075 SOL, платит partner): `pnpm launchlab:platform` с тем же гардом. Пока платформы нет, релейер выключает `unzeen` на старте (create → `venue_unavailable` до подписи), запускаем с `bonk` |
 | 5 | ~~high~~ | URI метаданных навсегда в цепочке | **Закрыт гардом.** API на mainnet с `UNZEEN_CREATE_ENABLED=1` не стартует без `PINATA_JWT` или публичного https `UNZEEN_METADATA_BASE_URL`; релейер отказывает create до подписи. Сам Pinata/домен по-прежнему нужен, чтобы create работал |
@@ -261,7 +264,7 @@
 | 8 | ~~low~~ | Топап funder только при старте и раз в 1–3 ч | **Закрыт.** Опрос адреса ребаланса раз в `HOOD_FUNDER_POLL_SECS` (300 с), топап по приходу ETH. Рестарт в H3 убран |
 | 9 | ~~high~~ | Общий каталог кошелька Solana-mainnet и hood-mainnet | **Закрыт.** Дефолт `~/.unzeen/hood-<net>/` для `UNZEEN_CHAIN=hood`; метка `data/chain` (кошелёк чужого инстанса — отказ; mainnet без метки — отказ); один `serve` на кошелёк (`data/serve.lock`) |
 | 10 | ~~low~~ | Нет БД для hood-mainnet | **Закрыт.** `infra/pg-mainnet.sh --hood up|roles|psql|status` (порт 55434, проверка портов `DATABASE_URL*`) |
-| 11 | ~~medium~~ | `needs_review` только ручным SQL | **Закрыт.** `unzeen-api review-job [<id>] [--reparse | --confirm --out-* --yes | --fail --yes]`. RUNBOOK §6.2 |
+| 11 | ~~medium~~ | `needs_review` только ручным SQL | **Закрыт** (+ ревью 87119bf: `--fail` только при reverted receipt из цепочки, transfer с `--hash`; create — только `--reparse`). `unzeen-api review-job [<id>] [--reparse | --confirm --out-* --yes | --fail --yes]`. RUNBOOK §6.2 |
 | 12 | medium | RUNBOOK печатает только pubkey адреса вывода → секрет теряется вместе с токенами | Открыт (процесс): на прогоне `solana-keygen new -o ~/.unzeen/demo-withdraw/wN.json` (0600). Hood — новый EOA в кошельке владельца |
 
 ## Открытые вопросы лиду

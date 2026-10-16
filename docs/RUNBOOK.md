@@ -529,7 +529,8 @@ set -a; . ~/.unzeen/main.env; set +a          # или hood.env: у hood-пул�
 UNZEEN_ALLOW_MAINNET_SEND=1 ./core/target/release/unzeen-scanner shield
 ```
   Одна tx: все подтверждённые (K=`UNZEEN_CONFIRMATIONS`) UTXO refund-адреса → внутренний Ironwood-receiver пула, `OvkPolicy::Discard`. Это change-нота: в реестр депозитов она не попадает (ни `credited`, ни `frozen`), через K подтверждений — снова оборотный ZEC (`wallet-balance` → spendable). После этого повторить S2/H2.
-- Запрос UTXO и отправка идут через `LIGHTWALLETD_SEND_URL` (если задан), не через сервер сканирования: тот не узнаёт t-адрес пула. Сумма и t-адрес шилд-tx публичны (как любой t→z), адресат — нет.
+- Запрос UTXO и отправка идут только через `LIGHTWALLETD_SEND_URL`, не через сервер сканирования: тот не узнаёт t-адрес пула. На mainnet без `LIGHTWALLETD_SEND_URL` команда отказывает (и `--dry-run` тоже). `--dry-run` ничего не пишет в wallet DB: комиссия — оценка ZIP-317 (5000 × (входы + 2)), совпадает с реальным предложением.
+- **Если был refund — `shield` до снимка Verify.** Refund-UTXO и ZEC, зависший в 1Click, в reserve Verify не входят (там только shielded): снимок до шилда покажет меньший резерв. Сумма и t-адрес шилд-tx публичны (как любой t→z), адресат — нет.
 - txid по умолчанию не печатается (`--show-txid`, если нужен). `--min-zat` (по умолчанию 20 000) — меньше не шилдит.
 - Кошельки, созданные до 16.10 (локальный testnet-пул), прозрачного ключа не имеют: `address --transparent` отвечает «created before GAP-2». Mainnet-пулы (Solana и hood) создаются `init` этой сборкой — у них t-адрес есть. Обход для старого кошелька — только явный `UNZEEN_REBALANCE_REFUND_TADDR`.
 
@@ -539,10 +540,11 @@ UNZEEN_ALLOW_MAINNET_SEND=1 ./core/target/release/unzeen-scanner shield
 ./core/target/release/unzeen-api review-job 42 --show-signature   # одно задание + хеш tx для Blockscout/Solscan
 ./core/target/release/unzeen-api review-job 42 --reparse    # hood: отдать релейеру сейчас, он перечитает receipt из цепочки
 ./core/target/release/unzeen-api review-job 42 --confirm --out-token-amount N --out-lamports W [--out-mint M] [--slot B] --yes
-./core/target/release/unzeen-api review-job 42 --fail --yes # ТОЛЬКО если tx не потратила средства: core вернёт ZEC
+./core/target/release/unzeen-api review-job 42 --fail --yes [--hash 0x…]  # только при REVERTED receipt; transfer — с --hash
 ```
 - Порядок: сначала `--reparse` (суммы из цепочки, не руками). Если через ~1 мин задание снова `needs_review` — смотреть tx в explorer и делать `--confirm` с фактами (wei/лампорты, базовые единицы токена) или `--fail`.
-- `--confirm` проверяет суммы против задания: buy — потрачено ≤ `lamports_in` и токенов > 0; sell — продано ≤ `token_amount`; create — нужен `--out-mint`; transfer — ровно `token_amount`; `fund_vaults` — `--out-lamports`. `attest` руками не подтверждается (только `--reparse`/`--fail`). Пары с ZEC: `--out-quote-amount` + `--out-quote-mint` вместо `--out-lamports`.
+- `--fail` (M1): только hood. Команда сама читает receipt записанной tx через `HOOD_RPC_URL_MAINNET` (иначе публичный RPC) и разрешает `failed` **только при status 0 (reverted)**. Успешная tx — отказ («funds moved»), receipt нет (pending/dropped) — отказ, `--reparse` и повторить позже. Для `transfer` ещё нужен `--hash` = хеш задания (сверка оператором, защита от двойной выплаты).
+- `--confirm` проверяет суммы против задания: buy — потрачено ≤ `lamports_in` и токенов > 0; sell — продано ≤ `token_amount`; transfer — ровно `token_amount`; `fund_vaults` — `--out-lamports`. **create / fair_create руками не подтверждаются** (M2: релейер в той же транзакции пишет `tokens`, `mint_vaults`, `trades`, цену) — только `--reparse`. `attest` — тоже только `--reparse`/`--fail`. Пары с ZEC: `--out-quote-amount` + `--out-quote-mint` вместо `--out-lamports`.
 - Меняет только задания в `needs_review` без `settled_at`. Если релейер успел разобрать сам — «left needs_review meanwhile», ничего не меняется. Дальше settler core закрывает действие за ~1 с.
 - `--reparse` только для hood: Solana-релейер `needs_review` не пишет.
 
@@ -552,3 +554,4 @@ UNZEEN_ALLOW_MAINNET_SEND=1 ./core/target/release/unzeen-scanner shield
 3. `... UNZEEN_ALLOW_MAINNET_SETUP=yes pnpm meteora:config --send` и подтвердить, введя адрес partner (или `--confirm-mainnet <partner>`). Записать напечатанный `METEORA_DBC_CONFIG_MAINNET` в main.env, добавить `meteora-dbc` в `UNZEEN_VENUES`, перезапустить релейер и API.
 4. То же для `pnpm launchlab:platform --send`. После перезапуска релейера WARN `LaunchLab platform unzeen switched off` пропадёт, create с `platform: "unzeen"` заработает (creator fee 0.30 %, у bonk 0). Пока платформы нет — create с `unzeen` получает `venue_unavailable` до подписи, запускать с `bonk`.
 5. Снять `UNZEEN_ALLOW_MAINNET_SETUP`. Перед `--send` обязательно `--simulate` уже с пополненным partner.
+6. `meteora:config` печатает адрес нового конфига **до** отправки и при каждом запуске ищет конфиги этого partner'а для той же quote: если конфиг уже есть (например, `--send` упал по таймауту, но tx легла), печатает `set METEORA_DBC_CONFIG_…=<он>` и ничего не создаёт. Второй конфиг — только с `--force-new`.

@@ -96,7 +96,12 @@ pub fn check_confirm(job: &ReviewJob, out: &ReviewOut) -> std::result::Result<()
     let token_amount = amount("token_amount", &job.token_amount)?;
     let value = lamports.or(quote);
     match job.op.as_str() {
-        "buy" | "create" | "fair_create" => {
+        // M2: a confirmed create also needs tokens, mint_vaults, trades and the price row the
+        // relayer writes in one transaction; a hand-written confirm would leave a broken token.
+        "create" | "fair_create" => {
+            return Err("create cannot be confirmed by hand (tokens/mint_vaults/trades rows): use --reparse".into());
+        }
+        "buy" => {
             let t = tokens.ok_or("--out-token-amount is required")?;
             let v = value.ok_or("--out-lamports (or --out-quote-amount) is required")?;
             if let Some(max) = lamports_in
@@ -104,11 +109,8 @@ pub fn check_confirm(job: &ReviewJob, out: &ReviewOut) -> std::result::Result<()
             {
                 return Err(format!("spent {v} > lamports_in {max} of the job"));
             }
-            if job.op == "buy" && t == 0 {
+            if t == 0 {
                 return Err("a confirmed buy received 0 tokens: use --fail if nothing was bought".into());
-            }
-            if job.op != "buy" && out.out_mint.as_deref().is_none_or(str::is_empty) {
-                return Err("--out-mint is required for create".into());
             }
         }
         "sell" => {
@@ -285,13 +287,11 @@ mod tests {
         assert!(check_confirm(&job("buy"), &out(Some("1e3"), Some("900"))).is_err());
         assert!(check_confirm(&job("sell"), &out(Some("500"), Some("1"))).is_ok());
         assert!(check_confirm(&job("sell"), &out(Some("501"), Some("1"))).is_err());
-        assert!(
-            check_confirm(&job("create"), &out(Some("5"), Some("10"))).is_err(),
-            "mint needed"
-        );
+        // M2: never by hand, even with every field.
         let mut o = out(Some("5"), Some("10"));
         o.out_mint = Some("0xMint".into());
-        assert!(check_confirm(&job("create"), &o).is_ok());
+        assert!(check_confirm(&job("create"), &o).unwrap_err().contains("--reparse"));
+        assert!(check_confirm(&job("fair_create"), &o).is_err());
         assert!(check_confirm(&job("transfer"), &out(Some("500"), None)).is_ok());
         assert!(check_confirm(&job("transfer"), &out(Some("499"), None)).is_err());
         assert!(check_confirm(&job("fund_vaults"), &out(None, Some("8"))).is_ok());

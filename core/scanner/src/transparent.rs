@@ -118,6 +118,101 @@ pub fn check_reply(ours: &TransparentAddress, r: &service::GetAddressUtxosReply)
     })
 }
 
+/// The offline part of `shield`. `None` = nothing to build (below minimum, or dry run). A dry
+/// run (L2) never writes to the wallet DB; otherwise the UTXOs are stored and proposed into
+/// one Ironwood change output. Fills fee/amount in `rep`.
+#[allow(clippy::too_many_arguments)]
+pub fn plan(
+    db: &mut Db,
+    net: &zcash_protocol::consensus::Network,
+    taddr: &TransparentAddress,
+    account: zcash_client_sqlite::AccountUuid,
+    ready: &[Utxo],
+    k: u32,
+    min_zat: u64,
+    dry_run: bool,
+    rep: &mut ShieldReport,
+) -> anyhow::Result<Option<zcash_client_backend::proposal::Proposal<StandardFeeRule, std::convert::Infallible>>> {
+    let total: u64 = ready.iter().map(|u| u.value_zat).sum();
+    if ready.is_empty() || total < min_zat {
+        return Ok(None);
+    }
+    if dry_run {
+        rep.fee_zat = estimate_fee_zat(ready.len());
+        rep.shielded_zat = total.saturating_sub(rep.fee_zat);
+        return Ok(None);
+    }
+    for u in ready {
+        let out = WalletTransparentOutput::from_parts(
+            OutPoint::new(u.txid, u.index),
+            TxOut::new(Zatoshis::from_u64(u.value_zat)?, Script::from(taddr.script())),
+            Some(BlockHeight::from_u32(u.height)),
+            Some(account),
+            None,
+            None,
+        )
+        .ok_or_else(|| anyhow!("UTXO has no recipient address"))?;
+        db.put_received_transparent_utxo(&out)?;
+    }
+    let change = SingleOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        None,
+        ShieldedPool::Ironwood,
+        DustOutputPolicy::default(),
+    );
+    let conf = ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::new(k.max(1)).expect("max(1)"), false);
+    let proposal = propose_shielding::<_, _, _, _, std::convert::Infallible>(
+        db,
+        net,
+        &GreedyInputSelector::new(),
+        &change,
+        Zatoshis::from_u64(min_zat)?,
+        &[*taddr],
+        account,
+        conf,
+        CoinbaseFilter::NonCoinbaseOnly,
+        None,
+    )
+    .map_err(|e| anyhow!("shielding proposal failed: {e}"))?;
+    if proposal.steps().len() != 1 {
+        bail!("multi-transaction shielding proposals not supported");
+    }
+    let step = proposal.steps().first();
+    rep.fee_zat = u64::from(step.balance().fee_required());
+    rep.shielded_zat = step
+        .balance()
+        .proposed_change()
+        .iter()
+        .map(|c| u64::from(c.value()))
+        .sum();
+    if step
+        .balance()
+        .proposed_change()
+        .iter()
+        .any(|c| c.output_pool() != zcash_protocol::PoolType::Shielded(ShieldedPool::Ironwood))
+    {
+        bail!("shielding proposal does not land in Ironwood");
+    }
+    Ok(Some(proposal))
+}
+
+/// L1: on mainnet `shield` needs LIGHTWALLETD_SEND_URL (another operator than the scan server).
+pub fn require_send_server(net: crate::config::NetName, send_url: Option<&str>) -> anyhow::Result<()> {
+    if net == crate::config::NetName::Main && send_url.is_none() {
+        bail!(
+            "refusing: shield on mainnet needs LIGHTWALLETD_SEND_URL (the UTXO query names the pool's \
+             t-address and must not go to the scan server, audit A8)"
+        );
+    }
+    Ok(())
+}
+
+/// ZIP-317 fee of a shielding tx with `n` P2PKH inputs and one Ironwood output (padded to 2
+/// actions): 5000 zat x max(2, n + 2). Checked against the real proposal in tests.
+pub fn estimate_fee_zat(n: usize) -> u64 {
+    5_000 * (n as u64 + 2).max(2)
+}
+
 /// UTXOs that are confirmed at least `k` times at `tip` (the rest wait for the next run).
 pub fn confirmed(utxos: &[Utxo], tip: u32, k: u32) -> (Vec<Utxo>, Vec<Utxo>) {
     utxos
@@ -143,6 +238,8 @@ pub async fn shield(common: &Common, db: &mut Db, k: u32, min_zat: u64, dry_run:
     if !dry_run {
         send::mainnet_gate(common)?;
     }
+    // L1 (A8): the UTXO query names our t-address; on mainnet it must never reach the scan server.
+    require_send_server(common.network, common.send_url().as_deref())?;
     let net = common.params();
     let taddr = pool_taddr(db)?;
     let tip = u32::from(
@@ -180,65 +277,9 @@ pub async fn shield(common: &Common, db: &mut Db, k: u32, min_zat: u64, dry_run:
         total_zat = rep.total_zat,
         "shield: refund address scanned"
     );
-    if ready.is_empty() || rep.total_zat < min_zat {
+    let Some(proposal) = plan(db, &net, &taddr, account, &ready, k, min_zat, dry_run, &mut rep)? else {
         return Ok(rep);
-    }
-
-    for u in &ready {
-        let out = WalletTransparentOutput::from_parts(
-            OutPoint::new(u.txid, u.index),
-            TxOut::new(Zatoshis::from_u64(u.value_zat)?, Script::from(taddr.script())),
-            Some(BlockHeight::from_u32(u.height)),
-            Some(account),
-            None,
-            None,
-        )
-        .ok_or_else(|| anyhow!("UTXO has no recipient address"))?;
-        db.put_received_transparent_utxo(&out)?;
-    }
-
-    let change = SingleOutputChangeStrategy::new(
-        StandardFeeRule::Zip317,
-        None,
-        ShieldedPool::Ironwood,
-        DustOutputPolicy::default(),
-    );
-    let conf = ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::new(k.max(1)).expect("max(1)"), false);
-    let proposal = propose_shielding::<_, _, _, _, std::convert::Infallible>(
-        db,
-        &net,
-        &GreedyInputSelector::new(),
-        &change,
-        Zatoshis::from_u64(min_zat)?,
-        &[taddr],
-        account,
-        conf,
-        CoinbaseFilter::NonCoinbaseOnly,
-        None,
-    )
-    .map_err(|e| anyhow!("shielding proposal failed: {e}"))?;
-    if proposal.steps().len() != 1 {
-        bail!("multi-transaction shielding proposals not supported");
-    }
-    let step = proposal.steps().first();
-    rep.fee_zat = u64::from(step.balance().fee_required());
-    rep.shielded_zat = step
-        .balance()
-        .proposed_change()
-        .iter()
-        .map(|c| u64::from(c.value()))
-        .sum();
-    if step
-        .balance()
-        .proposed_change()
-        .iter()
-        .any(|c| c.output_pool() != zcash_protocol::PoolType::Shielded(ShieldedPool::Ironwood))
-    {
-        bail!("shielding proposal does not land in Ironwood");
-    }
-    if dry_run {
-        return Ok(rep);
-    }
+    };
     let derivation = db
         .get_account(account)?
         .ok_or_else(|| anyhow!("account vanished"))?
@@ -532,5 +573,99 @@ mod tests {
             None,
         );
         assert!(again.is_err(), "the refund UTXO must be marked spent");
+        // L5: the shield output is an internal-scope change note, never a deposit.
+        let path = _d.0.join("wallet.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let (chg, scope): (i64, i64) = conn
+            .query_row(
+                "SELECT is_change, recipient_key_scope FROM ironwood_received_notes ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((chg, scope), (1, 1), "change, internal scope");
+        assert!(
+            crate::deposits::list(&path).unwrap().is_empty(),
+            "no deposit row from shield"
+        );
+    }
+
+    #[test]
+    fn l1_mainnet_shield_needs_send_server() {
+        use crate::config::NetName;
+        assert!(require_send_server(NetName::Main, None).is_err());
+        assert!(require_send_server(NetName::Main, Some("https://other.op:443")).is_ok());
+        assert!(require_send_server(NetName::Test, None).is_ok());
+    }
+
+    fn utxo(i: u8, v: u64, h: BlockHeight) -> Utxo {
+        Utxo {
+            txid: [i; 32],
+            index: 0,
+            value_zat: v,
+            height: u32::from(h),
+        }
+    }
+
+    /// L2: a dry run writes nothing; its fee estimate equals the real ZIP-317 proposal fee.
+    #[test]
+    fn l2_dry_run_writes_nothing_and_estimate_matches() {
+        let net = Network::MainNetwork;
+        for n in [1u8, 3] {
+            let (_d, mut db) = temp_wallet(net);
+            let account = db.get_account_ids().unwrap()[0];
+            let taddr = pool_taddr(&mut db).unwrap();
+            let h = tip(net) - 20;
+            let ready: Vec<Utxo> = (0..n).map(|i| utxo(10 + i, 400_000, h)).collect();
+            let mut dry = ShieldReport::default();
+            assert!(
+                plan(
+                    &mut db,
+                    &net,
+                    &taddr,
+                    account,
+                    &ready,
+                    3,
+                    DEFAULT_MIN_SHIELD_ZAT,
+                    true,
+                    &mut dry
+                )
+                .unwrap()
+                .is_none()
+            );
+            let t_rows = |db: &Db| {
+                let s = db
+                    .get_wallet_summary(ConfirmationsPolicy::new_symmetrical(
+                        std::num::NonZeroU32::new(1).unwrap(),
+                        false,
+                    ))
+                    .unwrap()
+                    .unwrap();
+                s.account_balances()
+                    .values()
+                    .map(|b| u64::from(b.unshielded_balance().total()))
+                    .sum::<u64>()
+            };
+            assert_eq!(t_rows(&db), 0, "dry run stored no UTXO");
+            let mut live = ShieldReport::default();
+            assert!(
+                plan(
+                    &mut db,
+                    &net,
+                    &taddr,
+                    account,
+                    &ready,
+                    3,
+                    DEFAULT_MIN_SHIELD_ZAT,
+                    false,
+                    &mut live
+                )
+                .unwrap()
+                .is_some()
+            );
+            assert_eq!(t_rows(&db), 400_000 * u64::from(n));
+            assert_eq!(dry.fee_zat, live.fee_zat, "estimate = proposal fee for {n} inputs");
+            assert_eq!(dry.shielded_zat, live.shielded_zat);
+        }
     }
 }

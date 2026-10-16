@@ -74,9 +74,13 @@ enum Cmd {
         /// Mark confirmed with the explicit out_* below (checked against the job).
         #[arg(long, conflicts_with = "fail")]
         confirm: bool,
-        /// Mark failed: the operator checked on the explorer that no funds moved.
+        /// Mark failed. Hood only, and only if the tx receipt read from the chain says REVERTED
+        /// (status 0): no receipt / success = refused (M1). Transfers also need --hash.
         #[arg(long)]
         fail: bool,
+        /// --fail of a `transfer`: the tx hash, must equal the job's recorded signature.
+        #[arg(long)]
+        hash: Option<String>,
         /// error_code for --fail.
         #[arg(long, default_value = "internal")]
         code: String,
@@ -183,6 +187,7 @@ async fn run() -> anyhow::Result<()> {
             slot,
             yes,
             show_signature,
+            hash,
         } => {
             let out = unzeen_ledger::review::ReviewOut {
                 out_token_amount,
@@ -198,7 +203,7 @@ async fn run() -> anyhow::Result<()> {
                 (_, _, true) => Some(unzeen_ledger::review::Resolution::Fail { code }),
                 _ => None,
             };
-            review_job(&cfg, if list { None } else { id }, action, yes, show_signature).await
+            review_job(&cfg, if list { None } else { id }, action, yes, show_signature, hash).await
         }
         Cmd::DevRequest {
             anon_key,
@@ -238,6 +243,7 @@ async fn review_job(
     action: Option<unzeen_ledger::review::Resolution>,
     yes: bool,
     show_signature: bool,
+    hash: Option<String>,
 ) -> anyhow::Result<()> {
     use unzeen_ledger::review::{FAIL_CODES, Resolution, check_confirm};
     let ledger = connect_checked(cfg).await?;
@@ -284,6 +290,20 @@ async fn review_job(
             if !yes {
                 bail!("--fail REFUNDS the user at settlement: only if the tx moved no funds; add --yes");
             }
+            let sig = fail_precheck(&job, hash.as_deref())?;
+            let url = hood_rpc_url(&job.network)?;
+            let receipt = fetch_receipt(&url, &sig).await?;
+            match receipt_verdict(&receipt, &sig) {
+                Verdict::Reverted => println!("receipt: REVERTED on chain (status 0): no funds moved"),
+                Verdict::Succeeded => {
+                    bail!("refused: the tx SUCCEEDED on chain (status 1): funds moved. Use --reparse or --confirm")
+                }
+                Verdict::Pending => bail!(
+                    "refused: no receipt for the recorded tx (pending, dropped or another RPC view): \
+                     nothing proves that no funds moved. Use --reparse and retry later"
+                ),
+                Verdict::Bad(why) => bail!("refused: unreadable receipt ({why})"),
+            }
         }
     }
     if !ledger.resolve_review(id, &action).await? {
@@ -298,6 +318,96 @@ async fn review_job(
         }
     );
     Ok(())
+}
+
+/// M1: what a `--fail` needs before any RPC call: a hood job with a recorded tx hash, and for
+/// `transfer` (tokens leave the pool) the operator's `--hash` repeating it.
+fn fail_precheck(job: &unzeen_ledger::review::ReviewJob, hash: Option<&str>) -> anyhow::Result<String> {
+    if !job.network.starts_with("hood") {
+        bail!(
+            "--fail is checked against a hood receipt; job #{} is on {}",
+            job.id,
+            job.network
+        );
+    }
+    let Some(sig) = job.signature.clone() else {
+        bail!("job #{} has no recorded tx hash: nothing to verify", job.id);
+    };
+    if !(sig.len() == 66 && sig.starts_with("0x") && sig[2..].bytes().all(|b| b.is_ascii_hexdigit())) {
+        bail!("recorded signature of job #{} is not an EVM tx hash", job.id);
+    }
+    if job.op == "transfer" {
+        match hash {
+            Some(h) if h.trim().eq_ignore_ascii_case(&sig) => {}
+            Some(_) => bail!("--hash does not match the job's recorded tx"),
+            None => bail!("--fail of a transfer needs --hash <tx hash> (= the job's tx, from the explorer)"),
+        }
+    }
+    Ok(sig)
+}
+
+fn hood_rpc_url(network: &str) -> anyhow::Result<String> {
+    let (var, public) = match network {
+        "hood" => ("HOOD_RPC_URL_MAINNET", "https://rpc.mainnet.chain.robinhood.com"),
+        "hood-testnet" => ("HOOD_RPC_URL_TESTNET", "https://rpc.testnet.chain.robinhood.com"),
+        other => bail!("no hood RPC for network {other:?}"),
+    };
+    Ok(std::env::var(var)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| public.to_string()))
+}
+
+async fn fetch_receipt(url: &str, hash: &str) -> anyhow::Result<serde_json::Value> {
+    let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionReceipt", "params": [hash]});
+    let r: serde_json::Value = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .context("hood RPC unreachable")?
+        .error_for_status()
+        .context("hood RPC error")?
+        .json()
+        .await
+        .context("hood RPC: bad JSON")?;
+    if let Some(e) = r.get("error") {
+        bail!(
+            "hood RPC error: {}",
+            e.get("message").and_then(|m| m.as_str()).unwrap_or("?")
+        );
+    }
+    Ok(r.get("result").cloned().unwrap_or(serde_json::Value::Null))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    Reverted,
+    Succeeded,
+    Pending,
+    Bad(&'static str),
+}
+
+/// Pure reading of an `eth_getTransactionReceipt` result for the job's tx.
+fn receipt_verdict(r: &serde_json::Value, hash: &str) -> Verdict {
+    if r.is_null() {
+        return Verdict::Pending;
+    }
+    let h = r.get("transactionHash").and_then(|v| v.as_str()).unwrap_or("");
+    if !h.eq_ignore_ascii_case(hash) {
+        return Verdict::Bad("receipt is for another tx");
+    }
+    if r.get("blockNumber").and_then(|v| v.as_str()).is_none() {
+        return Verdict::Pending;
+    }
+    match r.get("status").and_then(|v| v.as_str()) {
+        Some("0x0") => Verdict::Reverted,
+        Some("0x1") => Verdict::Succeeded,
+        _ => Verdict::Bad("no status field"),
+    }
 }
 
 async fn serve(cfg: Config) -> anyhow::Result<()> {
@@ -488,4 +598,73 @@ async fn dev_request(
     println!("HTTP {}", res.status());
     println!("{}", res.text().await?);
     Ok(())
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use serde_json::json;
+
+    const H: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+    fn job(op: &str, network: &str, sig: Option<&str>) -> unzeen_ledger::review::ReviewJob {
+        unzeen_ledger::review::ReviewJob {
+            id: 7,
+            op: op.into(),
+            venue: Some("pons".into()),
+            network: network.into(),
+            mint: None,
+            lamports_in: Some("1".into()),
+            token_amount: Some("1".into()),
+            signature: sig.map(Into::into),
+            error_message: None,
+            age_secs: 0,
+        }
+    }
+
+    #[test]
+    fn m1_receipt_verdicts() {
+        let rc = |status: &str| json!({"transactionHash": H, "blockNumber": "0x10", "status": status});
+        assert_eq!(receipt_verdict(&rc("0x0"), H), Verdict::Reverted);
+        assert_eq!(receipt_verdict(&rc("0x1"), H), Verdict::Succeeded);
+        assert_eq!(receipt_verdict(&serde_json::Value::Null, H), Verdict::Pending);
+        assert_eq!(
+            receipt_verdict(&json!({"transactionHash": H, "blockNumber": null, "status": "0x0"}), H),
+            Verdict::Pending
+        );
+        assert!(matches!(
+            receipt_verdict(&rc("0x0"), &H.replace('1', "2")),
+            Verdict::Bad(_)
+        ));
+        assert!(matches!(
+            receipt_verdict(&json!({"transactionHash": H, "blockNumber": "0x1"}), H),
+            Verdict::Bad(_)
+        ));
+    }
+
+    #[test]
+    fn m1_fail_precheck() {
+        assert_eq!(fail_precheck(&job("buy", "hood", Some(H)), None).unwrap(), H);
+        assert!(
+            fail_precheck(&job("buy", "mainnet-beta", Some(H)), None).is_err(),
+            "Solana: no receipt check"
+        );
+        assert!(fail_precheck(&job("buy", "hood", None), None).is_err());
+        assert!(fail_precheck(&job("buy", "hood", Some("5abc")), None).is_err());
+        assert!(
+            fail_precheck(&job("transfer", "hood", Some(H)), None).is_err(),
+            "transfer needs --hash"
+        );
+        assert!(fail_precheck(&job("transfer", "hood", Some(H)), Some("0xdead")).is_err());
+        assert!(
+            fail_precheck(
+                &job("transfer", "hood", Some(H)),
+                Some(&H.to_uppercase().replace("0X", "0x"))
+            )
+            .is_ok()
+        );
+        let t = hood_rpc_url("hood-testnet").unwrap();
+        assert!(t.contains("testnet") || std::env::var("HOOD_RPC_URL_TESTNET").is_ok());
+        assert!(hood_rpc_url("devnet").is_err());
+    }
 }

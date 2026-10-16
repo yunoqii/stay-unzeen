@@ -21,6 +21,7 @@ import {
   derivePartnerKeypair,
   unzeenDbcConfigParameters,
   MeteoraDbcAdapter,
+  existingPartnerConfigs,
 } from "../src/meteora";
 import { deriveCreatorKeypair, CreatorKeyring, MemoryCreatorIndexCounter } from "../src/keys";
 import { lamportDelta, tokenDelta } from "../src/events";
@@ -219,5 +220,23 @@ describe("error classification (DBC IDL)", () => {
   });
   it("pool PDA is derived from Unzeen's config + mint (SOL quote)", () => {
     expect(a.poolAddress(MINT).toBase58()).toBe(dbcInitEvents(txOf(FX.create))[0]!.pool.toBase58());
+  });
+});
+
+describe("L8: existing partner configs are reused", () => {
+  it("keeps only configs for the quote mint, sorted", () => {
+    const usdc = Keypair.generate().publicKey;
+    const a = Keypair.generate().publicKey;
+    const b = Keypair.generate().publicKey;
+    const c = Keypair.generate().publicKey;
+    const list = [
+      { publicKey: a, account: { quoteMint: NATIVE_MINT } },
+      { publicKey: b, account: { quoteMint: usdc } },
+      { publicKey: c, account: { quoteMint: NATIVE_MINT } },
+    ];
+    const sol = existingPartnerConfigs(list, NATIVE_MINT).map((k) => k.toBase58());
+    expect(sol).toEqual([a, c].map((k) => k.toBase58()).sort());
+    expect(existingPartnerConfigs(list, usdc).map((k) => k.toBase58())).toEqual([b.toBase58()]);
+    expect(existingPartnerConfigs([], NATIVE_MINT)).toEqual([]);
   });
 });

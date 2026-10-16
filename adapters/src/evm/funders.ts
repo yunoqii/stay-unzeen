@@ -16,9 +16,10 @@ import type { EvmKeyring } from "./keys";
  * - each create takes ONE funder at random among those that can cover it, never
  *   the one used just before -> a funder's history shows ~1/N of the creators;
  * - funders are topped up ONLY by the rebalance address, in round lots, in random
- *   order with random pauses (`topUp`); never from a vault, never funder -> funder
- *   (no chain linking them), never right before a specific launch (the pick only
- *   uses balances already there);
+ *   order with random pauses: at start, every 1–3 h (`topUp`) and when ETH arrives
+ *   on the rebalance address (`topUpOnArrival`, GAP-8); never from a vault, never
+ *   funder -> funder (no chain linking them). A create never triggers a top-up
+ *   for itself: the pick only uses balances already there;
  * - creator leftovers return to the rebalance address (reconcile / fee sweep
  *   keeps them on the creator for gas), not to "the" funder.
  * On Solana there is no funder at all: the vault is the fee payer of the create
@@ -155,7 +156,11 @@ export class FunderPool {
    * GREW since the previous read (1Click delivered ETH, a creator leftover came
    * back), tops up low funders right away instead of waiting for the 1–3 h cycle.
    * The first call only records the balance (the start-up top-up already ran).
-   * Timing: top-ups follow pool-level inflows, never a user's launch.
+   * Timing: the trigger is any inflow to the rebalance address. That includes a
+   * creator leftover returned by launch reconcile, so a top-up CAN follow a
+   * launch by a few minutes (poll + random pauses); it is still a round lot from
+   * the rebalance address to a random low funder, never sized or timed for a
+   * specific creator, and the next create picks among existing balances.
    */
   topUpOnArrival(pauseMs: [number, number] = [30_000, 300_000]): Promise<{ arrived: boolean; sent: number; totalWei: bigint }> {
     return this.serial(async () => {

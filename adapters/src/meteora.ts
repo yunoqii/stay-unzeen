@@ -1167,3 +1167,18 @@ export function dbcPoolVaults(pool: PublicKey, mint: PublicKey, quoteMint: Publi
 export function applyMargin(units: bigint): bigint {
   return (units * (10_000n - QUOTE_LEG_MARGIN_BPS)) / 10_000n;
 }
+
+/**
+ * L8: configs this partner already created for `quoteMint` (from
+ * `client.state.getPoolConfigsByOwner(partner)`), so a re-run after a timeout
+ * reuses the landed config instead of creating a second one. Sorted by address.
+ */
+export function existingPartnerConfigs(
+  list: ReadonlyArray<{ publicKey: PublicKey; account: { quoteMint: PublicKey } }>,
+  quoteMint: PublicKey,
+): PublicKey[] {
+  return list
+    .filter((c) => c.account.quoteMint.equals(quoteMint))
+    .map((c) => c.publicKey)
+    .sort((a, b) => a.toBase58().localeCompare(b.toBase58()));
+}

@@ -5,6 +5,8 @@
  *   pnpm meteora:config --simulate # + simulates the create tx on the RPC (read-only)
  *   pnpm meteora:config --send     # devnet: creates the config account
  *   pnpm meteora:config --quote USDC [--send]   # non-SOL pair: one config per quote mint
+ *   A config this partner already owns for the quote mint is found and reused (no second
+ *   one unless --force-new); the new config address is printed before sending.
  *     (same curve shape, fees and creator share in quote units: start 3 000, graduation 44 088)
  *
  * MAINNET (src/mainnet-setup.ts gate):
@@ -33,7 +35,7 @@ import { Keypair, LAMPORTS_PER_SOL, SystemProgram, VersionedTransaction } from "
 import { describeConfig, explorerAddressUrl, explorerTxUrl, loadConfig, makeConnection } from "../src/config";
 import { loadRepoEnv, redactSecrets } from "../src/env";
 import { formatUnits } from "../src/math";
-import { UNZEEN_DBC_CURVE, UNZEEN_DBC_CURVE_USD, dbcConfigAddress, derivePartnerKeypair, unzeenDbcConfigParameters } from "../src/meteora";
+import { UNZEEN_DBC_CURVE, UNZEEN_DBC_CURVE_USD, dbcConfigAddress, derivePartnerKeypair, existingPartnerConfigs, unzeenDbcConfigParameters } from "../src/meteora";
 import { quoteAssets } from "../src/pool-a";
 import { priorityFeeCacheFromConfig } from "../src/fees";
 import { FEE_ESTIMATE_PROGRAMS, openKeys } from "../src/relayer/runtime";
@@ -93,6 +95,19 @@ async function main(): Promise<void> {
   console.log(`partner needs ${sol(funding.need)} (config rent ${sol(rent)} + fee margin), holds ${sol(partnerBal)}`);
   if (gate.mainnet && funding.missing > 0n) console.log(fundingHint(partner.publicKey.toBase58(), funding.missing, funding.need));
 
+  // L8: a config this partner already created (e.g. a --send that timed out but landed) is
+  // reused; a second one is created only with --force-new.
+  const client = new DynamicBondingCurveClient(conn, "confirmed");
+  const mine = existingPartnerConfigs(await client.state.getPoolConfigsByOwner(partner.publicKey), quoteMint);
+  if (mine.length > 0) {
+    for (const c of mine) console.log(`existing config of this partner: ${c.toBase58()}`);
+    console.log(`set ${dbcConfigEnvName(cfg.cluster)}${asset ? `_${asset.symbol}` : ""}=${mine[0]!.toBase58()}`);
+    if (!process.argv.includes("--force-new")) {
+      console.log("nothing created (pass --force-new to create another config anyway)");
+      return;
+    }
+  }
+
   if (gate.mode === "dry") {
     console.log(`dry run (--simulate to simulate the tx, --send to create the config${gate.mainnet ? "; mainnet: see the header for the gate" : ""})`);
     return;
@@ -105,7 +120,8 @@ async function main(): Promise<void> {
   const prefix = { computeUnits: 200_000, priorityMicroLamports: fees.microLamports(), tip: pipeline.tip };
 
   const configKp = Keypair.generate();
-  const client = new DynamicBondingCurveClient(conn, "confirmed");
+  // L8: printed BEFORE anything is sent: after a timeout the operator can look it up.
+  console.log(`config account to create: ${configKp.publicKey.toBase58()}`);
   const build = () =>
     client.partner.createConfig({
       ...params,

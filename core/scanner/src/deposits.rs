@@ -63,7 +63,7 @@ impl Deposit {
     }
 }
 
-/// All incoming (non-change) Orchard/Ironwood notes, mined or not.
+/// All incoming (non-change, external-scope) Orchard/Ironwood notes, mined or not.
 pub fn list(db_path: &std::path::Path) -> anyhow::Result<Vec<Deposit>> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = conn.prepare(
@@ -72,6 +72,13 @@ pub fn list(db_path: &std::path::Path) -> anyhow::Result<Vec<Deposit>> {
          FROM v_received_outputs ro
          JOIN transactions t ON t.id_tx = ro.transaction_id
          WHERE ro.is_change = 0 AND ro.pool IN (:orchard, :ironwood)
+           -- L5: only notes to the EXTERNAL (published) receiver are deposits. Internal-scope
+           -- notes (change, `shield` output) stay out even if a seed restore loses is_change.
+           -- NULL scope (unknown) counts as external so no deposit is ever dropped.
+           AND COALESCE(CASE ro.pool
+                 WHEN :orchard THEN (SELECT n.recipient_key_scope FROM orchard_received_notes n WHERE n.id = ro.id_within_pool_table)
+                 WHEN :ironwood THEN (SELECT n.recipient_key_scope FROM ironwood_received_notes n WHERE n.id = ro.id_within_pool_table)
+               END, 0) = 0
          ORDER BY t.mined_height IS NULL, t.mined_height, ro.pool, ro.id_within_pool_table",
     )?;
     let params = named_params! { ":orchard": POOL_ORCHARD, ":ironwood": POOL_IRONWOOD };
