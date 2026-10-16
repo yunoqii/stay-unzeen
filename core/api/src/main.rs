@@ -4,6 +4,8 @@
 //!   unzeen-api stats-snapshot             build today's public stats snapshot now
 //!                                         (mainnet only with --allow-mainnet)
 //!   unzeen-api verify-snapshot            request a Verify snapshot now (mainnet: --allow-mainnet)
+//!   unzeen-api review-job [--list | <id> --reparse | --confirm --out-* | --fail] --yes
+//!                                         GAP-11: resolve relayer jobs in `needs_review`
 //!   unzeen-api dev-request --anon-key F   DEV: send a signed request and print the response
 //!
 //! `.env` is loaded from the current directory or its parents (repo root).
@@ -57,6 +59,47 @@ enum Cmd {
     Chat {
         #[command(subcommand)]
         cmd: ChatCmd,
+    },
+    /// GAP-11 operator: resolve relayer jobs stuck in `needs_review` (tx landed, result not
+    /// parsed) without SQL. No id / --list: list them. With an id and no action: show it.
+    /// Prefer --reparse (the hood relayer re-reads the receipt from the chain); --confirm
+    /// takes the facts from the explorer; --fail only if NO funds moved (core then refunds).
+    ReviewJob {
+        id: Option<i64>,
+        #[arg(long)]
+        list: bool,
+        /// Hand the job back to the relayer now: it re-parses the landed tx (hood).
+        #[arg(long, conflicts_with_all = ["confirm", "fail"])]
+        reparse: bool,
+        /// Mark confirmed with the explicit out_* below (checked against the job).
+        #[arg(long, conflicts_with = "fail")]
+        confirm: bool,
+        /// Mark failed: the operator checked on the explorer that no funds moved.
+        #[arg(long)]
+        fail: bool,
+        /// error_code for --fail.
+        #[arg(long, default_value = "internal")]
+        code: String,
+        #[arg(long)]
+        out_token_amount: Option<String>,
+        /// Lamports (Solana) or wei (hood) actually spent / received.
+        #[arg(long)]
+        out_lamports: Option<String>,
+        #[arg(long)]
+        out_mint: Option<String>,
+        #[arg(long)]
+        out_quote_mint: Option<String>,
+        #[arg(long)]
+        out_quote_amount: Option<String>,
+        /// Slot (Solana) or block number (hood) of the tx.
+        #[arg(long)]
+        slot: Option<i64>,
+        /// Required for --confirm / --fail (they move user balances at settlement).
+        #[arg(long)]
+        yes: bool,
+        /// Also print the tx signature/hash (public, but not next to the job id in logs).
+        #[arg(long)]
+        show_signature: bool,
     },
     /// DEV: sign a request with an anon key file (hex secret, from `unzeen-scanner anon-key`)
     /// and print the response. Refused on mainnet unless UNZEEN_DEV_PRINT=1.
@@ -125,6 +168,38 @@ async fn run() -> anyhow::Result<()> {
             include_today,
             allow_mainnet,
         } => stats_snapshot(&cfg, include_today, allow_mainnet).await,
+        Cmd::ReviewJob {
+            id,
+            list,
+            reparse,
+            confirm,
+            fail,
+            code,
+            out_token_amount,
+            out_lamports,
+            out_mint,
+            out_quote_mint,
+            out_quote_amount,
+            slot,
+            yes,
+            show_signature,
+        } => {
+            let out = unzeen_ledger::review::ReviewOut {
+                out_token_amount,
+                out_lamports,
+                out_mint,
+                out_quote_mint,
+                out_quote_amount,
+                slot,
+            };
+            let action = match (reparse, confirm, fail) {
+                (true, _, _) => Some(unzeen_ledger::review::Resolution::Reparse),
+                (_, true, _) => Some(unzeen_ledger::review::Resolution::Confirm(out)),
+                (_, _, true) => Some(unzeen_ledger::review::Resolution::Fail { code }),
+                _ => None,
+            };
+            review_job(&cfg, if list { None } else { id }, action, yes, show_signature).await
+        }
         Cmd::DevRequest {
             anon_key,
             method,
@@ -133,6 +208,96 @@ async fn run() -> anyhow::Result<()> {
             base_url,
         } => dev_request(&cfg, &anon_key, &method, &path, &body, base_url).await,
     }
+}
+
+fn print_review(j: &unzeen_ledger::review::ReviewJob, show_signature: bool) {
+    println!(
+        "#{:<8} {:<11} venue={:<17} network={:<12} lamports_in={} token_amount={} mint={} age={} min sig={}{}",
+        j.id,
+        j.op,
+        j.venue.as_deref().unwrap_or("-"),
+        j.network,
+        j.lamports_in.as_deref().unwrap_or("-"),
+        j.token_amount.as_deref().unwrap_or("-"),
+        j.mint.as_deref().unwrap_or("-"),
+        j.age_secs / 60,
+        match (&j.signature, show_signature) {
+            (None, _) => "none",
+            (Some(_), false) => "recorded (--show-signature)",
+            (Some(s), true) => s.as_str(),
+        },
+        j.error_message
+            .as_deref()
+            .map_or(String::new(), |m| format!(" note={m:?}")),
+    );
+}
+
+async fn review_job(
+    cfg: &Config,
+    id: Option<i64>,
+    action: Option<unzeen_ledger::review::Resolution>,
+    yes: bool,
+    show_signature: bool,
+) -> anyhow::Result<()> {
+    use unzeen_ledger::review::{FAIL_CODES, Resolution, check_confirm};
+    let ledger = connect_checked(cfg).await?;
+    let Some(id) = id else {
+        if action.is_some() {
+            bail!("--reparse/--confirm/--fail need a job id");
+        }
+        let jobs = ledger.review_jobs().await?;
+        println!("needs_review: {}", jobs.len());
+        for j in &jobs {
+            print_review(j, show_signature);
+        }
+        return Ok(());
+    };
+    let Some((job, status, settled)) = ledger.review_job(id).await? else {
+        bail!("no relayer job #{id}");
+    };
+    print_review(&job, show_signature);
+    if status != "needs_review" || settled {
+        bail!(
+            "job #{id} is {status}{}: only needs_review jobs are resolved here",
+            if settled { " (settled)" } else { "" }
+        );
+    }
+    let Some(action) = action else {
+        println!("status: needs_review. Next: --reparse (hood) | --confirm --out-... --yes | --fail --yes");
+        return Ok(());
+    };
+    match &action {
+        Resolution::Reparse if job.network != "hood" => {
+            bail!("--reparse works with the hood relayer only (the Solana relayer never writes needs_review)")
+        }
+        Resolution::Reparse => {}
+        Resolution::Confirm(o) => {
+            check_confirm(&job, o).map_err(|e| anyhow!("refused: {e}"))?;
+            if !yes {
+                bail!("--confirm credits the user at settlement: re-check the tx on the explorer, then add --yes");
+            }
+        }
+        Resolution::Fail { code } => {
+            if !FAIL_CODES.contains(&code.as_str()) {
+                bail!("--code must be one of {}", FAIL_CODES.join(", "));
+            }
+            if !yes {
+                bail!("--fail REFUNDS the user at settlement: only if the tx moved no funds; add --yes");
+            }
+        }
+    }
+    if !ledger.resolve_review(id, &action).await? {
+        bail!("job #{id} left needs_review meanwhile (the relayer resolved it?): nothing changed");
+    }
+    println!(
+        "#{id}: {}",
+        match action {
+            Resolution::Reparse => "handed back to the relayer; it re-reads the tx on its next pass",
+            Resolution::Confirm(_) => "confirmed; the core settler closes the action within ~1 s",
+            Resolution::Fail { .. } => "failed; the core settler releases the hold within ~1 s",
+        }
+    );
+    Ok(())
 }
 
 async fn serve(cfg: Config) -> anyhow::Result<()> {

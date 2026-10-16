@@ -38,6 +38,9 @@ own container and volume (`unzeen-main_pg-data`) from the same file:
 infra/pg-mainnet.sh up          # = POSTGRES_PORT=55433 docker compose -p unzeen-main ... up -d postgres
 infra/pg-mainnet.sh psql        # owner psql into the mainnet instance (no secrets printed)
 infra/pg-mainnet.sh roles       # apply relayer-role.sql + indexer-role.sql to the mainnet instance
+infra/pg-mainnet.sh --hood up   # Robinhood Chain mainnet: project unzeen-hood, 127.0.0.1:55434 (POSTGRES_PORT_HOOD)
+infra/pg-mainnet.sh --hood roles  # with hood.env sourced: refuses if DATABASE_URL* point elsewhere
+bash infra/tests/pg-mainnet.test.sh  # offline checks of the script guards (no Docker)
 ```
 
 - Port: `POSTGRES_PORT_MAINNET` (default 55433), same user/password/db name as `.env`.
@@ -75,7 +78,7 @@ local proxy, so per-client limits belong in the proxy (`limit_req`, in memory).
 
 ## Scanner quick reference (core/)
 
-State and keys live in `~/.unzeen/<network>/{data,keys}` (0700/0600), not in the repo.
+State and keys live in `~/.unzeen/<network>/{data,keys}` (Solana pool) and `~/.unzeen/hood-<network>/{data,keys}` (Robinhood Chain pool, `UNZEEN_CHAIN=hood`), 0700/0600, not in the repo. `data/chain` records the owner instance; a wallet of the other chain is refused.
 
 ```bash
 cd core && cargo build --release

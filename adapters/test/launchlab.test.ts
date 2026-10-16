@@ -139,7 +139,7 @@ interface Setup {
   tables: PublicKey[][];
 }
 
-function setup(o: { sol?: number; usd1?: bigint; zec?: bigint; zecRoute?: boolean } = {}): Setup {
+function setup(o: { sol?: number; usd1?: bigint; zec?: bigint; zecRoute?: boolean; unzeen?: PublicKey } = {}): Setup {
   const rpc = new FakeRpc(launchLabAccounts());
   const vault = Keypair.generate();
   rpc.balances.set(vault.publicKey.toBase58(), o.sol ?? 2_000_000_000);
@@ -161,6 +161,7 @@ function setup(o: { sol?: number; usd1?: bigint; zec?: bigint; zecRoute?: boolea
     creators: new CreatorKeyring(Buffer.alloc(64, 3), new MemoryCreatorIndexCounter()),
     stateDir: fs.mkdtempSync(path.join(os.tmpdir(), "unzeen-ll-")),
     quotes,
+    ...(o.unzeen ? { unzeenPlatform: o.unzeen } : {}),
     priorityMicroLamports: 1_000,
     lookupTables: lookupTables as never,
     pipeline: { tip: senderTip(5_000n, () => 0), broadcaster: { name: "none", send: async () => undefined, trySend: async () => undefined } },
@@ -293,6 +294,20 @@ describe("LaunchLab platform pins (RELAYER v8 A1)", () => {
     expect(w[0]).toMatch(/bonk switched off: claim wallet changed/);
     await expect(s.a.prepareCreate(META, 1n, 0n, { platform: "bonk" })).rejects.toMatchObject({ code: "venue_unavailable" });
     expect(Object.keys(s.a.platformIds())).toEqual(["stonk"]);
+  });
+  it("GAP-4: own platform 'unzeen' is served only once its account exists on this network", async () => {
+    const own = Keypair.generate().publicKey;
+    const s = setup({ unzeen: own });
+    const w = await s.a.checkPlatforms();
+    expect(w).toEqual(["LaunchLab platform unzeen switched off: not created on this network (pnpm launchlab:platform)"]);
+    expect(Object.keys(s.a.platformIds()).sort()).toEqual(["bonk", "stonk"]);
+    await expect(s.a.prepareCreate(META, 1n, 0n, { platform: "unzeen" })).rejects.toMatchObject({ code: "venue_unavailable" });
+
+    const s2 = setup({ unzeen: own });
+    const bonk = s2.rpc.accounts.get(LAUNCHLAB_PLATFORMS["mainnet-beta"].bonk!)!;
+    s2.rpc.accounts.set(own.toBase58(), { ...bonk }); // a PlatformConfig owned by the LaunchLab program
+    expect(await s2.a.checkPlatforms()).toEqual([]);
+    expect(Object.keys(s2.a.platformIds()).sort()).toEqual(["bonk", "stonk", "unzeen"]);
   });
   it("unreadable platforms: all third-party ones off (fail closed)", async () => {
     const s = setup();

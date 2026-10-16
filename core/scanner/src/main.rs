@@ -4,13 +4,14 @@
 //!   serve        sync + feed every incoming note into the Postgres ledger (no deposit data
 //!                in stdout/logs)
 //! Operator:
-//!   init, address, send, probe, seed-keygen, seed-encrypt, ledger-stats,
+//!   init, address [--transparent], send, shield, probe, seed-keygen, seed-encrypt, ledger-stats,
 //!   rebalance (quote | check | status | plan | close)
 //! Dev only (print deposit data / anon keys; refused on mainnet unless UNZEEN_DEV_PRINT=1):
 //!   sync, deposits, inspect-tx, anon-key, memo-deposit, balance
 //!
-//! Wallet state and keys live in $UNZEEN_HOME/<network>/{data,keys} (default ~/.unzeen),
-//! created 0700 with umask 077.
+//! Wallet state and keys live in $UNZEEN_HOME/<network>/{data,keys} for the Solana pool and
+//! $UNZEEN_HOME/hood-<network>/{data,keys} for the Robinhood Chain pool (default ~/.unzeen),
+//! created 0700 with umask 077. A `chain` marker in data/ keeps the two apart (GAP-9).
 
 mod blocks;
 mod config;
@@ -24,6 +25,7 @@ mod seed;
 mod send;
 mod service;
 mod sync;
+mod transparent;
 mod wallet;
 
 use std::collections::HashSet;
@@ -66,6 +68,24 @@ enum Cmd {
     Address {
         #[arg(long)]
         show_ufvk: bool,
+        /// GAP-2: print ONLY the pool's own transparent refund address (operator; value for
+        /// UNZEEN_REBALANCE_REFUND_TADDR). Never published: not in the UA, the API or the UI.
+        #[arg(long, conflicts_with = "show_ufvk")]
+        transparent: bool,
+    },
+    /// GAP-2 operator: shield the UTXOs of the pool's refund t-address (1Click refunds) into
+    /// the pool's own Ironwood (one tx, OvkPolicy::Discard, broadcast via LIGHTWALLETD_SEND_URL).
+    /// Mainnet needs UNZEEN_ALLOW_MAINNET_SEND=1. Run while `serve` keeps the wallet synced.
+    Shield {
+        /// Only report UTXOs, fee and the shielded amount; build and send nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip if the confirmed total is below this (zat).
+        #[arg(long, default_value_t = transparent::DEFAULT_MIN_SHIELD_ZAT)]
+        min_zat: u64,
+        /// Also print the txid (it is public anyway: it spends the refund address).
+        #[arg(long)]
+        show_txid: bool,
     },
     /// Service: sync forever and credit deposits into the Postgres ledger (DATABASE_URL).
     Serve {
@@ -233,6 +253,7 @@ fn main() -> anyhow::Result<()> {
     // Treat empty values from .env (e.g. `LIGHTWALLETD_URL=`) as "not set".
     for key in [
         "UNZEEN_NETWORK",
+        "UNZEEN_CHAIN",
         "LIGHTWALLETD_URL",
         "LIGHTWALLETD_FALLBACK_URLS",
         "UNZEEN_DATA_DIR",
@@ -300,7 +321,12 @@ async fn run() -> anyhow::Result<()> {
                 println!("ufvk:      {}", out.ufvk);
             }
         }
-        Cmd::Address { show_ufvk } => {
+        Cmd::Address { transparent: true, .. } => {
+            let mut db = wallet::open_db(c)?;
+            let t = transparent::pool_taddr(&mut db)?;
+            println!("{}", transparent::encode(c, &t));
+        }
+        Cmd::Address { show_ufvk, .. } => {
             if show_ufvk {
                 dev_only(c, "address --show-ufvk")?;
             }
@@ -419,6 +445,31 @@ async fn run() -> anyhow::Result<()> {
             let mut db = wallet::open_db(c)?;
             let txid = send::send(c, &mut db, &to, amount_zat, memo.as_deref()).await?;
             println!("sent txid={txid}");
+        }
+        Cmd::Shield {
+            dry_run,
+            min_zat,
+            show_txid,
+        } => {
+            let mut db = wallet::open_db(c)?;
+            let k = service::policy_from_env(c)?.confirmations.max(1);
+            let r = transparent::shield(c, &mut db, k, min_zat, dry_run).await?;
+            println!(
+                "refund UTXOs:   {} ({} waiting for {k} confirmations)",
+                r.utxos_found, r.utxos_waiting
+            );
+            println!("confirmed:      {} ZEC", deposits::format_zec(r.total_zat));
+            if r.fee_zat == 0 {
+                println!("nothing to shield (minimum {} ZEC)", deposits::format_zec(min_zat));
+            } else {
+                println!("fee (ZIP-317):  {} ZEC", deposits::format_zec(r.fee_zat));
+                println!("to Ironwood:    {} ZEC", deposits::format_zec(r.shielded_zat));
+                match &r.txid {
+                    None => println!("dry-run: nothing built or sent"),
+                    Some(t) if show_txid => println!("broadcast: txid={t}"),
+                    Some(_) => println!("broadcast: ok (spendable after {k} confirmations)"),
+                }
+            }
         }
         Cmd::InspectTx { txid } => {
             dev_only(c, "inspect-tx")?;
@@ -578,7 +629,7 @@ async fn run() -> anyhow::Result<()> {
             use zcash_client_backend::data_api::{WalletRead, wallet::ConfirmationsPolicy};
             let db = wallet::open_db(c)?;
             let k = service::policy_from_env(c)?.confirmations.max(1);
-            let conf = ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::new(k).expect("max(1)"));
+            let conf = ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::new(k).expect("max(1)"), false);
             match db
                 .get_wallet_summary(conf)
                 .map_err(|e| anyhow!("wallet summary: {e}"))?
@@ -635,6 +686,19 @@ async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd, target: &str) -> anyhow::R
     let sol = |l: u64| format!("{}.{:09}", l / 1_000_000_000, l % 1_000_000_000);
     match cmd {
         RebalanceCmd::Quote => {
+            let pool_t = wallet::open_db(c)
+                .and_then(|mut db| transparent::pool_taddr(&mut db))
+                .map(|t| transparent::encode(c, &t))
+                .ok();
+            let (cfg, refund) = cfg.with_pool_refund(pool_t);
+            println!(
+                "refund:         {}",
+                match refund {
+                    rebalance::RefundSource::PoolWallet => "pool wallet t-address (GAP-2, `shield` recovers)",
+                    rebalance::RefundSource::External => "EXTERNAL address from env (`shield` cannot recover)",
+                    rebalance::RefundSource::Missing => "none (live mode off)",
+                }
+            );
             let oc = oneclick::HttpOneClick::from_env()?;
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             let (q, expected) = rebalance::dry_quote(&cfg, &oc, now).await?;

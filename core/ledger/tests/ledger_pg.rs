@@ -1202,3 +1202,100 @@ async fn ninth_action_of_the_day_is_listed_first() {
     assert_eq!(r.get::<_, i64>(1), 9);
     db.drop_schema().await;
 }
+
+/// GAP-11: `review-job` resolves `needs_review` jobs: confirm (explicit out_*) settles like a
+/// relayer confirm, fail refunds, reparse only expires the lease, other statuses are untouched.
+#[tokio::test]
+async fn needs_review_operator_resolution() {
+    use unzeen_ledger::review::{Resolution, ReviewOut, check_confirm};
+    let Some(db) = setup().await else { return };
+    let l = &db.ledger;
+    let me = pk(21);
+    fund(l, 21, 0, 1_000_000).await;
+
+    // Two buys of 0.005 ZEC (50M lamports each), both landed but unparsed.
+    let a = l
+        .submit(
+            &me,
+            &[21; 16],
+            &[21; 32],
+            &action("buy", 500_000, 0, None, vec![buy_job("MINT", 50_000_000)]),
+        )
+        .await
+        .unwrap();
+    let b = l
+        .submit(
+            &me,
+            &[22; 16],
+            &[22; 32],
+            &action("buy", 500_000, 0, None, vec![buy_job("MINT", 50_000_000)]),
+        )
+        .await
+        .unwrap();
+    db.sql(
+        "UPDATE relayer_jobs SET status = 'needs_review', signature = 'SIGR', lease_until = now() + interval '1 hour'",
+    )
+    .await;
+    let jobs = l.review_jobs().await.unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(l.needs_review_count().await.unwrap(), 2);
+    assert_eq!(l.settle_ready(10).await.unwrap(), 0, "needs_review is not final");
+    let (ja, jb) = (jobs[0].id, jobs[1].id);
+    assert_eq!(jobs[0].lamports_in.as_deref(), Some("50000000"));
+
+    // Reparse: only the lease moves; the hood relayer re-claims it.
+    assert!(l.resolve_review(ja, &Resolution::Reparse).await.unwrap());
+    assert_eq!(
+        db.scalar_i64(&format!(
+            "SELECT count(*) FROM relayer_jobs WHERE id = {ja} AND status = 'needs_review' AND lease_until < now()"
+        ))
+        .await,
+        1
+    );
+
+    // Confirm A with explorer facts: 40M spent, 7000 tokens -> 0.001 ZEC back.
+    let o = ReviewOut {
+        out_token_amount: Some("7000".into()),
+        out_lamports: Some("40000000".into()),
+        ..Default::default()
+    };
+    check_confirm(&jobs[0], &o).unwrap();
+    assert!(l.resolve_review(ja, &Resolution::Confirm(o.clone())).await.unwrap());
+    assert!(
+        !l.resolve_review(ja, &Resolution::Confirm(o)).await.unwrap(),
+        "only from needs_review"
+    );
+    // Fail B: nothing moved -> refund.
+    assert!(
+        l.resolve_review(
+            jb,
+            &Resolution::Fail {
+                code: "internal".into()
+            }
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(l.settle_ready(10).await.unwrap(), 2);
+    assert_eq!(l.action_view(&me, &a.id).await.unwrap().unwrap().status, "executed");
+    assert_eq!(l.action_view(&me, &b.id).await.unwrap().unwrap().status, "failed");
+    let bal = l.balance(&me).await.unwrap().unwrap();
+    // 1.0M - 0.5M (A) + 0.1M (A unspent part) ; B fully released.
+    assert_eq!((bal.available_zat, bal.held_zat), (600_000, 0));
+    assert_eq!(l.token_holdings(&me).await.unwrap()[0].available, 7000);
+    assert!(l.review_jobs().await.unwrap().is_empty());
+    let (_, status, settled) = l.review_job(jb).await.unwrap().unwrap();
+    assert_eq!((status.as_str(), settled), ("failed", true));
+    assert!(
+        !l.resolve_review(
+            jb,
+            &Resolution::Fail {
+                code: "internal".into()
+            }
+        )
+        .await
+        .unwrap(),
+        "settled jobs are never touched"
+    );
+    db.drop_schema().await;
+}

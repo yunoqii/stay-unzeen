@@ -4,7 +4,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 import { AdapterError } from "../src/errors";
-import { LocalMetadataStore, PinataMetadataStore, parseImageDataUrl, sanitizeImage } from "../src/metadata";
+import { LocalMetadataStore, PinataMetadataStore, metadataStoreFromEnv, parseImageDataUrl, publicMetadataUrlProblem, sanitizeImage } from "../src/metadata";
 
 const MARK = "UNZEEN-SECRET-EXIF-MARK";
 
@@ -122,5 +122,45 @@ describe("metadata stores", () => {
 
     const failing = new PinataMetadataStore("j", undefined, (async () => new Response("no", { status: 401 })) as unknown as typeof fetch);
     await expect(failing.publish({ name: "A", symbol: "A" })).rejects.toMatchObject({ code: "venue_unavailable" });
+  });
+});
+
+describe("GAP-5: mainnet never writes a local metadata URL on chain", () => {
+  it("publicMetadataUrlProblem: only public https hosts pass", () => {
+    for (const ok of ["https://api.unzeen.xyz/media", "https://media.example/meta/", "https://8.8.8.8/m"]) expect(publicMetadataUrlProblem(ok)).toBeNull();
+    const bad: Record<string, RegExp> = {
+      "http://api.unzeen.xyz/media": /not https/,
+      "http://127.0.0.1:8090/media": /not https/,
+      "https://127.0.0.1/media": /loopback/,
+      "https://localhost/media": /public host|local/,
+      "https://box.local/media": /local host/,
+      "https://10.0.0.5/m": /private/,
+      "https://192.168.1.2/m": /private/,
+      "https://172.20.0.1/m": /private/,
+      "https://[::1]/m": /loopback/,
+      "https://media/m": /public host/,
+      "not a url": /not a URL/,
+    };
+    for (const [u, re] of Object.entries(bad)) expect(publicMetadataUrlProblem(u), u).toMatch(re);
+  });
+
+  it("metadataStoreFromEnv: mainnet + local http base -> refused (null + reason); devnet keeps it", () => {
+    const env = { UNZEEN_METADATA_BASE_URL: "http://127.0.0.1:8090/media" };
+    const reasons: string[] = [];
+    expect(metadataStoreFromEnv(os.tmpdir(), env, { cluster: "mainnet-beta", onRefuse: (r) => reasons.push(r) })).toBeNull();
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toMatch(/refused on mainnet \(not https\).*PINATA_JWT/);
+    expect(metadataStoreFromEnv(os.tmpdir(), env, { cluster: "devnet" })).toBeInstanceOf(LocalMetadataStore);
+    expect(metadataStoreFromEnv(os.tmpdir(), env)).toBeInstanceOf(LocalMetadataStore);
+  });
+
+  it("metadataStoreFromEnv: mainnet with PINATA_JWT or a public https base -> a store", () => {
+    expect(metadataStoreFromEnv(os.tmpdir(), { PINATA_JWT: "x", UNZEEN_METADATA_BASE_URL: "http://127.0.0.1/m" }, { cluster: "mainnet-beta" })).toBeInstanceOf(PinataMetadataStore);
+    expect(metadataStoreFromEnv(os.tmpdir(), { UNZEEN_METADATA_BASE_URL: "https://api.unzeen.xyz/media" }, { cluster: "mainnet-beta" })).toBeInstanceOf(LocalMetadataStore);
+  });
+
+  it("LocalMetadataStore itself refuses a local URL when built for mainnet", () => {
+    expect(() => new LocalMetadataStore(os.tmpdir(), "https://localhost/m", { requirePublicHttps: true })).toThrow(/refused on mainnet/);
+    expect(() => new LocalMetadataStore(os.tmpdir(), "http://127.0.0.1/m")).not.toThrow();
   });
 });

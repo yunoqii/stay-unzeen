@@ -416,6 +416,53 @@ impl std::fmt::Debug for Config {
 }
 
 /// Env var, with empty values treated as unset.
+/// GAP-5: why token metadata could not be published safely on mainnet (`None` = fine).
+/// Pinata wins; otherwise the base must be https on a public host name (no localhost,
+/// loopback/private/link-local IPs, `.local`/`.lan`/`.internal`, no bare IPv6).
+pub fn metadata_problem(base: Option<&str>, pinata: bool) -> Option<String> {
+    if pinata {
+        return None;
+    }
+    let Some(base) = base.map(str::trim).filter(|b| !b.is_empty()) else {
+        return Some("neither PINATA_JWT nor UNZEEN_METADATA_BASE_URL is set".into());
+    };
+    let Some(rest) = base.strip_prefix("https://") else {
+        return Some("UNZEEN_METADATA_BASE_URL is not https".into());
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') || authority.starts_with('[') {
+        return Some("UNZEEN_METADATA_BASE_URL host is not a public DNS name".into());
+    }
+    let host = authority.split(':').next().unwrap_or("").to_ascii_lowercase();
+    let host = host.trim_end_matches('.');
+    let private_ip = host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| {
+        ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || ip.is_unspecified()
+            || ip.is_broadcast()
+            || ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1])
+    });
+    let local_name = host.is_empty()
+        || !host.contains('.')
+        || host == "localhost"
+        || [
+            ".localhost",
+            ".local",
+            ".lan",
+            ".internal",
+            ".home",
+            ".test",
+            ".invalid",
+        ]
+        .iter()
+        .any(|s| host.ends_with(s));
+    if private_ip || local_name {
+        return Some(format!("UNZEEN_METADATA_BASE_URL host {host:?} is not public"));
+    }
+    None
+}
+
 pub fn var(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
@@ -526,6 +573,18 @@ impl Config {
         let hood = matches!(trade, unzeen_protocol::TradeNet::Hood(_));
         let cluster: &'static str = trade.network();
         let mainnet = trade.is_mainnet();
+        // GAP-5: a token URI is written on chain forever. On Solana mainnet `create` needs
+        // Pinata or a PUBLIC https media base, never a local/http one (127.0.0.1 in the URI).
+        if mainnet
+            && !hood
+            && var("UNZEEN_CREATE_ENABLED").as_deref() == Some("1")
+            && let Some(why) = metadata_problem(var("UNZEEN_METADATA_BASE_URL").as_deref(), var("PINATA_JWT").is_some())
+        {
+            bail!(
+                "refusing to start: UNZEEN_CREATE_ENABLED=1 on mainnet but {why}. Set PINATA_JWT, or \
+                 UNZEEN_METADATA_BASE_URL=https://<public API domain>/media, or UNZEEN_CREATE_ENABLED=0"
+            );
+        }
         let policy = Policy {
             chain,
             confirmations: num::<u32>("UNZEEN_CONFIRMATIONS", 3)?.max(1),
@@ -838,6 +897,37 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gap5_metadata_problem() {
+        use super::metadata_problem as m;
+        assert!(m(None, true).is_none());
+        assert!(m(Some("http://127.0.0.1:8080/media"), true).is_none(), "Pinata wins");
+        assert!(m(Some("https://api.unzeen.xyz/media"), false).is_none());
+        assert!(m(Some("https://api.unzeen.xyz:8443/media"), false).is_none());
+        assert!(m(Some("https://8.8.8.8/media"), false).is_none());
+        for bad in [
+            None,
+            Some(""),
+            Some("http://127.0.0.1:8080/media"),
+            Some("http://api.unzeen.xyz/media"),
+            Some("https://127.0.0.1/media"),
+            Some("https://localhost:8080/media"),
+            Some("https://10.0.0.5/media"),
+            Some("https://192.168.1.2/media"),
+            Some("https://172.16.0.1/media"),
+            Some("https://100.64.1.1/media"),
+            Some("https://169.254.0.1/media"),
+            Some("https://0.0.0.0/media"),
+            Some("https://[::1]/media"),
+            Some("https://mac.local/media"),
+            Some("https://box.lan/media"),
+            Some("https://vps/media"),
+            Some("https://user@api.unzeen.xyz/media"),
+        ] {
+            assert!(m(bad, false).is_some(), "{bad:?} must be refused");
+        }
+    }
+
     use super::*;
 
     #[test]

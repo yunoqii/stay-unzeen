@@ -206,6 +206,9 @@ export const DEFAULT_DBC_CONFIG: Partial<Record<SolanaCluster, string>> = {
   devnet: "5MHT8FPocqaLBrz9nHAyCuXSFPRbQxrXvG9E8y1eTZpK",
 };
 
+/** Size of a DBC config account (PoolConfig), bytes: read on devnet 16.10 (5MHT8F…, 1048). Rent = payer cost. */
+export const DBC_CONFIG_ACCOUNT_SIZE = 1048;
+
 export function dbcConfigEnvName(cluster: SolanaCluster): string | null {
   return cluster === "devnet" ? "METEORA_DBC_CONFIG_DEVNET" : cluster === "mainnet-beta" ? "METEORA_DBC_CONFIG_MAINNET" : null;
 }

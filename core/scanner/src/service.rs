@@ -33,8 +33,8 @@ pub fn policy_from_env(c: &Common) -> anyhow::Result<Policy> {
     let confirmations = u32::try_from(env_u64("UNZEEN_CONFIRMATIONS", 3)?)?.max(1);
     // API v0.20: UNZEEN_CHAIN=hood → Robinhood Chain instance (chain id 0111 / 0212 from the
     // Zcash network; its own pool wallet and DB, RELAYER v13).
-    let chain = match std::env::var("UNZEEN_CHAIN").ok().filter(|v| !v.is_empty()).as_deref() {
-        None | Some("solana") => {
+    let chain = match c.chain {
+        crate::config::ChainName::Solana => {
             let cluster: SolanaCluster = std::env::var("UNZEEN_SOLANA_CLUSTER")
                 .ok()
                 .filter(|v| !v.is_empty())
@@ -43,14 +43,13 @@ pub fn policy_from_env(c: &Common) -> anyhow::Result<Policy> {
                 .map_err(|e: String| anyhow!(e))?;
             ChainId::new(c.network.zcash_net(), cluster)
         }
-        Some("hood") => {
+        crate::config::ChainName::Hood => {
             let net = match c.network.zcash_net() {
                 unzeen_protocol::ZcashNet::Mainnet => unzeen_protocol::HoodNet::Mainnet,
                 unzeen_protocol::ZcashNet::Testnet => unzeen_protocol::HoodNet::Testnet,
             };
             ChainId::hood(c.network.zcash_net(), net)
         }
-        Some(other) => anyhow::bail!("UNZEEN_CHAIN={other:?}: expected solana | hood"),
     };
     // Same pairing rule as the API (review-numeric-hood п. 15): a testnet wallet with a
     // mainnet-beta cluster would freeze every deposit as `bad_signature` (chain id 0201).
@@ -162,6 +161,8 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
         .await
         .context("connecting to the ledger")?;
     let mut db = wallet::open_db(c)?;
+    // GAP-9: one serve per wallet directory (released at process exit).
+    let _serve_lock = c.lock_serve()?;
     let key = note_ref_key(c, &db)?;
     // Public facts for `GET /api/pool` (the API server has no wallet access).
     let ua = wallet::show(c)?.ua_orchard;
@@ -199,6 +200,20 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
     };
     let rebalance_cfg = if rebalance {
         let cfg = crate::rebalance::RebalanceCfg::from_env(c, trade)?;
+        // GAP-2: default refund address = the pool wallet's own t-address (never logged).
+        let pool_t = crate::transparent::pool_taddr(&mut db)
+            .map(|t| crate::transparent::encode(c, &t))
+            .ok();
+        let (cfg, refund) = cfg.with_pool_refund(pool_t);
+        match refund {
+            crate::rebalance::RefundSource::PoolWallet => {
+                info!("rebalance refunds go to the pool wallet's own t-address (recover with `shield`)")
+            }
+            crate::rebalance::RefundSource::External => warn!(
+                "UNZEEN_REBALANCE_REFUND_TADDR is not this pool wallet's t-address: `shield` cannot recover refunds there"
+            ),
+            crate::rebalance::RefundSource::Missing => {}
+        }
         match cfg.dry_reason() {
             Some(reason) => info!(reason, "rebalance enabled in DRY-RUN mode (quotes only, nothing sent)"),
             None => {
@@ -319,7 +334,7 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
             // (not the ZIP-315 default of 10 for received notes), plus our own change waiting
             // for confirmations. Core only; never logged.
             let k = std::num::NonZeroU32::new(policy.confirmations.max(1)).expect("max(1)");
-            let conf = zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new_symmetrical(k);
+            let conf = zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new_symmetrical(k, false);
             if let Some(summary) = db
                 .get_wallet_summary(conf)
                 .map_err(|e| anyhow!("wallet summary: {e}"))?

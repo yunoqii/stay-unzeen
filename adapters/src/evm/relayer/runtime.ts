@@ -13,7 +13,7 @@ import type { PonsAdapter } from "../pons/adapter";
 import { EvmWithdrawer } from "../withdraw";
 import { HoodRelayer, type HoodRelayerEvent } from "./engine";
 import { HoodFeeLoop } from "./fees";
-import { FunderPool } from "../funders";
+import { FunderPool, funderOptionsFromEnv, funderPollMsFromEnv } from "../funders";
 import { hoodPoolMints, hoodSnapshotSigners, hoodSnapshotTick, readInventory, writeInventory, writePonsLaunchCurve, writeTokenPrices } from "./pool-state";
 import { FileLaunchStore, FileSentClock, type LaunchStore } from "./launches";
 import { FileOwedStore } from "../pons/creator";
@@ -40,6 +40,13 @@ export interface HoodRuntimeOptions {
   feeLoop?: boolean;
   /** Funders in rotation (must match the adapter's FunderPool). Default 8. */
   funderCount?: number;
+  /**
+   * The SAME FunderPool the adapter picks from (thresholds from HOOD_FUNDER_*_WEI);
+   * default: a new pool with `funderCount` and the env thresholds.
+   */
+  funders?: FunderPool;
+  /** GAP-8: poll of the rebalance address for new ETH, ms (HOOD_FUNDER_POLL_SECS, default 300 s). */
+  funderPollMs?: number;
 }
 
 export function hoodNetworkId(cfg: HoodConfig): HoodNetworkId {
@@ -99,14 +106,16 @@ async function every(signal: AbortSignal, lo: number, hi: number, fn: () => Prom
  * Starts everything; resolves when `signal` aborts:
  * relayer lanes, fee cache, creator-fee loop, launch_curves (start + 10 min),
  * pool_sol_inventory (~5 min), Verify snapshot poll (1–2 s), funder top-ups from
- * the rebalance address (1–3 h).
+ * the rebalance address (at start, then 1–3 h) + on ETH arrival on the rebalance
+ * address (poll every HOOD_FUNDER_POLL_SECS ±10 %, GAP-8).
  */
 export async function runHoodRelayer(o: HoodRuntimeOptions, signal: AbortSignal): Promise<void> {
   const log = o.log ?? (() => undefined);
   const network = hoodNetworkId(o.cfg);
   const { relayer, fees, vaults } = buildHoodRelayer(o);
   const funderCount = o.funderCount ?? 8;
-  const funders = new FunderPool({ executor: o.executor, keyring: o.keyring, count: funderCount });
+  const funders = o.funders ?? new FunderPool({ executor: o.executor, keyring: o.keyring, count: funderCount, ...funderOptionsFromEnv() });
+  const pollMs = o.funderPollMs ?? funderPollMsFromEnv();
   const counter = new FileCreatorIndexCounter(path.join(o.cfg.keysDir, "creator-counter.json"));
   o.executor.fees.start(10 * 60_000, () => log("hood fee cache refresh failed"));
   const rec = await relayer.reconcileLaunches();
@@ -127,6 +136,11 @@ export async function runHoodRelayer(o: HoodRuntimeOptions, signal: AbortSignal)
         mints: () => hoodPoolMints(o.db, network),
       }), errs("verify snapshot")),
     every(signal, 3_600_000, 3 * 3_600_000, () => funders.topUp(), errs("funder top-up")),
+    // GAP-8: ETH delivered to the rebalance address (1Click lot) reaches the funders within minutes.
+    every(signal, Math.round(pollMs * 0.9), Math.round(pollMs * 1.1), async () => {
+      const r = await funders.topUpOnArrival();
+      if (r.arrived) log(`hood funder top-up on arrival: sent=${r.sent}`);
+    }, errs("funder arrival poll")),
     every(signal, 60_000, 120_000, () => writeTokenPrices(o.db, network, o.adapter), errs("token prices")),
   ]);
   o.executor.fees.stop();

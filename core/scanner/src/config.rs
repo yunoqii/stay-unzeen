@@ -13,6 +13,69 @@ use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxS
 use zcash_protocol::consensus::Network;
 
 pub const NETWORK_FILE: &str = "network";
+/// GAP-9: which pool instance (trade chain) owns this wallet directory.
+pub const CHAIN_FILE: &str = "chain";
+/// GAP-9: held (flock) by a running `serve` for the life of the process.
+pub const SERVE_LOCK_FILE: &str = "serve.lock";
+
+/// Trade chain of the pool instance (`UNZEEN_CHAIN`). Each chain has its own pool wallet:
+/// a Solana pool and a Robinhood Chain (hood) pool must never share a wallet directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ChainName {
+    Solana,
+    Hood,
+}
+
+impl ChainName {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChainName::Solana => "solana",
+            ChainName::Hood => "hood",
+        }
+    }
+}
+
+/// Default state root of an instance under `UNZEEN_HOME`: `<net>` for Solana (unchanged, so
+/// existing wallets stay where they are), `hood-<net>` for Robinhood Chain.
+pub fn instance_dir_name(chain: ChainName, net: NetName) -> String {
+    match chain {
+        ChainName::Solana => net.as_str().to_string(),
+        ChainName::Hood => format!("hood-{}", net.as_str()),
+    }
+}
+
+/// What to do with a wallet directory given its `chain` marker (pure, for tests).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ChainCheck {
+    Ok,
+    /// Marker absent on testnet: a wallet from before GAP-9; adopt it (marker written).
+    AdoptLegacy,
+    Refuse(String),
+}
+
+pub fn chain_check(stored: Option<&str>, want: ChainName, net: NetName, dir: &std::path::Path) -> ChainCheck {
+    match stored.map(str::trim) {
+        Some(s) if s == want.as_str() => ChainCheck::Ok,
+        // A dev/user wallet that pays several pools (e.g. ~/.unzeen/dev-user), never a pool.
+        Some("any") if net == NetName::Test => ChainCheck::Ok,
+        Some(other) => ChainCheck::Refuse(format!(
+            "refusing to open the wallet in {}: it belongs to the {other:?} pool instance, but UNZEEN_CHAIN={}. \
+             Each chain needs its own UNZEEN_DATA_DIR/UNZEEN_KEYS_DIR (default ~/.unzeen/{}/...)",
+            dir.display(),
+            want.as_str(),
+            instance_dir_name(want, net)
+        )),
+        None if net == NetName::Test => ChainCheck::AdoptLegacy,
+        None => ChainCheck::Refuse(format!(
+            "refusing to open the mainnet wallet in {}: no `{CHAIN_FILE}` marker. If this really is the \
+             {} pool's wallet, write it once: echo {} > {}/{CHAIN_FILE}",
+            dir.display(),
+            want.as_str(),
+            want.as_str(),
+            dir.display()
+        )),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum NetName {
@@ -93,11 +156,18 @@ pub struct Common {
     #[arg(long, env = "LIGHTWALLETD_SEND_URL")]
     pub lightwalletd_send_url: Option<String>,
 
-    /// Directory for wallet state (sqlite). Default: $UNZEEN_HOME/<network>/data.
+    /// Pool instance: `solana` (default) or `hood` (Robinhood Chain). Picks the default wallet
+    /// directories and is recorded in the wallet's `chain` marker (GAP-9).
+    #[arg(long, env = "UNZEEN_CHAIN", value_enum, default_value = "solana")]
+    pub chain: ChainName,
+
+    /// Directory for wallet state (sqlite). Default: $UNZEEN_HOME/<network>/data (Solana) or
+    /// $UNZEEN_HOME/hood-<network>/data (hood).
     #[arg(long, env = "UNZEEN_DATA_DIR")]
     pub data_dir_override: Option<PathBuf>,
 
-    /// Directory for secret material (seed). Default: $UNZEEN_HOME/<network>/keys.
+    /// Directory for secret material (seed). Default: $UNZEEN_HOME/<network>/keys (Solana) or
+    /// $UNZEEN_HOME/hood-<network>/keys (hood).
     #[arg(long, env = "UNZEEN_KEYS_DIR")]
     pub keys_dir_override: Option<PathBuf>,
 }
@@ -136,15 +206,19 @@ impl Common {
     }
 
     pub fn data_dir(&self) -> PathBuf {
-        self.data_dir_override
-            .clone()
-            .unwrap_or_else(|| unzeen_home().join(self.network.as_str()).join("data"))
+        self.data_dir_override.clone().unwrap_or_else(|| {
+            unzeen_home()
+                .join(instance_dir_name(self.chain, self.network))
+                .join("data")
+        })
     }
 
     pub fn keys_dir(&self) -> PathBuf {
-        self.keys_dir_override
-            .clone()
-            .unwrap_or_else(|| unzeen_home().join(self.network.as_str()).join("keys"))
+        self.keys_dir_override.clone().unwrap_or_else(|| {
+            unzeen_home()
+                .join(instance_dir_name(self.chain, self.network))
+                .join("keys")
+        })
     }
 
     /// Primary endpoint followed by fallbacks.
@@ -198,6 +272,54 @@ impl Common {
             );
         }
         Ok(())
+    }
+
+    /// GAP-9: record which pool instance owns a freshly created wallet.
+    pub fn write_chain_marker(&self) -> anyhow::Result<()> {
+        std::fs::write(self.data_dir().join(CHAIN_FILE), self.chain.as_str())?;
+        Ok(())
+    }
+
+    /// GAP-9: refuse a wallet that belongs to the other chain's instance. Testnet wallets from
+    /// before the marker are adopted (marker written); mainnet ones must be marked by hand.
+    pub fn check_chain_marker(&self) -> anyhow::Result<()> {
+        let dir = self.data_dir();
+        let stored = std::fs::read_to_string(dir.join(CHAIN_FILE)).ok();
+        match chain_check(stored.as_deref(), self.chain, self.network, &dir) {
+            ChainCheck::Ok => Ok(()),
+            ChainCheck::AdoptLegacy => {
+                tracing::warn!(
+                    chain = self.chain.as_str(),
+                    "wallet had no chain marker; adopted (testnet)"
+                );
+                self.write_chain_marker()
+            }
+            ChainCheck::Refuse(msg) => bail!(msg),
+        }
+    }
+
+    /// GAP-9: one `serve` per wallet. Holds an exclusive flock on `data/serve.lock` until the
+    /// returned file is dropped (process exit); a second instance fails at start.
+    pub fn lock_serve(&self) -> anyhow::Result<std::fs::File> {
+        let p = self.data_dir().join(SERVE_LOCK_FILE);
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&p)
+            .with_context(|| format!("opening {}", p.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: valid fd owned by `f`; LOCK_NB never blocks.
+            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                bail!(
+                    "refusing to start: another `serve` already runs on the wallet in {} ({SERVE_LOCK_FILE} is locked)",
+                    self.data_dir().display()
+                );
+            }
+        }
+        Ok(f)
     }
 
     pub fn wallet_db_path(&self) -> PathBuf {
@@ -363,6 +485,81 @@ mod tests {
         );
         assert_eq!(NetName::Test.lightd_chain_name(), "test");
         assert_eq!(NetName::Main.lightd_chain_name(), "main");
+    }
+
+    #[test]
+    fn gap9_default_dirs_differ_per_chain() {
+        use super::{ChainName, instance_dir_name};
+        assert_eq!(instance_dir_name(ChainName::Solana, NetName::Main), "main");
+        assert_eq!(instance_dir_name(ChainName::Solana, NetName::Test), "test");
+        assert_eq!(instance_dir_name(ChainName::Hood, NetName::Main), "hood-main");
+        assert_eq!(instance_dir_name(ChainName::Hood, NetName::Test), "hood-test");
+    }
+
+    #[test]
+    fn gap9_chain_marker_rules() {
+        use super::{ChainCheck, ChainName, chain_check};
+        let d = std::path::Path::new("/w");
+        assert_eq!(
+            chain_check(Some("solana\n"), ChainName::Solana, NetName::Main, d),
+            ChainCheck::Ok
+        );
+        assert_eq!(
+            chain_check(Some("hood"), ChainName::Hood, NetName::Main, d),
+            ChainCheck::Ok
+        );
+        assert!(matches!(
+            chain_check(Some("solana"), ChainName::Hood, NetName::Main, d),
+            ChainCheck::Refuse(m) if m.contains("\"solana\" pool instance")
+        ));
+        assert!(matches!(
+            chain_check(Some("hood"), ChainName::Solana, NetName::Test, d),
+            ChainCheck::Refuse(_)
+        ));
+        assert_eq!(
+            chain_check(None, ChainName::Solana, NetName::Test, d),
+            ChainCheck::AdoptLegacy
+        );
+        assert_eq!(
+            chain_check(Some("any"), ChainName::Hood, NetName::Test, d),
+            ChainCheck::Ok
+        );
+        assert!(matches!(
+            chain_check(Some("any"), ChainName::Hood, NetName::Main, d),
+            ChainCheck::Refuse(_)
+        ));
+        assert!(matches!(
+            chain_check(None, ChainName::Hood, NetName::Main, d),
+            ChainCheck::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn gap9_marker_and_serve_lock_on_disk() {
+        use super::{ChainName, Common};
+        let dir = std::env::temp_dir().join(format!("unzeen-gap9-{}", rand::random::<u64>()));
+        let mk = |chain| Common {
+            network: NetName::Main,
+            chain,
+            lightwalletd_url: None,
+            lightwalletd_fallbacks: None,
+            lightwalletd_send_url: None,
+            data_dir_override: Some(dir.join("data")),
+            keys_dir_override: Some(dir.join("keys")),
+        };
+        let sol = mk(ChainName::Solana);
+        let hood = mk(ChainName::Hood);
+        sol.secure_dirs().unwrap();
+        assert!(sol.check_chain_marker().is_err(), "mainnet without marker is refused");
+        sol.write_chain_marker().unwrap();
+        sol.check_chain_marker().unwrap();
+        let e = hood.check_chain_marker().unwrap_err().to_string();
+        assert!(e.contains("belongs to the \"solana\" pool instance"), "{e}");
+        let held = sol.lock_serve().unwrap();
+        assert!(hood.lock_serve().is_err(), "second serve on the same wallet is refused");
+        drop(held);
+        hood.lock_serve().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

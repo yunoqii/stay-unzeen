@@ -143,14 +143,25 @@ pub fn build_tx(common: &Common, db: &mut Db, payments: Vec<Payment>) -> anyhow:
     if proposal.steps().len() > 1 {
         return Err(ProposalError("multi-transaction proposals not supported".into()).into());
     }
+    build_from_proposal(common, db, derivation.account_index(), &proposal)
+}
 
+/// Prove, sign and store ONE tx of a single-step `proposal` (transfer or shielding) with
+/// `OvkPolicy::Discard`. Not broadcast. Returns (txid, raw tx).
+pub fn build_from_proposal<N: std::fmt::Display>(
+    common: &Common,
+    db: &mut Db,
+    account_index: zip32::AccountId,
+    proposal: &zcash_client_backend::proposal::Proposal<StandardFeeRule, N>,
+) -> anyhow::Result<(TxId, Vec<u8>)> {
+    let net = common.params();
     let phrase = crate::seed::load_phrase(common)?;
     let mnemonic =
         <Mnemonic<English>>::from_phrase(phrase.as_str()).map_err(|_| anyhow!("bad seed (not a mnemonic)"))?;
     let mut seed = mnemonic.to_seed("");
     drop(mnemonic);
-    let usk = UnifiedSpendingKey::from_seed(&net, &seed, derivation.account_index())
-        .map_err(|e| anyhow!("key derivation failed: {e:?}"));
+    let usk =
+        UnifiedSpendingKey::from_seed(&net, &seed, account_index).map_err(|e| anyhow!("key derivation failed: {e:?}"));
     seed.zeroize();
     let usk = usk?;
 
@@ -167,7 +178,7 @@ pub fn build_tx(common: &Common, db: &mut Db, payments: Vec<Payment>) -> anyhow:
         // Payouts must not be recoverable from the pool's OVK (C1): a future OVK/seed leak
         // must not reveal who was paid. Our own records live in the ledger.
         OvkPolicy::Discard,
-        &proposal,
+        proposal,
         None,
     )
     .map_err(|e| anyhow!("building tx failed: {e}"))?;

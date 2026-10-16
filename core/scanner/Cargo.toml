@@ -35,12 +35,14 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
 tonic = { version = "0.14", features = ["tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-zcash_client_backend = { version = "=0.25.0-pre.1", features = ["lightwalletd-tonic-tls-webpki-roots", "orchard"] }
-zcash_client_sqlite = { version = "=0.23.0-pre.1", features = ["orchard"] }
-zcash_keys = { version = "=0.17.0-pre.1", features = ["orchard", "sapling"] }
+zcash_client_backend = { version = "=0.25.0-pre.1", features = ["lightwalletd-tonic-tls-webpki-roots", "orchard", "transparent-inputs"] }
+zcash_client_sqlite = { version = "=0.23.0-pre.1", features = ["orchard", "transparent-inputs"] }
+zcash_keys = { version = "=0.17.0-pre.1", features = ["orchard", "sapling", "transparent-inputs"] }
 zcash_primitives = "=0.31.0-pre.1"
 zcash_protocol = "=0.11.0-pre.0"
 zcash_address = "=0.14.0-pre.1"
+# GAP-2: the pool's own refund t-address (never published) + `shield` (t -> Ironwood).
+transparent = { package = "zcash_transparent", version = "=0.11.0-pre.1", features = ["transparent-inputs"] }
 zcash_proofs = { version = "=0.31.0-pre.1", features = ["bundled-prover"] }
 zip32 = "0.3"
 zip321 = "=0.10.0-pre.1"

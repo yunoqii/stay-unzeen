@@ -7,7 +7,8 @@
  *   UNZEEN_HOOD=on, HOOD_NETWORK=mainnet|testnet, HOOD_RPC_URL_<NET>, HOOD_SEND_RPC_URL_<NET>,
  *   UNZEEN_ALLOW_HOOD_MAINNET=yes (mainnet sends; lead's approval), HOOD_KEYS_AGE_KEY_FILE,
  *   DATABASE_URL_RELAYER (role unzeen_relayer of the HOOD instance DB), HOOD_VAULTS (2), HOOD_FUNDERS (8),
- *   HOOD_FEE_SWEEP=1 (creator-fee loop).
+ *   HOOD_FEE_SWEEP=1 (creator-fee loop), HOOD_FUNDER_TARGET_WEI / HOOD_FUNDER_LOW_WEI / HOOD_FUNDER_LOT_WEI
+ *   (funder thresholds, default 0.02 / 0.011 / 0.005 ETH), HOOD_FUNDER_POLL_SECS (rebalance poll, 300).
  *
  * Logs: event kind + outcome code + counts only. Never hashes, addresses, amounts or ids.
  */
@@ -16,7 +17,7 @@ import pg from "pg";
 import { CreatorPubkeyFile, FileCreatorIndexCounter } from "../src/keys";
 import { loadRepoEnv, redactSecrets } from "../src/env";
 import { describeHoodConfig, hoodEnabled, hoodSecretUrls, loadHoodConfig } from "../src/evm/chain";
-import { FunderPool } from "../src/evm/funders";
+import { FunderPool, funderOptionsFromEnv, funderPollMsFromEnv } from "../src/evm/funders";
 import { openEvmKeys } from "../src/evm/keys";
 import { PgLaunchStore, FileLaunchStore, type LaunchStore } from "../src/evm/relayer/launches";
 import { hoodNetworkId, runHoodRelayer } from "../src/evm/relayer/runtime";
@@ -40,6 +41,9 @@ async function main(): Promise<void> {
   const vaultCount = Number(process.env.HOOD_VAULTS ?? 2);
   const funderCount = Number(process.env.HOOD_FUNDERS ?? 8);
   if (!Number.isInteger(vaultCount) || vaultCount < 1 || vaultCount > 64) throw new Error("HOOD_VAULTS must be 1..64");
+  // GAP-7/8: validated before anything starts (bad values refuse to start).
+  const funderOpts = funderOptionsFromEnv();
+  const funderPollMs = funderPollMsFromEnv();
   const db = new pg.Pool({ connectionString: url, max: 6 });
   const lockDb = new pg.Pool({ connectionString: url, max: vaultCount + 4 });
   db.on("error", () => undefined);
@@ -55,7 +59,8 @@ async function main(): Promise<void> {
   const clients = hoodClients(cfg);
   const executor = hoodExecutor(cfg, clients);
   await executor.fees.refresh();
-  const funders = new FunderPool({ executor, keyring, count: funderCount });
+  // ONE pool: the adapter picks from it, the runtime tops it up (shared serialization).
+  const funders = new FunderPool({ executor, keyring, count: funderCount, ...funderOpts });
   const adapter = hoodPonsAdapter(cfg, executor, keyring, funders);
   if (!adapter) throw new Error("Pons V2 is not deployed on this network (testnet): nothing to relay");
   await adapter.verifyDeployment();
@@ -90,6 +95,8 @@ async function main(): Promise<void> {
       keyring,
       vaultCount,
       funderCount,
+      funders,
+      funderPollMs,
       launches,
       feeLoop: process.env.HOOD_FEE_SWEEP?.trim() === "1",
       log,

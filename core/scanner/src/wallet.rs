@@ -27,6 +27,7 @@ pub fn open_db(common: &Common) -> anyhow::Result<Db> {
         bail!("wallet DB {} not found — run `init` first", path.display());
     }
     common.check_network_marker()?;
+    common.check_chain_marker()?;
     common.secure_dirs()?;
     Ok(WalletDb::for_path(path, common.params(), SystemClock, OsRng)?)
 }
@@ -93,6 +94,7 @@ pub async fn init(common: &Common, birthday: Option<u32>) -> anyhow::Result<Init
     };
 
     common.write_network_marker()?;
+    common.write_chain_marker()?;
     let mut db = WalletDb::for_path(&db_path, net, SystemClock, OsRng)?;
     init_wallet_db(&mut db, Some(SecretVec::new(seed.expose_secret().clone())))
         .map_err(|e| anyhow!("wallet DB migration failed: {e:?}"))?;

@@ -279,8 +279,13 @@ export function buildRelayer(o: RelayerRuntimeOptions): RelayerRuntime {
   const mintVaults =
     o.mintVaults ?? (pinsInFile ? new FileMintVaults(path.join(o.cfg.keysDir, "mint-vaults.json")) : new PgMintVaults(o.db, o.network));
   const usage: VaultUsage = pgState ? new PgVaultUsage(o.db, o.network) : new JobsVaultUsage(o.db, o.network);
-  const metadata = o.metadata !== undefined ? o.metadata : metadataStoreFromEnv(defaultMediaDir(o.cfg, env), env);
-  if (!metadata) o.warn("no metadata store (UNZEEN_METADATA_BASE_URL or PINATA_JWT): create jobs will retry and fail");
+  // GAP-5: on mainnet a non-public (http / 127.0.0.1 / LAN) base URL is refused: the URI is on chain forever.
+  let refused = false;
+  const metadata =
+    o.metadata !== undefined
+      ? o.metadata
+      : metadataStoreFromEnv(defaultMediaDir(o.cfg, env), env, { cluster: o.cfg.cluster, onRefuse: (m) => ((refused = true), o.warn(m)) });
+  if (!metadata && !refused) o.warn("no metadata store (UNZEEN_METADATA_BASE_URL or PINATA_JWT): create jobs will retry and fail");
 
   const fees = o.fees ?? priorityFeeCacheFromConfig(o.cfg, o.connection, FEE_ESTIMATE_PROGRAMS);
   // ONE pipeline for all builders: buy/sell/create (+ lookup tables) and withdraw get the same tip.

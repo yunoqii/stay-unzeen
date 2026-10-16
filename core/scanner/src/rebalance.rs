@@ -86,6 +86,17 @@ pub struct RebalanceCfg {
     pub refund_taddr: Option<String>,
 }
 
+/// Origin of the 1Click refund address (GAP-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefundSource {
+    /// The pool wallet's own transparent receiver: `unzeen-scanner shield` recovers refunds.
+    PoolWallet,
+    /// UNZEEN_REBALANCE_REFUND_TADDR points elsewhere: `shield` cannot see those refunds.
+    External,
+    /// None (testnet or no wallet): live mode stays off.
+    Missing,
+}
+
 fn env_u64(k: &str, d: u64) -> anyhow::Result<u64> {
     match std::env::var(k).ok().filter(|v| !v.is_empty()) {
         Some(v) => v.parse().with_context(|| format!("{k} must be an integer")),
@@ -186,6 +197,21 @@ impl RebalanceCfg {
             bail!("UNZEEN_REBALANCE_REFUND_TADDR must be a mainnet transparent (t1/t3) address");
         }
         Ok(())
+    }
+
+    /// GAP-2: refunds go to the pool wallet's own t-address (`pool_taddr`, mainnet only) unless
+    /// UNZEEN_REBALANCE_REFUND_TADDR overrides it. Returns where the refund address comes from.
+    pub fn with_pool_refund(mut self, pool_taddr: Option<String>) -> (Self, RefundSource) {
+        let src = match (&self.refund_taddr, pool_taddr) {
+            (None, Some(t)) if self.zcash == NetName::Main && is_transparent(&t, &Network::MainNetwork) => {
+                self.refund_taddr = Some(t);
+                RefundSource::PoolWallet
+            }
+            (None, _) => RefundSource::Missing,
+            (Some(e), Some(t)) if *e == t => RefundSource::PoolWallet,
+            (Some(_), _) => RefundSource::External,
+        };
+        (self, src)
     }
 
     /// `None` = live sends allowed; `Some(reason)` = dry-run.
@@ -379,7 +405,7 @@ impl PoolWallet for LiveWallet<'_> {
         let k = std::num::NonZeroU32::new(confirmations.max(1)).expect("max(1)");
         let summary = self
             .db
-            .get_wallet_summary(ConfirmationsPolicy::new_symmetrical(k))
+            .get_wallet_summary(ConfirmationsPolicy::new_symmetrical(k, false))
             .map_err(|e| anyhow!("wallet summary: {e}"))?;
         Ok(summary.map_or(0, |s| {
             s.account_balances()
@@ -1021,6 +1047,38 @@ mod tests {
         );
         assert!(is_transparent(&taddr(1), &Network::MainNetwork));
         assert!(!is_transparent(&taddr(1), &Network::TestNetwork));
+    }
+
+    #[test]
+    fn refund_defaults_to_pool_wallet_taddr() {
+        // No env refund address: the pool's own t-address fills it and live mode opens.
+        let bare = RebalanceCfg {
+            refund_taddr: None,
+            ..cfg(true)
+        };
+        assert!(bare.dry_reason().is_some());
+        let (c, src) = bare.clone().with_pool_refund(Some(taddr(5)));
+        assert_eq!(src, RefundSource::PoolWallet);
+        assert_eq!(c.refund_taddr, Some(taddr(5)));
+        assert!(c.dry_reason().is_none());
+        // Env override equal to the pool's: still recoverable by `shield`.
+        let (_, src) = cfg(true).with_pool_refund(Some(taddr(9)));
+        assert_eq!(src, RefundSource::PoolWallet);
+        // Env override elsewhere: kept, flagged external.
+        let (c, src) = cfg(true).with_pool_refund(Some(taddr(5)));
+        assert_eq!((src, c.refund_taddr), (RefundSource::External, Some(taddr(9))));
+        // A testnet pool address is never used as a mainnet refund.
+        let (c, src) = bare
+            .clone()
+            .with_pool_refund(Some("tmEZhbWHTpdKMw5it8YDspUXSMGQyFwovpU".into()));
+        assert_eq!((src, c.refund_taddr), (RefundSource::Missing, None));
+        // Testnet config: never filled (1Click has no testnet).
+        let test = RebalanceCfg {
+            zcash: NetName::Test,
+            ..bare
+        };
+        let (c, src) = test.with_pool_refund(Some(taddr(5)));
+        assert_eq!((src, c.refund_taddr), (RefundSource::Missing, None));
     }
 
     // ------------------------------------------------------------ mocks

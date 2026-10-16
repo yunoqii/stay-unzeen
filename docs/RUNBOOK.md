@@ -23,6 +23,8 @@
 | `~/.unzeen/devnet/solana/` | `vault-{0,1,2}.json.age`, `creator-master.hex.age` (из него выводятся creator-, partner- и **оба ключа аттестаций**), `creator-pubkeys.json`, `creator-counter.json`, `alt-*.json`, `mint-vaults.json`, `fee-sweeps.json` (файловый режим) | relayer; indexer читает только `creator-pubkeys.json` |
 | `~/.unzeen/devnet/media/` | картинки и JSON-метаданные токенов (`<sha40>.<ext>`) | relayer пишет, API отдаёт `/media/*` |
 | `~/.unzeen/main/…`, `~/.unzeen/mainnet-beta/…` | то же для mainnet (создаются при первом `init` / `keys:gen` с mainnet-окружением) | — |
+| `~/.unzeen/hood-main/{data,keys}`, `~/.unzeen/hood-test/…` | кошелёк Zcash **hood-пула** (`UNZEEN_CHAIN=hood`): каталог по умолчанию свой, не общий с Solana-пулом (GAP-9) | scanner hood |
+| `data/chain`, `data/serve.lock` | метка инстанса (`solana`/`hood`) и замок `serve`. Кошелёк с чужой меткой не открывается; второй `serve` на том же кошельке не стартует. Testnet-кошельки без метки принимаются и помечаются при первом открытии, mainnet без метки — отказ. Для dev-user, который платит в оба пула: `echo any > ~/.unzeen/dev-user/data/chain` (только testnet) | scanner |
 
 dev-user, скорее всего, зашифрован тем же `~/.unzeen/seed.agekey` (создан в ту же минуту, что и `test`). Если `send` с dev-user не расшифрует сид — см. открытые вопросы.
 
@@ -383,6 +385,16 @@ infra/pg-mainnet.sh psql     # psql владельца в mainnet-БД
 ```
 и в mainnet-терминалах `DATABASE_URL`, `DATABASE_URL_RELAYER`, `DATABASE_URL_INDEXER` на порт 55433. Описано в `infra/README.md`; core сам откажется стартовать на БД другой сети (GAP закрыт).
 
+**Hood-mainnet — третья БД (GAP-10):** тот же скрипт с `--hood` (проект `unzeen-hood`, 127.0.0.1:55434, `POSTGRES_PORT_HOOD`):
+```bash
+set -a; . ~/.unzeen/hood.env; set +a     # DATABASE_URL* -> :55434; пароли ролей берутся из окружения, затем из .env
+infra/pg-mainnet.sh --hood up
+# первый старт hood-сканера/API применит миграции, затем:
+infra/pg-mainnet.sh --hood roles         # откажет, если экспортированные DATABASE_URL* смотрят не на 55434
+infra/pg-mainnet.sh --hood psql
+```
+Скрипт отказывается работать с портом 55432 (devnet) и проверяет порты `DATABASE_URL*` перед `roles`. Проверка гардов без Docker: `bash infra/tests/pg-mainnet.test.sh`. Env-файл compose (`POSTGRES_PASSWORD`) — `UNZEEN_PG_ENV_FILE`, по умолчанию `.env`.
+
 ### 4.2 Флаги (в окружении mainnet-терминалов, поверх `.env`)
 | Флаг | Процесс | Зачем |
 |---|---|---|
@@ -394,7 +406,8 @@ infra/pg-mainnet.sh psql     # psql владельца в mainnet-БД
 | `SOLANA_KEYS_AGE_KEY_FILE` (свой mainnet-файл), `DATABASE_URL_RELAYER` | relayer | обязательны, без них отказ |
 | `API_BIND=127.0.0.1:8081`, `API_CORS_ORIGINS=…` | API | второй процесс API, свой origin |
 | `UNZEEN_FAIR_LAUNCH=0` | API | см. 4.5 |
-| `UNZEEN_VENUES=pumpfun` (+`jupiter` при необходимости) | API | Meteora на mainnet не настроен: `meteora:config` только devnet, `METEORA_DBC_CONFIG_MAINNET` пуст (GAP) |
+| `UNZEEN_VENUES=pumpfun,jupiter,raydium-launchlab` (+`meteora-dbc` после §6.3, +`bags` на VPS) | API | Meteora — только когда `METEORA_DBC_CONFIG_MAINNET` задан (§6.3), иначе релейер её на mainnet не обслуживает |
+| `PINATA_JWT` **или** `UNZEEN_METADATA_BASE_URL=https://<публичный домен>/media` | API, relayer | GAP-5: с `UNZEEN_CREATE_ENABLED=1` на mainnet API без этого не стартует; релейер отказывает create до подписи |
 | `UNZEEN_DEV_PRINT` — **не задавать** | все | dev-команды на mainnet отказывают — так и надо |
 Web: `NEXT_PUBLIC_API_URL_MAINNET=http://127.0.0.1:8081`, `NEXT_PUBLIC_ATTESTATION_PUBKEY_MAINNET=<verify pubkey mainnet>`, перезапуск `pnpm dev`.
 
@@ -410,9 +423,9 @@ Web: `NEXT_PUBLIC_API_URL_MAINNET=http://127.0.0.1:8081`, `NEXT_PUBLIC_ATTESTATI
 3. `UNZEEN_ALLOW_MAINNET=yes SOLANA_CLUSTER=mainnet-beta SOLANA_KEYS_AGE_KEY_FILE=<mainnet файл> pnpm keys:encrypt` (создаст age-файл), `pnpm keys:gen 2`, пополнить vault и ключ verify.
 4. Роли (1.4 на mainnet-БД), API на 8081, relayer, intel.
 5. Сценарий A целиком (Top up с ZODL по QR → Buy Now и Delayed → лента → Sell → Withdraw токенов → Withdraw ZEC в ZODL).
-6. Launch pump.fun — **только если** `UNZEEN_METADATA_BASE_URL` указывает на публичный HTTPS-домен или задан `PINATA_JWT`: URI метаданных пишется в цепочку навсегда, `http://127.0.0.1…` сломает токен на pump.fun. GAP: для локального mainnet-прогона публичного медиа-хоста нет.
+6. Launch pump.fun — нужен `PINATA_JWT` или `UNZEEN_METADATA_BASE_URL` на публичном HTTPS-домене: URI метаданных пишется в цепочку навсегда. Теперь это гард, а не правило (GAP-5): API на mainnet с `UNZEEN_CREATE_ENABLED=1` без этого не стартует («refusing to start: … not https / not public»), релейер при старте пишет WARN и все create падают `venue_unavailable` до подписи. Локальный прогон без публичного HTTPS — только с `PINATA_JWT`.
 7. Verify/Stats на mainnet вручную — только явным флагом оператора: `unzeen-api verify-snapshot --allow-mainnet` (заморозка торговли ≤ 120 с), `unzeen-api stats-snapshot --include-today --allow-mainnet` (GAP закрыт).
-7a. Авторебаланс на mainnet (по желанию, с одобрения лида): `UNZEEN_ALLOW_MAINNET_REBALANCE=1`, `UNZEEN_REBALANCE_SOL_ADDRESS=<rebalance-адрес релейера, не vault>`, `UNZEEN_REBALANCE_REFUND_TADDR=<t1… пула>`, `UNZEEN_REBALANCE_LOT_ZAT` ≤ `UNZEEN_REBALANCE_MAX_LOT_ZAT` (пыль на прогоне, минимум 1Click 132 000 зат), затем `scanner serve --rebalance` и `rebalance plan --force --now` для ручного запуска. Проверить сначала `rebalance quote`. Refund от 1Click приходит на t-адрес — шилдить вручную.
+7a. Авторебаланс на mainnet (по желанию, с одобрения лида): `UNZEEN_ALLOW_MAINNET_REBALANCE=1`, `UNZEEN_REBALANCE_SOL_ADDRESS=<rebalance-адрес релейера, не vault>`, `UNZEEN_REBALANCE_LOT_ZAT` ≤ `UNZEEN_REBALANCE_MAX_LOT_ZAT` (пыль на прогоне, минимум 1Click 132 000 зат), затем `scanner serve --rebalance` и `rebalance plan --force --now` для ручного запуска. Проверить сначала `rebalance quote` (строка `refund: pool wallet t-address`). `UNZEEN_REBALANCE_REFUND_TADDR` **не задавать**: refund идёт на собственный t-адрес кошелька пула, разбор — §6.1.
 8. После съёмки: остановить API mainnet (или `UNZEEN_ALLOW_MAINNET_ACTIONS=0`), выплатить остатки, `unset` всех `ALLOW_MAINNET_*`.
 
 ### 4.5 Что НЕ показывать на экране
@@ -439,9 +452,11 @@ Web: `NEXT_PUBLIC_API_URL_MAINNET=http://127.0.0.1:8081`, `NEXT_PUBLIC_ATTESTATI
 | `HOOD_KEYS_AGE_KEY_FILE` | age-identity вне каталога ключей, 0600. На mainnet обязателен |
 | `DATABASE_URL_RELAYER` | роль `unzeen_relayer` **БД hood-инстанса** (после миграций перезапустить `infra/relayer-role.sql`) |
 | `HOOD_VAULTS` (2), `HOOD_FUNDERS` (8), `HOOD_FEE_SWEEP=1` | число vault, число funder'ов в ротации, сбор комиссий создателя |
+| `HOOD_FUNDER_TARGET_WEI` / `_LOW_WEI` / `_LOT_WEI` | GAP-7: цель / порог / лот пополнения funder'а, по умолчанию 0.02 / 0.011 / 0.005 ETH (`low < target`, `lot ≤ target`, иначе релейер не стартует) |
+| `HOOD_FUNDER_POLL_SECS` | GAP-8: опрос адреса ребаланса на приход ETH, по умолчанию 300 с (30..3600) |
 | `HOOD_MAX_FEE_WEI`, `HOOD_RPC_MAX_RPS` | минимум единого `maxFeePerGas` (0,2 gwei) и лимит запросов |
 
-Core hood-инстанс: `UNZEEN_CHAIN=hood`, `UNZEEN_NETWORK=main`, `UNZEEN_VENUES=pons`, `UNZEEN_REBALANCE_ETH_ADDRESS` (= адрес ребаланса из `evm:keys`). `UNZEEN_ALLOW_MAINNET_REBALANCE` на время прогона не ставить.
+Core hood-инстанс: `UNZEEN_CHAIN=hood`, `UNZEEN_NETWORK=main`, `UNZEEN_VENUES=pons`, `UNZEEN_REBALANCE_ETH_ADDRESS` (= адрес ребаланса из `evm:keys`). `UNZEEN_ALLOW_MAINNET_REBALANCE` — только на время прогона. Кошелёк Zcash hood-пула по умолчанию в `~/.unzeen/hood-main/{data,keys}` (GAP-9); явные `UNZEEN_DATA_DIR`/`UNZEEN_KEYS_DIR` больше не обязательны, но если заданы и указывают на кошелёк Solana-пула, сканер откажет («belongs to the "solana" pool instance»). Свой `UNZEEN_SEED_KEY_FILE`. БД — §4.1 (`--hood`).
 
 ### 5.2 Ключи
 1. `cd adapters && HOOD_NETWORK=mainnet pnpm evm:keys 2` — создаёт сид при первом запуске (24 слова, `evm-seed.txt.age`, 0600) и печатает **только адреса**: `vault-*`, `funder-0..7`, `rebalance-0`, `attest`. Если права на файл шире 0600, чтение сида будет отклонено.
@@ -449,7 +464,7 @@ Core hood-инстанс: `UNZEEN_CHAIN=hood`, `UNZEEN_NETWORK=main`, `UNZEEN_VE
 3. **Откуда ETH** (ни один перевод не с личного кошелька владельца):
    - **адрес ребаланса** — ZEC → ETH(hood) через NEAR 1Click (ручной лот или ребаланс сканера);
    - **vault** — задание `fund_vaults` (одна tx Multicall3 с адреса ребаланса);
-   - **funder'ы** — их пополняет только адрес ребаланса (`FunderPool.topUp`, лоты по 0,01 ETH, раз в 1–3 ч);
+   - **funder'ы** — их пополняет только адрес ребаланса (`FunderPool.topUp`): при старте, раз в 1–3 ч и **по приходу ETH** на адрес ребаланса (опрос раз в ~5 мин, GAP-8: рестарт релейера после ребаланса не нужен, в логе `hood funder top-up on arrival: sent=N`). Пороги — `HOOD_FUNDER_*` (5.1). С `UNZEEN_REBALANCE_KEEP_LAMPORTS=22000000000000000` на адресе ребаланса остаётся 0.022 ETH — хватает на одно пополнение funder'а до 0.02;
    - **ключ аттестаций hood** (`attest`) владелец **пополняет вручную из внешнего источника**: отдельный перевод, не с vault и не с адреса ребаланса. На старте релейер предупреждает, если на ключе < 0,0002 ETH.
 
 ### 5.3 Запуск
@@ -485,8 +500,8 @@ HOOD_NETWORK=mainnet UNZEEN_HOOD=on UNZEEN_ALLOW_HOOD_MAINNET=yes pnpm relayer:h
 4. ~~Сегодняшний прогон не виден в Stats~~ — **закрыт**: `stats-snapshot --include-today`.
 5. ~~Нет ручных снимков на mainnet~~ — **закрыт**: `--allow-mainnet`.
 6. `media:serve` (8787) бесполезен для фронта: картинки разрешены только с origin API; базу метаданных нужно ставить на API `/media`.
-7. Mainnet launch с локальной базой метаданных запишет `127.0.0.1` в URI on-chain навсегда; нужен публичный домен или Pinata.
-8. Meteora DBC на mainnet недоступна: `meteora:config` только devnet, `METEORA_DBC_CONFIG_MAINNET` пуст.
+7. ~~Mainnet launch с локальной базой метаданных запишет `127.0.0.1` в URI~~ — **закрыт гардом** (16.10, GAP-5): API не стартует, релейер отказывает create. Публичный домен или Pinata по-прежнему нужны, чтобы create вообще работал.
+8. ~~Meteora DBC на mainnet недоступна~~ — **закрыт** (16.10, GAP-3): `meteora:config` с mainnet-гардом (§6.3), конфиг создаётся один раз владельцем.
 9. ~~Claim недостижим~~ — **закрыт**: отдельный `MIN_CLAIM_ZAT` (10 000 по умолчанию, `PoolInfo.minClaimZat`).
 10. Нет скрипта торговли произвольным mint с внешнего кошелька → цену для ордеров двигаем только действиями второго ключа.
 11. ~~Нет «спендабл-баланса»~~ — **закрыт**: `unzeen-scanner wallet-balance` (для dev-user — с `UNZEEN_DATA_DIR`/`UNZEEN_KEYS_DIR` dev-user).
@@ -494,3 +509,46 @@ HOOD_NETWORK=mainnet UNZEEN_HOOD=on UNZEEN_ALLOW_HOOD_MAINNET=yes pnpm relayer:h
 13. ~~`send` 0.05 против Top up 0.1~~ — **закрыт**: на testnet потолок 0.5 TAZ (mainnet 0.05).
 14. Один ключ на origin в web: несколько участников fair-launch — только через разные origin/профили браузера.
 15. В текущем `.env` нет `API_CORS_ORIGINS`, `UNZEEN_VENUES`, `UNZEEN_CREATE_ENABLED`, `DEVNET_ZEC_SOL_RATE`, `UNZEEN_METADATA_BASE_URL`, `FEE_SWEEP_STORE` — без них сценарии B, D, F и любые запросы из браузера не работают.
+16. ~~Refund 1Click некуда принять~~ — **закрыт** (16.10, GAP-2): собственный t-адрес кошелька пула + `unzeen-scanner shield` (§6.1).
+17. ~~Ручной SQL для `needs_review`~~ — **закрыт** (16.10, GAP-11): `unzeen-api review-job` (§6.2).
+
+---
+
+## 6. Операторские команды mainnet (GAP mainnet-прогона, 16.10)
+
+Все — только у оператора, не на камеру. Логи этих команд и сервисов — только счётчики и суммы, без адресов и txid.
+
+### 6.1 Refund 1Click → `shield` (GAP-2)
+- У кошелька пула есть собственный прозрачный адрес: внешний P2PKH-receiver того же аккаунта (тот же сид). В UA пула (`/api/pool`, QR) его **нет**, в API и UI он не публикуется. Печатает только `unzeen-scanner address --transparent` (одна строка, адрес).
+- `serve --rebalance` и `rebalance quote` на mainnet сами берут его как refund-адрес, если `UNZEEN_REBALANCE_REFUND_TADDR` пуст (`refund: pool wallet t-address`). Если env задан и указывает на чужой адрес — WARN «`shield` cannot recover refunds there».
+- Признак refund: `rebalance status` → `refunded`/`attention`. Закрыть: `rebalance close <id> --status refunded`.
+- Шилд (сканер `serve` должен работать — кошелёк синхронизирован):
+```bash
+set -a; . ~/.unzeen/main.env; set +a          # или hood.env: у hood-пула свой t-адрес
+./core/target/release/unzeen-scanner shield --dry-run   # UTXO, подтверждения, комиссия ZIP-317, сумма в Ironwood
+UNZEEN_ALLOW_MAINNET_SEND=1 ./core/target/release/unzeen-scanner shield
+```
+  Одна tx: все подтверждённые (K=`UNZEEN_CONFIRMATIONS`) UTXO refund-адреса → внутренний Ironwood-receiver пула, `OvkPolicy::Discard`. Это change-нота: в реестр депозитов она не попадает (ни `credited`, ни `frozen`), через K подтверждений — снова оборотный ZEC (`wallet-balance` → spendable). После этого повторить S2/H2.
+- Запрос UTXO и отправка идут через `LIGHTWALLETD_SEND_URL` (если задан), не через сервер сканирования: тот не узнаёт t-адрес пула. Сумма и t-адрес шилд-tx публичны (как любой t→z), адресат — нет.
+- txid по умолчанию не печатается (`--show-txid`, если нужен). `--min-zat` (по умолчанию 20 000) — меньше не шилдит.
+- Кошельки, созданные до 16.10 (локальный testnet-пул), прозрачного ключа не имеют: `address --transparent` отвечает «created before GAP-2». Mainnet-пулы (Solana и hood) создаются `init` этой сборкой — у них t-адрес есть. Обход для старого кошелька — только явный `UNZEEN_REBALANCE_REFUND_TADDR`.
+
+### 6.2 `needs_review` → `unzeen-api review-job` (GAP-11)
+```bash
+./core/target/release/unzeen-api review-job                 # список: id, op, venue, сеть, суммы задания, возраст
+./core/target/release/unzeen-api review-job 42 --show-signature   # одно задание + хеш tx для Blockscout/Solscan
+./core/target/release/unzeen-api review-job 42 --reparse    # hood: отдать релейеру сейчас, он перечитает receipt из цепочки
+./core/target/release/unzeen-api review-job 42 --confirm --out-token-amount N --out-lamports W [--out-mint M] [--slot B] --yes
+./core/target/release/unzeen-api review-job 42 --fail --yes # ТОЛЬКО если tx не потратила средства: core вернёт ZEC
+```
+- Порядок: сначала `--reparse` (суммы из цепочки, не руками). Если через ~1 мин задание снова `needs_review` — смотреть tx в explorer и делать `--confirm` с фактами (wei/лампорты, базовые единицы токена) или `--fail`.
+- `--confirm` проверяет суммы против задания: buy — потрачено ≤ `lamports_in` и токенов > 0; sell — продано ≤ `token_amount`; create — нужен `--out-mint`; transfer — ровно `token_amount`; `fund_vaults` — `--out-lamports`. `attest` руками не подтверждается (только `--reparse`/`--fail`). Пары с ZEC: `--out-quote-amount` + `--out-quote-mint` вместо `--out-lamports`.
+- Меняет только задания в `needs_review` без `settled_at`. Если релейер успел разобрать сам — «left needs_review meanwhile», ничего не меняется. Дальше settler core закрывает действие за ~1 с.
+- `--reparse` только для hood: Solana-релейер `needs_review` не пишет.
+
+### 6.3 Meteora DBC и платформа LaunchLab «Unzeen» на mainnet (GAP-3, GAP-4; один раз на сеть, делает владелец)
+1. `SOLANA_CLUSTER=mainnet-beta UNZEEN_ALLOW_MAINNET=yes pnpm meteora:config --simulate`, затем то же для `pnpm launchlab:platform --simulate`. Скрипты печатают адрес partner (он же fee claimer и admin платформы), сколько нужно и сколько не хватает. Ориентир: ≈0.008 SOL на конфиг и ≈0.0075 SOL на платформу, вместе ≈0.016 SOL.
+2. Пополнить partner **из внешнего операторского кошелька**, как ключ `verify`. Никогда из vault и никогда с адреса ребаланса (публично связало бы торговые кошельки пула с fee claimer'ом). Скрипт на mainnet отказывает, пока денег не хватает.
+3. `... UNZEEN_ALLOW_MAINNET_SETUP=yes pnpm meteora:config --send` и подтвердить, введя адрес partner (или `--confirm-mainnet <partner>`). Записать напечатанный `METEORA_DBC_CONFIG_MAINNET` в main.env, добавить `meteora-dbc` в `UNZEEN_VENUES`, перезапустить релейер и API.
+4. То же для `pnpm launchlab:platform --send`. После перезапуска релейера WARN `LaunchLab platform unzeen switched off` пропадёт, create с `platform: "unzeen"` заработает (creator fee 0.30 %, у bonk 0). Пока платформы нет — create с `unzeen` получает `venue_unavailable` до подписи, запускать с `bonk`.
+5. Снять `UNZEEN_ALLOW_MAINNET_SETUP`. Перед `--send` обязательно `--simulate` уже с пополненным partner.

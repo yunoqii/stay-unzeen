@@ -144,9 +144,13 @@ export class LocalMetadataStore extends BaseMetadataStore {
   constructor(
     private readonly dir: string,
     private readonly baseUrl: string,
+    o: { requirePublicHttps?: boolean } = {},
   ) {
     super();
     if (!/^https?:\/\//.test(baseUrl)) throw new Error("UNZEEN_METADATA_BASE_URL must be an http(s) URL");
+    // Second layer of GAP-5 (mainnet): this store can never hand out a local URL.
+    const why = o.requirePublicHttps ? publicMetadataUrlProblem(baseUrl) : null;
+    if (why) throw new Error(`UNZEEN_METADATA_BASE_URL refused on mainnet (${why})`);
   }
 
   /** Public put for already-sanitized media (token intel: third-party images re-encoded by the indexer). */
@@ -200,12 +204,53 @@ export class PinataMetadataStore extends BaseMetadataStore {
   }
 }
 
-/** Store from env: PINATA_JWT -> Pinata, else UNZEEN_METADATA_DIR + UNZEEN_METADATA_BASE_URL. */
-export function metadataStoreFromEnv(defaultDir: string, env: NodeJS.ProcessEnv = process.env): MetadataStore | null {
+/**
+ * GAP-5: why a metadata base URL may not go on chain on mainnet (null = fine).
+ * The URI is written into the token's metadata FOREVER: on mainnet it must be
+ * public https on a non-local host (never 127.0.0.1 / localhost / LAN / .local).
+ */
+export function publicMetadataUrlProblem(base: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(base);
+  } catch {
+    return "not a URL";
+  }
+  if (u.protocol !== "https:") return "not https";
+  const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!h.includes(".") && !h.includes(":")) return "not a public host name";
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".lan") || h.endsWith(".home.arpa")) return "local host name";
+  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(h);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 127 || a === 10 || a === 0 || (a === 169 && b === 254) || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 100 && b >= 64 && b <= 127)) return "private or loopback address";
+  }
+  if (h.includes(":") && (h === "::1" || h === "::" || /^f[cd]/.test(h) || h.startsWith("fe80") || h.startsWith("::ffff:"))) return "private or loopback address";
+  return null;
+}
+
+/**
+ * Store from env: PINATA_JWT -> Pinata, else UNZEEN_METADATA_DIR + UNZEEN_METADATA_BASE_URL.
+ * On mainnet (`cluster` = mainnet-beta) a local store is REFUSED unless its base URL
+ * is public https (`publicMetadataUrlProblem`): null + `onRefuse(reason)`, so create
+ * jobs fail `venue_unavailable` before anything is signed.
+ */
+export function metadataStoreFromEnv(
+  defaultDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  o: { cluster?: string; onRefuse?: (reason: string) => void } = {},
+): MetadataStore | null {
   const jwt = env.PINATA_JWT?.trim();
   if (jwt) return new PinataMetadataStore(jwt, env.PINATA_GATEWAY_URL?.trim() || undefined);
   const base = env.UNZEEN_METADATA_BASE_URL?.trim();
   if (!base) return null;
+  if (o.cluster === "mainnet-beta") {
+    const why = publicMetadataUrlProblem(base);
+    if (why) {
+      o.onRefuse?.(`UNZEEN_METADATA_BASE_URL refused on mainnet (${why}): it would be written on chain forever; set PINATA_JWT or a public https URL. Create jobs fail venue_unavailable`);
+      return null;
+    }
+  }
   const dir = env.UNZEEN_METADATA_DIR?.trim() || defaultDir;
-  return new LocalMetadataStore(dir, base);
+  return new LocalMetadataStore(dir, base, { requirePublicHttps: o.cluster === "mainnet-beta" });
 }

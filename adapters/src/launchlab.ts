@@ -294,8 +294,9 @@ export class LaunchLabAdapter {
    * a missing or changed one is removed (its creates fail venue_unavailable). Returns warnings.
    */
   async checkPlatforms(): Promise<string[]> {
+    const own = await this.checkOwnPlatform();
     const names = [...this.platforms.keys()].filter((n) => LAUNCHLAB_PLATFORM_PINS[n]);
-    if (names.length === 0) return [];
+    if (names.length === 0) return own;
     let accs: (AccountInfo<Buffer> | null)[];
     try {
       accs = await this.rpc(() => this.connection.getMultipleAccountsInfo(names.map((n) => this.platforms.get(n)!)));
@@ -320,7 +321,27 @@ export class LaunchLabAdapter {
         warnings.push(`LaunchLab platform ${n} switched off: ${why}`);
       }
     });
-    return warnings;
+    return [...own, ...warnings];
+  }
+
+  /**
+   * Our own platform ("unzeen", PDA of the partner key) is served only once
+   * `pnpm launchlab:platform --send` created it on this network (GAP-4): a missing
+   * account switches it off (creates -> venue_unavailable instead of a failed tx).
+   * An RPC error keeps it (our own config; the create tx would fail on chain anyway).
+   */
+  private async checkOwnPlatform(): Promise<string[]> {
+    const id = this.platforms.get("unzeen");
+    if (!id) return [];
+    let acc: AccountInfo<Buffer> | null;
+    try {
+      acc = await this.rpc(() => this.connection.getAccountInfo(id));
+    } catch {
+      return [];
+    }
+    if (acc && acc.owner.equals(this.program)) return [];
+    this.platforms.delete("unzeen");
+    return ["LaunchLab platform unzeen switched off: not created on this network (pnpm launchlab:platform)"];
   }
 
   platformIds(): Record<string, string> {

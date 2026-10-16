@@ -22,6 +22,7 @@ pub mod orders;
 pub mod payouts;
 pub mod quotes;
 pub mod rebalance;
+pub mod review;
 pub mod scenarios;
 pub mod stats;
 pub mod verify;

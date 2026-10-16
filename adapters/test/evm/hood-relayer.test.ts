@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Address } from "viem";
-import { FunderPool } from "../../src/evm/funders";
+import { FUNDER_DEFAULTS, FunderPool, funderOptionsFromEnv, funderPollMsFromEnv } from "../../src/evm/funders";
 import { EvmFeeCache } from "../../src/evm/fees";
 import { EvmKeyring } from "../../src/evm/keys";
 import { FileLaunchStore } from "../../src/evm/relayer/launches";
@@ -77,6 +77,93 @@ describe("funder rotation", () => {
 
   it("top-up plan: only low funders, round lots", async () => {
     const pool = new FunderPool({ executor: fake((a) => (a === kr.funder(1).address ? 3n * 10n ** 15n : 10n ** 17n)), keyring: kr, count: 3 });
-    expect(await pool.plan()).toEqual([{ index: 1, value: 5n * 10n ** 16n }]); // 0.05 - 0.003 -> ceil to 0.01
+    expect(await pool.plan()).toEqual([{ index: 1, value: 2n * 10n ** 16n }]); // 0.02 - 0.003 -> ceil to 0.005
+    const big = new FunderPool({ executor: fake((a) => (a === kr.funder(1).address ? 3n * 10n ** 15n : 10n ** 17n)), keyring: kr, count: 3, targetWei: 5n * 10n ** 16n, lowWei: 2n * 10n ** 16n, lotWei: 10n ** 16n });
+    expect(await big.plan()).toEqual([{ index: 1, value: 5n * 10n ** 16n }]); // 0.05 - 0.003 -> ceil to 0.01
+  });
+});
+
+describe("GAP-7: funder thresholds from env", () => {
+  it("defaults are demo-sized: target 0.02, low 0.011, lot 0.005 ETH", () => {
+    expect(funderOptionsFromEnv({})).toEqual({ targetWei: 20_000_000_000_000_000n, lowWei: 11_000_000_000_000_000n, lotWei: 5_000_000_000_000_000n });
+    expect(FUNDER_DEFAULTS.targetWei).toBe(20_000_000_000_000_000n);
+  });
+  it("env overrides; validation low < target, lot <= target, integers > 0", () => {
+    expect(funderOptionsFromEnv({ HOOD_FUNDER_TARGET_WEI: "50000000000000000", HOOD_FUNDER_LOW_WEI: "20000000000000000", HOOD_FUNDER_LOT_WEI: "10000000000000000" })).toEqual({
+      targetWei: 5n * 10n ** 16n,
+      lowWei: 2n * 10n ** 16n,
+      lotWei: 10n ** 16n,
+    });
+    expect(() => funderOptionsFromEnv({ HOOD_FUNDER_LOW_WEI: "20000000000000000" })).toThrow(/LOW_WEI must be below/);
+    expect(() => funderOptionsFromEnv({ HOOD_FUNDER_LOT_WEI: "30000000000000000" })).toThrow(/LOT_WEI must not exceed/);
+    expect(() => funderOptionsFromEnv({ HOOD_FUNDER_TARGET_WEI: "0.02" })).toThrow(/integer in wei/);
+    expect(() => funderOptionsFromEnv({ HOOD_FUNDER_TARGET_WEI: "0" })).toThrow(/> 0/);
+    const ex = { fees: new EvmFeeCache(200_000_000n, async () => 1n), balance: async () => 0n } as unknown as EvmExecutor;
+    expect(() => new FunderPool({ executor: ex, keyring: new EvmKeyring(TEST_MNEMONIC), lowWei: 5n, targetWei: 5n })).toThrow(RangeError);
+  });
+  it("GAP-8 poll interval: HOOD_FUNDER_POLL_SECS 30..3600, default 300 s", () => {
+    expect(funderPollMsFromEnv({})).toBe(300_000);
+    expect(funderPollMsFromEnv({ HOOD_FUNDER_POLL_SECS: "120" })).toBe(120_000);
+    expect(() => funderPollMsFromEnv({ HOOD_FUNDER_POLL_SECS: "5" })).toThrow(/30..3600/);
+  });
+});
+
+describe("GAP-8: funder top-up when ETH arrives on the rebalance address", () => {
+  const kr = new EvmKeyring(TEST_MNEMONIC);
+  const REB = kr.rebalance(0).address;
+  const ETH = 10n ** 18n;
+  function world(rebalance: bigint, funders: bigint[]) {
+    const bal = new Map<string, bigint>([[REB, rebalance], ...funders.map((b, i) => [kr.funder(i).address, b] as [string, bigint])]);
+    const transfers: { from: string; to: string; value: bigint }[] = [];
+    const fees = new EvmFeeCache(1_000_000_000n, async () => 1n);
+    const ex = {
+      fees,
+      balance: async (a: Address) => bal.get(a) ?? 0n,
+      transfer: async (from: { address: Address }, to: Address, value: bigint) => {
+        const gas = 100_000n * fees.maxFeePerGas;
+        if ((bal.get(from.address) ?? 0n) < value + gas) throw new Error("insufficient");
+        bal.set(from.address, (bal.get(from.address) ?? 0n) - value - gas);
+        bal.set(to, (bal.get(to) ?? 0n) + value);
+        transfers.push({ from: from.address, to, value });
+        return {};
+      },
+    } as unknown as EvmExecutor;
+    const pool = new FunderPool({ executor: ex, keyring: kr, count: funders.length, sleep: async () => undefined });
+    return { bal, transfers, pool };
+  }
+
+  it("first poll only records; no change -> nothing; arrival -> low funders topped up from rebalance only", async () => {
+    const w = world(0n, [0n]);
+    expect(await w.pool.topUpOnArrival()).toEqual({ arrived: false, sent: 0, totalWei: 0n });
+    expect(await w.pool.topUpOnArrival()).toEqual({ arrived: false, sent: 0, totalWei: 0n });
+    w.bal.set(REB, (22n * ETH) / 1000n); // 1Click delivered 0.022 ETH (plan: keep on rebalance-0)
+    const r = await w.pool.topUpOnArrival();
+    expect(r).toEqual({ arrived: true, sent: 1, totalWei: (2n * ETH) / 100n });
+    expect(w.transfers).toEqual([{ from: REB, to: kr.funder(0).address, value: (2n * ETH) / 100n }]);
+    // our own outflow is not an arrival
+    expect((await w.pool.topUpOnArrival()).arrived).toBe(false);
+    expect(w.transfers).toHaveLength(1);
+  });
+
+  it("only what the rebalance address can pay is sent (no failing transfer); the rest waits", async () => {
+    const w = world(0n, [0n, 0n]);
+    await w.pool.topUpOnArrival();
+    w.bal.set(REB, (25n * ETH) / 1000n); // covers one 0.02 lot + gas, not two
+    const r = await w.pool.topUpOnArrival();
+    expect(r.sent).toBe(1);
+    expect(w.transfers).toHaveLength(1);
+    w.bal.set(REB, (w.bal.get(REB) ?? 0n) + (3n * ETH) / 100n); // next lot arrives
+    expect((await w.pool.topUpOnArrival()).sent).toBe(1);
+    expect(new Set(w.transfers.map((t) => t.to)).size).toBe(2);
+    expect(w.transfers.every((t) => t.from === REB)).toBe(true);
+  });
+
+  it("top-ups are serialized: the 1–3 h cycle and the poll never double-fund", async () => {
+    const w = world(ETH, [0n]);
+    await w.pool.topUpOnArrival(); // record
+    w.bal.set(REB, 2n * ETH);
+    const [a, b] = await Promise.all([w.pool.topUp(), w.pool.topUpOnArrival()]);
+    expect(a.sent + b.sent).toBe(1);
+    expect(w.bal.get(kr.funder(0).address)).toBe((2n * ETH) / 100n);
   });
 });
