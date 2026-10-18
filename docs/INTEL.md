@@ -85,7 +85,7 @@
                    "riskyExtensions": ["permanentDelegate" | "transferHook" | "transferFee" | "defaultFrozen" | "mintClose" | "pausable"] },
   "holders": { "top10Pct": "12.5", "devPct": "3.1" | null, "unzeenPoolPct": "0.8",
                "count": 1234 },                                                       // необязательно; asOf ставит core = as_of; count (v3) — пока не пишется
-  "market": { "venue": "pumpfun" | "meteora-dbc" | "jupiter", "status": "curve" | "graduated",
+  "market": { "venue": "pumpfun" | "meteora-dbc" | "raydium-launchlab" | "jupiter", "status": "curve" | "graduated",
               "curveProgressPct": "41.2", "lpBurnedPct": "100" },                     // проценты — десятичные строки
               // meteora-dbc: lpBurnedPct = доля LP, заблокированного навсегда (позиция DAMM v2), а не сожжённый LP-mint
   "socials": { "twitter": "https://x.com/…", "telegram": "https://t.me/…", "website": "https://…" },  // необязательно

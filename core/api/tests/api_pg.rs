@@ -150,7 +150,12 @@ fn config(url: &str) -> Config {
             zec_spread_bps: 30,
             zec_virtual_units: 271_890_000,
         },
-        comfort: unzeen_api::config::ComfortConfig::default(),
+        // v0.28 timers (Pulse, progress sampling, quote rounds) off: tests drive the steps, so
+        // no test depends on their timing and parallel tests do not load the database with them.
+        comfort: unzeen_api::config::ComfortConfig {
+            timers: false,
+            ..Default::default()
+        },
     }
 }
 
@@ -6335,6 +6340,8 @@ mod comfort_v028 {
             "UPDATE {s}.intel_discovery SET progress_pct = 90.00 WHERE mint = '{D_NEW}'"
         ))
         .await;
+        let v = unzeen_api::comfort::build_pulse(&e.state).await.unwrap();
+        e.state.pulse.put(v.to_string()).await;
         let changed = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(Ok(Message::Text(t))) = ws.next().await {
@@ -6524,16 +6531,19 @@ mod comfort_v028 {
         format!("http://{addr}")
     }
 
+    /// The quote grid is filled by a background round (here driven by the test); user
+    /// requests are answered from it only — they never reach Jupiter.
     #[tokio::test]
-    async fn quote_bucketed_cached_limited() {
+    async fn quote_from_background_grid_only() {
         let hits = Arc::new(AtomicUsize::new(0));
         let url = mock_jupiter(hits.clone()).await;
         let Some(e) = setup_with(move |c| {
             c.comfort.quote = Some(unzeen_api::config::JupiterQuoteConfig {
                 url,
                 api_key: None,
-                rps: 0.2,
-                burst: 2.0,
+                rps: 1.0,
+                round_secs: 600,
+                max_mints: 40,
             });
         })
         .await
@@ -6541,41 +6551,61 @@ mod comfort_v028 {
             return;
         };
         let s = e.schema.clone();
+        // Graduated pool token (1e-6 SOL per whole token) and a curve token (not quoted).
         e.sql(&format!(
-            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, status) VALUES ('{MINT2}', 'pumpfun', 'G', 'G', 6, 'graduated')"
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol, status) VALUES
+               ('{MINT2}', 'pumpfun', 'G', 'G', 6, 0.000001, 1000, 'graduated'),
+               ('{P1}', 'pumpfun', 'C', 'C', 6, 0.000001, 1000, 'curve')"
         ))
         .await;
         e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
         assert_eq!(e.get("/api/pool").await.body["features"]["quote"], true);
+        // Before the first round: nothing to answer from, and no upstream call.
+        let r = e
+            .get(&format!("/api/quote?mint={MINT2}&side=buy&amount=123456789"))
+            .await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        let svc = e.state.quotes.clone().unwrap();
+        let n = unzeen_api::comfort::quote_round(&e.state, &svc, Duration::ZERO)
+            .await
+            .unwrap();
+        let grid = unzeen_api::comfort::QUOTE_GRID_LAMPORTS.len();
+        assert_eq!(n, 2 * grid, "one token × both sides × the grid");
+        assert_eq!(hits.load(Ordering::SeqCst), 2 * grid);
+        // Between grid points: the chord (mock is linear, so exact): buy 123 456 789 lamports → ×1000.
         let r = e
             .get(&format!("/api/quote?mint={MINT2}&side=buy&amount=123456789"))
             .await;
         assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
         assert_eq!(r.headers["cache-control"], "public, max-age=10");
-        assert_eq!(r.body["inAmount"], "130000000", "rounded up to 2 significant digits");
-        assert_eq!(r.body["outAmount"], "130000000000");
+        assert_eq!(r.body["inAmount"], "123456789");
+        assert_eq!(r.body["outAmount"], "123456789000");
         assert_eq!(r.body["priceImpactPct"], "1.2500");
         assert_eq!(r.body["route"], json!(["Pump.fun Amm"]));
-        assert_eq!(r.body["side"], "buy");
-        // Same bucket: from the cache (one upstream call).
-        let r2 = e
-            .get(&format!("/api/quote?mint={MINT2}&side=buy&amount=129000000"))
+        assert_eq!(r.body["maxAmount"], "25000000000");
+        // Sell grid: tokens worth the grid lamports at the public price (0.01 SOL = 1e10 units).
+        let r = e
+            .get(&format!("/api/quote?mint={MINT2}&side=sell&amount=10000000000"))
             .await;
-        assert_eq!(r2.body, r.body);
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
-        // A new bucket uses the second burst token; the third is over the upstream limit.
-        let r3 = e
-            .get(&format!("/api/quote?mint={MINT2}&side=sell&amount=5000000"))
+        assert_eq!(r.body["outAmount"], "10000000", "{:?}", r.body);
+        // Below the first point: proportional; above the last: not served.
+        let r = e.get(&format!("/api/quote?mint={MINT2}&side=buy&amount=1000")).await;
+        assert_eq!(r.body["outAmount"], "1000000");
+        let r = e
+            .get(&format!("/api/quote?mint={MINT2}&side=buy&amount=25000000001"))
             .await;
-        assert_eq!(r3.status, StatusCode::OK);
-        assert_eq!(r3.body["outAmount"], "5000");
-        let r4 = e
-            .get(&format!("/api/quote?mint={MINT2}&side=sell&amount=7000000"))
-            .await;
-        assert_eq!((r4.status, code(&r4)), (StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
-        assert!(r4.headers.get("retry-after").is_some());
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
-        // Validation and unknown mints (not queued for the indexer).
+        assert_eq!(r.status, StatusCode::NOT_FOUND);
+        // Not graduated / unknown: not in the grid.
+        assert_eq!(
+            e.get(&format!("/api/quote?mint={P1}&side=buy&amount=1000"))
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        // No request ever reached Jupiter because of a user.
+        assert_eq!(hits.load(Ordering::SeqCst), 2 * grid);
+        // Validation.
         for bad in [
             format!("/api/quote?mint={MINT2}&side=hold&amount=1"),
             format!("/api/quote?mint={MINT2}&side=buy&amount=0"),
@@ -6585,11 +6615,18 @@ mod comfort_v028 {
         ] {
             assert_eq!(e.get(&bad).await.status, StatusCode::BAD_REQUEST, "{bad}");
         }
+        // A token that left the candidate set is dropped on the next round.
+        e.sql(&format!("UPDATE {s}.tokens SET price_sol = 0 WHERE mint = '{MINT2}'"))
+            .await;
+        unzeen_api::comfort::quote_round(&e.state, &svc, Duration::ZERO)
+            .await
+            .unwrap();
         assert_eq!(
-            e.get(&format!("/api/quote?mint={P1}&side=buy&amount=1")).await.status,
+            e.get(&format!("/api/quote?mint={MINT2}&side=buy&amount=1000"))
+                .await
+                .status,
             StatusCode::NOT_FOUND
         );
-        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.intel_requests")).await, 0);
         e.drop_schema().await;
         // Off (devnet default): the path does not exist, no feature flag.
         let Some(e) = setup().await else { return };

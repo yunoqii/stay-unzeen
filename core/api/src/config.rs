@@ -61,6 +61,9 @@ pub struct ComfortConfig {
     pub eta_window_secs: u32,
     /// `GET /api/quote` (Jupiter); `None` = off (devnet, Robinhood Chain, UNZEEN_QUOTE=0).
     pub quote: Option<JupiterQuoteConfig>,
+    /// Background timers of this module (Pulse, progress sampling, quote rounds). Always on in
+    /// the server; integration tests turn them off and drive the steps themselves.
+    pub timers: bool,
 }
 
 impl Default for ComfortConfig {
@@ -69,6 +72,7 @@ impl Default for ComfortConfig {
             graduating_pct: 70,
             eta_window_secs: 600,
             quote: None,
+            timers: true,
         }
     }
 }
@@ -79,9 +83,13 @@ pub struct JupiterQuoteConfig {
     pub url: String,
     /// `x-api-key` (JUPITER_API_KEY); keyless when absent. Never logged.
     pub api_key: Option<String>,
-    /// Upstream requests per second for the whole server (UNZEEN_QUOTE_RPS, default 1) and burst (5).
+    /// Upstream requests per second at most (UNZEEN_QUOTE_RPS, default 1).
     pub rps: f64,
-    pub burst: f64,
+    /// One quoting round of the whole grid every this many seconds ± 20 % (UNZEEN_QUOTE_ROUND_SECS,
+    /// 60..3600, default 600).
+    pub round_secs: u32,
+    /// Graduated tokens quoted per round (UNZEEN_QUOTE_MAX_MINTS, 1..200, default 40).
+    pub max_mints: u32,
 }
 
 /// Scenarios (API v0.19, docs/analysis/scenarios.md). Off: no `features.scenarios`, the ops
@@ -718,6 +726,8 @@ impl Config {
         {
             bail!("UNZEEN_LAUNCH_*: need virtual reserves > 0 and > the creator cap");
         }
+        let quote_round_secs = num::<u32>("UNZEEN_QUOTE_ROUND_SECS", 600)?.clamp(60, 3_600);
+        let quote_max_mints = num::<u32>("UNZEEN_QUOTE_MAX_MINTS", 40)?.clamp(1, 200);
         let cfg = Config {
             bind: var("API_BIND")
                 .unwrap_or_else(|| "127.0.0.1:8080".into())
@@ -882,8 +892,10 @@ impl Config {
                         .and_then(|v| v.parse::<f64>().ok())
                         .filter(|r| *r > 0.0 && *r <= 50.0)
                         .unwrap_or(1.0),
-                    burst: 5.0,
+                    round_secs: quote_round_secs,
+                    max_mints: quote_max_mints,
                 }),
+                timers: true,
             },
             scenarios: {
                 let enabled = var("UNZEEN_SCENARIOS").as_deref() == Some("1");

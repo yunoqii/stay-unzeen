@@ -964,9 +964,15 @@ pub fn spawn_background(st: &AppState) {
     let s = st.clone();
     tokio::spawn(market::poll_trades(s));
     tokio::spawn(intel::warm_sync_loop(st.clone()));
-    // v0.28: curve progress history (ETA) and the Pulse body, on core's own timers.
-    tokio::spawn(comfort::progress_loop(st.clone()));
-    tokio::spawn(comfort::pulse_loop(st.clone()));
+    // v0.28: curve progress history (ETA), the Pulse body and the Jupiter quote grid, on core's
+    // own timers (tests drive these steps themselves).
+    if st.cfg.comfort.timers {
+        tokio::spawn(comfort::progress_loop(st.clone()));
+        tokio::spawn(comfort::pulse_loop(st.clone()));
+        if let Some(q) = st.quotes.clone() {
+            tokio::spawn(comfort::quote_loop(st.clone(), q));
+        }
+    }
     if st.cfg.fair.enabled {
         tokio::spawn(fair::scheduler_loop(st.clone()));
     }

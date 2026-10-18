@@ -222,7 +222,7 @@ pub fn safety_json(mint: &str, as_of_ms: i64, d: &Value, launch: Option<(u64, u6
     let venue = m
         .get("venue")?
         .as_str()
-        .filter(|v| ["pumpfun", "meteora-dbc", "jupiter"].contains(v))?;
+        .filter(|v| ["pumpfun", "meteora-dbc", "raydium-launchlab", "jupiter"].contains(v))?;
     let status = m
         .get("status")?
         .as_str()
@@ -412,6 +412,14 @@ mod tests {
         s["authorities"]["freezeRevoked"] = json!(false);
         let v = safety_json("M", 0, &s, Some((86_400, 500))).unwrap();
         assert_eq!(v["unzeen"]["rules"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn launchlab_snapshots_are_served() {
+        let mut d = snap();
+        d["market"]["venue"] = json!("raydium-launchlab");
+        let v = safety_json("M", 60_000, &d, None).expect("LaunchLab venue accepted");
+        assert_eq!(v["market"]["venue"], "raydium-launchlab");
     }
 
     #[test]

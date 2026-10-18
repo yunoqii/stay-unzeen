@@ -29,7 +29,6 @@ use crate::{
     config::JupiterQuoteConfig,
     error::{ApiError, ApiResult},
     intel::{media_url_ok, safety_json},
-    limit::Limiter,
     market::{client, db},
     rate::now_ms,
 };
@@ -619,24 +618,23 @@ async fn ws_loop(mut sock: WebSocket, mut rx: broadcast::Receiver<Arc<str>>, fir
 
 // ------------------------------------------------------------------ Jupiter quotes
 
-const QUOTE_CACHE_SECS: u64 = 10;
-const QUOTE_CACHE_MAX: usize = 4_096;
 const WSOL: &str = "So11111111111111111111111111111111111111112";
 const QUOTE_MAX_BODY: usize = 256 * 1024;
+/// Response cache of `GET /api/quote` (the answer only changes when the grid does).
+const QUOTE_CACHE_SECS: u32 = 10;
 
-/// Round up to 2 significant digits (12 345 → 13 000; ≤ 99 unchanged).
-pub fn bucket_up(x: u64) -> u64 {
-    if x < 100 {
-        return x;
-    }
-    let mut p = 1u64;
-    while x / p >= 100 {
-        p *= 10;
-    }
-    x.div_ceil(p).saturating_mul(p)
-}
+/// The fixed grid (lamports, log-spaced 0.01 .. 25 SOL): buys spend these, sells sell the
+/// tokens worth these at the public spot price. Same grid for every token, every round.
+pub const QUOTE_GRID_LAMPORTS: [u64; 6] = [
+    10_000_000,
+    50_000_000,
+    250_000_000,
+    1_000_000_000,
+    5_000_000_000,
+    25_000_000_000,
+];
 
-/// The fields of a Jupiter `/quote` answer we serve; `None` if malformed.
+/// The fields of a Jupiter `/quote` answer we keep; `None` if malformed.
 pub fn parse_jupiter(body: &Value) -> Option<(String, String, Vec<String>)> {
     let out = body.get("outAmount")?.as_str()?;
     if out.is_empty() || out.len() > 39 || !out.bytes().all(|b| b.is_ascii_digit()) {
@@ -681,13 +679,66 @@ pub fn parse_jupiter(body: &Value) -> Option<(String, String, Vec<String>)> {
     Some((out, pct, route))
 }
 
-type QuoteKey = (String, bool, u64);
+/// One quoted grid point.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridPoint {
+    /// Input: lamports (buy) or token base units (sell).
+    pub input: u128,
+    pub output: u128,
+    /// Impact, % with 4 decimals as a string from Jupiter, parsed.
+    pub impact_pct: f64,
+    pub route: Vec<String>,
+    /// unix ms of the quote.
+    pub at: i64,
+}
+
+/// Quote for `amount` from a grid (any order): proportional below the first point (the
+/// chord from 0 lies under a concave curve: conservative), linear between neighbours (the
+/// chord again), the impact of the upper neighbour. `None` above the last point or without
+/// points. Returns (output, impact %, route, oldest quote time used).
+pub fn interpolate(points: &[GridPoint], amount: u128) -> Option<(u128, f64, Vec<String>, i64)> {
+    let mut p: Vec<&GridPoint> = points.iter().filter(|x| x.input > 0).collect();
+    p.sort_by_key(|x| x.input);
+    let last = p.last()?;
+    if amount == 0 || amount > last.input {
+        return None;
+    }
+    let i = p.iter().position(|x| x.input >= amount)?;
+    let b = p[i];
+    if i == 0 {
+        let out = unzeen_fair::alloc::mul_div(b.output, amount, b.input)?;
+        return Some((out, b.impact_pct, b.route.clone(), b.at));
+    }
+    let a = p[i - 1];
+    let span = b.input - a.input;
+    let out = if b.output >= a.output {
+        a.output + unzeen_fair::alloc::mul_div(b.output - a.output, amount - a.input, span)?
+    } else {
+        // Malformed grid (more in, less out): the smaller of the two.
+        b.output
+    };
+    Some((out, b.impact_pct, b.route.clone(), a.at.min(b.at)))
+}
+
+/// Tokens worth `lamports` at spot `price_e18` (SOL per whole token × 1e18).
+pub fn tokens_for_lamports(lamports: u64, price_e18: u128, decimals: u32) -> Option<u128> {
+    if price_e18 == 0 {
+        return None;
+    }
+    unzeen_fair::alloc::mul_div(u128::from(lamports), 10u128.checked_pow(decimals + 9)?, price_e18)
+        .filter(|t| *t > 0 && *t <= u128::from(u64::MAX))
+}
+
+#[derive(Default)]
+struct Grids {
+    /// (mint, buy) → points by grid slot.
+    points: HashMap<(String, bool), [Option<GridPoint>; QUOTE_GRID_LAMPORTS.len()]>,
+}
 
 pub struct QuoteService {
     cfg: JupiterQuoteConfig,
     http: reqwest::Client,
-    upstream: Limiter,
-    cache: Mutex<HashMap<QuoteKey, (Instant, Value)>>,
+    grids: Mutex<Grids>,
 }
 
 impl QuoteService {
@@ -699,39 +750,48 @@ impl QuoteService {
             .build()
             .expect("reqwest client");
         Self {
-            upstream: Limiter::new(cfg.rps, cfg.burst),
             cfg,
             http,
-            cache: Mutex::new(HashMap::new()),
+            grids: Mutex::new(Grids::default()),
         }
     }
 
-    fn cached(&self, k: &QuoteKey) -> Option<Value> {
-        let c = self.cache.lock().unwrap_or_else(|p| p.into_inner());
-        c.get(k)
-            .filter(|(at, _)| at.elapsed() < Duration::from_secs(QUOTE_CACHE_SECS))
-            .map(|(_, v)| v.clone())
+    /// Points older than two rounds (+ slack) are not served.
+    fn max_age_ms(&self) -> i64 {
+        i64::from(self.cfg.round_secs) * 2_400
     }
 
-    fn store(&self, k: QuoteKey, v: Value) {
-        let mut c = self.cache.lock().unwrap_or_else(|p| p.into_inner());
-        if c.len() >= QUOTE_CACHE_MAX {
-            c.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(QUOTE_CACHE_SECS));
-            if c.len() >= QUOTE_CACHE_MAX {
-                c.clear();
+    fn put(&self, mint: &str, buy: bool, slot: usize, p: GridPoint) {
+        let mut g = self.grids.lock().unwrap_or_else(|e| e.into_inner());
+        g.points.entry((mint.to_string(), buy)).or_default()[slot] = Some(p);
+    }
+
+    /// Forget mints that left the candidate set and stale points.
+    fn prune(&self, keep: &std::collections::HashSet<String>, now: i64) {
+        let max = self.max_age_ms();
+        let mut g = self.grids.lock().unwrap_or_else(|e| e.into_inner());
+        g.points.retain(|(m, _), slots| {
+            for s in slots.iter_mut() {
+                if s.as_ref().is_some_and(|p| p.at < now - max) {
+                    *s = None;
+                }
             }
-        }
-        c.insert(k, (Instant::now(), v));
+            keep.contains(m) && slots.iter().any(Option::is_some)
+        });
     }
 
-    async fn fetch(&self, mint: &str, buy: bool, amount: u64) -> ApiResult<Value> {
-        let k: QuoteKey = (mint.to_string(), buy, amount);
-        if let Some(v) = self.cached(&k) {
-            return Ok(v);
-        }
-        if let Err(secs) = self.upstream.check(&0u8) {
-            return Err(ApiError::rate_limited(secs.max(1)));
-        }
+    /// Fresh points of (mint, side).
+    pub fn points(&self, mint: &str, buy: bool, now: i64) -> Vec<GridPoint> {
+        let max = self.max_age_ms();
+        let g = self.grids.lock().unwrap_or_else(|e| e.into_inner());
+        g.points
+            .get(&(mint.to_string(), buy))
+            .map(|s| s.iter().flatten().filter(|p| p.at >= now - max).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// One upstream quote. Nothing of the request or the answer is logged.
+    async fn fetch(&self, mint: &str, buy: bool, amount: u128) -> Option<GridPoint> {
         let (input, output) = if buy { (WSOL, mint) } else { (mint, WSOL) };
         let url = format!(
             "{}/quote?inputMint={input}&outputMint={output}&amount={amount}&slippageBps=50&restrictIntermediateTokens=true",
@@ -741,36 +801,110 @@ impl QuoteService {
         if let Some(key) = &self.cfg.api_key {
             rq = rq.header("x-api-key", key);
         }
-        // Nothing of the request or the answer is logged.
-        let unavailable = || ApiError::venue_unavailable("no Jupiter quote");
-        let resp = rq.send().await.map_err(|_| unavailable())?;
-        if resp.status().as_u16() == 429 {
-            return Err(ApiError::rate_limited(2));
-        }
+        let resp = rq.send().await.ok()?;
         if !resp.status().is_success() {
-            return Err(unavailable());
+            return None;
         }
-        let bytes = resp.bytes().await.map_err(|_| unavailable())?;
+        let bytes = resp.bytes().await.ok()?;
         if bytes.len() > QUOTE_MAX_BODY {
-            return Err(unavailable());
+            return None;
         }
-        let body: Value = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
-        let (out, impact, route) = parse_jupiter(&body).ok_or_else(unavailable)?;
-        let v = json!({
-            "mint": mint,
-            "side": if buy { "buy" } else { "sell" },
-            "inAmount": amount.to_string(),
-            "outAmount": out,
-            "priceImpactPct": impact,
-            "route": route,
-            "asOf": now_ms(),
-        });
-        self.store(k, v.clone());
-        Ok(v)
+        let body: Value = serde_json::from_slice(&bytes).ok()?;
+        let (out, impact, route) = parse_jupiter(&body)?;
+        Some(GridPoint {
+            input: amount,
+            output: out.parse().ok()?,
+            impact_pct: impact.parse().ok()?,
+            route,
+            at: now_ms() as i64,
+        })
     }
 }
 
-/// `GET /api/quote?mint=&side=buy|sell&amount=` (mainnet, `features.quote`).
+/// Graduated tokens the pool trades or shows (pool tokens, then Pulse's graduated discovery
+/// tokens), SOL pairs with a public price: (mint, price, decimals).
+async fn quote_candidates(st: &AppState, max: i64) -> ApiResult<Vec<(String, String, i16)>> {
+    let c = client(st).await?;
+    let rows = c
+        .query(
+            "SELECT mint, price, dec FROM (
+               SELECT t.mint, trim_scale(t.price_sol)::text AS price, t.decimals AS dec, 0 AS k, t.created_at AS at
+                 FROM tokens t
+                WHERE t.quote_mint IS NULL AND t.price_sol > 0
+                  AND (t.status = 'graduated' OR t.venue = 'jupiter'
+                       OR EXISTS (SELECT 1 FROM intel_prices p WHERE p.mint = t.mint AND p.status = 'graduated'))
+               UNION ALL
+               SELECT d.mint, trim_scale(d.price_sol)::text, COALESCE(it.decimals, 6::smallint), 1, d.created_at
+                 FROM intel_discovery d LEFT JOIN intel_tokens it ON it.mint = d.mint
+                WHERE d.network = $1 AND d.status = 'graduated' AND d.price_sol > 0
+                  AND d.created_at > now() - interval '24 hours'
+                  AND NOT EXISTS (SELECT 1 FROM tokens t WHERE t.mint = d.mint)) x
+             ORDER BY k, at DESC LIMIT $2",
+            &[&st.cfg.cluster, &max],
+        )
+        .await
+        .map_err(db)?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
+}
+
+/// One round: every candidate × both sides × the whole grid, in random order, one request
+/// every `spacing` (± 30 %). The work depends only on the candidate set and the grid, never
+/// on a user request.
+pub async fn quote_round(st: &AppState, svc: &QuoteService, spacing: Duration) -> ApiResult<usize> {
+    let cands = quote_candidates(st, i64::from(svc.cfg.max_mints)).await?;
+    let mut tasks: Vec<(String, bool, usize, u128)> = Vec::new();
+    for (mint, price, dec) in &cands {
+        let p18 = crate::config::eth_to_wei(price).unwrap_or(0);
+        for (slot, l) in QUOTE_GRID_LAMPORTS.iter().enumerate() {
+            tasks.push((mint.clone(), true, slot, u128::from(*l)));
+            if let Some(t) = tokens_for_lamports(*l, p18, u32::try_from(*dec).unwrap_or(6)) {
+                tasks.push((mint.clone(), false, slot, t));
+            }
+        }
+    }
+    {
+        use rand::seq::SliceRandom;
+        tasks.shuffle(&mut rand::rng());
+    }
+    let mut ok = 0;
+    for (mint, buy, slot, amount) in tasks {
+        if let Some(p) = svc.fetch(&mint, buy, amount).await {
+            svc.put(&mint, buy, slot, p);
+            ok += 1;
+        }
+        if !spacing.is_zero() {
+            let j = 0.7 + rand::random::<f64>() * 0.6;
+            tokio::time::sleep(spacing.mul_f64(j)).await;
+        }
+    }
+    let keep = cands.into_iter().map(|c| c.0).collect();
+    svc.prune(&keep, now_ms() as i64);
+    Ok(ok)
+}
+
+/// Background quoting (mainnet): a round every `round_secs` (± 20 %), requests spread over
+/// the round and never faster than `rps`.
+pub async fn quote_loop(st: AppState, svc: Arc<QuoteService>) {
+    loop {
+        let n = quote_candidates(&st, i64::from(svc.cfg.max_mints))
+            .await
+            .map_or(0, |c| c.len())
+            * QUOTE_GRID_LAMPORTS.len()
+            * 2;
+        let round = f64::from(svc.cfg.round_secs);
+        let spacing = Duration::from_secs_f64((round * 0.8 / n.max(1) as f64).max(1.0 / svc.cfg.rps));
+        let t = Instant::now();
+        if let Err(e) = quote_round(&st, &svc, spacing).await {
+            tracing::warn!(code = e.code, "quote round failed");
+        }
+        let wait = round * (0.8 + rand::random::<f64>() * 0.4);
+        let left = (wait - t.elapsed().as_secs_f64()).max(10.0);
+        tokio::time::sleep(Duration::from_secs_f64(left)).await;
+    }
+}
+
+/// `GET /api/quote?mint=&side=buy|sell&amount=` (mainnet, `features.quote`): answered only
+/// from the background grid; no upstream request is ever made for it.
 pub async fn quote(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> ApiResult<Response> {
     let Some(svc) = st.quotes.as_ref() else {
         return Err(ApiError::not_found());
@@ -789,23 +923,22 @@ pub async fn quote(State(st): State<AppState>, Query(q): Query<HashMap<String, S
         .filter(|a| !a.is_empty() && a.len() <= 20 && a.bytes().all(|b| b.is_ascii_digit()) && !a.starts_with('0'))
         .and_then(|a| a.parse().ok())
         .ok_or_else(|| ApiError::bad_request("amount: integer > 0, ≤ u64"))?;
-    // Known mints only (never queued for the indexer from here).
-    let c = client(&st).await?;
-    let known = c
-        .query_opt(
-            "SELECT 1 FROM tokens WHERE mint = $1 UNION ALL SELECT 1 FROM intel_tokens WHERE mint = $1
-             UNION ALL SELECT 1 FROM intel_discovery WHERE mint = $1 AND network = $2 LIMIT 1",
-            &[&mint, &st.cfg.cluster],
-        )
-        .await
-        .map_err(db)?
-        .is_some();
-    drop(c);
-    if !known {
+    let points = svc.points(&mint, buy, now_ms() as i64);
+    let max = points.iter().map(|p| p.input).max();
+    let Some((out, impact, route, at)) = interpolate(&points, u128::from(amount)) else {
         return Err(ApiError::not_found());
-    }
-    let v = svc.fetch(&mint, buy, bucket_up(amount)).await?;
-    Ok(crate::market::public(v, QUOTE_CACHE_SECS as u32))
+    };
+    let v = json!({
+        "mint": mint,
+        "side": if buy { "buy" } else { "sell" },
+        "inAmount": amount.to_string(),
+        "outAmount": out.to_string(),
+        "priceImpactPct": format!("{impact:.4}"),
+        "route": route,
+        "maxAmount": max.unwrap_or(0).to_string(),
+        "asOf": at,
+    });
+    Ok(crate::market::public(v, QUOTE_CACHE_SECS))
 }
 
 #[cfg(test)]
@@ -918,19 +1051,60 @@ mod tests {
         assert_eq!(columns(many, now, 70).0.len(), PULSE_COLUMN);
     }
 
-    #[test]
-    fn buckets_round_up_to_two_digits() {
-        assert_eq!(bucket_up(1), 1);
-        assert_eq!(bucket_up(99), 99);
-        assert_eq!(bucket_up(100), 100);
-        assert_eq!(bucket_up(101), 110);
-        assert_eq!(bucket_up(12_345), 13_000);
-        assert_eq!(bucket_up(1_000_000_000), 1_000_000_000);
-        assert_eq!(bucket_up(1_000_000_001), 1_100_000_000);
-        assert!(bucket_up(u64::MAX) >= 18_000_000_000_000_000_000);
-        for x in [150u64, 7_777, 123_456_789] {
-            assert!(bucket_up(x) >= x && bucket_up(x) * 100 <= x * 110, "{x}");
+    fn gp(input: u128, output: u128, at: i64) -> GridPoint {
+        GridPoint {
+            input,
+            output,
+            impact_pct: input as f64 / 1e9,
+            route: vec![format!("r{input}")],
+            at,
         }
+    }
+
+    #[test]
+    fn grid_interpolation_is_conservative() {
+        // Concave curve out = 1000·x/(1 + x/1e9): chords lie under it.
+        let f = |x: u128| x * 1000 * 1_000_000_000 / (1_000_000_000 + x);
+        let pts: Vec<GridPoint> = QUOTE_GRID_LAMPORTS
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(i, l)| gp(u128::from(*l), f(u128::from(*l)), 100 + i as i64))
+            .collect();
+        for x in [
+            1u128,
+            5_000_000,
+            10_000_000,
+            30_000_000,
+            700_000_000,
+            3_000_000_000,
+            25_000_000_000,
+        ] {
+            let (out, _, _, _) = interpolate(&pts, x).unwrap();
+            assert!(out <= f(x), "{x}: {out} > {}", f(x));
+            assert!(out * 100 >= f(x) * 80, "{x}: too far below");
+        }
+        // exact at the points; impact/route of the upper neighbour; oldest time of the two
+        let (out, imp, route, at) = interpolate(&pts, 1_000_000_000).unwrap();
+        assert_eq!(out, f(1_000_000_000));
+        assert_eq!(route, ["r1000000000"]);
+        assert!((imp - 1.0).abs() < 1e-9);
+        let (_, _, route, at2) = interpolate(&pts, 600_000_000).unwrap();
+        assert_eq!(route, ["r1000000000"]);
+        assert!(at2 <= at);
+        // above the grid / empty / zero
+        assert!(interpolate(&pts, 25_000_000_001).is_none());
+        assert!(interpolate(&[], 1).is_none());
+        assert!(interpolate(&pts, 0).is_none());
+    }
+
+    #[test]
+    fn sell_grid_amounts() {
+        // 1e-6 SOL per whole token (6 decimals): 0.01 SOL = 10 000 tokens = 1e10 base units.
+        let p18 = 1_000_000_000_000u128;
+        assert_eq!(tokens_for_lamports(10_000_000, p18, 6), Some(10_000_000_000));
+        assert_eq!(tokens_for_lamports(10_000_000, 0, 6), None);
+        assert_eq!(tokens_for_lamports(25_000_000_000, 1, 18), None, "beyond u64");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 - **`GET /api/pulse`** + **`/ws/pulse`** — три колонки New / About to graduate / Graduated по всем индексируемым площадкам (`PulseToken`), один ответ всем, кэш 3 с.
 - **Состояние кривой токена** `Token.curve?: TokenCurve` (pump.fun, Meteora DBC, Raydium LaunchLab; SOL-пары на кривой) и **общая формула оценки** с режимом комиссии `buyFee`. Core считает по ней проверку минимума sell, `min_out` ордеров и шагов сценариев.
 - **Прогресс кривой с тика цены и ETA** по темпу: `Token.curveProgressPct` (теперь с каждого тика), `Token.eta?: CurveEta` — в `GET /api/tokens/:mint`, `GET /api/tokens`, `PulseToken`.
-- **`GET /api/quote`** (только mainnet, только для graduated / Jupiter): котировка Jupiter с импактом по округлённой вверх сумме, кэш 10 с, общий лимит частоты; `PoolInfo.features.quote`.
+- **`GET /api/quote`** (только mainnet, только для graduated / Jupiter): котировка с импактом из сетки, которую сервер собирает у Jupiter фоновым таймером (на запрос пользователя в Jupiter не ходит); `PoolInfo.features.quote`.
 
 Изменения v0.27 против v0.26 (15.10; миграция `0034_launch_curve_fees.sql`):
 - **Комиссия кривой — из цепочки, а не из env.** Релейер вместе с резервами читает pump.fun `FeeConfig.feeTiers` (уровни по market cap: protocol + creator bps; lp — только у AMM). Если FeeConfig нет — Global `feeBasisPoints + creatorFeeBasisPoints`. Результат пишется в `launch_curves.fee_tiers`. `UNZEEN_TRADE_FEE_BPS_PUMPFUN` остаётся только запасным значением, когда уровней нет.
@@ -242,7 +242,7 @@ v0.18 (13.10; миграция `0026_amounts_numeric.sql`; RELAYER.md v12). Robi
 | GET | `/api/creator` (подписанный) | `CreatorCabinet` (v0.9), только токены, созданные этим ключом; ответ кратен 4096 байт |
 | GET | `/api/stats` | `PlatformStats` (v0.9) — последний суточный снимок \| `404` до первого снимка; `Cache-Control: public, max-age=3600` |
 | GET | `/api/pulse` | `Pulse` (v0.28) — колонки New / About to graduate / Graduated; `public, max-age=3` |
-| GET | `/api/quote?mint=&side=buy\|sell&amount=` | `JupiterQuote` (v0.28) — только mainnet и при `features.quote`; для graduated / Jupiter |
+| GET | `/api/quote?mint=&side=buy\|sell&amount=` | `JupiterQuote` (v0.28) — только mainnet и при `features.quote`; для graduated / Jupiter; только из фоновой сетки |
 
 Подписанные запросы — схема в разделе «Подпись запросов».
 
@@ -1304,22 +1304,27 @@ interface TokenCurve {
 
 Только для токенов, которые торгуются через Jupiter (`status = "graduated"` или `venue = "jupiter"`); для кривых фронт считает сам по формуле выше. Есть только на mainnet Solana при `PoolInfo.features.quote: true` (env `UNZEEN_QUOTE`, по умолчанию включено на mainnet); иначе путь → `404 not_found`. На devnet `features.quote` нет.
 
-`GET /api/quote?mint=<base58>&side=buy|sell&amount=<целое>`; `amount` — buy: лампорты, sell: базовые единицы токена (> 0, ≤ u64).
+**Решение лида 18.10: на запрос пользователя сервер в Jupiter не ходит.** Котировки собирает фоновый таймер сервера:
+- набор токенов — graduated-токены, которыми торгует или которые показывает пул: токены пула (`GET /api/tokens`, SOL-пары с ценой) и graduated-карточки Pulse (discovery, ≤ 24 ч); не больше `UNZEEN_QUOTE_MAX_MINTS` (40), токены пула первыми;
+- фиксированная сетка, одна для всех токенов: buy — 0.01 / 0.05 / 0.25 / 1 / 5 / 25 SOL (лампорты); sell — количество токенов, стоящее эти суммы по публичной цене токена (`priceSol`);
+- раунд — каждые `UNZEEN_QUOTE_ROUND_SECS` (600 с) ± 20 %, запросы раунда в случайном порядке, равномерно по раунду с джиттером ± 30 %, не чаще `UNZEEN_QUOTE_RPS` (1/с). Что и когда спрашивается, зависит только от набора токенов и сетки, не от запросов пользователей. Точки старше двух раундов не отдаются.
+
+`GET /api/quote?mint=<base58>&side=buy|sell&amount=<целое>` отвечает **только из этой сетки**: `amount` — buy: лампорты, sell: базовые единицы токена (> 0, ≤ u64).
 
 ```ts
 interface JupiterQuote {
   mint: string; side: "buy" | "sell";
-  inAmount: string;        // сумма, по которой спросили Jupiter: amount, округлённая ВВЕРХ до 2 значащих цифр
-  outAmount: string;       // выход Jupiter для inAmount (buy: базовые единицы токена; sell: лампорты), без slippage
-  priceImpactPct: string;  // импакт по Jupiter, % (десятичная строка, ≥ 0)
-  route: string[];         // метки площадок маршрута (например ["PumpSwap"]), ≤ 4
-  asOf: number;            // unix мс ответа Jupiter (кэш до 10 с)
+  inAmount: string;        // = amount из запроса
+  outAmount: string;       // оценка по сетке (buy: базовые единицы токена; sell: лампорты), без slippage
+  priceImpactPct: string;  // импакт Jupiter в ближайшей точке сетки сверху, % (4 знака, ≥ 0)
+  route: string[];         // метки площадок маршрута той же точки, ≤ 4
+  maxAmount: string;       // верхняя точка сетки этой стороны (больше — 404)
+  asOf: number;            // unix мс самой старой котировки, по которой посчитан ответ
 }
 ```
-- Фронт масштабирует к своей сумме: `out ≈ outAmount · amount / inAmount` (сумма округлена вверх → оценка консервативна), затем свой slippage.
-- **Приватность:** сервер ходит в Jupiter (`/swap/v1/quote`) со своего адреса, без IP пользователя; спрашивает только округлённую сумму; ответ кэшируется на 10 с по `(mint, side, inAmount)` и отдаётся всем одинаково (`Cache-Control: public, max-age=10`); параметры и ответы не логируются. Jupiter видит «кто-то через Unzeen интересуется mint X на ~сумму Y», без пользователя.
-- Mint должен быть известен серверу (`GET /api/tokens`, снимок индексатора или Pulse), иначе `404` (в очередь индексатора не ставится). Неверные параметры → `400 bad_request`.
-- **Лимит частоты:** общий на сервер (env `UNZEEN_QUOTE_RPS`, по умолчанию 1 запрос к Jupiter в секунду, burst 5) и на сокет (как у остальных публичных путей); превышение → `429 rate_limited` + `Retry-After`. Jupiter недоступен / нет маршрута → `503 venue_unavailable`.
+- **Интерполяция:** между соседними точками — по хорде (линейно), ниже первой точки — пропорционально от первой. Выход Jupiter вогнут по сумме, поэтому хорда даёт оценку не выше настоящей (консервативно). Выше `maxAmount`, токен не в сетке или точек ещё нет → `404 not_found`. Фронт применяет свой slippage.
+- Ответ одинаков для одинаковых параметров, `Cache-Control: public, max-age=10`, ничего не логируется; Jupiter не видит ни IP пользователя, ни момента его запроса, ни суммы.
+- Неверные параметры → `400 bad_request`. Общий лимит запросов на сокет — как у остальных публичных путей (`429`).
 - Котировка — только для показа. Сделка `venue: "jupiter"` по-прежнему требует `minOut > 0` от пользователя; релейер строит транзакцию сам, в момент исполнения.
 
 ```ts
