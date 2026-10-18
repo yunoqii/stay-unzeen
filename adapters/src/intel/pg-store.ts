@@ -1,3 +1,4 @@
+import { curveJson } from "./curves";
 import type pg from "pg";
 import type { CreatorPubkeyFile } from "../keys";
 import type { IntelStore, OffchainInfo, TickCommit, TokenSafety, WarmEntry } from "./types";
@@ -97,6 +98,29 @@ export class PgIntelStore implements IntelStore {
   }
 
   private pricesWritable: Promise<boolean> | null = null;
+
+  private curveCols: Promise<boolean> | null = null;
+
+  /** intel_prices.progress_pct / curve (core 0035) exist. Cached once true; before 0035 only price/status are written. */
+  private hasCurveColumns(): Promise<boolean> {
+    if (!this.curveCols) {
+      this.curveCols = this.db
+        .query<{ ok: boolean }>(
+          `SELECT count(*) = 2 AS ok FROM information_schema.columns
+            WHERE table_name = 'intel_prices' AND column_name IN ('progress_pct', 'curve') AND table_schema = current_schema()`,
+        )
+        .then((r) => {
+          const ok = Boolean(r.rows[0]?.ok);
+          if (!ok) this.curveCols = null; // core may migrate later: ask again next tick
+          return ok;
+        })
+        .catch(() => {
+          this.curveCols = null;
+          return false;
+        });
+    }
+    return this.curveCols;
+  }
 
   /** intel_prices (core 0011) exists and this role may upsert it. Cached; before 0011 prices are dropped. */
   private canWritePrices(): Promise<boolean> {
@@ -204,12 +228,28 @@ export class PgIntelStore implements IntelStore {
       if (prices.length > 0) {
         // INTEL v2: current + previous value; an older tick never overwrites a newer one.
         await c.query(
-          `INSERT INTO intel_prices (mint, price_sol, status, tick_at)
-           SELECT m, p::numeric, s, $4::bigint FROM unnest($1::text[], $2::text[], $3::text[]) AS x(m, p, s)
-           ON CONFLICT (mint) DO UPDATE SET prev_price_sol = intel_prices.price_sol, prev_tick_at = intel_prices.tick_at,
-             price_sol = EXCLUDED.price_sol, status = EXCLUDED.status, tick_at = EXCLUDED.tick_at
-           WHERE intel_prices.tick_at < EXCLUDED.tick_at`,
-          [prices.map((p) => p.mint), prices.map((p) => p.priceSol), prices.map((p) => p.status), String(t.tickStartedAt)],
+          (await this.hasCurveColumns())
+            ? `INSERT INTO intel_prices (mint, price_sol, status, tick_at, progress_pct, curve)
+               SELECT m, p::numeric, s, $4::bigint, g::numeric, c::jsonb
+               FROM unnest($1::text[], $2::text[], $3::text[], $5::text[], $6::text[]) AS x(m, p, s, g, c)
+               ON CONFLICT (mint) DO UPDATE SET prev_price_sol = intel_prices.price_sol, prev_tick_at = intel_prices.tick_at,
+                 price_sol = EXCLUDED.price_sol, status = EXCLUDED.status, tick_at = EXCLUDED.tick_at,
+                 progress_pct = EXCLUDED.progress_pct, curve = EXCLUDED.curve
+               WHERE intel_prices.tick_at < EXCLUDED.tick_at`
+            : `INSERT INTO intel_prices (mint, price_sol, status, tick_at)
+               SELECT m, p::numeric, s, $4::bigint FROM unnest($1::text[], $2::text[], $3::text[]) AS x(m, p, s)
+               ON CONFLICT (mint) DO UPDATE SET prev_price_sol = intel_prices.price_sol, prev_tick_at = intel_prices.tick_at,
+                 price_sol = EXCLUDED.price_sol, status = EXCLUDED.status, tick_at = EXCLUDED.tick_at
+               WHERE intel_prices.tick_at < EXCLUDED.tick_at`,
+          [
+            prices.map((p) => p.mint),
+            prices.map((p) => p.priceSol),
+            prices.map((p) => p.status),
+            String(t.tickStartedAt),
+            ...((await this.hasCurveColumns())
+              ? [prices.map((p) => (p.progressPct && /^\d{1,3}\.\d{2}$/.test(p.progressPct) && Number(p.progressPct) <= 100 ? p.progressPct : null)), prices.map((p) => (p.curve ? JSON.stringify(curveJson(p.curve)) : null))]
+              : []),
+          ],
         );
       }
       await c.query("DELETE FROM intel_subscriptions");

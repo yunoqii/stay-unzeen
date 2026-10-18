@@ -2,7 +2,12 @@
 
 Источник правды для `core/` (Rust, API) и индексатора (`adapters/`, TS). Меняет backend по согласованию с лидом. Схема: `core/migrations/0007_intel.sql` (применяет core при старте; индексатор миграции **не** запускает и схему не меняет). Публичная сторона — `docs/API.md` v0.5, раздел «Безопасность токена и лента сделок». Обоснование схемы (тик, приманки, warm set) — `docs/analysis/token-intel.md` §2.
 
-Статус: **v3** (13.10, кабинет создателя API.md v0.9; миграции не меняются). Изменения против v2:
+Статус: **v4** (18.10, API.md v0.28 «Trading comfort»; миграция `0035_trading_comfort.sql`). Изменения против v3:
+- **Ценовой проход пишет прогресс и состояние кривой**: `intel_prices.progress_pct` (`NUMERIC(5,2)`, только на кривой) и `intel_prices.curve` (JSONB: `virtualSol`, `virtualTokens` — текущие резервы кривой / сегмента DBC, `feeBps` — комиссия сейчас (у pump.fun нет — уровень FeeConfig ставит core), `buyFee` `added|input|output`, `buyLimitLamports?`, `sellLimitTokens?`). Только SOL-пары на кривой. В тот же `getMultipleAccounts` добавлен Global pump.fun (прогресс), а для каждого pinned mint — PDA пула LaunchLab (mint, wSOL); конфиг и платформа LaunchLab — вторым вызовом, только если такие пулы есть; для DBC с активацией по слотам — один `getSlot` на проход. Набор mint по-прежнему только `pinned`, от пользователей не зависит. Права роли не меняются (UPDATE/INSERT на всю таблицу).
+- **Discovery LaunchLab** (mainnet, Parsed Streams, `INTEL_DISCOVERY_LAUNCHLAB=0` выключает): create LaunchLab — кандидаты discovery (только SOL-пулы), метрики — пул (PDA mint/wSOL) и mint на тике. `intel_discovery.venue` += `raydium-launchlab`.
+- **core** своим таймером (20 с) копирует прогресс с тиков в `curve_progress` (1 ч) и отмечает первые graduation в `curve_graduations` (7 сут) — для Pulse и ETA. Индексатор к этим таблицам доступа не имеет.
+
+Изменения v3 против v2 (13.10, кабинет создателя API.md v0.9; миграции не меняются):
 - **`holders.count`** в `token_safety.data` — целое число владельцев mint с ненулевым балансом (без `associated_bonding_curve`, base-vault пула AMM и `mayhem_token_vault`; vault пула Unzeen считаются как обычные владельцы). Читает только core для подписанного `GET /api/creator` (`CreatorToken.holders`); в публичный `TokenSafety` не выводится. **Пока `null`/нет ключа:** на тарифе Shyft Free нет `getProgramAccounts`, посчитать владельцев нечем; core тогда отдаёт `holders: null`. Включить после перехода на провайдера с GPA (или Helius DAS `getTokenAccounts`), в том же тике и с той же приманочной пачкой, что остальные поля.
 
 Изменения v2 против v1 (ордера; миграция `0011_orders.sql`):

@@ -227,12 +227,18 @@ pub async fn tokens(State(st): State<AppState>, Query(q): Query<HashMap<String, 
         )
         .await
         .map_err(db)?;
+    // v0.28: progress from the price tick, ETA and the token's curve state.
+    let mints: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+    let extras = crate::comfort::extras(&st, &mints).await?;
     let list = rows
         .iter()
         .map(|r| {
             let mut v = token_json(r);
             quote_fields(&mut v, r, 14);
             list_fields(&mut v, r.get(10), r.get(11), r.get(12), r.get(13));
+            if let Some(e) = extras.get(&r.get::<_, String>(0)) {
+                e.apply(&mut v);
+            }
             v
         })
         .collect();
@@ -304,6 +310,7 @@ pub async fn token(State(st): State<AppState>, Path(mint): Path<String>) -> ApiR
         .await
         .map_err(db)?;
     let mut v = token_json(&t);
+    token_extras(&st, &c, &mint, &mut v).await?;
     v["trades"] = Value::Array(trades.iter().map(trade_json).collect());
     Ok(public(v, 2))
 }
@@ -318,6 +325,7 @@ async fn cold_token(st: &AppState, c: &unzeen_ledger::deadpool_postgres::Object,
         .map_err(db)?
     {
         let mut v = token_json(&t);
+        token_extras(st, c, mint, &mut v).await?;
         v["trades"] = json!([]);
         return Ok(public(v, 60));
     }
@@ -340,6 +348,39 @@ async fn cold_token(st: &AppState, c: &unzeen_ledger::deadpool_postgres::Object,
             crate::intel::pending(c).await
         }
     }
+}
+
+/// v0.28 `Token.curveProgressPct` / `eta` / `curve` (on the curve only). Progress falls back to
+/// the safety snapshot when the price tick has none (as v0.12 lists).
+async fn token_extras(
+    st: &AppState,
+    c: &unzeen_ledger::deadpool_postgres::Object,
+    mint: &str,
+    v: &mut Value,
+) -> ApiResult<()> {
+    if v["status"] != "curve" {
+        return Ok(());
+    }
+    let e = crate::comfort::extras(st, &[mint.to_string()])
+        .await?
+        .remove(mint)
+        .unwrap_or_default();
+    if e.progress.is_none()
+        && let Some(r) = c
+            .query_opt(
+                "SELECT data->'market'->>'curveProgressPct' FROM token_safety WHERE mint = $1 AND NOT missing",
+                &[&mint],
+            )
+            .await
+            .map_err(db)?
+        && let Some(p) = r
+            .get::<_, Option<String>>(0)
+            .filter(|p| crate::comfort::progress_x100(p).is_some())
+    {
+        v["curveProgressPct"] = json!(p);
+    }
+    e.apply(v);
+    Ok(())
 }
 
 /// Known mint: traded by the pool (`tokens`) or snapshotted by the indexer (`intel_tokens`).

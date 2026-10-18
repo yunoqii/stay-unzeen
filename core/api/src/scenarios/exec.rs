@@ -1024,7 +1024,7 @@ async fn submit_trade(
     // limit on the average price.
     let curve = if slip > 0 && !zec_pair {
         match crate::actions::token_info(st, mint).await {
-            Ok(Some(t)) => crate::actions::impact_curve(st, venue, &t).await.ok().flatten(),
+            Ok(Some(t)) => crate::actions::impact_curve(st, venue, mint, &t).await.ok().flatten(),
             _ => None,
         }
     } else {

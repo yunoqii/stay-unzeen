@@ -14,7 +14,12 @@ import { NATIVE_MINT, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { deriveDbcPoolAddress, deriveDbcPoolAuthority, type PoolConfig, type VirtualPool } from "@meteora-ag/dynamic-bonding-curve-sdk";
 import { DBC_PROGRAM_ID, dbcCoder, dbcPoolVaults, dbcPriceAndCap, dbcProgressPct, dbcStatus } from "../meteora";
 import { PublicKey, type AccountInfo, type Connection } from "@solana/web3.js";
+import BN from "bn.js";
+import { LaunchpadConfig, LaunchpadPool, PlatformConfig, getPdaLaunchpadPoolId } from "@raydium-io/raydium-sdk-v2";
+import { isLegacyQuoteMint, normalizeQuoteMint } from "@pump-fun/pump-sdk";
+import { formatUnits } from "../math";
 import { priceAndCap } from "../pumpfun";
+import { dbcCurveState, dbcProgress, launchLabCurveState, launchLabProgress, pumpCurveState } from "./curves";
 import { cryptoRng, type Rng } from "../relayer/random";
 import type { FullIntel } from "./full";
 import { tagTrade, type TagContext, type TradeSource } from "./trades";
@@ -165,6 +170,11 @@ export interface IndexerOptions {
    * read in the same call: progress / graduated / locked LP for DBC launches.
    */
   dbcConfig?: PublicKey | null;
+  /**
+   * Raydium LaunchLab program of this network (API v0.28): the price pass also
+   * reads each pinned mint's SOL pool PDA (price, progress, curve state).
+   */
+  launchLabProgram?: PublicKey | null;
   /**
    * INTEL v2 price pass: the read of all pinned curves happens at a uniformly
    * random moment in [0, this] ms after the tick start (orders.md §3: a tick
@@ -384,42 +394,104 @@ export class IntelIndexer {
     const valid = mints.filter(isMintAddress);
     if (valid.length === 0) return [];
     const dbcCfg = this.o.dbcConfig ?? null;
+    const llProgram = this.o.launchLabProgram ?? null;
     const per = valid.map((m) => {
       const mint = new PublicKey(m);
-      return { key: m, mint, curve: bondingCurvePda(mint), dbc: dbcCfg ? deriveDbcPoolAddress(NATIVE_MINT, mint, dbcCfg) : null };
+      return {
+        key: m,
+        mint,
+        curve: bondingCurvePda(mint),
+        dbc: dbcCfg ? deriveDbcPoolAddress(NATIVE_MINT, mint, dbcCfg) : null,
+        ll: llProgram ? getPdaLaunchpadPoolId(llProgram, mint, NATIVE_MINT).publicKey : null,
+      };
     });
-    const shared = dbcCfg ? [dbcCfg] : [];
-    const stride = dbcCfg ? 3 : 2;
-    const accs = await this.o.reader.getMultipleAccounts([...shared, ...per.flatMap((p) => [p.mint, p.curve, ...(p.dbc ? [p.dbc] : [])])]);
-    const ca = dbcCfg ? accs[0] : null;
+    // v4 (API v0.28): the pump Global (curve progress) rides in the same call.
+    const shared = [GLOBAL_PDA, ...(dbcCfg ? [dbcCfg] : [])];
+    const stride = 2 + (dbcCfg ? 1 : 0) + (llProgram ? 1 : 0);
+    const accs = await this.o.reader.getMultipleAccounts([...shared, ...per.flatMap((p) => [p.mint, p.curve, ...(p.dbc ? [p.dbc] : []), ...(p.ll ? [p.ll] : [])])]);
+    const g = accs[0];
+    if (g && g.owner.equals(PUMP_PROGRAM_ID)) this.global = safe(() => PUMP_SDK.decodeGlobal(g)) ?? this.global;
+    const ca = dbcCfg ? accs[1] : null;
     if (ca && ca.owner.equals(DBC_PROGRAM_ID)) this.dbcConfigState = safe(() => dbcCoder().accounts.decode("poolConfig", ca.data) as PoolConfig) ?? this.dbcConfigState;
+    // DBC fee schedulers run on slots or seconds: one getSlot per pass, only when a DBC pool is read.
+    let currentPoint: BN | null = null;
+    const pointOf = async (): Promise<BN | null> => {
+      if (!this.dbcConfigState) return null;
+      if (Number(this.dbcConfigState.activationType) === 1) return new BN(Math.floor(this.now() / 1000));
+      if (currentPoint) return currentPoint;
+      const slot = this.o.reader.getSlot ? await this.o.reader.getSlot().catch(() => null) : null;
+      currentPoint = slot === null ? null : new BN(slot);
+      return currentPoint;
+    };
     const out: PriceRow[] = [];
-    per.forEach((p, i) => {
+    const llRows: Array<{ row: PriceRow; pool: ReturnType<typeof LaunchpadPool.decode> }> = [];
+    for (let i = 0; i < per.length; i++) {
+      const p = per[i]!;
       const a = (k: number) => accs[shared.length + i * stride + k] ?? null;
       const facts = mintFacts(p.mint, a(0));
-      if (!facts) return;
+      if (!facts) continue;
       const ci = a(1);
       const curve = ci && ci.owner.equals(PUMP_PROGRAM_ID) ? safe(() => PUMP_SDK.decodeBondingCurveNullable(ci as AccountInfo<Buffer>)) : null;
       let row: PriceRow | null = null;
       if (curve && toBigSafe(curve.virtualTokenReserves) > 0n) {
+        const graduated = curve.complete || isBondingCurveMigrated(curve);
+        // SOL-quoted curves only carry a curve state (a USDC / pump-coin quote is not lamports).
+        const sol = isLegacyQuoteMint(normalizeQuoteMint(curve.quoteMint));
         row = {
           mint: p.key,
           priceSol: priceAndCap(curve, facts.decimals).priceSol,
-          status: curve.complete || isBondingCurveMigrated(curve) ? "graduated" : "curve",
+          status: graduated ? "graduated" : "curve",
+          progressPct: !graduated && this.global ? curveProgress(curve, this.global).progressPct : null,
+          curve: !graduated && sol ? pumpCurveState(curve) : null,
         };
-      } else if (p.dbc) {
-        const di = a(2);
-        const st = di && di.owner.equals(DBC_PROGRAM_ID) ? safe(() => (dbcCoder().accounts.decode("virtualPool", di.data) as VirtualPool).poolState) : null;
-        if (st && st.baseMint.equals(p.mint) && this.dbcConfigState) {
+      } else if (p.dbc && a(2) && a(2)!.owner.equals(DBC_PROGRAM_ID)) {
+        const di = a(2)!;
+        const st = safe(() => (dbcCoder().accounts.decode("virtualPool", di.data) as VirtualPool).poolState);
+        const cfg = this.dbcConfigState;
+        if (st && st.baseMint.equals(p.mint) && cfg) {
+          const onCurve = dbcStatus(st, cfg) === "curve";
           row = {
             mint: p.key,
             priceSol: dbcPriceAndCap(st.sqrtPrice, facts.supply, facts.decimals).priceSol,
-            status: dbcStatus(st, this.dbcConfigState) === "curve" ? "curve" : "graduated",
+            status: onCurve ? "curve" : "graduated",
+            progressPct: onCurve ? dbcProgress(st, cfg) : null,
+            curve: onCurve && cfg.quoteMint.equals(NATIVE_MINT) ? dbcCurveState(st, cfg, await pointOf()) : null,
           };
+        }
+      } else if (p.ll) {
+        const li = a(stride - 1);
+        const pool = li && li.owner.equals(llProgram!) ? safe(() => LaunchpadPool.decode(li.data)) : null;
+        if (pool && pool.mintA.equals(p.mint) && pool.mintB.equals(NATIVE_MINT)) {
+          const onCurve = Number(pool.status) === 0;
+          const s = toBigSafe(pool.virtualB) + toBigSafe(pool.realB);
+          const t = toBigSafe(pool.virtualA) - toBigSafe(pool.realA);
+          if (s > 0n && t > 0n) {
+            row = {
+              mint: p.key,
+              priceSol: formatUnits((s * 10n ** BigInt(facts.decimals) * 10n ** 18n) / (t * 1_000_000_000n), 18),
+              status: onCurve ? "curve" : "graduated",
+              progressPct: onCurve ? launchLabProgress(pool) : null,
+              curve: null,
+            };
+            if (onCurve) llRows.push({ row, pool });
+          }
         }
       }
       if (row && isPositiveDecimal(row.priceSol)) out.push(row);
-    });
+    }
+    // LaunchLab fee rates live in the pool's GlobalConfig + PlatformConfig: one more call, only when such pools exist.
+    if (llRows.length > 0) {
+      const ids = [...new Set(llRows.flatMap((r) => [r.pool.configId.toBase58(), r.pool.platformId.toBase58()]))];
+      const extra = await this.o.reader.getMultipleAccounts(ids.map((k) => new PublicKey(k))).catch(() => null);
+      const byId = new Map(ids.map((k, i) => [k, extra?.[i] ?? null]));
+      for (const { row, pool } of llRows) {
+        const c = byId.get(pool.configId.toBase58());
+        const pl = byId.get(pool.platformId.toBase58());
+        const config = c ? safe(() => LaunchpadConfig.decode(c.data)) : null;
+        const platform = pl ? safe(() => PlatformConfig.decode(pl.data)) : null;
+        row.curve = config && platform ? launchLabCurveState(pool, config, platform) : null;
+      }
+    }
     return out;
   }
 

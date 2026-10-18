@@ -10,6 +10,7 @@
 pub mod actions;
 pub mod auth;
 pub mod chat;
+pub mod comfort;
 pub mod config;
 pub mod creator;
 pub mod creator_fees;
@@ -71,6 +72,10 @@ pub struct Inner {
     pub verify_limit: Limiter,
     /// Chat ops per key (API v0.12): 1/10 s, 20/h, 100/day.
     pub chat_limit: chat::ChatLimiter,
+    /// v0.28 Pulse: the body every client gets, rebuilt by a timer.
+    pub pulse: Arc<comfort::PulseCache>,
+    /// v0.28 `GET /api/quote` (mainnet): Jupiter quotes, cached per amount bucket.
+    pub quotes: Option<Arc<comfort::QuoteService>>,
 }
 
 impl std::ops::Deref for AppState {
@@ -94,6 +99,12 @@ impl AppState {
             drand: fair::Drand::new(cfg.fair.drand_urls.clone()),
             verify_limit: Limiter::new(10.0 / 60.0, 10.0),
             chat_limit: chat::ChatLimiter::default(),
+            pulse: Arc::new(comfort::PulseCache::default()),
+            quotes: cfg
+                .comfort
+                .quote
+                .clone()
+                .map(|q| Arc::new(comfort::QuoteService::new(q))),
             feed_tx,
             ledger: ledger.with_creator_rules(cfg.launch.rules()),
             cfg,
@@ -125,6 +136,9 @@ pub fn router(st: AppState) -> Router {
         .route("/api/stats", get(stats::stats))
         .route("/api/creator", get(creator::cabinet))
         .route("/ws/feed", get(market::ws_feed))
+        .route("/api/pulse", get(comfort::pulse))
+        .route("/api/quote", get(comfort::quote))
+        .route("/ws/pulse", get(comfort::ws_pulse))
         .route("/media/{name}", get(media))
         .fallback(|| async { ApiError::not_found() })
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
@@ -411,6 +425,11 @@ async fn pool(State(st): State<AppState>) -> ApiResult<Response> {
     );
     if st.cfg.intel.discovery {
         r.0["features"]["discovery"] = json!(true);
+    }
+    // v0.28: Pulse always; Jupiter quotes only where configured (mainnet).
+    r.0["features"]["pulse"] = json!(true);
+    if st.quotes.is_some() {
+        r.0["features"]["quote"] = json!(true);
     }
     // v0.12: absent keys = disabled.
     if st.cfg.chat.enabled {
@@ -945,6 +964,9 @@ pub fn spawn_background(st: &AppState) {
     let s = st.clone();
     tokio::spawn(market::poll_trades(s));
     tokio::spawn(intel::warm_sync_loop(st.clone()));
+    // v0.28: curve progress history (ETA) and the Pulse body, on core's own timers.
+    tokio::spawn(comfort::progress_loop(st.clone()));
+    tokio::spawn(comfort::pulse_loop(st.clone()));
     if st.cfg.fair.enabled {
         tokio::spawn(fair::scheduler_loop(st.clone()));
     }

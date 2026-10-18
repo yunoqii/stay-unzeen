@@ -23,6 +23,8 @@ export interface ChainReader {
    */
   recentPumpMints(sample: number, before?: string): Promise<string[] | { mints: string[]; oldest: string | null }>;
   readonly hasIndex: boolean;
+  /** Current slot (DBC fee schedulers on slot-activated configs, API v0.28). Optional. */
+  getSlot?(): Promise<number>;
 }
 
 /** Token bucket in front of fetch: at most `rps` requests per second (Shyft Free 10 rps). */
@@ -69,6 +71,10 @@ export class RpcChainReader implements ChainReader {
       out.push(...(await this.read.getMultipleAccountsInfo(keys.slice(i, i + 100) as PublicKey[])));
     }
     return out;
+  }
+
+  async getSlot(): Promise<number> {
+    return this.read.getSlot();
   }
 
   async getTokenLargestAccounts(mint: PublicKey): Promise<LargestAccount[] | null> {

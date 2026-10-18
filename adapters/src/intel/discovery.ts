@@ -6,6 +6,10 @@ import { DBC_PROGRAM_ID, dbcCoder, dbcPriceAndCap, dbcProgressPct, dbcStatus } f
 import { curveStatus, priceAndCap } from "../pumpfun";
 import type { Rng } from "../relayer/random";
 import { curveProgress, metaplexMetadataPda, mintFacts, parseMetaplexMetadata } from "./metrics";
+import { LaunchpadPool, getPdaLaunchpadPoolId } from "@raydium-io/raydium-sdk-v2";
+import { NATIVE_MINT } from "@solana/spl-token";
+import { formatUnits } from "../math";
+import { launchLabProgress } from "./curves";
 import { nextTickDelay, tickBoundary } from "./schedule";
 
 /**
@@ -33,12 +37,12 @@ import { nextTickDelay, tickBoundary } from "./schedule";
  * admitted through a token bucket (smooth ~33/h, burst 10), newest first.
  */
 
-export type DiscoveryVenue = "pumpfun" | "meteora-dbc";
+export type DiscoveryVenue = "pumpfun" | "meteora-dbc" | "raydium-launchlab";
 
 /** A create seen on chain (public). `mint` may be unknown until resolved (pump poll). */
 export interface CreateSeen {
-  /** LaunchLab creates feed the dev index only (not discovery candidates). */
-  venue: DiscoveryVenue | "raydium-launchlab";
+  /** LaunchLab creates are discovery candidates only with `launchLabProgram` set (API v0.28); always in the dev index. */
+  venue: DiscoveryVenue;
   /** Launcher (pump: CreateEvent.user; DBC / LaunchLab: the instruction's `creator`), for the dev index. */
   creator?: string;
   signature: string;
@@ -432,6 +436,8 @@ export interface DiscoveryOptions {
   windowMs?: number;
   /** Admission bucket size (INTEL_DISCOVERY_BURST, default 10). */
   burst?: number;
+  /** Raydium LaunchLab program (API v0.28 Pulse): LaunchLab creates become candidates (SOL pools only). null = dev index only. */
+  launchLabProgram?: PublicKey | null;
   /** Every create drained this tick (all venues, before admission): the dev index (INTEL_FULL). */
   onCreates?: (creates: readonly CreateSeen[]) => Promise<void> | void;
 }
@@ -509,7 +515,7 @@ export class Discovery {
         try {
           for (const c of await s.drain()) {
             drained.push(c);
-            if (c.venue === "raydium-launchlab") continue; // dev index only
+            if (c.venue === "raydium-launchlab" && !this.o.launchLabProgram) continue; // dev index only
             if (this.seen.has(c.signature) || (c.mint && (this.seen.has(c.mint) || this.active.has(c.mint)))) continue;
             if (c.createdAt !== null && c.createdAt < horizon) continue;
             fresh.push(c);
@@ -547,7 +553,7 @@ export class Discovery {
         this.allowance -= 1;
         admitted.push({
           mint,
-          venue: full.venue as DiscoveryVenue, // LaunchLab creates never reach admission
+          venue: full.venue,
           createdAt: full.createdAt ?? asOf,
           name: clean(full.name),
           symbol: clean(full.symbol),
@@ -617,7 +623,14 @@ export class Discovery {
       const idx: Record<string, number> = {};
       const mintPk = new PublicKey(c.mint);
       if (c.venue === "pumpfun") idx.curve = add(bondingCurvePda(mintPk));
-      else {
+      else if (c.venue === "raydium-launchlab") {
+        if (!this.o.launchLabProgram) continue;
+        idx.ll = add(getPdaLaunchpadPoolId(this.o.launchLabProgram, mintPk, NATIVE_MINT).publicKey);
+        if (fresh.has(c.mint) || c.supply === null) {
+          idx.mint = add(mintPk);
+          idx.meta = add(metaplexMetadataPda(mintPk));
+        }
+      } else {
         if (!c.pool) continue; // unknown pool: never guess the PDA of a foreign config
         idx.pool = add(new PublicKey(c.pool));
         if (c.config && !this.configs.has(c.config) && !wantConfig.has(c.config)) wantConfig.set(c.config, add(new PublicKey(c.config)));
@@ -673,6 +686,26 @@ export class Discovery {
             c.name ??= clean(md?.name);
             c.symbol ??= clean(md?.symbol);
           }
+        }
+        if (c.venue === "raydium-launchlab") {
+          const la = accs[idx.ll!];
+          const pool = la && this.o.launchLabProgram && la.owner.equals(this.o.launchLabProgram) ? safe(() => LaunchpadPool.decode(la.data)) : null;
+          if (!pool || !pool.mintA.equals(new PublicKey(c.mint)) || !pool.mintB.equals(NATIVE_MINT)) {
+            if (fresh.has(c.mint)) gone.push(c.mint); // not a SOL LaunchLab pool
+            else errors++;
+            continue;
+          }
+          const onCurve = Number(pool.status) === 0;
+          c.status = onCurve ? "curve" : "graduated";
+          c.progressPct = onCurve ? launchLabProgress(pool) : null;
+          const sq = BigInt(pool.virtualB.toString()) + BigInt(pool.realB.toString());
+          const tq = BigInt(pool.virtualA.toString()) - BigInt(pool.realA.toString());
+          if (sq > 0n && tq > 0n) {
+            const price18 = (sq * 10n ** BigInt(c.decimals) * 10n ** 18n) / (tq * 1_000_000_000n);
+            c.priceSol = formatUnits(price18, 18);
+            if (c.supply !== null) c.marketCapSol = formatUnits((sq * c.supply) / tq, 9);
+          }
+          continue;
         }
         const a = accs[idx.pool!];
         const st = a && a.owner.equals(DBC_PROGRAM_ID) ? safe(() => (dbcCoder().accounts.decode("virtualPool", a.data) as VirtualPool).poolState) : null;

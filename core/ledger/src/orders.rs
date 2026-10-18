@@ -171,8 +171,9 @@ pub fn sell_min_out(amount: u128, trigger_e18: u128, decimals: u32, slippage_bps
     unzeen_fair::alloc::mul_div(amount, k, den)
 }
 
-/// Launch parameters of an order's curve when its price impact can be computed: a SOL-paired
-/// pump.fun token (orders are pump.fun only) and the relayer's `launch_curves` row.
+/// Curve of an order's token when its price impact can be computed: v0.28 the token's own
+/// curve state on a fresh indexer tick (`intel_prices.curve`); else a SOL-paired pump.fun token
+/// (orders are pump.fun only) with the relayer's `launch_curves` row.
 async fn order_curve<C: GenericClient>(
     tx: &C,
     network: &str,
@@ -181,6 +182,12 @@ async fn order_curve<C: GenericClient>(
     price_e18: u128,
     decimals: u32,
 ) -> Result<Option<crate::curve::CurveParams>> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    if let Some((tc, _)) = crate::curve::load_token_curve(tx, network, mint, now_ms, fee_bps).await? {
+        return Ok(Some(tc.params()));
+    }
     let r = tx
         .query_opt(
             "SELECT c.virtual_sol_lamports, c.virtual_token_reserves, c.fee_tiers, c.token_total_supply
@@ -195,6 +202,7 @@ async fn order_curve<C: GenericClient>(
             virtual_sol: r.get::<_, Option<Num>>(0)?.to_u128().ok()?,
             virtual_tokens: r.get::<_, Option<Num>>(1)?.to_u128().ok()?,
             fee_bps,
+            ..Default::default()
         })
         .map(|c| {
             // v0.26: the fee of the tier the curve is in, as read from chain by the relayer.

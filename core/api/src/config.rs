@@ -48,6 +48,40 @@ pub struct Config {
     pub quotes: QuotesConfig,
     /// Scenarios (API v0.19).
     pub scenarios: ScenariosConfig,
+    /// Trading comfort (API v0.28): Pulse, ETA, Jupiter quotes.
+    pub comfort: ComfortConfig,
+}
+
+/// API v0.28 "Trading comfort".
+#[derive(Clone, Debug)]
+pub struct ComfortConfig {
+    /// Pulse "About to graduate" threshold, % (UNZEEN_PULSE_GRADUATING_PCT, 1..99, default 70).
+    pub graduating_pct: u32,
+    /// Pace window of the ETA (UNZEEN_PULSE_ETA_WINDOW_SECS, 120..3600, default 600).
+    pub eta_window_secs: u32,
+    /// `GET /api/quote` (Jupiter); `None` = off (devnet, Robinhood Chain, UNZEEN_QUOTE=0).
+    pub quote: Option<JupiterQuoteConfig>,
+}
+
+impl Default for ComfortConfig {
+    fn default() -> Self {
+        Self {
+            graduating_pct: 70,
+            eta_window_secs: 600,
+            quote: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct JupiterQuoteConfig {
+    /// Quote API base (JUPITER_QUOTE_URL, default https://api.jup.ag/swap/v1): `<base>/quote`.
+    pub url: String,
+    /// `x-api-key` (JUPITER_API_KEY); keyless when absent. Never logged.
+    pub api_key: Option<String>,
+    /// Upstream requests per second for the whole server (UNZEEN_QUOTE_RPS, default 1) and burst (5).
+    pub rps: f64,
+    pub burst: f64,
 }
 
 /// Scenarios (API v0.19, docs/analysis/scenarios.md). Off: no `features.scenarios`, the ops
@@ -836,6 +870,20 @@ impl Config {
                     )?,
                     key,
                 }
+            },
+            comfort: ComfortConfig {
+                graduating_pct: num::<u32>("UNZEEN_PULSE_GRADUATING_PCT", 70)?.clamp(1, 99),
+                eta_window_secs: num::<u32>("UNZEEN_PULSE_ETA_WINDOW_SECS", 600)?.clamp(120, 3_600),
+                // Jupiter has no devnet; Robinhood Chain has no Jupiter.
+                quote: (mainnet && !hood && var("UNZEEN_QUOTE").as_deref() != Some("0")).then(|| JupiterQuoteConfig {
+                    url: var("JUPITER_QUOTE_URL").unwrap_or_else(|| "https://api.jup.ag/swap/v1".into()),
+                    api_key: var("JUPITER_API_KEY").filter(|k| !k.trim().is_empty()),
+                    rps: var("UNZEEN_QUOTE_RPS")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .filter(|r| *r > 0.0 && *r <= 50.0)
+                        .unwrap_or(1.0),
+                    burst: 5.0,
+                }),
             },
             scenarios: {
                 let enabled = var("UNZEEN_SCENARIOS").as_deref() == Some("1");

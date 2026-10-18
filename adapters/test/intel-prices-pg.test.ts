@@ -98,4 +98,21 @@ describe.skipIf(!DB || !fs.existsSync(path.resolve(__dirname, "../../core/migrat
     const r = (await pool.query(`SELECT token_amount::text, sol_amount::text FROM market_trades WHERE signature = 'sig-numeric'`)).rows;
     expect(r).toEqual([{ token_amount: big.toString(), sol_amount: (2n ** 64n).toString() }]);
   });
+
+  it("v4 (core 0035): progress_pct and the curve state are written once the columns exist", async () => {
+    const store = new PgIntelStore(pool, "devnet");
+    const M = "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R";
+    // Before 0035: the old two-column write still works.
+    await store.commitTick(commit(8000, [{ mint: M, priceSol: "0.5", status: "curve", progressPct: "12.50", curve: null }]));
+    const sql = fs.readFileSync(path.resolve(__dirname, "../../core/migrations/0035_trading_comfort.sql"), "utf8");
+    const a = sql.indexOf("ALTER TABLE intel_prices");
+    await pool.query(sql.slice(a, sql.indexOf(";", a) + 1));
+    const curve = { virtualSol: 31_000_000_000n, virtualTokens: 1_038_000_000_000_000n, feeBps: 100, buyFee: "input" as const, buyLimitLamports: 54_000_000_000n, sellLimitTokens: null };
+    await store.commitTick(commit(9000, [{ mint: M, priceSol: "0.6", status: "curve", progressPct: "12.75", curve }, { mint: "So11111111111111111111111111111111111111112", priceSol: "1", status: "graduated", progressPct: null, curve: null }]));
+    const r = (await pool.query(`SELECT progress_pct::text, curve FROM intel_prices WHERE mint = $1`, [M])).rows;
+    expect(r).toEqual([{ progress_pct: "12.75", curve: { virtualSol: "31000000000", virtualTokens: "1038000000000000", feeBps: 100, buyFee: "input", buyLimitLamports: "54000000000" } }]);
+    // A malformed progress never reaches the CHECK: written as NULL.
+    await store.commitTick(commit(10_000, [{ mint: M, priceSol: "0.6", status: "curve", progressPct: "100.01", curve: null }]));
+    expect((await pool.query(`SELECT progress_pct, curve FROM intel_prices WHERE mint = $1`, [M])).rows).toEqual([{ progress_pct: null, curve: null }]);
+  });
 });

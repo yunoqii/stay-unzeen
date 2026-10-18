@@ -150,6 +150,7 @@ fn config(url: &str) -> Config {
             zec_spread_bps: 30,
             zec_virtual_units: 271_890_000,
         },
+        comfort: unzeen_api::config::ComfortConfig::default(),
     }
 }
 
@@ -348,7 +349,7 @@ async fn pool_info() {
                "minDepositZat":"100000","minActionZat":"100000","minClaimZat":"100000","confirmations":3,
                "createEnabled":true,
                "orders": unzeen_api::orders::pool_block(),
-               "features":{"fullTrades":false},
+               "features":{"fullTrades":false,"pulse":true},
                // v0.16: enabled venues with what the pool can do there.
                "venues":[{"venue":"pumpfun","trade":true,"create":true,"quotes":["SOL","USDC"],
                           "atomicFirstBuy":true,"creatorFees":true,"mainnetOnly":false}],
@@ -2764,6 +2765,7 @@ mod orders_v08 {
             virtual_sol: 300_000_000,
             virtual_tokens: 1_073_000_000_000_000,
             fee_bps: 125,
+            ..Default::default()
         };
         e.sql(&format!(
             "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals) VALUES ('{MINT}', 'pumpfun', 'T', 'T', 6);
@@ -6194,4 +6196,411 @@ async fn pool_info_venue_curve() {
         json!({"marketCapLamports":"500000000","bps":100})
     );
     e.drop_schema().await;
+}
+
+/// API v0.28 "Trading comfort": Pulse (+ WS), progress / ETA / curve state in token data,
+/// core estimates from the token's curve state, Jupiter quotes.
+mod comfort_v028 {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::{Router, extract::Query, routing::get};
+    use unzeen_ledger::actions::quantize_min_out;
+    use unzeen_ledger::curve::{BuyFee, CurveParams};
+    use unzeen_ledger::orders::parse_e18;
+
+    use super::*;
+
+    const P1: &str = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
+    const D_NEW: &str = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
+    const D_HOT: &str = "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R";
+    const D_DONE: &str = "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr";
+    const D_OLD: &str = "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3";
+    const DBC: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+    fn now() -> i64 {
+        now_ms() as i64
+    }
+
+    fn ids(v: &Value) -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["mint"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Pool token P1 (pump.fun, price tick 72 % with a pace history) + discovery candidates:
+    /// D_NEW (fresh, 10 %, safety snapshot with holders), D_HOT (85 %), D_DONE (graduated after
+    /// being seen on the curve), D_OLD (8 h old, 5 %: in no column).
+    #[tokio::test]
+    async fn pulse_columns_eta_graduations_and_ws() {
+        let Some(e) = setup_with(|c| c.intel.discovery = true).await else {
+            return;
+        };
+        let s = e.schema.clone();
+        let t = now();
+        e.sql(&format!(
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol, status, created_at)
+             VALUES ('{P1}', 'pumpfun', 'P1', 'Pool one', 6, 0.00000003, 30, 'curve', now() - interval '1 hour');
+             INSERT INTO {s}.trades (kind, venue, mint, symbol, token_amount, sol_amount, decimals, signature, ts)
+             VALUES ('create', 'pumpfun', '{P1}', 'P1', 1, 1, 6, 'CREATE1', now());
+             INSERT INTO {s}.intel_prices (mint, price_sol, status, tick_at, progress_pct) VALUES ('{P1}', 0.00000003, 'curve', {t}, 72.00);
+             INSERT INTO {s}.curve_progress (mint, tick_at, progress) VALUES ('{P1}', {a}, 60.00), ('{P1}', {b}, 66.00), ('{D_DONE}', {b}, 99.10);
+             INSERT INTO {s}.intel_discovery (network, mint, venue, created_at, name, symbol, status, price_sol, market_cap_sol, progress_pct, as_of) VALUES
+               ('devnet', '{D_NEW}', 'pumpfun', now() - interval '30 minutes', 'New', 'NEW', 'curve', 0.00000003, 28, 10.00, date_trunc('minute', now())),
+               ('devnet', '{D_HOT}', 'raydium-launchlab', now() - interval '10 hours', 'Hot', 'HOT', 'curve', 0.0000002, 200, 85.00, date_trunc('minute', now())),
+               ('devnet', '{D_DONE}', 'meteora-dbc', now() - interval '2 hours', 'Done', 'DONE', 'graduated', 0.0000004, 400, NULL, date_trunc('minute', now())),
+               ('devnet', '{D_OLD}', 'pumpfun', now() - interval '8 hours', 'Old', 'OLD', 'curve', 0.00000003, 28, 5.00, date_trunc('minute', now()));",
+            a = t - 300_000,
+            b = t - 150_000
+        ))
+        .await;
+        // The warm set keeps the snapshot (core drops snapshots of unwarmed mints).
+        e.sql(&format!(
+            "INSERT INTO {s}.intel_warm (mint, expires_at) VALUES ('{D_NEW}', now() + interval '7 days')"
+        ))
+        .await;
+        e.put_snapshot(
+            D_NEW,
+            &json!({"program":"spl-token","authorities":{"mintRevoked":true,"freezeRevoked":false,"metadataImmutable":null,
+                    "riskyExtensions":["transferHook","bogus"]},
+                    "holders":{"top10Pct":"31.5","devPct":"2","unzeenPoolPct":"0","count":123},
+                    "market":{"venue":"pumpfun","status":"curve","curveProgressPct":"10"},
+                    "image":"https://evil.example/x.png"}),
+        )
+        .await;
+        unzeen_api::comfort::sample(&e.state).await.unwrap();
+        assert_eq!(
+            e.one_i64(&format!(
+                "SELECT count(*) FROM {s}.curve_graduations WHERE mint = '{D_DONE}'"
+            ))
+            .await,
+            1,
+            "seen on the curve, now graduated"
+        );
+        let v = unzeen_api::comfort::build_pulse(&e.state).await.unwrap();
+        e.state.pulse.put(v.to_string()).await;
+        let r = e.get("/api/pulse").await;
+        assert_eq!(r.status, StatusCode::OK);
+        assert_eq!(r.headers["cache-control"], "public, max-age=3");
+        let p = r.body;
+        assert_eq!(p["graduatingPct"], 70);
+        assert_eq!(p["etaWindowSecs"], 600);
+        assert_eq!(ids(&p["new"]), [D_NEW]);
+        assert_eq!(ids(&p["graduating"]), [D_HOT, P1]);
+        assert_eq!(ids(&p["graduated"]), [D_DONE]);
+        // Pool card: numbers of the pool, progress of the price tick, ETA by pace:
+        // 60 → 72 % in 300 s = 2.4 pp/min, 28 pp left → 700 s.
+        let c = &p["graduating"][1];
+        assert_eq!(c["pool"], true);
+        assert_eq!(c["unzeenLaunch"], true);
+        assert_eq!(c["curveProgressPct"], "72");
+        assert_eq!(c["eta"], json!({"secs": 700, "ratePctPerMin": "2.40", "samples": 3}));
+        assert_eq!(c["quote"], "SOL");
+        assert_eq!(c["holders"], Value::Null);
+        assert!(c.get("safety").is_none());
+        // Discovery card with a safety snapshot: flags only, holders count, no foreign image.
+        let n = &p["new"][0];
+        assert_eq!(n["pool"], false);
+        assert_eq!(n["holders"], 123, "{n}");
+        assert_eq!(n["safety"]["mintRevoked"], true);
+        assert_eq!(n["safety"]["freezeRevoked"], false);
+        assert_eq!(n["safety"]["riskyExtensions"], json!(["transferHook"]));
+        assert_eq!(n["safety"]["top10Pct"], "31.5");
+        assert!(n["safety"].get("devPct").is_none() && n.get("image").is_none());
+        assert!(n.get("eta").is_none(), "one tick only");
+        let d = &p["graduated"][0];
+        assert!(d["graduatedAt"].as_i64().unwrap() % 60_000 == 0);
+        assert!(d.get("curveProgressPct").is_none() && d.get("eta").is_none());
+        assert_eq!(p["graduating"][0]["venue"], "raydium-launchlab");
+        // Same bytes for every client.
+        let a = e.raw("GET", "/api/pulse", "", None).await.raw_len;
+        let b = e.raw("GET", "/api/pulse", "", None).await.raw_len;
+        assert_eq!(a, b);
+        // WS: the whole Pulse on connect, then on change.
+        let ws_url = format!("{}/ws/pulse", e.base.replace("http", "ws"));
+        let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Text(first) = first else { panic!("text") };
+        assert_eq!(
+            serde_json::from_str::<Value>(&first).unwrap()["graduated"],
+            p["graduated"]
+        );
+        e.sql(&format!(
+            "UPDATE {s}.intel_discovery SET progress_pct = 90.00 WHERE mint = '{D_NEW}'"
+        ))
+        .await;
+        let changed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(Ok(Message::Text(t))) = ws.next().await {
+                    let v = serde_json::from_str::<Value>(&t).unwrap();
+                    if ids(&v["graduating"]).contains(&D_NEW.to_string()) {
+                        return v;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("pulse change over WS");
+        assert_eq!(ids(&changed["graduating"])[0], D_NEW);
+        // Without discovery: pool tokens only.
+        e.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn token_data_carries_progress_eta_and_curve_state() {
+        let Some(e) = setup_with(|c| c.venues = vec!["pumpfun".into(), "meteora-dbc".into()]).await else {
+            return;
+        };
+        let s = e.schema.clone();
+        let t = now();
+        e.sql(&format!(
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol, status) VALUES
+               ('{P1}', 'pumpfun', 'P1', 'P1', 6, 0.0000000279, 28, 'curve'),
+               ('{DBC}', 'meteora-dbc', 'D', 'D', 6, 0.0000000300, 30, 'curve');
+             INSERT INTO {s}.launch_curves (network, venue, virtual_sol_lamports, virtual_token_reserves,
+                                            real_token_reserves, token_total_supply, fee_tiers)
+             VALUES ('devnet', 'pumpfun', 30000000000, 1073000000000000, 793100000000000, 1000000000000000,
+                     '[{{\"marketCapLamports\":\"0\",\"bps\":125}},{{\"marketCapLamports\":\"100000000000\",\"bps\":95}}]');
+             INSERT INTO {s}.intel_prices (mint, price_sol, status, tick_at, progress_pct, curve) VALUES
+               ('{P1}', 0.0000000279, 'curve', {t}, 3.10,
+                '{{\"virtualSol\":\"30000000000\",\"virtualTokens\":\"1073000000000000\",\"buyFee\":\"added\",\"buyLimitLamports\":\"85000000000\"}}'),
+               ('{DBC}', 0.0000000300, 'curve', {t}, 7.50,
+                '{{\"virtualSol\":\"31000000000\",\"virtualTokens\":\"1033000000000000\",\"feeBps\":100,\"buyFee\":\"input\",\"buyLimitLamports\":\"54000000000\",\"sellLimitTokens\":\"40000000000000\"}}');
+             INSERT INTO {s}.curve_progress (mint, tick_at, progress) VALUES ('{P1}', {a}, 2.10);",
+            a = t - 200_000
+        ))
+        .await;
+        unzeen_api::comfort::sample(&e.state).await.unwrap();
+        let v = e.get(&format!("/api/tokens/{P1}")).await.body;
+        assert_eq!(v["curveProgressPct"], "3.1");
+        // pump: the FeeConfig tier of the curve's market cap (≈ 28 SOL < 100 SOL → 125).
+        assert_eq!(
+            v["curve"],
+            json!({"virtualSol":"30000000000","virtualTokens":"1073000000000000","feeBps":125,"buyFee":"added",
+                   "buyLimitLamports":"85000000000","asOf": t})
+        );
+        // 2.1 → 3.1 % in 200 s: 0.30 pp/min, 96.9 pp left → 19 380 s.
+        assert_eq!(v["eta"], json!({"secs": 19_380, "ratePctPerMin": "0.30", "samples": 2}));
+        let d = e.get(&format!("/api/tokens/{DBC}")).await.body;
+        assert_eq!(d["curve"]["feeBps"], 100);
+        assert_eq!(d["curve"]["buyFee"], "input");
+        assert_eq!(d["curve"]["sellLimitTokens"], "40000000000000");
+        // The list carries the same fields.
+        let l = e.get("/api/tokens").await.body;
+        let lp = l.as_array().unwrap().iter().find(|x| x["mint"] == P1).unwrap();
+        assert_eq!(lp["curve"], v["curve"]);
+        assert_eq!(lp["eta"], v["eta"]);
+        // A stale tick (> 180 s) gives no curve state; graduated tokens get none of the fields.
+        e.sql(&format!(
+            "UPDATE {s}.intel_prices SET tick_at = {} WHERE mint = '{DBC}'",
+            t - 200_000
+        ))
+        .await;
+        assert!(e.get(&format!("/api/tokens/{DBC}")).await.body.get("curve").is_none());
+        e.sql(&format!(
+            "UPDATE {s}.tokens SET status = 'graduated' WHERE mint = '{P1}'"
+        ))
+        .await;
+        let g = e.get(&format!("/api/tokens/{P1}")).await.body;
+        assert!(g.get("curve").is_none() && g.get("eta").is_none() && g.get("curveProgressPct").is_none());
+        e.drop_schema().await;
+    }
+
+    /// Core's estimates follow the token's curve state: the sell minimum (B2) and a fired
+    /// order's min_out, from a thin DBC-like / pump curve the venue's launch row knows nothing of.
+    #[tokio::test]
+    async fn estimates_use_the_token_curve_state() {
+        let Some(e) = setup_with(|c| c.rate.fixed_lamports_per_zec = Some(10_000_000_000)).await else {
+            return;
+        };
+        let s = e.schema.clone();
+        let me = user(31);
+        e.fund(31, 0, 100_000_000).await;
+        let pk = hex::encode(me.verifying_key().to_bytes());
+        // Spot 1e-9 SOL per whole token = 1e-6 lamports per base unit.
+        let price = "0.000000001";
+        e.sql(&format!(
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol, status)
+             VALUES ('{MINT}', 'pumpfun', 'T', 'T', 6, {price}, 1, 'curve');
+             INSERT INTO {s}.token_balances (anon_pubkey, mint, available) VALUES ('\\x{pk}', '{MINT}', 900000000000000)"
+        ))
+        .await;
+        let post = |b: Value| {
+            let e = &e;
+            let me = &me;
+            async move { e.signed(me, "POST", "/api/actions", &b.to_string()).await }
+        };
+        // 15e12 base units = 0.015 SOL at spot: above the 0.01 SOL (0.001 ZEC) minimum.
+        let amount = "15000000000000";
+        let r = post(json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":amount,"minZecOut":"1"})).await;
+        assert_eq!(r.status, StatusCode::OK, "spot: {:?}", r.body);
+        // A thin curve at the same spot (S = 0.01 SOL): the same sell returns < 0.01 SOL.
+        let (cs, ct) = (10_000_000u128, 10_000_000_000_000u128);
+        e.sql(&format!(
+            "INSERT INTO {s}.intel_prices (mint, price_sol, status, tick_at, progress_pct, curve)
+             VALUES ('{MINT}', {price}, 'curve', {t}, 1.00,
+                     '{{\"virtualSol\":\"{cs}\",\"virtualTokens\":\"{ct}\",\"feeBps\":100,\"buyFee\":\"input\"}}')",
+            t = now()
+        ))
+        .await;
+        let r = post(json!({"op":"sell","venue":"pumpfun","mint":MINT,"amount":amount,"minZecOut":"1"})).await;
+        assert_eq!(
+            (r.status, code(&r)),
+            (StatusCode::UNPROCESSABLE_ENTITY, "below_minimum"),
+            "{:?}",
+            r.body
+        );
+        // Order: a take_profit fires on the next tick; min_out = the token curve's output.
+        let body = json!({"op":"order_create","venue":"pumpfun","mint":MINT,"kind":"take_profit",
+                          "triggerPriceSol":"0.000000001","amount":"200000000000000"})
+        .to_string();
+        let r = e.signed(&me, "POST", "/api/actions", &body).await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        let big = (100_000_000_000u128, 100_000_000_000_000_000u128); // 100 SOL curve at 1e-6 l/base
+        e.sql(&format!(
+            "UPDATE {s}.intel_prices SET prev_price_sol = price_sol, prev_tick_at = tick_at, price_sol = 0.0000000011,
+               tick_at = {t}, curve = '{{\"virtualSol\":\"{}\",\"virtualTokens\":\"{}\",\"buyFee\":\"added\"}}'",
+            big.0,
+            big.1,
+            t = now() + 5
+        ))
+        .await;
+        let mut m = 0i64;
+        for _ in 0..100 {
+            m = e.one_i64(&format!("SELECT COALESCE(max(min_out), 0)::bigint FROM {s}.relayer_jobs WHERE op = 'sell' AND token_amount > 100000000000000")).await;
+            if m > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(m > 0, "order fired");
+        let amt = e
+            .one_i64(&format!(
+                "SELECT token_amount::bigint FROM {s}.relayer_jobs WHERE op = 'sell' AND token_amount > 100000000000000"
+            ))
+            .await as u128;
+        let p11 = parse_e18("0.0000000011").unwrap();
+        // pump curve state without a fee: no launch_curves tiers → the configured 125 bps.
+        let curve = CurveParams {
+            virtual_sol: big.0,
+            virtual_tokens: big.1,
+            fee_bps: 125,
+            buy_fee: BuyFee::Added,
+            buy_limit: None,
+        };
+        assert_eq!(
+            m as u128,
+            quantize_min_out(curve.sell_out(p11, 6, amt).unwrap() * 9_500 / 10_000)
+        );
+        e.drop_schema().await;
+    }
+
+    async fn mock_jupiter(hits: Arc<AtomicUsize>) -> String {
+        let app = Router::new().route(
+            "/quote",
+            get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let amount: u128 = q["amount"].parse().unwrap();
+                    let buy = q["inputMint"] == "So11111111111111111111111111111111111111112";
+                    json!({"inputMint": q["inputMint"], "inAmount": q["amount"], "outputMint": q["outputMint"],
+                           "outAmount": (if buy { amount * 1000 } else { amount / 1000 }).to_string(),
+                           "priceImpactPct": "0.0125", "slippageBps": 50,
+                           "routePlan": [{"swapInfo": {"label": "Pump.fun Amm"}}]})
+                    .to_string()
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn quote_bucketed_cached_limited() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let url = mock_jupiter(hits.clone()).await;
+        let Some(e) = setup_with(move |c| {
+            c.comfort.quote = Some(unzeen_api::config::JupiterQuoteConfig {
+                url,
+                api_key: None,
+                rps: 0.2,
+                burst: 2.0,
+            });
+        })
+        .await
+        else {
+            return;
+        };
+        let s = e.schema.clone();
+        e.sql(&format!(
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, status) VALUES ('{MINT2}', 'pumpfun', 'G', 'G', 6, 'graduated')"
+        ))
+        .await;
+        e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+        assert_eq!(e.get("/api/pool").await.body["features"]["quote"], true);
+        let r = e
+            .get(&format!("/api/quote?mint={MINT2}&side=buy&amount=123456789"))
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+        assert_eq!(r.headers["cache-control"], "public, max-age=10");
+        assert_eq!(r.body["inAmount"], "130000000", "rounded up to 2 significant digits");
+        assert_eq!(r.body["outAmount"], "130000000000");
+        assert_eq!(r.body["priceImpactPct"], "1.2500");
+        assert_eq!(r.body["route"], json!(["Pump.fun Amm"]));
+        assert_eq!(r.body["side"], "buy");
+        // Same bucket: from the cache (one upstream call).
+        let r2 = e
+            .get(&format!("/api/quote?mint={MINT2}&side=buy&amount=129000000"))
+            .await;
+        assert_eq!(r2.body, r.body);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // A new bucket uses the second burst token; the third is over the upstream limit.
+        let r3 = e
+            .get(&format!("/api/quote?mint={MINT2}&side=sell&amount=5000000"))
+            .await;
+        assert_eq!(r3.status, StatusCode::OK);
+        assert_eq!(r3.body["outAmount"], "5000");
+        let r4 = e
+            .get(&format!("/api/quote?mint={MINT2}&side=sell&amount=7000000"))
+            .await;
+        assert_eq!((r4.status, code(&r4)), (StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
+        assert!(r4.headers.get("retry-after").is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        // Validation and unknown mints (not queued for the indexer).
+        for bad in [
+            format!("/api/quote?mint={MINT2}&side=hold&amount=1"),
+            format!("/api/quote?mint={MINT2}&side=buy&amount=0"),
+            format!("/api/quote?mint={MINT2}&side=buy&amount=01"),
+            format!("/api/quote?mint={MINT2}&side=buy&amount=1&taker=x"),
+            "/api/quote?mint=nope&side=buy&amount=1".to_string(),
+        ] {
+            assert_eq!(e.get(&bad).await.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert_eq!(
+            e.get(&format!("/api/quote?mint={P1}&side=buy&amount=1")).await.status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(e.one_i64(&format!("SELECT count(*) FROM {s}.intel_requests")).await, 0);
+        e.drop_schema().await;
+        // Off (devnet default): the path does not exist, no feature flag.
+        let Some(e) = setup().await else { return };
+        e.ledger.set_pool_meta("pool_ua", "utest1example").await.unwrap();
+        assert!(e.get("/api/pool").await.body["features"].get("quote").is_none());
+        assert_eq!(
+            e.get(&format!("/api/quote?mint={MINT2}&side=buy&amount=1"))
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        e.drop_schema().await;
+    }
 }

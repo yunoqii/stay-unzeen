@@ -84,6 +84,11 @@ creator_tokens.launch_fee_zat_left bigint
 creator_tokens.locked_amount numeric
 creator_tokens.locked_until timestamp with time zone
 creator_tokens.mint text
+curve_graduations.graduated_at timestamp with time zone
+curve_graduations.mint text
+curve_progress.mint text
+curve_progress.progress numeric
+curve_progress.tick_at bigint
 deposits.amount_zat bigint
 deposits.anon_pubkey bytea
 deposits.created_at timestamp with time zone
@@ -165,10 +170,12 @@ intel_discovery.venue text
 intel_meta.key text
 intel_meta.updated_at timestamp with time zone
 intel_meta.value text
+intel_prices.curve jsonb
 intel_prices.mint text
 intel_prices.prev_price_sol numeric
 intel_prices.prev_tick_at bigint
 intel_prices.price_sol numeric
+intel_prices.progress_pct numeric
 intel_prices.status text
 intel_prices.tick_at bigint
 intel_requests.mint text

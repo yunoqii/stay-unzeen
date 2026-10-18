@@ -19,6 +19,10 @@ import {
   type DiscoveryChain,
 } from "../src/intel/discovery";
 import { DBC_PROGRAM_ID } from "../src/meteora";
+import BN from "bn.js";
+import { NATIVE_MINT } from "@solana/spl-token";
+import { LaunchpadPool, getPdaLaunchpadPoolId } from "@raydium-io/raydium-sdk-v2";
+import { LAUNCHLAB_PROGRAM } from "../src/launchlab";
 import { seededRng } from "../src/relayer/random";
 
 /* Fixtures: public devnet data. pump create 13.10 (scripts: captured once), DBC pool 12.10 (intel-dbc.test). */
@@ -285,6 +289,43 @@ describe("Discovery tick", () => {
     now += 60_000;
     await d.tick();
     expect(chain.keysRead.at(-1)).toEqual([GLOBAL_PDA.toBase58(), DBC.pool.address]);
+  });
+
+  it("LaunchLab (API v0.28, with launchLabProgram): SOL pool PDA + mint read; price, progress; non-SOL pool dropped", async () => {
+    const program = LAUNCHLAB_PROGRAM["mainnet-beta"];
+    const mint = new PublicKey(DBC.mint.address);
+    const chain = pumpChain();
+    const pool = LaunchpadPool.decode(Buffer.alloc(LaunchpadPool.span));
+    const s0 = 30_000_000_000n;
+    const t0 = 1_073_000_000_000_000n;
+    Object.assign(pool, {
+      mintA: mint, mintB: NATIVE_MINT, status: 0, virtualA: new BN(t0.toString()), virtualB: new BN(s0.toString()),
+      realA: new BN(100_000_000_000_000), realB: new BN(8_500_000_000), totalFundRaisingB: new BN(85_000_000_000), supply: new BN(10n ** 15n + ""),
+    });
+    const buf = Buffer.alloc(LaunchpadPool.span);
+    LaunchpadPool.encode(pool, buf);
+    chain.accounts.set(getPdaLaunchpadPoolId(program, mint, NATIVE_MINT).publicKey.toBase58(), { data: buf, owner: program, lamports: 1, executable: false });
+    const src = new ListSource();
+    const other = Keypair.generate().publicKey.toBase58();
+    src.queue = [
+      { venue: "raydium-launchlab", signature: "l1", slot: 1, createdAt: T0, mint: mint.toBase58() },
+      { venue: "raydium-launchlab", signature: "l2", slot: 2, createdAt: T0, mint: other }, // no SOL pool
+    ];
+    const store = new MemoryDiscoveryStore();
+    const d = new Discovery({ store, chain, sources: [src], rng: seededRng(3), now: () => T0 + 60_000, launchLabProgram: program });
+    await d.tick();
+    const row = store.rows.get(mint.toBase58())!;
+    expect(row).toMatchObject({ venue: "raydium-launchlab", status: "curve", progressPct: "10.00" });
+    // price = (vB + rB) / (vA − rA) lamports per base unit
+    const want = Number(s0 + 8_500_000_000n) / Number(t0 - 100_000_000_000_000n) * 1e6 / 1e9;
+    expect(Number(row.priceSol)).toBeCloseTo(want, 12);
+    expect(store.rows.has(other)).toBe(false);
+    // without the program: LaunchLab creates are dev index only (as before)
+    const src2 = new ListSource();
+    src2.queue = [{ venue: "raydium-launchlab", signature: "l3", slot: 3, createdAt: T0, mint: mint.toBase58() }];
+    const store2 = new MemoryDiscoveryStore();
+    await new Discovery({ store: store2, chain, sources: [src2], rng: seededRng(3), now: () => T0 + 60_000 }).tick();
+    expect(store2.rows.size).toBe(0);
   });
 
   it("nothing is read outside a tick (no on-demand requests)", async () => {

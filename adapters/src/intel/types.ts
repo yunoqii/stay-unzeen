@@ -1,3 +1,4 @@
+import type { CurveState } from "./curves";
 /**
  * Token intel (FEATURES 6–8, docs/analysis/token-intel.md). Shapes follow the
  * draft `TokenSafety` of token-intel.md §5; the final table layout and API
@@ -121,6 +122,10 @@ export interface PriceRow {
   mint: string;
   priceSol: string;
   status: "curve" | "graduated";
+  /** v4 (API v0.28): curve progress "0.00".."100.00" on the curve; null = graduated / unknown. */
+  progressPct?: string | null;
+  /** v4: the token's curve state (SOL pairs on the curve); null = none. */
+  curve?: CurveState | null;
 }
 
 /**

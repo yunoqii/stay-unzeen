@@ -521,6 +521,8 @@ describe("INTEL v2 price pass (intel_prices)", () => {
     for (const m of [a, b, c]) reader.accounts.set(m.toBase58(), mintAccount(1_000_000_000_000_000n));
     reader.accounts.set(bondingCurvePda(a).toBase58(), await curveAccount(key()));
     reader.accounts.set(bondingCurvePda(c).toBase58(), await curveAccount(key()));
+    const gj = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "pump-params.json"), "utf8")) as { global: { owner: string; data: string } };
+    reader.accounts.set(GLOBAL_PDA.toBase58(), { data: Buffer.from(gj.global.data, "base64"), owner: new PublicKey(gj.global.owner), lamports: 1, executable: false });
     reader.recent = Array.from({ length: 20 }, keyS);
     store.pin(a.toBase58(), false);
     store.pin(b.toBase58(), false);
@@ -547,10 +549,14 @@ describe("INTEL v2 price pass (intel_prices)", () => {
     expect(store.prices.has(c.toBase58())).toBe(false);
     expect(store.commits.at(-1)!.prices).toHaveLength(1);
     // The price read itself: one call with exactly the pinned mints and their curve PDAs.
+    // v4 (API v0.28): + the pump Global (curve progress), same call.
     const priceCall = reader.calls.find(
-      (x) => x.method === "getMultipleAccounts" && x.keys.length === 4 && x.keys.includes(bondingCurvePda(b).toBase58()),
+      (x) => x.method === "getMultipleAccounts" && x.keys.length === 5 && x.keys.includes(bondingCurvePda(b).toBase58()),
     );
-    expect(new Set(priceCall!.keys)).toEqual(new Set([a, bondingCurvePda(a), b, bondingCurvePda(b)].map((k) => k.toBase58())));
+    expect(new Set(priceCall!.keys)).toEqual(new Set([GLOBAL_PDA, a, bondingCurvePda(a), b, bondingCurvePda(b)].map((k) => k.toBase58())));
+    // v4: progress and the curve state of a fresh curve.
+    expect(p1.progressPct).toBe("0.00");
+    expect(p1.curve).toMatchObject({ virtualSol: BigInt(global.initialVirtualSolReserves.toString()), virtualTokens: BigInt(global.initialVirtualTokenReserves.toString()), buyFee: "added", feeBps: null });
 
     t += 60_000;
     await idx.tick();

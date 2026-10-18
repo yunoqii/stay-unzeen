@@ -219,7 +219,7 @@ async fn hood_price_guard(st: &AppState, mint: &str, min_out: u128) -> ApiResult
     }
 }
 
-fn is_hood(st: &AppState) -> bool {
+pub fn is_hood(st: &AppState) -> bool {
     matches!(st.cfg.policy.chain.trade, unzeen_protocol::TradeNet::Hood(_))
 }
 
@@ -512,10 +512,27 @@ fn estimate_zat_on(
 pub async fn impact_curve(
     st: &AppState,
     venue: &str,
+    mint: &str,
     t: &TokenFacts,
 ) -> ApiResult<Option<unzeen_ledger::curve::CurveParams>> {
     if is_hood(st) || t.quote_mint.is_some() || t.status != "curve" || t.venue != venue {
         return Ok(None);
+    }
+    // v0.28: the token's own curve state on a fresh indexer tick (pump.fun, DBC, LaunchLab).
+    {
+        let c = crate::market::client(st).await?;
+        if let Some((tc, _)) = unzeen_ledger::curve::load_token_curve(
+            &c,
+            st.cfg.cluster,
+            mint,
+            crate::rate::now_ms() as i64,
+            trade_fee_bps(st, "pumpfun"),
+        )
+        .await
+        .map_err(crate::market::db)?
+        {
+            return Ok(Some(tc.params()));
+        }
     }
     let (c, supply, own) = crate::rules_curve(st, venue).await?;
     if !own {
@@ -525,6 +542,7 @@ pub async fn impact_curve(
         virtual_sol: c.virtual_sol,
         virtual_tokens: c.virtual_tokens,
         fee_bps: trade_fee_bps(st, venue),
+        ..Default::default()
     };
     // v0.26: the fee of the tier this token's curve is in (relayer-read FeeConfig tiers); the
     // configured fee only when the relayer did not write tiers.
@@ -888,7 +906,7 @@ pub async fn build(st: &AppState, pk: &[u8; 32], a: SignedAction) -> ApiResult<N
                 });
             }
             let curve = match &known {
-                Some(t) => impact_curve(st, &v, t).await?,
+                Some(t) => impact_curve(st, &v, &mint, t).await?,
                 None => None,
             };
             let known = known.map(|t| (t.price_sol, t.decimals));

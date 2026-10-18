@@ -2,7 +2,13 @@
 
 Источник правды для обеих сторон. Меняет только backend (по согласованию с лидом); frontend работает по нему и мокает, пока бек не готов.
 
-Статус: **v0.27** (15.10; миграция `0034_launch_curve_fees.sql`). Изменения против v0.26:
+Статус: **v0.28** (18.10; миграция `0035_trading_comfort.sql`). Изменения против v0.27 — раздел «Trading comfort (v0.28)» ниже:
+- **`GET /api/pulse`** + **`/ws/pulse`** — три колонки New / About to graduate / Graduated по всем индексируемым площадкам (`PulseToken`), один ответ всем, кэш 3 с.
+- **Состояние кривой токена** `Token.curve?: TokenCurve` (pump.fun, Meteora DBC, Raydium LaunchLab; SOL-пары на кривой) и **общая формула оценки** с режимом комиссии `buyFee`. Core считает по ней проверку минимума sell, `min_out` ордеров и шагов сценариев.
+- **Прогресс кривой с тика цены и ETA** по темпу: `Token.curveProgressPct` (теперь с каждого тика), `Token.eta?: CurveEta` — в `GET /api/tokens/:mint`, `GET /api/tokens`, `PulseToken`.
+- **`GET /api/quote`** (только mainnet, только для graduated / Jupiter): котировка Jupiter с импактом по округлённой вверх сумме, кэш 10 с, общий лимит частоты; `PoolInfo.features.quote`.
+
+Изменения v0.27 против v0.26 (15.10; миграция `0034_launch_curve_fees.sql`):
 - **Комиссия кривой — из цепочки, а не из env.** Релейер вместе с резервами читает pump.fun `FeeConfig.feeTiers` (уровни по market cap: protocol + creator bps; lp — только у AMM). Если FeeConfig нет — Global `feeBasisPoints + creatorFeeBasisPoints`. Результат пишется в `launch_curves.fee_tiers`. `UNZEEN_TRADE_FEE_BPS_PUMPFUN` остаётся только запасным значением, когда уровней нет.
 - **`PoolInfo.venues[].curve`** += `tokenTotalSupply: string`, `feeSource: "chain" | "config"`, `feeTiers?: { marketCapLamports: string; bps: number }[]` (по возрастанию; есть при `feeSource = "chain"`). `feeBps` = уровень свежей кривой (market cap `virtualSol · tokenTotalSupply / virtualTokens`).
 - **Уровень выбирает market cap токена** — как `calculateFeeTier` в SDK: последний уровень с порогом ≤ market cap, а ниже первого порога — первый уровень. Market cap = `S · tokenTotalSupply / T` при текущих резервах (формула v0.26). Core выбирает уровень так же для проверки минимума sell, ордеров и сценариев; фронт должен делать то же.
@@ -235,6 +241,8 @@ v0.18 (13.10; миграция `0026_amounts_numeric.sql`; RELAYER.md v12). Robi
 | GET | `/api/verify/proof[?snapshot=<id>]` (подписанный) | `VerifyProof` (v0.7), только последний или предыдущий снимок |
 | GET | `/api/creator` (подписанный) | `CreatorCabinet` (v0.9), только токены, созданные этим ключом; ответ кратен 4096 байт |
 | GET | `/api/stats` | `PlatformStats` (v0.9) — последний суточный снимок \| `404` до первого снимка; `Cache-Control: public, max-age=3600` |
+| GET | `/api/pulse` | `Pulse` (v0.28) — колонки New / About to graduate / Graduated; `public, max-age=3` |
+| GET | `/api/quote?mint=&side=buy\|sell&amount=` | `JupiterQuote` (v0.28) — только mainnet и при `features.quote`; для graduated / Jupiter |
 
 Подписанные запросы — схема в разделе «Подпись запросов».
 
@@ -247,6 +255,7 @@ v0.18 (13.10; миграция `0026_amounts_numeric.sql`; RELAYER.md v12). Robi
 ## WebSocket
 `/ws/feed` → поток `FeedEvent` (все сделки).
 `/ws/feed?mint=<mint>` → только события по одному mint (для страницы токена).
+`/ws/pulse` → `Pulse` целиком: сразу после подключения и при каждом изменении (не чаще раза в 3 с) (v0.28).
 
 ## Типы
 
@@ -282,6 +291,9 @@ interface Token {
   quoteMint?: string;    // v0.13: нет у SOL
   priceQuote?: string;   // v0.13: quote за 1 целый токен (UI-единицы), если релейер его записал
   platform?: "unzeen" | "bonk" | "stonk";   // v0.13: только venue = "raydium-launchlab"
+  curveProgressPct?: string; // v0.28: только на кривой; с тика цены индексатора (см. «Trading comfort»)
+  eta?: CurveEta;            // v0.28: оценка времени до graduation по темпу
+  curve?: TokenCurve;        // v0.28: состояние кривой токена (SOL-пары на кривой), общая формула — «Trading comfort»
 }
 
 // v0.13: PoolInfo.quotes[] — включённые quote-активы сети
@@ -343,6 +355,8 @@ interface PoolInfo {
     chat?: true;            // v0.12: чат токена (нет ключа = выключен; вкладку не показывать)
     noop?: true;            // v0.12: сервер принимает op "noop" (покрывающий трафик, R8)
     fairLaunch?: true;      // v0.6/v0.7: есть только при включённом fair-launch; нет ключа → выключено (UI не показывать)
+    pulse?: true;           // v0.28: есть GET /api/pulse и /ws/pulse
+    quote?: true;           // v0.28: есть GET /api/quote (только mainnet Solana)
   };
   fairLaunch?: FairLaunchParams;  // v0.6: только при features.fairLaunch = true
   chat?: ChatParams;        // v0.12: только при features.chat = true
@@ -1198,6 +1212,121 @@ interface Scenario {                       // Portfolio.scenarios: ≤ 5, акт
 **Блоки.** `PoolInfo.scenarios.blocks` — все блоки, кроме `fl_*` без `features.fairLaunch` и `chat` без `features.chat`; блок, которого там нет, → `bad_request` / `feature_disabled`.
 
 **Как исполняются (сервер):** триггеры опрашиваются раз в 20–40 с только по данным core (тик индексатора, снимок безопасности, реестр, часы), без RPC; `deposit_received` взводится на текущую сумму депозитов ключа и срабатывает на её рост; `check_safety` без свежего снимка (≤ 10 мин) ставит mint в общую очередь CA и ждёт до 3 тиков, затем без данных — `false`; `swap` = продажа → скрытая пауза 3–15 мин → покупка на 92–98 % выручки; `dca` — срезы с весами ±20 % и паузами `U(everySecs)`; `repeat` — `abs`-суммы итераций ±10 %; `withdraw_token` — ещё `U(0, 30 мин)` перед постановкой; `chat` после своей сделки по mint — всегда `slow` + 10–30 мин. Выход шага `create` — его mint и токены первой покупки; `claim` — зачисленные зат.
+
+## Trading comfort (v0.28)
+
+Решение владельца 18.10: Pulse, прогресс кривой с ETA, котировки с импактом на всех площадках. Trending и публичный поток сделок для трекинга кошельков **не делаем**.
+
+**Приватность (жёстко).** Всё ниже — публичные данные цепочки, собранные по таймерам сервера и индексатора, независимо от запросов. Публичные эндпоинты — без подписи, без cookies, без `x-unzeen-*`, ответ одинаков для всех и кэшируемый. Сервер не принимает и не хранит списков «что смотрит/отслеживает пользователь», не пишет логов с mint, суммой или IP. Watchlist, если нужен, — только в браузере.
+
+### Pulse — `GET /api/pulse`, `/ws/pulse`
+
+Ответ собирает фоновый таймер сервера раз в 3 с (не запрос), одинаковый для всех; `Cache-Control: public, max-age=3`. Источники: токены пула (`tokens` + цена и прогресс с тика индексатора `intel_prices`) и, при `features.discovery`, свежие токены площадок (`intel_discovery`). Без discovery Pulse показывает только токены пула. Площадки: `pumpfun`, `meteora-dbc`, `raydium-launchlab` (discovery LaunchLab — только mainnet), у токенов пула — любая их площадка.
+
+```ts
+interface Pulse {
+  asOf: number;              // unix мс самых свежих данных в ответе (последний тик индексатора среди карточек); не время запроса
+  graduatingPct: number;     // порог колонки «About to graduate», % (env UNZEEN_PULSE_GRADUATING_PCT, по умолчанию 70)
+  etaWindowSecs: number;     // окно темпа для ETA (env UNZEEN_PULSE_ETA_WINDOW_SECS, по умолчанию 600)
+  new: PulseToken[];         // status = "curve", progress < graduatingPct (или неизвестен), созданы ≤ 6 ч назад; новые первыми; ≤ 30
+  graduating: PulseToken[];  // status = "curve", progress ≥ graduatingPct; по прогрессу убыв.; ≤ 30
+  graduated: PulseToken[];   // status = "graduated", ушли с кривой ≤ 24 ч назад (или graduatedAt неизвестен и созданы ≤ 24 ч); по graduatedAt убыв.; ≤ 30
+}
+
+interface PulseToken {
+  mint: string; symbol: string; name: string;   // symbol/name могут быть "" (метаданные ещё не прочитаны)
+  image?: string;            // только наш `/media/<sha40>.<ext>`
+  venue: Venue; status: "curve" | "graduated";
+  decimals: number;
+  quote: Quote;              // пара кривой ("SOL" у discovery)
+  priceSol: string; marketCapSol: string;       // как в Token; "0" — ещё не прочитаны
+  createdAt: number;         // unix мс создания токена на площадке
+  curveProgressPct?: string; // только на кривой: десятичная строка 0..100, до 2 знаков без хвостовых нулей ("72", "30.92")
+  eta?: CurveEta;            // только на кривой и при положительном темпе
+  graduatedAt?: number;      // unix мс (вниз до минуты): когда сервер впервые увидел status = graduated у mint, который он видел на кривой в последний час; иначе поля нет
+  holders: number | null;    // число холдеров из снимка безопасности (`holders.count`, INTEL v3); null — нет (на Shyft Free не считается)
+  safety?: PulseSafety;      // только если у mint есть снимок безопасности
+  unzeenLaunch: boolean;     // запущен через Unzeen
+  pool: boolean;             // токен есть в GET /api/tokens (пул им торговал; есть цена пула)
+  asOf: number;              // unix мс тика индексатора, к которому относятся числа
+}
+
+interface PulseSafety {      // выжимка TokenSafety того же снимка (флаги для карточки)
+  mintRevoked: boolean; freezeRevoked: boolean;
+  riskyExtensions: RiskyExtension[];
+  top10Pct?: string;         // есть, если есть holders в снимке
+  asOf: number;
+}
+
+interface CurveEta {         // темп по скользящему окну etaWindowSecs (тики индексатора)
+  secs: number;              // оценка до 100 % при текущем темпе, вверх до 10 с; > 7 сут → поля eta нет
+  ratePctPerMin: string;     // темп, п.п. прогресса в минуту (десятичная строка, 2 знака)
+  samples: number;           // сколько тиков в окне (≥ 2, охват ≥ 120 с)
+}
+```
+- Один mint — в одной колонке. Токен пула и discovery-кандидат с тем же mint — одна карточка (`pool: true`, числа пула).
+- `/ws/pulse`: сервер шлёт `Pulse` целиком сразу после подключения и затем при каждом изменении (не чаще раза в 3 с). Клиент ничего не шлёт (любое входящее сообщение игнорируется). Подписка ничего не говорит серверу сверх «открыта страница Pulse».
+- ETA — оценка по истории тиков (`curve_progress`: core копирует прогресс с тиков индексатора своим таймером раз в 20 с, хранит 1 ч): `rate = (p_last − p_first) / (t_last − t_first)` по тикам окна; `secs = (100 − p_last) / rate`. Нет ≥ 2 тиков с охватом ≥ 120 с, темп ≤ 0 или > 7 сут → поля нет. UI: «≈ 4 min to graduation at the current pace».
+
+### Прогресс и ETA в данных токена
+- `Token.curveProgressPct?: string` — v0.28: у токенов пула берётся с **каждого** тика цены (`intel_prices.progress_pct`, 45–75 с), иначе из снимка безопасности (как раньше). Есть только при `status = "curve"`. То же поле в `TokenListItem` (`GET /api/tokens`) и в `GET /api/tokens/:mint`.
+- `Token.eta?: CurveEta` — там же, по той же истории, что в Pulse.
+- Прогресс по площадкам: pump.fun — продано из `initialRealTokenReserves` Global; Meteora DBC — `quoteReserve / migrationQuoteThreshold`; LaunchLab — `realB / totalFundRaisingB`.
+
+### Состояние кривой токена и общая формула оценки
+
+`Token.curve?: TokenCurve` — в `GET /api/tokens/:mint` (и в `TokenListItem`) для токенов **на кривой в паре к SOL** на `pumpfun`, `meteora-dbc`, `raydium-launchlab`, если индексатор прочитал кривую на последнем тике (не старше 180 с). Нет поля → как раньше: `PoolInfo.venues[].curve` (pump.fun), иначе спот. Для Pulse-карточек кривая не отдаётся (только на странице токена).
+
+```ts
+interface TokenCurve {
+  virtualSol: string;       // S: SOL-сторона кривой на тике asOf, лампорты (виртуальные + реальные резервы)
+  virtualTokens: string;    // T: токен-сторона на тике asOf, базовые единицы; S·T = k (константа кривой/сегмента)
+  feeBps: number;           // суммарная торговая комиссия сейчас, б.п. (pump: уровень FeeConfig; DBC: базовая + динамическая; LaunchLab: протокол + платформа + создатель)
+  buyFee: "added" | "input" | "output";   // как комиссия берётся с покупки (ниже)
+  buyLimitLamports?: string;// чистые лампорты в кривую до конца кривой / текущего сегмента DBC на тике asOf; больше — частичное исполнение (pump, DBC) или оценка неточна
+  sellLimitTokens?: string; // DBC: токены до нижней границы текущего сегмента; нет — без ограничения
+  asOf: number;             // unix мс тика индексатора
+}
+```
+
+**Формула (одна у core и UI, обобщает v0.26).** Спот `p` — лампорты за базовую единицу из `Token.priceSol` (`p = priceSol · 1e9 / 10^decimals`). `k = virtualSol · virtualTokens`, `S = √(k·p)`, `T = k / S` (при `p` = цене тика это ровно `virtualSol`/`virtualTokens`). `f = feeBps / 10⁴`.
+- **Sell** `a` базовых единиц (все площадки, комиссия с выхода SOL): `S·a / (T + a) · (1 − f)`.
+- **Buy** на `x` лампортов всего:
+  - `buyFee = "added"` (pump.fun, комиссия сверху): `net = x / (1 + f)`, токенов `T·net / (S + net)`;
+  - `"input"` (DBC с комиссией в quote, LaunchLab): `net = x · (1 − f)`, токенов `T·net / (S + net)`;
+  - `"output"` (DBC с комиссией в токене): токенов `T·x / (S + x) · (1 − f)`.
+  - `net > buyLimitLamports` → показать «partially fills / curve ends» (сервер ограничивает так же).
+- Без `Token.curve`, но с `PoolInfo.venues[].curve` (pump.fun) — как v0.26/v0.27 (`virtualSol`/`virtualTokens` начальной кривой, `buyFee = "added"`).
+- **Core (v0.28)** считает той же формулой (со свежим `Token.curve`, иначе по кривой площадки, иначе спот): проверку минимума `sell`, `min_out` сработавших ордеров, `min_out` шагов сценария со `slippageBps`. Затем, как раньше, минус slippage и квантование до 3 значащих цифр.
+- **Сверка (18.10):** `adapters/scripts/curves-check.ts` (только чтение, публичный devnet RPC) прогоняет формулу по реальным сделкам токенов пула: pump.fun — 21 сделка (buy/sell, 125 б.п.), максимальное расхождение 0.005 б.п.; Meteora DBC (конфиг Unzeen, `input`, 100 б.п.) — 4 сделки, расхождение 0 (± 9 базовых единиц). LaunchLab (`input`, 100 б.п. платформы Unzeen) и DBC сверены с математикой SDK площадок (`adapters/test/intel-curves.test.ts`: ≤ 2 б.п.); первая покупка LaunchLab в SDK-математике совпадает с цепочкой (`launchlab.test.ts`).
+
+### Котировка для graduated — `GET /api/quote`
+
+Только для токенов, которые торгуются через Jupiter (`status = "graduated"` или `venue = "jupiter"`); для кривых фронт считает сам по формуле выше. Есть только на mainnet Solana при `PoolInfo.features.quote: true` (env `UNZEEN_QUOTE`, по умолчанию включено на mainnet); иначе путь → `404 not_found`. На devnet `features.quote` нет.
+
+`GET /api/quote?mint=<base58>&side=buy|sell&amount=<целое>`; `amount` — buy: лампорты, sell: базовые единицы токена (> 0, ≤ u64).
+
+```ts
+interface JupiterQuote {
+  mint: string; side: "buy" | "sell";
+  inAmount: string;        // сумма, по которой спросили Jupiter: amount, округлённая ВВЕРХ до 2 значащих цифр
+  outAmount: string;       // выход Jupiter для inAmount (buy: базовые единицы токена; sell: лампорты), без slippage
+  priceImpactPct: string;  // импакт по Jupiter, % (десятичная строка, ≥ 0)
+  route: string[];         // метки площадок маршрута (например ["PumpSwap"]), ≤ 4
+  asOf: number;            // unix мс ответа Jupiter (кэш до 10 с)
+}
+```
+- Фронт масштабирует к своей сумме: `out ≈ outAmount · amount / inAmount` (сумма округлена вверх → оценка консервативна), затем свой slippage.
+- **Приватность:** сервер ходит в Jupiter (`/swap/v1/quote`) со своего адреса, без IP пользователя; спрашивает только округлённую сумму; ответ кэшируется на 10 с по `(mint, side, inAmount)` и отдаётся всем одинаково (`Cache-Control: public, max-age=10`); параметры и ответы не логируются. Jupiter видит «кто-то через Unzeen интересуется mint X на ~сумму Y», без пользователя.
+- Mint должен быть известен серверу (`GET /api/tokens`, снимок индексатора или Pulse), иначе `404` (в очередь индексатора не ставится). Неверные параметры → `400 bad_request`.
+- **Лимит частоты:** общий на сервер (env `UNZEEN_QUOTE_RPS`, по умолчанию 1 запрос к Jupiter в секунду, burst 5) и на сокет (как у остальных публичных путей); превышение → `429 rate_limited` + `Retry-After`. Jupiter недоступен / нет маршрута → `503 venue_unavailable`.
+- Котировка — только для показа. Сделка `venue: "jupiter"` по-прежнему требует `minOut > 0` от пользователя; релейер строит транзакцию сам, в момент исполнения.
+
+```ts
+// PoolInfo.features += pulse: true (v0.28, всегда); quote?: true (v0.28, только mainnet при UNZEEN_QUOTE)
+// Token += curveProgressPct?: string (v0.28 — и в GET /api/tokens/:mint); eta?: CurveEta; curve?: TokenCurve
+// TokenListItem += eta?: CurveEta; curve?: TokenCurve
+```
 
 ## Единицы сумм
 

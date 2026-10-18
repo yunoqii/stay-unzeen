@@ -14,7 +14,7 @@ export const PROPOSED_DISCOVERY_SQL = `
 CREATE TABLE IF NOT EXISTS intel_discovery (
   network        TEXT        NOT NULL CHECK (network IN ('devnet', 'mainnet-beta')),
   mint           TEXT        NOT NULL,
-  venue          TEXT        NOT NULL CHECK (venue IN ('pumpfun', 'meteora-dbc')),
+  venue          TEXT        NOT NULL CHECK (venue IN ('pumpfun', 'meteora-dbc', 'raydium-launchlab')),
   created_at     TIMESTAMPTZ NOT NULL,
   name           TEXT        NULL CHECK (char_length(name) <= 64),
   symbol         TEXT        NULL CHECK (char_length(symbol) <= 64),

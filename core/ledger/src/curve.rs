@@ -17,13 +17,50 @@ use unzeen_fair::alloc::mul_div;
 /// Lamports have 9 decimals; prices are decimal SOL per whole token × 1e18.
 const NATIVE_DECIMALS: u32 = 9;
 
-/// Initial virtual reserves of the venue's curve (`launch_curves`) and its trade fee.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How a buy pays the venue fee (API v0.28 `TokenCurve.buyFee`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BuyFee {
+    /// On top of the SOL into the curve: `x = net · (1 + f)` (pump.fun).
+    #[default]
+    Added,
+    /// Deducted from the SOL in: `net = x · (1 − f)` (DBC with the fee in quote, LaunchLab).
+    Input,
+    /// Deducted from the tokens out (DBC with the fee in the base token).
+    Output,
+}
+
+impl BuyFee {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "added" => Some(Self::Added),
+            "input" => Some(Self::Input),
+            "output" => Some(Self::Output),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Input => "input",
+            Self::Output => "output",
+        }
+    }
+}
+
+/// Virtual reserves of a constant-product curve (`S · T = k`) and its trade fee: either the
+/// venue's launch curve (`launch_curves`, v0.26) or, v0.28, the token's own curve state on the
+/// last indexer tick (`intel_prices.curve`: current reserves of the curve / DBC segment).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct CurveParams {
     pub virtual_sol: u128,
     pub virtual_tokens: u128,
     /// Venue trade fee, b.p. of the SOL side (pump.fun: protocol + creator). 0 = fees ignored.
     pub fee_bps: u32,
+    /// v0.28: how a buy pays the fee.
+    pub buy_fee: BuyFee,
+    /// v0.28: net lamports the curve (or the DBC segment) still takes, from the token's tick
+    /// state; a larger buy fills only this much (pump, DBC) — the estimate is capped there.
+    pub buy_limit: Option<u128>,
 }
 
 /// pump.fun bonding-curve trade fee assumed by core (0.95 % protocol + 0.30 % creator):
@@ -125,12 +162,152 @@ impl CurveParams {
     }
 
     /// Base units a buy spending `lamports` in total returns at spot `price_e18`, impact
-    /// included; the fee comes on top of the curve input (`lamports = net · (1 + fee)`).
+    /// included. The fee per [`BuyFee`]: on top of the curve input (`lamports = net · (1 + f)`,
+    /// pump.fun), out of the input (`net = lamports · (1 − f)`) or out of the tokens. v0.28: the
+    /// net into the curve is capped at `buy_limit` (the rest is not filled).
     pub fn buy_out(&self, price_e18: u128, decimals: u32, lamports: u128) -> Option<u128> {
         let (s, t) = self.reserves_at(price_e18, decimals)?;
-        let net = mul_div(lamports, 10_000, 10_000 + u128::from(self.fee_bps))?;
-        mul_div(t, net, s.checked_add(net)?)
+        let f = u128::from(self.fee_bps.min(10_000));
+        let net = match self.buy_fee {
+            BuyFee::Added => mul_div(lamports, 10_000, 10_000 + f)?,
+            BuyFee::Input | BuyFee::Output => {
+                if self.buy_fee == BuyFee::Input {
+                    mul_div(lamports, 10_000 - f, 10_000)?
+                } else {
+                    lamports
+                }
+            }
+        };
+        let net = self.buy_limit.map_or(net, |l| net.min(l));
+        let out = mul_div(t, net, s.checked_add(net)?)?;
+        if self.buy_fee == BuyFee::Output {
+            mul_div(out, 10_000 - f, 10_000)
+        } else {
+            Some(out)
+        }
     }
+}
+
+/// v0.28 (API `TokenCurve`, INTEL v4): a token's curve state on the last indexer tick
+/// (`intel_prices.curve`, 0035) — the current reserves of its curve (DBC: of the segment the
+/// price is in), the fee now and how a buy pays it. `fee_bps = None`: pump.fun, the fee is the
+/// FeeConfig tier core resolves ([`load_token_curve`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenCurve {
+    pub virtual_sol: u128,
+    pub virtual_tokens: u128,
+    pub fee_bps: Option<u32>,
+    pub buy_fee: BuyFee,
+    pub buy_limit: Option<u128>,
+    pub sell_limit: Option<u128>,
+}
+
+/// A tick's curve state is used for estimates only this long (orders: the same tick age bound).
+pub const TOKEN_CURVE_MAX_AGE_MS: i64 = 180_000;
+
+/// `intel_prices.curve` JSON → state; `None` if malformed (the indexer is a separate process:
+/// every field is checked).
+pub fn parse_token_curve(v: &serde_json::Value) -> Option<TokenCurve> {
+    let n = |k: &str| -> Option<Option<u128>> {
+        match v.get(k) {
+            None | Some(serde_json::Value::Null) => Some(None),
+            Some(x) => x
+                .as_str()
+                .filter(|s| s.len() <= 39 && s.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|s| s.parse().ok())
+                .map(Some),
+        }
+    };
+    let virtual_sol = n("virtualSol")?.filter(|x| *x > 0)?;
+    let virtual_tokens = n("virtualTokens")?.filter(|x| *x > 0)?;
+    let fee_bps = match v.get("feeBps") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(x) => Some(u32::try_from(x.as_u64()?).ok().filter(|b| *b <= 9_900)?),
+    };
+    Some(TokenCurve {
+        virtual_sol,
+        virtual_tokens,
+        fee_bps,
+        buy_fee: BuyFee::parse(v.get("buyFee")?.as_str()?)?,
+        buy_limit: n("buyLimitLamports")?,
+        sell_limit: n("sellLimitTokens")?,
+    })
+}
+
+impl TokenCurve {
+    /// Estimate parameters (the fee must be resolved: `fee_bps` set).
+    pub fn params(&self) -> CurveParams {
+        CurveParams {
+            virtual_sol: self.virtual_sol,
+            virtual_tokens: self.virtual_tokens,
+            fee_bps: self.fee_bps.unwrap_or(0),
+            buy_fee: self.buy_fee,
+            buy_limit: self.buy_limit,
+        }
+    }
+
+    /// API v0.28 `TokenCurve` JSON (fee resolved), `as_of` = tick ms.
+    pub fn to_json(&self, as_of: i64) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "virtualSol": self.virtual_sol.to_string(),
+            "virtualTokens": self.virtual_tokens.to_string(),
+            "feeBps": self.fee_bps.unwrap_or(0),
+            "buyFee": self.buy_fee.as_str(),
+            "asOf": as_of,
+        });
+        if let Some(l) = self.buy_limit {
+            v["buyLimitLamports"] = serde_json::json!(l.to_string());
+        }
+        if let Some(l) = self.sell_limit {
+            v["sellLimitTokens"] = serde_json::json!(l.to_string());
+        }
+        v
+    }
+}
+
+/// The token's fresh curve state (tick not older than [`TOKEN_CURVE_MAX_AGE_MS`] at `now_ms`,
+/// still on the curve, not a pair to a non-SOL quote), with the fee resolved: the indexer's
+/// fee (DBC, LaunchLab), or for pump.fun the FeeConfig tier of its market cap
+/// (`launch_curves.fee_tiers`, v0.27), else `pump_fee_bps`. Returns the tick time too.
+pub async fn load_token_curve<C: deadpool_postgres::GenericClient>(
+    c: &C,
+    network: &str,
+    mint: &str,
+    now_ms: i64,
+    pump_fee_bps: u32,
+) -> Result<Option<(TokenCurve, i64)>, tokio_postgres::Error> {
+    let Some(r) = c
+        .query_opt(
+            "SELECT p.curve, p.tick_at, lc.fee_tiers, lc.token_total_supply
+               FROM intel_prices p
+               LEFT JOIN launch_curves lc ON lc.network = $1 AND lc.venue = 'pumpfun'
+              WHERE p.mint = $2 AND p.status = 'curve' AND p.curve IS NOT NULL AND p.tick_at >= $3
+                AND NOT EXISTS (SELECT 1 FROM tokens t WHERE t.mint = $2 AND t.quote_mint IS NOT NULL)",
+            &[&network, &mint, &(now_ms - TOKEN_CURVE_MAX_AGE_MS)],
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(mut tc) = r
+        .get::<_, Option<serde_json::Value>>(0)
+        .as_ref()
+        .and_then(parse_token_curve)
+    else {
+        return Ok(None);
+    };
+    if tc.fee_bps.is_none() {
+        let tiers = r
+            .get::<_, Option<serde_json::Value>>(2)
+            .and_then(|v| parse_fee_tiers(&v));
+        let supply = r
+            .get::<_, Option<crate::Num>>(3)
+            .and_then(|n| n.to_u128().ok())
+            .unwrap_or(0);
+        let cap = mul_div(tc.virtual_sol, supply, tc.virtual_tokens).unwrap_or(0);
+        tc.fee_bps = Some(tiers.and_then(|t| tier_bps(&t, cap)).unwrap_or(pump_fee_bps));
+    }
+    Ok(Some((tc, r.get(1))))
 }
 
 #[cfg(test)]
@@ -142,6 +319,8 @@ mod tests {
         virtual_sol: 300_000_000,
         virtual_tokens: 1_073_000_000_000_000,
         fee_bps: 0,
+        buy_fee: BuyFee::Added,
+        buy_limit: None,
     };
 
     #[test]
@@ -261,6 +440,84 @@ mod tests {
         assert!(spot > 2 * est, "spot {spot} vs curve {est}");
     }
 
+    /// v0.28: the three buy-fee modes and the buy limit, at the tick price (reserves exact).
+    #[test]
+    fn buy_fee_modes_and_limit() {
+        let (s, t) = (31_000_000_000u128, 1_038_000_000_000_000u128);
+        let p = price_e18(s, t, 6);
+        let base = CurveParams {
+            virtual_sol: s,
+            virtual_tokens: t,
+            fee_bps: 100,
+            ..Default::default()
+        };
+        let x = 1_000_000_000u128;
+        let (s2, t2) = base.reserves_at(p, 6).unwrap();
+        let cp = |net: u128| t2 * net / (s2 + net);
+        let added = base.buy_out(p, 6, x).unwrap();
+        assert!(added.abs_diff(cp(x * 10_000 / 10_100)) <= 1);
+        let input = CurveParams {
+            buy_fee: BuyFee::Input,
+            ..base
+        }
+        .buy_out(p, 6, x)
+        .unwrap();
+        assert!(input.abs_diff(cp(x * 9_900 / 10_000)) <= 1);
+        let output = CurveParams {
+            buy_fee: BuyFee::Output,
+            ..base
+        }
+        .buy_out(p, 6, x)
+        .unwrap();
+        assert!(output.abs_diff(cp(x) * 9_900 / 10_000) <= 1);
+        assert!(input < added && output < cp(x));
+        // limit: the net into the curve never exceeds what the curve still takes
+        let lim = CurveParams {
+            buy_fee: BuyFee::Input,
+            buy_limit: Some(500_000_000),
+            ..base
+        };
+        assert_eq!(lim.buy_out(p, 6, 10 * x), lim.buy_out(p, 6, 600_000_000));
+        assert!(lim.buy_out(p, 6, 400_000_000) < lim.buy_out(p, 6, 600_000_000));
+        // sell is the same for every mode
+        assert_eq!(
+            CurveParams {
+                buy_fee: BuyFee::Output,
+                ..base
+            }
+            .sell_out(p, 6, 10u128.pow(12)),
+            base.sell_out(p, 6, 10u128.pow(12))
+        );
+    }
+
+    #[test]
+    fn token_curve_json_round_trip() {
+        let v = serde_json::json!({"virtualSol":"31000000000","virtualTokens":"1038000000000000","feeBps":100,
+                                   "buyFee":"input","buyLimitLamports":"54000000000"});
+        let tc = parse_token_curve(&v).unwrap();
+        assert_eq!(tc.fee_bps, Some(100));
+        assert_eq!(tc.buy_fee, BuyFee::Input);
+        assert_eq!(tc.buy_limit, Some(54_000_000_000));
+        assert_eq!(tc.sell_limit, None);
+        let out = tc.to_json(1_000);
+        assert_eq!(out["asOf"], 1_000);
+        assert_eq!(out["buyLimitLamports"], "54000000000");
+        assert!(out.get("sellLimitTokens").is_none());
+        let pump =
+            parse_token_curve(&serde_json::json!({"virtualSol":"1","virtualTokens":"2","buyFee":"added"})).unwrap();
+        assert_eq!(pump.fee_bps, None);
+        for bad in [
+            serde_json::json!({"virtualSol":"0","virtualTokens":"2","buyFee":"added"}),
+            serde_json::json!({"virtualSol":"1","virtualTokens":"2","buyFee":"other"}),
+            serde_json::json!({"virtualSol":1,"virtualTokens":"2","buyFee":"added"}),
+            serde_json::json!({"virtualSol":"-1","virtualTokens":"2","buyFee":"added"}),
+            serde_json::json!({"virtualSol":"1","virtualTokens":"2","buyFee":"added","feeBps":9901}),
+            serde_json::json!({"virtualSol":"1","virtualTokens":"2","buyFee":"added","buyLimitLamports":"1e3"}),
+        ] {
+            assert!(parse_token_curve(&bad).is_none(), "{bad}");
+        }
+    }
+
     #[test]
     fn none_on_bad_input() {
         assert_eq!(DEVNET.reserves_at(0, 6), None);
@@ -268,12 +525,14 @@ mod tests {
             virtual_sol: 0,
             virtual_tokens: 1,
             fee_bps: 0,
+            ..Default::default()
         };
         assert_eq!(zero.sell_out(10, 6, 1), None);
         let huge = CurveParams {
             virtual_sol: u128::MAX,
             virtual_tokens: 2,
             fee_bps: 0,
+            ..Default::default()
         };
         assert_eq!(huge.sell_out(10, 6, 1), None);
     }

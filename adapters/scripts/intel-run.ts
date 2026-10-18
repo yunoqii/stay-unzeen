@@ -24,6 +24,7 @@ import { PgIntelStore } from "../src/intel/pg-store";
 import { CreatorPubkeyFile } from "../src/keys";
 import { solanaKeysDir } from "../src/config";
 import { dbcConfigAddress } from "../src/meteora";
+import { LAUNCHLAB_PROGRAM, launchLabCluster } from "../src/launchlab";
 import pg from "pg";
 import { RpcChainReader } from "../src/intel/reader";
 import { Discovery, DbcStreamSource, MemoryDiscoveryStore, PumpLogsSource, PumpPollSource, launchLabCreatesFromNotification, launchLabStreamRequest, loadDiscoveryConfig, type CreateSource, type DiscoveryStore } from "../src/intel/discovery";
@@ -95,6 +96,8 @@ async function main(): Promise<void> {
     trades: tradeStream ? { source: tradeStream, whaleLamports: cfg.whaleLamports, sniperSlots: cfg.sniperSlots } : null,
     // Meteora DBC launches of Unzeen's config: progress / graduated / locked LP.
     dbcConfig: dbcConfigAddress(cfg.cluster),
+    // API v0.28: LaunchLab SOL pools of pinned mints (price, progress, curve state).
+    launchLabProgram: launchLabCluster(cfg.cluster) ? LAUNCHLAB_PROGRAM[launchLabCluster(cfg.cluster)!] : null,
   });
   // INTEL.md rule 4: tick number, batch size, durations, error counts. Never mints or "real/decoy".
   const fmt = (r: Awaited<ReturnType<IntelIndexer["tick"]>>) =>
@@ -110,7 +113,10 @@ async function main(): Promise<void> {
     if (dcfg.pump === "ws") sources.push(new PumpLogsSource(chain.conn));
     if (dcfg.dbcStreamUrl) sources.push(new DbcStreamSource(dcfg.dbcStreamUrl, { maxPerHour: dcfg.dbcMaxPerHour }));
     // Dev index: LaunchLab creates too (not discovery candidates); pump creators need the logs source.
-    if (devIndex && cfg.streamUrl) sources.push(launchLabCreates(cfg.streamUrl, cfg.createsMaxPerHour));
+    // API v0.28 Pulse: LaunchLab creates are discovery candidates too (mainnet, Parsed Streams; INTEL_DISCOVERY_LAUNCHLAB=0 turns it off).
+    const llUrl = cfg.streamUrl ?? dcfg.dbcStreamUrl;
+    const llDiscovery = cfg.cluster === "mainnet-beta" && process.env.INTEL_DISCOVERY_LAUNCHLAB?.trim() !== "0" && Boolean(llUrl);
+    if ((devIndex || llDiscovery) && llUrl) sources.push(launchLabCreates(llUrl, cfg.createsMaxPerHour));
     if (devIndex && dcfg.pump !== "ws") log("WARN dev index: pump.fun creators need INTEL_DISCOVERY_PUMP=ws (the poll source has no CreateEvent)");
     let dstore: DiscoveryStore = new MemoryDiscoveryStore();
     if (db) {
@@ -126,9 +132,10 @@ async function main(): Promise<void> {
       max: dcfg.max,
       windowMs: dcfg.windowMs,
       burst: dcfg.burst,
+      launchLabProgram: llDiscovery ? LAUNCHLAB_PROGRAM["mainnet-beta"] : null,
       ...(devIndex ? { onCreates: (c) => devIndex!.record(c) } : {}),
     });
-    log(`discovery ON rpc=${maskUrl(dcfg.rpcUrl)} (${dcfg.rpcSource}) pump=${dcfg.pump} dbc=${dcfg.dbcStreamUrl ? "stream" : "off"} max=${dcfg.max}/${dcfg.windowMs / 3_600_000}h`);
+    log(`discovery ON rpc=${maskUrl(dcfg.rpcUrl)} (${dcfg.rpcSource}) pump=${dcfg.pump} dbc=${dcfg.dbcStreamUrl ? "stream" : "off"} launchlab=${llDiscovery ? "stream" : "off"} max=${dcfg.max}/${dcfg.windowMs / 3_600_000}h`);
   }
   // Dev index without discovery: the same public create streams, drained every 60 s.
   let createFeed: CreateSource[] = [];

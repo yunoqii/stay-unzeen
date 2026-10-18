@@ -1,4 +1,4 @@
-import type { CurveUpdate, IntelStore, OffchainInfo, TickCommit, TokenCard, TokenSafety, WarmEntry } from "./types";
+import type { CurveUpdate, IntelStore, OffchainInfo, TickCommit, TokenCard, TokenSafety, WarmEntry, PriceRow } from "./types";
 
 /**
  * In-memory IntelStore for tests and `pnpm intel:run --memory`. Same
@@ -16,7 +16,7 @@ export class MemoryIntelStore implements IntelStore {
   readonly cards = new Map<string, TokenCard>();
   readonly curves = new Map<string, CurveUpdate>();
   /** intel_prices: current + previous value per mint (no history). */
-  readonly prices = new Map<string, { priceSol: string; status: string; tickAt: number; prevPriceSol: string | null; prevTickAt: number | null }>();
+  readonly prices = new Map<string, { priceSol: string; status: string; tickAt: number; prevPriceSol: string | null; prevTickAt: number | null; progressPct: string | null; curve: PriceRow["curve"] }>();
   readonly commits: TickCommit[] = [];
   subscriptions: TickCommit["subscriptions"] = [];
   meta: { nextTickAt: number; lastTickAt: number } | null = null;
@@ -96,6 +96,8 @@ export class MemoryIntelStore implements IntelStore {
         tickAt: t.tickStartedAt,
         prevPriceSol: cur?.priceSol ?? null,
         prevTickAt: cur?.tickAt ?? null,
+        progressPct: p.progressPct ?? null,
+        curve: p.curve ?? null,
       });
     }
     this.subscriptions = t.subscriptions;
