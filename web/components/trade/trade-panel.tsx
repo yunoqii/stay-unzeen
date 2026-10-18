@@ -637,7 +637,7 @@ function Quote({
       ? [
           ["You get", <span key="v" className="text-foreground">≈ {formatCompact(unitsToNumber(quote.tokensOut.toString(), token.decimals))} {sym}</span>],
           ["Trade size", size("lamports" in quote ? quote.lamports : null, "quoteUnits" in quote ? quote.quoteUnits : null)],
-          [`Min received · ${slippage / 100}%`, `${formatCompact(unitsToNumber(quote.minOut.toString(), token.decimals))} ${sym}`],
+          [`Min received · ${slippage / 100}%`, `${formatCompact(unitsToNumber(("minOutShown" in quote && quote.minOutShown !== undefined ? quote.minOutShown : quote.minOut).toString(), token.decimals))} ${sym}`],
         ]
       : [
           ["You receive", <span key="v" className="text-foreground">≈ {formatZec(quote.zecOut.toString())} <CoinIcon symbol="ZEC" size={12} /> ZEC</span>],

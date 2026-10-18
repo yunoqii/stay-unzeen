@@ -62,17 +62,37 @@ export const lamportsToZatCeil = (lamports: bigint, lamportsPerZec: bigint) =>
 export const withSlippage = (v: bigint, bps: number) => (v * (BPS - BigInt(bps))) / BPS;
 
 export interface BuyQuote {
+  /** Native units expected to reach the venue: after the pool's D10 trim and step (display, trade size). */
   lamports: bigint;
+  /** Tokens expected for `lamports` (display). */
   tokensOut: bigint;
-  /** What we sign: 0 when there is no rate to quote with (no price limit). */
+  /**
+   * What we sign: the limit for the full zecIn. The pool trims the buy (D10) and lowers minOut in the same
+   * proportion, so the minimum price stays the one signed here. 0 when there is no rate (no price limit).
+   */
   minOut: bigint;
+  /** minOut as the pool will apply it to `lamports` (scaled the same way): what "Min received" shows. */
+  minOutShown?: bigint;
+}
+
+/**
+ * D10 (docs/API.md): the pool trims a buy by a random 0–1 % and rounds it DOWN to its step (0.001 SOL; 0.0001 ETH on
+ * Robinhood Chain), refunding the rest in ZEC. Expected amount: the mid trim (0.5 %), then the step. Live devnet
+ * 18.10: 0.0137 SOL asked went out as 0.013 SOL, so a quote at the full amount read ~5 % high.
+ */
+export function d10Expected(lamports: bigint, nativeDecimals: number = nativeOf().decimals): bigint {
+  const step = nativeDecimals >= 18 ? TEN ** BigInt(nativeDecimals - 4) : TEN ** BigInt(Math.max(0, nativeDecimals - 3));
+  const trimmed = (lamports * BigInt(995)) / BigInt(1000);
+  return trimmed - (trimmed % step);
 }
 
 export function quoteBuy(zecIn: bigint, rate: SolRateUsed | null, priceSol: string, decimals: number, slippageBps: number, curve: CurveParams | null = null): BuyQuote | null {
   if (!rate) return null;
-  const lamports = zatToLamports(zecIn, BigInt(rate.lamportsPerZec));
-  const tokensOut = (curve && curveBuyOut(curve, priceSol, decimals, lamports)) ?? lamportsToTokens(lamports, priceSol, decimals);
-  return { lamports, tokensOut, minOut: withSlippage(tokensOut, slippageBps) };
+  const full = zatToLamports(zecIn, BigInt(rate.lamportsPerZec));
+  const out = (x: bigint) => (curve && curveBuyOut(curve, priceSol, decimals, x)) ?? lamportsToTokens(x, priceSol, decimals);
+  const lamports = d10Expected(full);
+  const minOut = withSlippage(out(full), slippageBps);
+  return { lamports, tokensOut: out(lamports), minOut, minOutShown: full > ZERO ? (minOut * lamports) / full : minOut };
 }
 
 export interface SellQuote {

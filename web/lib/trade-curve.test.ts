@@ -1,6 +1,6 @@
 // API v0.26: the curve impact estimate, the formula of docs/API.md and core/ledger/src/curve.rs (same cases as its tests).
 import { describe, expect, it } from "vitest";
-import { curveBuyOut, curveBuyPartial, curveFor, curveMarketCap, curveOf, tokenCurveOf, curveReserves, curveSellOut, effectiveFeeBps, isqrt, parseFeeTiers, quoteSell, tierBps, type CurveParams } from "./trade";
+import { d10Expected, quoteBuy, curveBuyOut, curveBuyPartial, curveFor, curveMarketCap, curveOf, tokenCurveOf, curveReserves, curveSellOut, effectiveFeeBps, isqrt, parseFeeTiers, quoteSell, tierBps, type CurveParams } from "./trade";
 
 /** pump.fun devnet Global 15.10, fee off for the AMM cases (as core's DEVNET); the fee is checked on its own. */
 const DEVNET: CurveParams = { virtualSol: BigInt(300_000_000), virtualTokens: BigInt("1073000000000000"), feeBps: 0 };
@@ -156,5 +156,23 @@ describe("pump.fun curve impact (devnet 0.3 SOL / 1.073e15)", () => {
     expect(curveBuyPartial(c, BigInt(40_000_000))).toBe(false); // net = 39.6M <= 40M
     expect(curveBuyPartial(c, BigInt(41_000_000))).toBe(true); // net = 40.59M > 40M
     expect(curveBuyPartial(null, BigInt(1) << BigInt(60))).toBe(false);
+  });
+
+  it("live devnet 18.10: the shown buy matches the real fill on pump.fun and Meteora DBC (D10 + curve + fee)", () => {
+    const rate = { lamportsPerZec: "11442500000", source: "fixed" as const, ts: 0 };
+    // UZRUN, pump.fun, Token.curve buyFee "added": 0.0012 ZEC -> 13 000 000 lamports sent, 36 274 722 314 045 base units filled.
+    const run = curveFor({ curve: { virtualSol: "331186983", virtualTokens: "971958518382141", feeBps: 125, buyFee: "added", buyLimitLamports: "818866641" } }, POOL, "pumpfun");
+    const a = quoteBuy(BigInt(120_000), rate, "0.00000000034074189", 6, 100, run)!;
+    expect(a.lamports).toBe(BigInt(13_000_000));
+    expect(absDiff(a.tokensOut, BigInt("36274722314045")) * BigInt(1000) <= BigInt("36274722314045")).toBe(true); // within 0.1 %
+    // UZDBC, Meteora DBC, buyFee "input": 458 673 750 790 filled for the same 13 000 000 lamports.
+    const dbc = curveFor({ curve: { virtualSol: "30048191421", virtualTokens: "1071345749397769", feeBps: 100, buyFee: "input", buyLimitLamports: "84963519660" } }, POOL, "meteora-dbc");
+    const b = quoteBuy(BigInt(120_000), rate, "0.000000028047146719", 6, 100, dbc)!;
+    expect(absDiff(b.tokensOut, BigInt("458673750790")) * BigInt(1000) <= BigInt("458673750790")).toBe(true);
+    // The signed limit stays on the full amount: the pool lowers it in proportion to what it sends.
+    expect(b.minOut > b.tokensOut).toBe(true);
+    expect(b.minOutShown! < b.tokensOut).toBe(true); // what the panel shows: below "You get"
+    expect(d10Expected(BigInt(13_731_000), 9)).toBe(BigInt(13_000_000));
+    expect(d10Expected(BigInt("123456789012345678"), 18)).toBe(BigInt("122800000000000000"));
   });
 });

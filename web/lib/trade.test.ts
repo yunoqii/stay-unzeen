@@ -32,8 +32,9 @@ describe("trade math", () => {
   it("quotes a buy with slippage", () => {
     // 0.1 ZEC at 2 SOL/ZEC = 0.2 SOL; at 1e-6 SOL/token -> 200k tokens (6 dp)
     const q = quoteBuy(BigInt(10_000_000), rate("2000000000"), "0.000001", 6, 100)!;
-    expect(q.lamports).toBe(BigInt(200_000_000));
-    expect(q.tokensOut).toBe(BigInt("200000000000"));
+    // D10: 0.2 SOL trimmed by the mid 0.5 % -> 0.199 SOL after the 0.001 step; the limit stays on the full 0.2 SOL.
+    expect(q.lamports).toBe(BigInt(199_000_000));
+    expect(q.tokensOut).toBe(BigInt("199000000000"));
     expect(q.minOut).toBe(BigInt("198000000000"));
     expect(quoteBuy(BigInt(1), null, "1", 6, 100)).toBeNull();
   });
