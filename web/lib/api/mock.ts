@@ -598,20 +598,21 @@ export async function mockRatesFor(network: Network, now: number, doFetch: typeo
 /** v0.28: Pulse everywhere, the Jupiter quote on mainnet only (as UNZEEN_QUOTE). */
 const v028 = (network: Network) => ({ pulse: true as const, ...(network === "mainnet" ? { quote: true as const } : {}) });
 
-/** v0.28 GET /api/quote of the mock: graduated tokens, amount rounded UP to 2 significant digits, ~1 % impact. */
+/** v0.28 GET /api/quote of the mock: the server's background grid (top 25 SOL), linear, ~1 % impact, up to 10 min old. */
+const QUOTE_TOP_LAMPORTS = BigInt(25_000_000_000);
 export function mockQuote(network: Network, q: URLSearchParams): JupiterQuote {
   if (network !== "mainnet") throw new ApiError("not_found", "no quote on this network", 404);
   const side = q.get("side");
   const amount = q.get("amount") ?? "";
   if ((side !== "buy" && side !== "sell") || !/^[1-9]\d{0,19}$/.test(amount)) throw new ApiError("bad_request", "side, amount", 400);
   const s = findToken(q.get("mint") ?? "");
-  if (s.token.status !== "graduated" && s.token.venue !== "jupiter") throw new ApiError("not_found", "curve token: quote it yourself", 404);
+  if (s.token.status !== "graduated" && s.token.venue !== "jupiter") throw new ApiError("not_found", "not in the quote grid", 404);
   const a = BigInt(amount);
-  const digits = a.toString().length;
-  const unit = digits > 2 ? BigInt(10) ** BigInt(digits - 2) : BigInt(1);
-  const inAmount = ((a + unit - BigInt(1)) / unit) * unit;
-  const spot = side === "buy" ? lamportsToTokens(inAmount, s.token.priceSol, s.token.decimals, 9) : tokensToLamports(inAmount, s.token.priceSol, s.token.decimals, 9);
-  return { mint: s.token.mint, side, inAmount: inAmount.toString(), outAmount: ((spot * BigInt(99)) / BigInt(100)).toString(), priceImpactPct: "1.00", route: ["PumpSwap"], asOf: Date.now() };
+  const max = side === "buy" ? QUOTE_TOP_LAMPORTS : lamportsToTokens(QUOTE_TOP_LAMPORTS, s.token.priceSol, s.token.decimals, 9);
+  if (a > max) throw new ApiError("not_found", "above the grid", 404);
+  const spot = side === "buy" ? lamportsToTokens(a, s.token.priceSol, s.token.decimals, 9) : tokensToLamports(a, s.token.priceSol, s.token.decimals, 9);
+  const minute = Math.floor(Date.now() / 60_000);
+  return { mint: s.token.mint, side, inAmount: amount, outAmount: ((spot * BigInt(99)) / BigInt(100)).toString(), priceImpactPct: "1.0000", route: ["PumpSwap"], maxAmount: max.toString(), asOf: (minute - (minute % 10)) * 60_000 };
 }
 
 export function mockPool(network: Network): PoolInfo {

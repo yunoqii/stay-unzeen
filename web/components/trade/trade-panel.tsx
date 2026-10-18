@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useEffect, useId, useRef, useState } from "react";
 import { hotkeyIntent, isTyping, onIntent, peekIntent, requestTrade, SELL_SLOTS, takeIntent } from "@/lib/trade-intent";
 import { HotkeysSheet } from "@/components/trading/hotkeys-sheet";
-import { useJupiterQuote } from "@/lib/jupiter-quote";
+import { quoteAgeMin, useJupiterQuote } from "@/lib/jupiter-quote";
 import { AnimatePresence, motion } from "motion/react";
 import { CaretDown, Info, Key, LockKey, ShieldCheck, SlidersHorizontal } from "@phosphor-icons/react";
 import { ApiError } from "@/lib/api/client";
@@ -244,7 +244,7 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
   const routeAmount = !shown.quote ? null : isBuy ? ("lamports" in shown.quote ? shown.quote.lamports : null) : shown.parsed;
   const jq = useJupiterQuote(routed, token.mint, side, routeAmount);
   const applyRoute = (q: ReturnType<typeof evaluate>["quote"], parsedAmount: bigint | null): ReturnType<typeof evaluate>["quote"] => {
-    if (!jq || !q || !routed) return q;
+    if (!jq || jq.kind !== "ok" || !q || !routed) return q;
     if (isBuy && "tokensOut" in q && "lamports" in q && q.lamports === jq.amount) return { ...q, tokensOut: jq.out, minOut: withSlippage(jq.out, slippage) };
     if (!isBuy && "zecOut" in q && "lamports" in q && parsedAmount === jq.amount && rate) {
       const zecOut = lamportsToZat(jq.out, BigInt(rate.lamportsPerZec));
@@ -448,9 +448,11 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
 
       {routed && quote && (
         <p role="note" className="-mt-1 text-[11px] text-pretty text-faint-foreground">
-          {jq
-            ? `Jupiter route${jq.route.length ? ` (${jq.route.join(" → ")})` : ""}, price impact ${jq.impactPct.toFixed(2)} %. Asked by the pool for a rounded amount, not by your browser.`
-            : "Spot estimate until the pool's Jupiter quote arrives."}
+          {jq?.kind === "ok"
+            ? `Jupiter${jq.route.length ? ` (${jq.route.join(" → ")})` : ""}: price impact ${jq.impactPct.toFixed(2)} %, quote ${now === null ? "" : `${quoteAgeMin(jq.asOf, now)} min old`}. From the pool's background quotes, not asked for you.`
+            : jq?.kind === "above"
+              ? `Quote unavailable above ${isBuy ? `${formatSol(unitsToNumber(jq.maxAmount.toString(), nativeOf().decimals))} ${nativeOf().symbol}` : `${formatCompact(unitsToNumber(jq.maxAmount.toString(), token.decimals))} $${token.symbol}`}: showing the spot estimate. Mind your slippage.`
+              : "Spot estimate until the pool's Jupiter quote arrives."}
         </p>
       )}
       {partialFill(quote) && (

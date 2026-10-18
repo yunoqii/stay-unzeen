@@ -192,16 +192,21 @@ export interface Pulse {
   graduated: PulseToken[];
 }
 
-/** v0.28: GET /api/quote (mainnet, graduated / Jupiter only, with features.quote). */
+/** v0.28: GET /api/quote (mainnet, graduated / Jupiter only, with features.quote). Answered from the server's
+ *  background grid of Jupiter quotes (never a live request to Jupiter): linear between grid points, conservative. */
 export interface JupiterQuote {
   mint: string;
   side: "buy" | "sell";
-  /** The asked amount rounded UP to 2 significant digits. */
+  /** = the requested amount. */
   inAmount: string;
-  /** Jupiter's output for inAmount, without slippage. */
+  /** Grid estimate for inAmount, without slippage (buy: token base units; sell: lamports). */
   outAmount: string;
+  /** Jupiter's impact at the nearest grid point above, %. */
   priceImpactPct: DecimalString;
   route: string[];
+  /** Top grid point of this side; larger amounts answer 404. */
+  maxAmount: string;
+  /** unix ms of the oldest quote the answer was computed from (up to ~10 min old). */
   asOf: number;
 }
 
