@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Unlock the encrypted volume after a reboot and start the stack (owner, by hand: N2).
+#   ssh -t <admin>@<vps> sudo unzeen-unlock
+# Asks for the LUKS passphrase on the terminal. Prints no secrets.
+set -euo pipefail
+IMG=/var/lib/unzeen/vault.img
+NAME=unzeen
+MNT=/srv/unzeen
+die() { printf 'unzeen-unlock: %s\n' "$*" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || die "run with sudo"
+[ -e "$IMG" ] || die "no encrypted container ($IMG): run unzeen-vault-init first"
+if ! mountpoint -q "$MNT"; then
+  if [ ! -e "/dev/mapper/$NAME" ]; then
+    [ -t 0 ] || die "interactive terminal required (ssh -t)"
+    cryptsetup open "$IMG" "$NAME"
+  fi
+  fsck.ext4 -p "/dev/mapper/$NAME" >/dev/null || true
+  chattr -i "$MNT" 2>/dev/null || true
+  mount -o noatime,nodev,nosuid "/dev/mapper/$NAME" "$MNT"
+fi
+[ -f "$MNT/.unzeen-volume" ] || die "$MNT is mounted but has no .unzeen-volume marker: refusing to start"
+echo "volume unlocked"
+if [ "${1:-}" = "--no-start" ]; then exit 0; fi
+/usr/local/sbin/unzeenctl up

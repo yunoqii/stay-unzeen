@@ -555,3 +555,182 @@ UNZEEN_ALLOW_MAINNET_SEND=1 ./core/target/release/unzeen-scanner shield
 4. То же для `pnpm launchlab:platform --send`. После перезапуска релейера WARN `LaunchLab platform unzeen switched off` пропадёт, create с `platform: "unzeen"` заработает (creator fee 0.30 %, у bonk 0). Пока платформы нет — create с `unzeen` получает `venue_unavailable` до подписи, запускать с `bonk`.
 5. Снять `UNZEEN_ALLOW_MAINNET_SETUP`. Перед `--send` обязательно `--simulate` уже с пополненным partner.
 6. `meteora:config` печатает адрес нового конфига **до** отправки и при каждом запуске ищет конфиги этого partner'а для той же quote: если конфиг уже есть (например, `--send` упал по таймауту, но tx легла), печатает `set METEORA_DBC_CONFIG_…=<он>` и ничего не создаёт. Второй конфиг — только с `--force-new`.
+
+---
+
+## 7. Деплой на VPS (18.10, `infra/deploy/`)
+
+Один VPS, на нём всё (решение владельца: без Vercel и без Cloudflare-proxy): фронт (Next.js prod), Caddy (HTTPS), три инстанса бекенда — **devnet** (Zcash testnet + Solana devnet), **mainnet** (Zcash main + Solana mainnet-beta), **hood** (Zcash main + Robinhood Chain 4663). У каждого инстанса свой Postgres, своя docker-сеть, свой env-файл, свои ключи и свой каталог состояния на зашифрованном томе. Закрывает A3/A9 (`docs/analysis/final-audit.md`), N2, H9, E17, L-18.
+
+Файлы:
+| Файл | Что |
+|---|---|
+| `infra/deploy/compose.yml` | весь стек: `web`, `caddy`, `pg-/api-/scanner-/relayer-<inst>`, `intel-devnet`, `intel-mainnet`; профили `devnet`/`mainnet`/`hood`, `build` |
+| `infra/deploy/Caddyfile` | прокси: хосты, без access-логов, фильтр логов, без сжатия на API, лимиты в памяти, срез `X-Forwarded-For` |
+| `infra/deploy/docker/{core,adapters,web,caddy}.Dockerfile` | образы (core — release-сборка Rust; caddy — с `caddy-ratelimit`) |
+| `infra/deploy/env/*.env.example` | шаблоны `/etc/unzeen/{stack,devnet,mainnet,hood,monitor}.env` без секретов |
+| `infra/deploy/bin/bootstrap.sh` | первичная настройка Ubuntu 24.04 (идемпотентная) |
+| `infra/deploy/bin/unzeen-vault-init`, `unzeen-unlock`, `unzeen-lock` | зашифрованный том LUKS2 |
+| `infra/deploy/bin/unzeenctl` | всё операторское: deploy, keys, roles, psql, разовые команды scanner/api/adapters, check-proxy |
+| `infra/deploy/bin/unzeen-monitor` + `systemd/unzeen-monitor.{service,timer}` | проверки раз в 5 мин, алерт в Telegram |
+| `infra/deploy/bin/deploy.sh` | запускается на Mac: отправить HEAD на VPS и задеплоить |
+
+Схема на VPS:
+```
+Internet :80/:443 ── caddy ──┬── web:3000                     (WEB_HOST)
+                             ├── api-devnet:8080   ─┐ сеть devnet:  pg-devnet, scanner-, relayer-, intel-devnet
+                             ├── api-mainnet:8080  ─┤ сеть mainnet: pg-mainnet, scanner-, relayer-, intel-mainnet
+                             └── api-hood:8080     ─┘ сеть hood:    pg-hood, scanner-hood, relayer-hood
+127.0.0.1: 8080/8081/8082 (API для оператора и монитора), 3100 (web). Postgres наружу не публикуется.
+/srv/unzeen  (LUKS2 из /var/lib/unzeen/vault.img): <inst>/home (= UNZEEN_HOME), <inst>/pg (данные Postgres)
+/etc/unzeen: stack.env, <inst>.env (0640 root:<admin>), monitor.env (0600), keys/<inst>/* (0600, uid 10001)
+/opt/unzeen/releases/<sha>, /opt/unzeen/current -> текущий релиз
+```
+
+### 7.1 VPS: требования и провайдер
+- **ОС:** Ubuntu 24.04 LTS, x86_64.
+- **Ресурсы (сборка Rust прямо на VPS):** 8 vCPU / 16 GB RAM / ≥ 160 GB SSD. Release-сборка librustzcash + halo2 съедает 4–6 GB RAM и 15–30 мин при первом запуске. В работе стек занимает ~4–5 GB RAM: 3× Postgres, 3× scanner, 3× API, 3× relayer, 2× indexer, Next, Caddy. Диск: образы и кеш сборки ~20–25 GB, том 40 GB. Минимум — 4 vCPU / 8 GB, но тогда сборка идёт дольше, а своп нельзя (см. ниже).
+- **Сборку можно вынести с VPS:** образы под x86_64 на Mac с Apple Silicon собираются через эмуляцию часами — не советую. Есть два варианта: (а) собирать на VPS (по умолчанию, `deploy.sh`); (б) взять ARM-VPS (Hetzner CAX), собрать образы локально на Mac под arm64 и залить через `docker save | ssh … docker load`. Вариант (б) в скриптах не реализован.
+- **Провайдеры в EU** (цены ориентировочные, проверить при покупке):
+  1. **Hetzner Cloud CX43** — 8 vCPU / 16 GB / 160 GB, ≈ €12/мес + IPv4 (Германия/Финляндия). Бэкапы — платная опция, по умолчанию **выключены**, снапшоты только вручную. Новым аккаунтам иногда нужна верификация личности. **Рекомендую.** Если нужно больше диска — CPX42 (320 GB, ≈ €25).
+  2. **OVHcloud VPS** (тариф с 8 vCore / 24 GB) — Франция/Германия, автобэкап — платная опция (не включать).
+  3. **netcup VPS 2000** (8 vCore / 16 GB / 512 GB, Германия) — дёшево, но бывает минимальный срок договора и медленнее панель; снапшоты только вручную.
+- **При покупке (делает владелец):**
+  - образ Ubuntu 24.04, **свой SSH-ключ** (публичный, лучше отдельный: `ssh-keygen -t ed25519 -f ~/.ssh/unzeen_vps`), пароль root не задавать;
+  - **бэкапы и автоснапшоты провайдера НЕ включать** (N2: снапшот диска = копия контейнера тома, при утечке пароля — весь реестр);
+  - без «managed firewall»/CDN провайдера (ufw ставит bootstrap); IPv6 по желанию;
+  - запомнить IPv4 — нужен для DNS или sslip.io;
+  - в README/модели доверия: провайдер VPS видит сетевые метаданные (кто и когда подключается).
+
+### 7.2 Домен или sslip.io
+Каждой сети нужен свой origin, API — в корне (подписанный request-target не должен меняться): `WEB_HOST`, `API_DEVNET_HOST`, `API_MAINNET_HOST`, `API_HOOD_HOST` в `/etc/unzeen/stack.env`.
+- **Свой домен (рекомендую):** A-записи (и AAAA, если есть IPv6) `unzeen.<домен>`, `api-devnet.<домен>`, `api-mainnet.<домен>`, `api-hood.<домен>` → IP VPS. Режим DNS only, **без прокси регистратора/Cloudflare**. В whois — приватность регистратора. Caddy сам получит сертификаты Let's Encrypt (HTTP-01 на :80), e-mail для ACME не задаём.
+- **Временно без домена — sslip.io:** `WEB_HOST=203-0-113-7.sslip.io`, `API_DEVNET_HOST=api-devnet.203-0-113-7.sslip.io` и т. д. (DNS sslip сам отвечает IP из имени). Минусы: IP VPS в каждом URL; лимиты Let's Encrypt на общий домен (если упрёмся — нужен свой домен); **нельзя для mainnet-launch**: URI метаданных (`https://api-mainnet…/media/…`) пишется в цепочку навсегда и умрёт вместе с IP. На mainnet с sslip — только `PINATA_JWT` (Pinata приоритетнее базы `/media`, `adapters/src/metadata.ts`). nip.io работает так же.
+- Смена хостов = пересборка web (`NEXT_PUBLIC_*` вшиваются) + рестарт API (`API_CORS_ORIGINS`) — `unzeenctl deploy <sha>`.
+
+### 7.3 Bootstrap (один раз, ~5 мин)
+```bash
+# на Mac
+scp -i ~/.ssh/unzeen_vps -r infra/deploy root@<IP>:/root/unzeen-deploy
+ssh -i ~/.ssh/unzeen_vps root@<IP> 'ADMIN_USER=unzeen bash /root/unzeen-deploy/bin/bootstrap.sh'
+# ~/.ssh/config: Host unzeen-vps / HostName <IP> / User unzeen / IdentityFile ~/.ssh/unzeen_vps
+ssh unzeen-vps 'sudo docker ps'     # в НОВОМ терминале, старый не закрывать, пока не убедились
+```
+Что делает: пользователь `unzeen` (sudo без пароля — у него нет пароля, вход только по ключу; группа docker) с ключами root; `sshd`: только ключ, без root, `AllowUsers unzeen` (если ключей нет — шаг пропускается, чтобы не запереть); ufw: 22 (limit), 80, 443; unattended-upgrades только security и **без автоперезагрузки** (ребут запирает том); Docker CE + compose, `daemon.json`: ротация логов 10 MB × 3, `live-restore`; fail2ban на sshd; journald 200 MB / 7 дней; core dumps выключены; предупреждение, если включён своп на незашифрованном диске (лучше `swapoff -a` и убрать из fstab); каталоги `/etc/unzeen`, `/opt/unzeen`, точка монтирования `/srv/unzeen` с `chattr +i`; утилиты в `/usr/local/sbin`; таймер монитора. Повторный запуск безопасен: существующие env-файлы не перезаписывает.
+
+Docker публикует порты в обход ufw. Поэтому в `compose.yml` наружу открыт только Caddy (80/443), всё остальное — на `127.0.0.1`.
+
+### 7.4 Зашифрованный том (N2)
+```bash
+ssh -t unzeen-vps sudo unzeen-vault-init 40     # LUKS2-файл 40 GB, ext4, /srv/unzeen; пароль вводит владелец
+scp unzeen-vps:/var/lib/unzeen/vault.luks-header ~/offline-backup/   # копия заголовка (бесполезна без пароля)
+```
+- Пароль тома — только у владельца (менеджер паролей), в чат и в файлы не попадает. Без него данные пула не восстановить.
+- **После любой перезагрузки** том заперт: `ssh -t unzeen-vps sudo unzeen-unlock` (спросит пароль, смонтирует том, проверит маркер `.unzeen-volume`, поднимет стек). До этого web открывается, API всех сетей отвечают `503 unavailable`, а монитор шлёт «volume is LOCKED».
+- Почему сервисы не стартуют на пустом диске: все bind-монтирования состояния — с `create_host_path: false`, а `/srv/unzeen` без тома immutable. Docker не может создать каталог, и контейнер не стартует. Postgres не выполнит initdb на незашифрованном корне, сканер не создаст новый кошелёк.
+- `sudo unzeen-lock` — остановить бекенды и запереть том вручную.
+- **age-идентичности вне тома** (решение N2): `/etc/unzeen/keys/<inst>/{seed,solana|hood-evm}.agekey`, 0600, uid 10001. В контейнер монтируются по одному файлу и только read-only, каждому сервису — только свой (scanner — seed, relayer — solana/hood-evm, API — chat/scenario). Systemd `LoadCredential` не используем: сервисы в docker, read-only bind одного файла даёт то же самое. Зашифрованные сиды (`*.age`) лежат на томе, их ключи — на корневом диске. Ни снапшот диска, ни копия тома по отдельности ничего не дают.
+- Увеличить том: `unzeen-lock` → `truncate -s +20G /var/lib/unzeen/vault.img` → `cryptsetup open …` → `cryptsetup resize unzeen` → `resize2fs /dev/mapper/unzeen` → `unzeen-unlock`.
+
+### 7.5 Env и ключи
+1. Заполнить `/etc/unzeen/stack.env` (хосты, не секрет) и `/etc/unzeen/<inst>.env`: каждое `__SET__` — значение из `.env` с Mac или из `docs/submission/mainnet-demo-run.md` §1.3. Редактировать на VPS (`sudoedit /etc/unzeen/mainnet.env`), значения не печатать и не копировать через чат. Значения — без кавычек.
+2. `sudo unzeenctl keys <inst>` для каждого инстанса: создаёт недостающие `pg-password`, `chat.key`, `scenario.key` (разные, 32 байта hex), age-идентичности; вписывает в env `DATABASE_URL`, `DATABASE_URL_RELAYER`, `DATABASE_URL_INDEXER` со случайными паролями (хост `pg-<inst>`). Ничего не печатает. Существующие файлы не трогает.
+3. `sudo unzeenctl check-env` — нет ли незаполненных `__SET__`/`__GENERATE__`, все ли ключи на месте, нет ли `DEVNET_ZEC_SOL_RATE` на mainnet и `UNZEEN_DEV_PRINT`.
+4. **Офлайн-бэкап** `/etc/unzeen/keys/*/*.agekey` и сидов: после `scanner init` / `keys:gen` / `evm:keys` — шифрованный носитель, не облако.
+
+Что compose задаёт сам, поверх env-файла (в шаблонах этого нет): `UNZEEN_HOME=/data/home`, `API_BIND=0.0.0.0:8080`, `API_CORS_ORIGINS=https://$WEB_HOST`, `UNZEEN_METADATA_BASE_URL=https://<API-хост сети>/media` (https, GAP-5), пути `*_KEY_FILE`. Релейеру и индексатору — пустой `DATABASE_URL` (никогда не владельческая роль, RELAYER.md), индексатору ещё и пустой `DATABASE_URL_RELAYER`.
+
+**A9 (лимиты):** за прокси все запросы приходят в core с одного адреса, поэтому `API_RL_IP_PER_SEC=1000`/`API_RL_IP_BURST=3000` в шаблонах. Лимит по клиенту держит Caddy: чтение 300 / 10 с, POST 30 / 10 с, WS 30 / мин, web 600 / 10 с — `RL_*` в `stack.env`. Лимит по anon-ключу в core (`API_RL_KEY_*`) остаётся. Счётчики Caddy — только в памяти: без distributed-режима, на диск ничего не пишется. Пользователи Tor делят лимит выходного узла.
+
+### 7.6 Сборка и деплой
+```bash
+# на Mac, из корня репо, после коммита
+infra/deploy/bin/deploy.sh unzeen-vps          # всё
+infra/deploy/bin/deploy.sh unzeen-vps --web    # только web + caddy (сменились pubkey аттестаций / хосты в stack.env)
+```
+- `deploy.sh` отказывается работать, если в `core/ adapters/ web/ infra/` есть незакоммиченные изменения. Шлёт `git archive HEAD core adapters web infra`: без `.env`, `node_modules`, `docs/`, `CLAUDE.md`. На VPS это `/opt/unzeen/releases/<sha>`.
+- `unzeenctl deploy <sha>` на VPS:
+  1. `check-env`, том открыт;
+  2. сборка образов `unzeen-{core,adapters,web,caddy}:<sha>`. Web — `pnpm build:public` с `NEXT_PUBLIC_API_MODE=real`, URL'ами API/WS трёх сетей, `NEXT_PUBLIC_HOOD=1`, pubkey аттестаций из `stack.env` и **пустым `NEXT_PUBLIC_FAIR_LAUNCH_BUILD`**: строгая проверка бандла падает, если в нём есть код fair-launch;
+  3. по каждому инстансу: остановить relayer/scanner/intel → поднять pg → новый API. Он сам применяет миграции и проверяет схему по `schema-columns.txt`: если не сходится, API не станет healthy и деплой остановится с последними 30 строками лога. Затем сверка `max(schema_migrations.version)` с последним файлом `core/migrations/` релиза и переприменение `relayer-role.sql`/`indexer-role.sql`. Пароли ролей берутся из env и подаются через stdin psql, не через argv. Env — источник правды: `ALTER ROLE … PASSWORD` выполняется каждый раз;
+  4. `current` → новый релиз, `up -d` остального, обновление `unzeen-*` в `/usr/local/sbin`;
+  5. `check-proxy` (7.7).
+- **Откат:** `sudo unzeenctl deploy <старый sha>` (релизы лежат в `/opt/unzeen/releases`, предыдущий — `/opt/unzeen/previous`). Миграции только вперёд: старый бинарь на новой схеме обычно работает (проверка схемы терпит лишние колонки), но если миграция что-то удаляла — откат только кодом вперёд.
+- **28.10 после дедлайна (fair-launch):** в `stack.env` — `NEXT_PUBLIC_FAIR_LAUNCH_BUILD=1`, `WEB_BUILD_SCRIPT=build`, в `<inst>.env` — `UNZEEN_FAIR_LAUNCH=1` (только где нужно), затем `deploy.sh unzeen-vps`.
+- Чистка: `docker image prune` (старые теги — `docker image ls 'unzeen-*'`).
+
+Разовые операторские команды (RUNBOOK §4–6) на VPS — вместо `./core/target/release/…` и `pnpm …`:
+```bash
+sudo unzeenctl scanner mainnet address | wallet-balance | payout list-held | payout approve <id> | shield --dry-run | rebalance status
+sudo unzeenctl api mainnet review-job | verify-snapshot --allow-mainnet | stats-snapshot --include-today --allow-mainnet
+sudo unzeenctl tool mainnet keys:gen 2 | keys:attest | fees:sweep --dry-run
+sudo ONEOFF_ENV="UNZEEN_ALLOW_MAINNET_SETUP=yes" unzeenctl tool mainnet meteora:config --send
+sudo unzeenctl tool hood evm:keys 2
+sudo unzeenctl psql mainnet ; sudo unzeenctl status ; sudo unzeenctl logs scanner-mainnet --since 30m
+```
+Это `docker run --rm` образа релиза с env инстанса, его томом и каталогом ключей (rw), в сети инстанса. `UNZEEN_DEV_PRINT` принудительно пуст. Флаги на один запуск — через `ONEOFF_ENV`: в env-файл их не пишем.
+
+### 7.7 Прокси (Caddy): что гарантировано и как проверить
+- **Access-логов нет совсем** (ни в одном сайте нет директивы `log`). Остальные логи — уровень ERROR, JSON-фильтр удаляет `remote_ip`, `client_ip`, порт, `uri`, заголовки, TLS-данные. Логгеры `http.stdlib` и `events` исключены: в первом адрес клиента зашит в текст сообщения, во втором — в `client_hello`. Проверено 18.10 локально на уровне DEBUG: 0 вхождений IP или пути.
+- `X-Forwarded-For`, `X-Forwarded-Host/Proto`, `Forwarded`, `X-Real-IP` срезаются до upstream (проверено эхо-сервером: пусто).
+- **Сжатия на API-хостах нет вообще** (`encode` только на web-хосте). Это строже, чем требует RELAYER.md: исключаем все пути, а не только паддированные. Ответ core `Cache-Control: no-transform` дополнительно защищает от посредников.
+- CSP фронта ставит `next.config.ts`, Caddy его не трогает. На API-хостах — `default-src 'none'; frame-ancestors 'none'` (если core не прислал свой; у `/media` свой sandbox-CSP), HSTS, nosniff, `Referrer-Policy: no-referrer`, без `Server`/`Via`.
+- WS `/ws/feed` проксируется на том же origin (проверено: 101). Если инстанс лежит — JSON `503 unavailable`; при превышении лимита — `429 rate_limited` + `Retry-After`.
+- `/media/*` отдаёт core на origin своей сети (https) — это база метаданных токенов (GAP-5).
+- Проверка после деплоя (на VPS, запросы идут через Caddy на 127.0.0.1 с настоящими именами):
+  ```bash
+  sudo unzeenctl check-proxy          # portfolio, actions (POST), actions/:id, verify/proof, creator, chat, feed: нет Content-Encoding
+  # с Mac, снаружи:
+  curl -sI -H 'Accept-Encoding: gzip, br' https://<API_MAINNET_HOST>/api/tokens/<mint>/chat | grep -i content-encoding   # пусто
+  ```
+
+### 7.8 Мониторинг (`unzeen-monitor`, таймер раз в 5 мин, root)
+- Канал: Telegram-бот. `/etc/unzeen/monitor.env`: `TG_BOT_TOKEN`, `TG_CHAT_ID` (0600). Токен попадает в curl только через stdin-конфиг и в argv не виден. Можно добавить `ALERT_CMD` (свой скрипт, сообщение на stdin). Внешних SaaS нет. Проверка канала: `sudo unzeen-monitor --test`; что ушло бы прямо сейчас: `sudo unzeen-monitor --dry-run`.
+- Проверки: **том заперт** (после ребута); диск ≥ 85 % (корень и том); caddy/web/каждый сервис инстанса не запущен; `GET 127.0.0.1:808x/api/pool` ≠ 200; строки `ALERT:` в логах api/scanner с прошлого прогона (needs_review, выплаты выше капа, refund 1Click, reorg …); нет `scan pass` сканера 15 мин; `relayer_jobs` в `needs_review`; выплаты ZEC в очереди > 30 мин сверх `not_before` (в том числе выше капа) и `sent` > 2 ч; самая свежая цена токена старше 15 мин (`stale_price` для buy/sell); снимок `pool_sol_inventory` старше 30 мин.
+- Что в тексте: только имя проверки, сеть и счётчик (`mainnet: 1 relayer job(s) in needs_review`). Адресов, txid, сумм и ключей нет. Повтор неразрешённого алерта — раз в 6 ч, при исправлении приходит «resolved».
+- Telegram узнаёт, что у этого сервера есть алерты (метаданные оператора, не пользователей). Если это не устраивает — только `ALERT_CMD` (например, локальный `msmtp`).
+
+### 7.9 Перенос devnet-стенда с Mac (рекомендую, иначе нужен новый TAZ)
+Фаусет даёт 0.125 TAZ в сутки. Свежий devnet-пул на VPS = пустой кошелёк и пустые vault. Перенос сохраняет кошелёк пула, vault с devnet-SOL, токены и историю:
+1. На Mac **остановить все devnet-сервисы** (scanner, API, relayer, intel). Два сканера с одним кошельком = двойные выплаты: `serve.lock` локальный и про другой хост не знает.
+2. `docker compose -f infra/docker-compose.yml --env-file .env exec -T postgres pg_dump -U unzeen -d unzeen -Fc > /tmp/devnet.dump` (файл содержит реестр — передать по scp и сразу удалить).
+3. Состояние: `~/.unzeen/test/` и `~/.unzeen/devnet/` (`solana/`, `media/`) → `/srv/unzeen/devnet/home/{test,devnet}/` (`rsync -a` по ssh, затем `chown -R 10001:10001`). Ключи: `~/.unzeen/seed.agekey` → `/etc/unzeen/keys/devnet/seed.agekey`, `~/.unzeen/solana-devnet.agekey` → `…/solana.agekey`, `~/.unzeen/devnet/{chat,scenario}.key` → `…/{chat,scenario}.key` (0600, uid 10001). **До** `unzeenctl keys devnet`, чтобы не создались новые.
+4. На VPS: `unzeenctl keys devnet` (создаст только pg-password и URL'ы БД) → поднять `pg-devnet` (`sudo unzeenctl deploy <sha>` его поднимет; либо сначала `docker compose … up -d pg-devnet`) → `pg_restore` в него → `deploy`.
+5. Картинки старых devnet-токенов были с базой `http://127.0.0.1:8080/media` и на VPS станут глифами (как в 1.9) — ожидаемо.
+6. После переноса devnet на Mac не запускать (или только с другой БД и другим кошельком).
+
+### 7.10 Чеклист «день деплоя»
+**Владелец (до):** купить VPS (7.1, без бэкапов/снапшотов, SSH-ключ), решить домен (7.2) и прописать DNS, создать Telegram-бота, подготовить пароль тома в менеджере паролей.
+
+| # | Кто | Шаг | Проверка |
+|---|---|---|---|
+| 1 | лид/агент | закоммитить `infra/deploy/` (сейчас без коммита) | `git status` чистый |
+| 2 | владелец | `scp` + `bootstrap.sh` (7.3), вход как `unzeen` в новом терминале | `ssh unzeen-vps sudo docker ps` |
+| 3 | владелец | `ssh -t unzeen-vps sudo unzeen-vault-init 40`, заголовок LUKS — в офлайн-бэкап | `sudo unzeenctl status` → volume unlocked |
+| 4 | владелец | `/etc/unzeen/stack.env` (хосты), `monitor.env` (бот) | `sudo unzeen-monitor --test` пришло |
+| 5 | владелец | (если перенос devnet) 7.9 шаги 1–3 | файлы на месте, Mac-devnet остановлен |
+| 6 | владелец | заполнить `__SET__` в `devnet.env`/`mainnet.env`/`hood.env` (RPC, ключи провайдеров, `UNZEEN_BIRTHDAY` = текущая высота mainnet) | — |
+| 7 | агент по SSH | `sudo unzeenctl keys devnet`, `… keys mainnet`, `… keys hood`, затем `sudo unzeenctl check-env` (`UNZEEN_REBALANCE_*_ADDRESS` пустые и `UNZEEN_REBALANCE=0` до шага 10 — так в шаблоне) | check-env ok |
+| 8 | агент | `deploy.sh unzeen-vps` (первая сборка 20–40 мин). Пока ключей mainnet/hood нет, можно временно `UNZEEN_INSTANCES=devnet` | `unzeenctl status`, `check-proxy` |
+| 9 | владелец | mainnet: `sudo unzeenctl stop scanner-mainnet` → `sudo unzeenctl scanner mainnet init` (печатает UA) → `sudo unzeenctl start scanner-mainnet`. То же для hood (`scanner hood init`) | `/api/pool` mainnet/hood = 200 |
+| 10 | владелец | Solana mainnet: `tool mainnet keys:gen 2` (age-идентичность уже создана `unzeenctl keys`) → `tool mainnet keys:attest` (адрес `rebal` → `UNZEEN_REBALANCE_SOL_ADDRESS` и `UNZEEN_REBALANCE=1`, `verify` → `NEXT_PUBLIC_ATTESTATION_PUBKEY_MAINNET`). Hood: `tool hood evm:keys 2` (`rebalance-0` → `UNZEEN_REBALANCE_ETH_ADDRESS` и `UNZEEN_REBALANCE=1`, `attest` → `NEXT_PUBLIC_ATTESTATION_PUBKEY_HOOD`). Devnet pubkey — `tool devnet keys:attest` | — |
+| 11 | владелец | офлайн-бэкап `/etc/unzeen/keys/*` и сидов | — |
+| 12 | агент | `deploy.sh unzeen-vps` (рестарт с адресами ребаланса, web с pubkey) | `/verify` «pinned» в трёх сетях |
+| 13 | агент | снаружи: `curl -sI` без Content-Encoding (7.7), CSP в браузере без ошибок, WS-лента живая, переключатель сетей | — |
+| 14 | агент | аудит логов: `sudo unzeenctl logs <svc> --since 1h \| grep -E '0x[0-9a-f]{40}\|[1-9A-HJ-NP-Za-km-z]{43,44}\|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'` по всем сервисам — пусто | — |
+| 15 | владелец | пре-флайт mainnet-прогона (`docs/submission/mainnet-demo-run.md` §1.6) уже на VPS: команды из 7.6 вместо локальных | — |
+| 16 | владелец | тест ребута: `sudo reboot` → алерт «LOCKED» в Telegram → `unzeen-unlock` → `status` | всё healthy |
+
+**Агенты по SSH** делают шаги 7, 8, 12–14 и read-only проверки. Агентам не поручать: пароль тома, заполнение секретов, генерацию и бэкап ключей, `init`, любые mainnet-траты и флаги `UNZEEN_ALLOW_MAINNET_*`.
+
+### 7.11 Фронт
+Правок в `web/` не нужно: все URL'ы, WS, pubkey аттестаций, `NEXT_PUBLIC_HOOD`, `NEXT_PUBLIC_SITE_URL` и CSP (`connect-src`/`img-src` из `NEXT_PUBLIC_API_URL_*`) уже берутся из env сборки. Пожелание на потом (не блокер): `output: "standalone"` в `next.config.ts` уменьшит образ web (сейчас в рантайм копируется весь `node_modules`).
+
+### 7.12 Риски и ограничения
+- **Ребут = простой** до ручного `unzeen-unlock` (это решение N2). unattended-upgrades сами не перезагружают. Обновления ядра ставит владелец, в окно без судей.
+- **Сборка на VPS** держит 4–6 GB RAM 15–30 мин. На 8 GB без свопа возможен OOM, поэтому берём 16 GB. Своп на незашифрованном диске — утечка памяти процессов, держим его выключенным.
+- `caddy-ratelimit` собирается с последней версии плагина (`CADDY_RATELIMIT_VERSION=latest`). После первой удачной сборки зафиксировать версию в `caddy.Dockerfile`.
+- `sslip.io` и mainnet-launch несовместимы без Pinata (7.2).
+- Docker в группе `unzeen` = root-доступ. Ключ SSH владельца — фактически ключ от пула.
+- Логи наших сервисов чистые по коду (аудиты day2–14), но `docker logs` хранит до 30 MB на контейнер. В шаге 14 аудит логов делаем после первого часа работы.
+- Индексатор и API монтируют `home` инстанса на запись (индексатор читает `creator-pubkeys.json`). Сузить до read-only — после проверки, что intel ничего туда не пишет.

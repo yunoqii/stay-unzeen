@@ -1,0 +1,147 @@
+# Unzeen reverse proxy (A3/A9, H9, E17, L-18). One origin per network, API at the root
+# (no path prefix: the signed request-target must reach core unchanged), WS on the same origin.
+#
+# Hosts come from /etc/unzeen/stack.env (own domain or <ip>.sslip.io, RUNBOOK "Деплой на VPS").
+# Privacy rules enforced here:
+#   - no access log at all (there is no `log` directive in any site block);
+#   - runtime/error log at ERROR level only, with client address, URI and headers removed;
+#   - X-Forwarded-For / Forwarded / X-Real-IP are stripped before the upstream sees them;
+#   - per-client rate limits live in memory (caddy-ratelimit, no distributed mode = no storage);
+#   - NO compression on API origins: padded responses (/api/portfolio, /api/actions*,
+#     /api/verify/proof, /api/creator, chat) must keep their size (RELAYER.md "Деплой: сжатие").
+#     Compression is enabled only on the web origin (public static pages, no account data).
+{
+	# ACME account without e-mail (no identity at Let's Encrypt). Certificates: caddy_data volume.
+	order rate_limit before basic_auth
+	servers {
+		protocols h1 h2
+	}
+	log default {
+		output stderr
+		level ERROR
+		# Go's http.Server messages put the client address into the message text, which the
+		# filter cannot rewrite; TLS events carry it in client_hello. Both are dropped entirely.
+		exclude http.stdlib events
+		format filter {
+			wrap json
+			fields {
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>uri delete
+				request>headers delete
+				request>tls delete
+				remote_ip delete
+				remote_addr delete
+				remote_port delete
+				client_ip delete
+				data>client_hello>RemoteAddr delete
+				data>client_hello>LocalAddr delete
+			}
+		}
+	}
+}
+
+(no_client_headers) {
+	header_up -X-Forwarded-For
+	header_up -X-Forwarded-Host
+	header_up -X-Forwarded-Proto
+	header_up -Forwarded
+	header_up -X-Real-IP
+	header_up -CF-Connecting-IP
+	header_up -True-Client-IP
+}
+
+(security_headers) {
+	header {
+		-Server
+		-X-Powered-By
+		-Via
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+}
+
+# API origin: {args[0]} = upstream (container:port).
+(api_site) {
+	import security_headers
+	header {
+		# JSON API: nothing may render or frame it. /media sets its own sandbox CSP (core), kept as is.
+		?Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+		X-Frame-Options DENY
+	}
+	# Per client, in memory only. Core's own per-socket limit is relaxed in the instance env
+	# (API_RL_IP_*): behind this proxy every request comes from one address (A9). The per-anon-key
+	# limit in core (API_RL_KEY_*) stays.
+	rate_limit {
+		zone api_write {
+			match {
+				method POST
+			}
+			key {remote_host}
+			events {$RL_API_WRITE_EVENTS:30}
+			window 10s
+		}
+		zone api_read {
+			key {remote_host}
+			events {$RL_API_READ_EVENTS:300}
+			window 10s
+		}
+		zone api_ws {
+			match {
+				path /ws/*
+			}
+			key {remote_host}
+			events {$RL_WS_EVENTS:30}
+			window 1m
+		}
+	}
+	# No `encode` here on purpose (see header).
+	reverse_proxy {args[0]} {
+		import no_client_headers
+		# WebSocket (/ws/feed) is proxied transparently; keep long-lived streams open on reload.
+		stream_close_delay 5m
+	}
+	handle_errors 502 503 504 {
+		header Content-Type application/json
+		header Cache-Control "no-store, no-transform"
+		respond `{"error":{"code":"unavailable","message":"this network is temporarily unavailable"}}` 503
+	}
+	handle_errors 429 {
+		header Content-Type application/json
+		respond `{"error":{"code":"rate_limited","message":"too many requests"}}` 429
+	}
+}
+
+{$WEB_HOST} {
+	import security_headers
+	# CSP, COOP/CORP, Permissions-Policy and frame headers come from next.config.ts.
+	encode zstd gzip
+	rate_limit {
+		zone web {
+			key {remote_host}
+			events {$RL_WEB_EVENTS:600}
+			window 10s
+		}
+	}
+	reverse_proxy {$UPSTREAM_WEB:web:3000} {
+		import no_client_headers
+	}
+	handle_errors 502 503 504 {
+		header Cache-Control no-store
+		respond "Unzeen is restarting. Try again in a minute." 503
+	}
+}
+
+{$API_DEVNET_HOST} {
+	import api_site {$UPSTREAM_API_DEVNET:api-devnet:8080}
+}
+
+{$API_MAINNET_HOST} {
+	import api_site {$UPSTREAM_API_MAINNET:api-mainnet:8080}
+}
+
+{$API_HOOD_HOST} {
+	import api_site {$UPSTREAM_API_HOOD:api-hood:8080}
+}

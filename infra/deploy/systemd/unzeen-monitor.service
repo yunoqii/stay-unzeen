@@ -1,0 +1,11 @@
+[Unit]
+Description=Unzeen health checks and owner alerts
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/unzeen-monitor
+# Needs docker + psql inside the pg containers; reads /etc/unzeen/monitor.env (0600 root).
+User=root
+Nice=10

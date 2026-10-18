@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# unzeen-monitor — health checks of the VPS, alerts to the owner (Telegram bot via /etc/unzeen/monitor.env
+# and/or ALERT_CMD). Runs as root from unzeen-monitor.timer every 5 min; works while the volume is locked.
+#
+# Alert texts contain only check names, instance names and counts: no addresses, txids, amounts,
+# anon keys or client IPs. SQL checks are aggregates (count / max age) as the DB owner.
+#   unzeen-monitor            run all checks, send new/changed/repeated alerts and "resolved" notes
+#   unzeen-monitor --dry-run  print what would be sent, send nothing, keep no state
+#   unzeen-monitor --test     send a test message
+set -uo pipefail
+
+ETC="${UNZEEN_ETC:-/etc/unzeen}"
+STATE=/var/lib/unzeen-monitor
+DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
+
+set -a
+# shellcheck disable=SC1091
+[ -f "$ETC/stack.env" ] && . "$ETC/stack.env"
+# shellcheck disable=SC1091
+[ -f "$ETC/monitor.env" ] && . "$ETC/monitor.env"
+set +a
+VAULT="${UNZEEN_VAULT:-/srv/unzeen}"
+IFS=',' read -r -a INSTANCES <<< "${UNZEEN_INSTANCES:-devnet,mainnet,hood}"
+REPEAT="${ALERT_REPEAT_SECS:-21600}"
+PRICE_MAX="${PRICE_MAX_AGE_SECS:-900}"
+INV_MAX="${INVENTORY_MAX_AGE_SECS:-1800}"
+SCAN_MAX="${SCAN_PASS_MAX_AGE_SECS:-900}"
+HOSTNAME_SHORT="$(hostname -s)"
+PROJECT=unzeen-vps
+
+send() { # message on $1
+  local msg="[unzeen ${HOSTNAME_SHORT}] $1"
+  if [ "$DRY" = 1 ]; then echo "would send: $msg"; return 0; fi
+  if [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${TG_CHAT_ID:-}" ]; then
+    # Token only in a curl config on stdin: never in argv / process list.
+    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TG_BOT_TOKEN" \
+      | curl -s -o /dev/null --max-time 15 -K - --data-urlencode "chat_id=$TG_CHAT_ID" \
+          --data-urlencode "text=$msg" || logger -t unzeen-monitor "telegram send failed"
+  fi
+  if [ -n "${ALERT_CMD:-}" ]; then printf '%s\n' "$msg" | sh -c "$ALERT_CMD" || true; fi
+  logger -t unzeen-monitor "$1"
+}
+
+if [ "${1:-}" = "--test" ]; then send "test alert: monitoring works"; exit 0; fi
+install -d -m 0700 "$STATE"
+
+FIRING=()
+fire() { FIRING+=("$1|$2"); }   # fire <id> <text>
+
+container() { docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=$1" | head -1; }
+running() { local id; id="$(container "$1")"; [ -n "$id" ] && [ "$(docker inspect -f '{{.State.Running}}' "$id" 2>/dev/null)" = true ]; }
+sql() { # sql <inst> <query>: one value, empty on error
+  local id; id="$(container "pg-$1")"; [ -n "$id" ] || return 0
+  docker exec "$id" psql -U unzeen -d unzeen -tAqc "$2" 2>/dev/null | head -1
+}
+since_last() { # docker logs --since: last run time (or 10 min)
+  local f="$STATE/last-run"; if [ -f "$f" ]; then cat "$f"; else date -u -d '-10 min' +%FT%TZ; fi
+}
+SINCE="$(since_last)"
+
+# ---------------------------------------------------------------- volume
+if ! mountpoint -q "$VAULT" || [ ! -f "$VAULT/.unzeen-volume" ]; then
+  fire volume "encrypted volume is LOCKED (reboot?): run 'ssh -t <admin>@<vps> sudo unzeen-unlock'"
+fi
+
+# ---------------------------------------------------------------- disk
+root_use="$(df --output=pcent / | tail -1 | tr -dc 0-9)"
+[ "${root_use:-0}" -ge 85 ] && fire disk-root "root disk ${root_use}% full (docker images/logs)"
+if mountpoint -q "$VAULT"; then
+  v_use="$(df --output=pcent "$VAULT" | tail -1 | tr -dc 0-9)"
+  [ "${v_use:-0}" -ge 85 ] && fire disk-vault "encrypted volume ${v_use}% full"
+fi
+
+# ---------------------------------------------------------------- edge
+running caddy || fire caddy "caddy is not running"
+running web || fire web "web is not running"
+
+# ---------------------------------------------------------------- instances
+if mountpoint -q "$VAULT"; then
+  for i in "${INSTANCES[@]}"; do
+    svcs=("pg-$i" "api-$i" "scanner-$i" "relayer-$i"); [ "$i" = hood ] || svcs+=("intel-$i")
+    for s in "${svcs[@]}"; do running "$s" || fire "down-$s" "$i: $s is not running"; done
+    case "$i" in devnet) port=8080;; mainnet) port=8081;; hood) port=8082;; esac
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://127.0.0.1:$port/api/pool" || true)"
+    [ "$code" = 200 ] || fire "pool-$i" "$i: GET /api/pool -> ${code:-no answer}"
+
+    # ALERT lines of core (constant texts, counts only) since the last run.
+    for s in "api-$i" "scanner-$i"; do
+      id="$(container "$s")"; [ -n "$id" ] || continue
+      alerts="$(docker logs --since "$SINCE" "$id" 2>&1 | grep -oE 'ALERT: [^"=]{1,120}' | sed 's/[[:space:]]*$//' | sort | uniq -c | head -5 | awk '{$1=$1};1' || true)"
+      [ -n "$alerts" ] && fire "alert-$s-$(printf '%s' "$alerts" | md5sum | cut -c1-8)" "$i: $s logged: $(printf '%s' "$alerts" | tr '\n' ';')"
+    done
+    # Scanner progress: at least one "scan pass" line recently.
+    id="$(container "scanner-$i")"
+    if [ -n "$id" ] && ! docker logs --since "$(date -u -d "-${SCAN_MAX} sec" +%FT%TZ)" "$id" 2>&1 | grep -q 'scan pass'; then
+      fire "scan-$i" "$i: scanner made no scan pass in ${SCAN_MAX}s (lightwalletd?)"
+    fi
+
+    n="$(sql "$i" "SELECT count(*) FROM relayer_jobs WHERE status = 'needs_review' AND settled_at IS NULL")"
+    [ -n "$n" ] && [ "$n" != 0 ] && fire "review-$i" "$i: $n relayer job(s) in needs_review (unzeenctl api $i review-job)"
+    n="$(sql "$i" "SELECT count(*) FROM zec_payouts WHERE status = 'queued' AND NOT approved AND not_before < now() - interval '30 minutes'")"
+    [ -n "$n" ] && [ "$n" != 0 ] && fire "payout-held-$i" "$i: $n ZEC payout(s) waiting > 30 min (above cap? unzeenctl scanner $i payout list-held)"
+    n="$(sql "$i" "SELECT count(*) FROM zec_payouts WHERE status = 'sent' AND updated_at < now() - interval '2 hours'")"
+    [ -n "$n" ] && [ "$n" != 0 ] && fire "payout-stuck-$i" "$i: $n ZEC payout(s) sent > 2 h without confirmation"
+    age="$(sql "$i" "SELECT COALESCE(extract(epoch FROM now() - max(price_at))::bigint, -1) FROM tokens")"
+    if [ -n "$age" ] && [ "$age" -gt "$PRICE_MAX" ] 2>/dev/null; then
+      fire "price-$i" "$i: newest token price is ${age}s old (stale_price for buy/sell; indexer/relayer down?)"
+    fi
+    age="$(sql "$i" "SELECT COALESCE(extract(epoch FROM now() - max(updated_at))::bigint, -1) FROM pool_sol_inventory")"
+    if [ -n "$age" ] && [ "$age" -gt "$INV_MAX" ] 2>/dev/null; then
+      fire "inventory-$i" "$i: relayer inventory snapshot ${age}s old (relayer stalled?)"
+    fi
+  done
+fi
+
+# ---------------------------------------------------------------- dispatch (dedupe by id)
+now="$(date +%s)"
+declare -A SEEN=()
+for entry in "${FIRING[@]}"; do
+  id="${entry%%|*}"; text="${entry#*|}"; SEEN[$id]=1
+  f="$STATE/$id"
+  if [ "$DRY" = 1 ]; then send "ALERT $text"; continue; fi
+  if [ ! -f "$f" ] || [ "$(head -1 "$f")" != "$text" ] || [ $((now - $(stat -c %Y "$f"))) -ge "$REPEAT" ]; then
+    send "ALERT $text"
+    printf '%s\n' "$text" > "$f"
+  fi
+done
+if [ "$DRY" = 0 ]; then
+  for f in "$STATE"/*; do
+    [ -f "$f" ] || continue
+    id="$(basename "$f")"; [ "$id" = last-run ] && continue
+    if [ -z "${SEEN[$id]:-}" ]; then
+      case "$id" in alert-*) ;; *) send "resolved: $(head -1 "$f")";; esac
+      rm -f "$f"
+    fi
+  done
+  date -u +%FT%TZ > "$STATE/last-run"
+fi
+exit 0

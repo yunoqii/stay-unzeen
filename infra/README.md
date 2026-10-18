@@ -28,6 +28,26 @@ docker compose -f infra/docker-compose.yml --env-file .env up -d postgres
 - Docker logs are rotated (`json-file`, 10 MB x 3). Postgres runs with `log_error_verbosity=terse`, no statement/connection logging: row values from constraint errors (DETAIL) and client IPs never reach the container log.
 - Relayer role (least privilege, cannot read `action_id`, balances, deposits): `infra/relayer-role.sql` (idempotent; re-run after new migrations), contract in `docs/RELAYER.md`. The relayer gets `DATABASE_URL_RELAYER`, never the owner's `DATABASE_URL`.
 
+## VPS deploy (`deploy/`)
+
+One VPS runs everything: web (Next.js prod), Caddy (HTTPS) and three backend instances
+(devnet, mainnet, hood), each with its own Postgres, network, env file, keys and state on an
+encrypted LUKS volume. Step-by-step: `docs/RUNBOOK.md` section 7 ("Деплой на VPS").
+
+| Path | What |
+|---|---|
+| `deploy/compose.yml` | the whole stack (profiles `devnet`, `mainnet`, `hood`, `build`) |
+| `deploy/Caddyfile` | no access logs, scrubbed error log, no compression on API origins, per-client limits in memory, X-Forwarded-For stripped |
+| `deploy/docker/*.Dockerfile` | core (release), adapters, web (`build:public`), caddy (+ratelimit) |
+| `deploy/env/*.env.example` | templates of `/etc/unzeen/*.env` (no secrets) |
+| `deploy/bin/` | `bootstrap.sh`, `unzeen-vault-init`/`unzeen-unlock`/`unzeen-lock`, `unzeenctl`, `unzeen-monitor`, `deploy.sh` |
+| `deploy/tests/deploy.test.sh` | offline checks: shellcheck, compose config + invariants, caddy validate, check-env |
+
+```bash
+bash infra/deploy/tests/deploy.test.sh     # offline, needs Docker for compose/caddy/shellcheck
+infra/deploy/bin/deploy.sh unzeen-vps      # ship HEAD to the VPS and deploy (after bootstrap)
+```
+
 ## Separate database per network (mainnet)
 
 The ledger is **not split by network** (`balances`, `deposits`, `actions`, `pool_meta`, …).

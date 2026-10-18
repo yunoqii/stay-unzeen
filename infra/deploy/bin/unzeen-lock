@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Stop the backend instances and lock the encrypted volume (web + Caddy keep running, APIs answer 503).
+#   sudo unzeen-lock
+set -euo pipefail
+NAME=unzeen
+MNT=/srv/unzeen
+[ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
+/usr/local/sbin/unzeenctl stop-backends || true
+if mountpoint -q "$MNT"; then umount "$MNT"; fi
+if [ -e "/dev/mapper/$NAME" ]; then cryptsetup close "$NAME"; fi
+chattr +i "$MNT" 2>/dev/null || true
+echo "volume locked"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run unzeen-monitor every 5 minutes (also right after boot: alerts that the volume is locked)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

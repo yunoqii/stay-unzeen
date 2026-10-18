@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# One-time creation of the encrypted volume (N2): LUKS2 container in a file, ext4 inside,
+# mounted at /srv/unzeen by `unzeen-unlock`. Interactive: cryptsetup asks for the passphrase
+# twice (type it, never paste it into a shared terminal; keep it in the owner's password manager).
+#   sudo unzeen-vault-init [SIZE_GB]      (default 40)
+# Refuses if the container already exists. Prints no secrets.
+set -euo pipefail
+IMG=/var/lib/unzeen/vault.img
+NAME=unzeen
+SIZE_GB="${1:-40}"
+die() { printf 'unzeen-vault-init: %s\n' "$*" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || die "run with sudo"
+[[ "$SIZE_GB" =~ ^[0-9]+$ ]] && [ "$SIZE_GB" -ge 5 ] || die "size in GB, >= 5"
+[ -e "$IMG" ] && die "$IMG already exists (to unlock: unzeen-unlock)"
+[ -t 0 ] || die "interactive terminal required (ssh -t)"
+install -d -m 0700 /var/lib/unzeen
+avail_gb=$(( $(df --output=avail -k /var/lib/unzeen | tail -1) / 1024 / 1024 ))
+[ "$avail_gb" -gt $((SIZE_GB + 10)) ] || die "only ${avail_gb} GB free on the root disk; need ${SIZE_GB} + 10 for images"
+echo "Creating ${SIZE_GB} GB encrypted container (fully allocated)."
+fallocate -l "${SIZE_GB}G" "$IMG"
+chmod 0600 "$IMG"
+# Default LUKS2 (aes-xts-plain64, argon2id). The header is backed up below, outside the volume.
+cryptsetup luksFormat --type luks2 --batch-mode=no --verify-passphrase "$IMG"
+cryptsetup open "$IMG" "$NAME"
+mkfs.ext4 -q -L unzeen -m 0 "/dev/mapper/$NAME"
+chattr -i /srv/unzeen 2>/dev/null || true
+mount -o noatime,nodev,nosuid "/dev/mapper/$NAME" /srv/unzeen
+for inst in devnet mainnet hood; do
+  install -d -m 0700 -o 10001 -g 10001 "/srv/unzeen/$inst/home"
+  # Postgres entrypoint chowns PGDATA to its own uid on first start.
+  install -d -m 0700 "/srv/unzeen/$inst/pg"
+done
+date -u +%FT%TZ > /srv/unzeen/.unzeen-volume
+chmod 0644 /srv/unzeen/.unzeen-volume
+cryptsetup luksHeaderBackup "$IMG" --header-backup-file /var/lib/unzeen/vault.luks-header
+chmod 0600 /var/lib/unzeen/vault.luks-header
+echo "Volume created and mounted at /srv/unzeen."
+echo "Copy /var/lib/unzeen/vault.luks-header to the owner's offline backup (useless without the passphrase)."
+echo "Next: fill /etc/unzeen/*.env, then 'sudo unzeenctl keys <instance>' and 'unzeenctl deploy'."

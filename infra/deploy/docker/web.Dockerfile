@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1.7
+# Unzeen web (Next.js production). Context: web/.
+# NEXT_PUBLIC_* are inlined at build time: every change of an API URL, attestation pubkey or
+# feature flag needs a rebuild (`unzeenctl deploy`). Values come from /etc/unzeen/stack.env.
+FROM node:22-bookworm-slim AS build
+RUN npm install -g pnpm@10.20.0
+WORKDIR /app/web
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY . .
+ARG NEXT_PUBLIC_API_MODE=real
+ARG NEXT_PUBLIC_SITE_URL=
+ARG NEXT_PUBLIC_API_URL_DEVNET=
+ARG NEXT_PUBLIC_API_URL_MAINNET=
+ARG NEXT_PUBLIC_API_URL_HOOD=
+ARG NEXT_PUBLIC_WS_URL_DEVNET=
+ARG NEXT_PUBLIC_WS_URL_MAINNET=
+ARG NEXT_PUBLIC_WS_URL_HOOD=
+ARG NEXT_PUBLIC_ATTESTATION_PUBKEY_DEVNET=
+ARG NEXT_PUBLIC_ATTESTATION_PUBKEY_MAINNET=
+ARG NEXT_PUBLIC_ATTESTATION_PUBKEY_HOOD=
+ARG NEXT_PUBLIC_HOOD=1
+# Empty until 28.10 23:59 UTC: build:public fails if sealed-bid code is in the bundle.
+ARG NEXT_PUBLIC_FAIR_LAUNCH_BUILD=
+# build:public = strict bundle check (no fair-launch code). After the deadline: WEB_BUILD_SCRIPT=build.
+ARG WEB_BUILD_SCRIPT=build:public
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN pnpm run "$WEB_BUILD_SCRIPT"
+
+FROM node:22-bookworm-slim
+WORKDIR /app/web
+# Same public env at runtime: next.config.ts (CSP connect-src/img-src) is loaded again by `next start`.
+ARG NEXT_PUBLIC_API_MODE=real
+ARG NEXT_PUBLIC_SITE_URL=
+ARG NEXT_PUBLIC_API_URL_DEVNET=
+ARG NEXT_PUBLIC_API_URL_MAINNET=
+ARG NEXT_PUBLIC_API_URL_HOOD=
+ARG NEXT_PUBLIC_WS_URL_DEVNET=
+ARG NEXT_PUBLIC_WS_URL_MAINNET=
+ARG NEXT_PUBLIC_WS_URL_HOOD=
+ARG NEXT_PUBLIC_HOOD=1
+ARG NEXT_PUBLIC_FAIR_LAUNCH_BUILD=
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 \
+    NEXT_PUBLIC_API_MODE=$NEXT_PUBLIC_API_MODE NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
+    NEXT_PUBLIC_API_URL_DEVNET=$NEXT_PUBLIC_API_URL_DEVNET NEXT_PUBLIC_API_URL_MAINNET=$NEXT_PUBLIC_API_URL_MAINNET \
+    NEXT_PUBLIC_API_URL_HOOD=$NEXT_PUBLIC_API_URL_HOOD NEXT_PUBLIC_WS_URL_DEVNET=$NEXT_PUBLIC_WS_URL_DEVNET \
+    NEXT_PUBLIC_WS_URL_MAINNET=$NEXT_PUBLIC_WS_URL_MAINNET NEXT_PUBLIC_WS_URL_HOOD=$NEXT_PUBLIC_WS_URL_HOOD \
+    NEXT_PUBLIC_HOOD=$NEXT_PUBLIC_HOOD NEXT_PUBLIC_FAIR_LAUNCH_BUILD=$NEXT_PUBLIC_FAIR_LAUNCH_BUILD
+COPY --from=build --chown=node:node /app/web /app/web
+USER node
+EXPOSE 3000
+CMD ["node_modules/.bin/next", "start", "-H", "0.0.0.0", "-p", "3000"]

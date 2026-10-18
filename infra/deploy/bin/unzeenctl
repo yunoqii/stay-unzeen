@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# unzeenctl — operator tool of the Unzeen VPS (installed to /usr/local/sbin by bootstrap/deploy).
+# Never prints secrets: passwords are generated into files, URLs with keys are never echoed.
+#
+#   unzeenctl status                         volume, containers, schema versions, API health
+#   unzeenctl receive <tag>                  read a `git archive` tar from stdin into a release dir
+#   unzeenctl deploy <tag> [--web]           build -> migrate (+schema check, roles) -> restart -> proxy check
+#   unzeenctl up | stop-backends             start everything / stop all instance services
+#   unzeenctl restart|stop|start <service...> | logs <service> [--since 10m]
+#   unzeenctl keys <instance>                generate DB passwords (into the env file), pg-password,
+#                                            chat.key, scenario.key, age identities (missing ones only)
+#   unzeenctl roles <instance>               (re)apply relayer/indexer roles (after every migration)
+#   unzeenctl psql <instance>                owner psql (interactive)
+#   unzeenctl scanner <instance> <args...>   one-off unzeen-scanner (init, address, wallet-balance, payout ...)
+#   unzeenctl api <instance> <args...>       one-off unzeen-api (review-job, verify-snapshot --allow-mainnet ...)
+#   unzeenctl tool <instance> <script> [args...]   one-off adapters script (keys:gen 2, keys:attest, evm:keys 2 ...)
+#                                            extra one-off flags: sudo ONEOFF_ENV="UNZEEN_ALLOW_MAINNET_SETUP=yes" unzeenctl tool ...
+#   unzeenctl check-proxy [--insecure]       padded paths: no Content-Encoding through Caddy (curl -sI)
+#   unzeenctl check-env                      env files have no __SET__/__GENERATE__ placeholders
+set -euo pipefail
+
+ETC="${UNZEEN_ETC:-/etc/unzeen}"
+OPT=/opt/unzeen
+PROJECT=unzeen-vps
+APP_UID=10001
+
+die() { printf 'unzeenctl: %s\n' "$*" >&2; exit 1; }
+say() { printf '[unzeenctl] %s\n' "$*"; }
+
+[ -f "$ETC/stack.env" ] || die "$ETC/stack.env missing (bootstrap not run?)"
+set -a
+# shellcheck disable=SC1091
+. "$ETC/stack.env"
+set +a
+VAULT="${UNZEEN_VAULT:-/srv/unzeen}"
+IFS=',' read -r -a INSTANCES <<< "${UNZEEN_INSTANCES:-devnet,mainnet,hood}"
+
+valid_inst() { case "$1" in devnet|mainnet|hood) return 0;; *) return 1;; esac; }
+for i in "${INSTANCES[@]}"; do valid_inst "$i" || die "bad UNZEEN_INSTANCES entry: $i"; done
+api_port() { case "$1" in devnet) echo 8080;; mainnet) echo 8081;; hood) echo 8082;; esac; }
+api_host() { case "$1" in devnet) echo "$API_DEVNET_HOST";; mainnet) echo "$API_MAINNET_HOST";; hood) echo "$API_HOOD_HOST";; esac; }
+
+current_rel() { readlink -f "$OPT/current" 2>/dev/null || true; }
+REL="${REL:-$(current_rel)}"
+
+dc() { # dc <release dir> <compose args...>
+  local rel="$1"; shift
+  [ -n "$rel" ] && [ -f "$rel/infra/deploy/compose.yml" ] || die "no release deployed yet (unzeenctl deploy <tag>)"
+  local profiles=()
+  for i in "${INSTANCES[@]}"; do profiles+=(--profile "$i"); done
+  UNZEEN_TAG="${UNZEEN_TAG:-$(basename "$rel")}" \
+    docker compose -p "$PROJECT" -f "$rel/infra/deploy/compose.yml" --env-file "$ETC/stack.env" "${profiles[@]}" "$@"
+}
+
+vault_open() { mountpoint -q "$VAULT" && [ -f "$VAULT/.unzeen-volume" ]; }
+need_vault() { vault_open || die "encrypted volume is locked: run 'sudo unzeen-unlock' first"; }
+need_root() { [ "$(id -u)" -eq 0 ] || die "run with sudo"; }
+
+# Value of KEY in an env file, no echo. python reads the file itself (no secret in argv).
+env_get() { python3 - "$1" "$2" <<'PY'
+import sys
+path, key = sys.argv[1], sys.argv[2]
+val = ""
+for line in open(path, encoding="utf-8"):
+    line = line.rstrip("\n")
+    if line.startswith(key + "="):
+        val = line[len(key) + 1:]
+sys.stdout.write(val)
+PY
+}
+url_password() { python3 - "$1" "$2" <<'PY'
+import sys, urllib.parse
+path, key = sys.argv[1], sys.argv[2]
+val = ""
+for line in open(path, encoding="utf-8"):
+    if line.startswith(key + "="):
+        val = line.rstrip("\n")[len(key) + 1:]
+pw = urllib.parse.urlsplit(val).password if val else None
+sys.stdout.write(urllib.parse.unquote(pw or ""))
+PY
+}
+# Replace KEY=__GENERATE__ by KEY=<value> in place (value on stdin, never in argv).
+env_fill() { python3 -c '
+import sys, os
+path, key = sys.argv[1], sys.argv[2]
+val = sys.stdin.read().strip()
+lines = open(path, encoding="utf-8").read().split("\n")
+out = [key + "=" + val if l == key + "=__GENERATE__" else l for l in lines]
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write("\n".join(out))
+st = os.stat(path)
+os.chmod(tmp, st.st_mode & 0o777); os.chown(tmp, st.st_uid, st.st_gid)
+os.replace(tmp, path)
+' "$1" "$2"; }
+
+check_env() {
+  local bad=0 f
+  for i in "${INSTANCES[@]}"; do
+    f="$ETC/$i.env"
+    [ -f "$f" ] || { echo "missing $f"; bad=1; continue; }
+    if grep -qE '=__(SET|GENERATE)__$' "$f"; then
+      echo "$f: unfilled: $(grep -oE '^[A-Z0-9_]+=__(SET|GENERATE)__$' "$f" | cut -d= -f1 | tr '\n' ' ')"
+      bad=1
+    fi
+    for k in pg-password chat.key scenario.key seed.agekey; do
+      [ -f "$ETC/keys/$i/$k" ] || { echo "missing $ETC/keys/$i/$k (unzeenctl keys $i)"; bad=1; }
+    done
+    case "$i" in
+      hood) [ -f "$ETC/keys/$i/hood-evm.agekey" ] || { echo "missing $ETC/keys/$i/hood-evm.agekey"; bad=1; };;
+      *) [ -f "$ETC/keys/$i/solana.agekey" ] || { echo "missing $ETC/keys/$i/solana.agekey"; bad=1; };;
+    esac
+    if [ "$i" != devnet ] && grep -qE '^DEVNET_ZEC_SOL_RATE=.+' "$f"; then echo "$f: DEVNET_ZEC_SOL_RATE must not be set"; bad=1; fi
+    if grep -qE '^UNZEEN_DEV_PRINT=.+' "$f"; then echo "$f: UNZEEN_DEV_PRINT must not be set on the VPS"; bad=1; fi
+  done
+  return $bad
+}
+
+wait_healthy() { # wait_healthy <rel> <service> <timeout s>
+  local rel="$1" svc="$2" t="$3" id st
+  for _ in $(seq 1 "$t"); do
+    id="$(dc "$rel" ps -q "$svc" 2>/dev/null || true)"
+    if [ -n "$id" ]; then
+      st="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || echo none)"
+      [ "$st" = healthy ] && return 0
+      [ "$st" = exited ] && return 1
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+psql_owner() { # psql_owner <rel> <inst> <psql args...>
+  local rel="$1" inst="$2"; shift 2
+  dc "$rel" exec -T "pg-$inst" psql -v ON_ERROR_STOP=1 -U unzeen -d unzeen "$@"
+}
+
+migrate_check() { # schema version in the DB == newest migration file of the release
+  local rel="$1" inst="$2" want have
+  want="$(find "$rel/core/migrations" -maxdepth 1 -name '[0-9][0-9][0-9][0-9]_*.sql' -printf '%f\n' | sort | tail -1 | cut -c1-4 | sed 's/^0*//')"
+  have="$(psql_owner "$rel" "$inst" -tAc 'SELECT max(version) FROM schema_migrations')"
+  [ -n "$want" ] && [ "$have" = "$want" ] || die "$inst: schema version ${have:-?} != release $want"
+  say "$inst: schema version $have ok (column check passed at API start)"
+}
+
+apply_roles() { # relayer + indexer roles; the env file is the source of truth for their passwords
+  local rel="$1" inst="$2" f="$ETC/$2.env" pw
+  pw="$(url_password "$f" DATABASE_URL_RELAYER)"
+  [ -n "$pw" ] || die "$inst: DATABASE_URL_RELAYER has no password"
+  [[ "$pw" =~ ^[A-Za-z0-9]+$ ]] || die "$inst: role passwords must be alphanumeric (unzeenctl keys generates hex)"
+  { printf "\\set pw '''%s'''\n" "$pw"; cat "$rel/infra/relayer-role.sql"; printf 'ALTER ROLE unzeen_relayer PASSWORD :pw;\n'; } \
+    | psql_owner "$rel" "$inst" -q >/dev/null
+  pw="$(url_password "$f" DATABASE_URL_INDEXER)"
+  if [ -n "$pw" ]; then
+    [[ "$pw" =~ ^[A-Za-z0-9]+$ ]] || die "$inst: role passwords must be alphanumeric"
+    { printf "\\set pw '''%s'''\n" "$pw"; cat "$rel/infra/indexer-role.sql"; printf 'ALTER ROLE unzeen_indexer PASSWORD :pw;\n'; } \
+      | psql_owner "$rel" "$inst" -q >/dev/null
+  fi
+  unset pw
+  say "$inst: roles applied"
+}
+
+check_proxy() {
+  local insecure=() bad=0 h p ce code
+  [ "${1:-}" = "--insecure" ] && insecure=(-k)
+  for i in "${INSTANCES[@]}"; do
+    h="$(api_host "$i")"
+    for p in "GET /api/portfolio" "POST /api/actions" "GET /api/actions/1" "GET /api/verify/proof" \
+             "GET /api/creator" "GET /api/tokens/11111111111111111111111111111111/chat" "GET /api/feed"; do
+      code="$(curl -s "${insecure[@]}" --max-time 10 --resolve "$h:443:127.0.0.1" -X "${p%% *}" -o /dev/null \
+        -D /dev/stdout -H 'Accept-Encoding: gzip, br, zstd' "https://$h${p#* }" | tr -d '\r')" || true
+      ce="$(printf '%s\n' "$code" | grep -i '^content-encoding:' || true)"
+      if [ -n "$ce" ]; then echo "FAIL $i ${p}: $ce"; bad=1
+      elif [ -z "$code" ]; then echo "FAIL $i ${p}: no answer"; bad=1
+      else echo "ok   $i ${p}: $(printf '%s\n' "$code" | head -1), no Content-Encoding"; fi
+    done
+  done
+  code="$(curl -s "${insecure[@]}" --max-time 10 --resolve "$WEB_HOST:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$WEB_HOST/" || true)"
+  echo "web  https://$WEB_HOST/ -> $code"
+  [ "$code" = 200 ] || bad=1
+  return $bad
+}
+
+docker_oneoff() { # docker_oneoff <inst> <image> <cmd...>: operator one-off with the instance's env, state and keys (rw)
+  local inst="$1" image="$2"; shift 2
+  need_vault
+  local tty=(); [ -t 0 ] && [ -t 1 ] && tty=(-it)
+  local host; host="$(api_host "$inst")"
+  local extra=() kv
+  for kv in ${ONEOFF_ENV:-}; do
+    [[ "$kv" =~ ^[A-Z0-9_]+=[A-Za-z0-9_.:-]*$ ]] || die "ONEOFF_ENV: KEY=value pairs only"
+    extra+=(-e "$kv")
+  done
+  docker run --rm "${tty[@]}" --user "$APP_UID:$APP_UID" --read-only --tmpfs /tmp \
+    --security-opt no-new-privileges:true --cap-drop ALL \
+    --network "${PROJECT}_$inst" --env-file "$ETC/$inst.env" \
+    -e UNZEEN_HOME=/data/home -e HOME=/data/home -e UNZEEN_DEV_PRINT= \
+    -e UNZEEN_SEED_KEY_FILE=/run/unzeen-keys/seed.agekey \
+    -e UNZEEN_CHAT_KEY_FILE=/run/unzeen-keys/chat.key -e UNZEEN_SCENARIO_KEY_FILE=/run/unzeen-keys/scenario.key \
+    -e SOLANA_KEYS_AGE_KEY_FILE=/run/unzeen-keys/solana.agekey -e HOOD_KEYS_AGE_KEY_FILE=/run/unzeen-keys/hood-evm.agekey \
+    -e "UNZEEN_METADATA_BASE_URL=https://$host/media" -e "API_CORS_ORIGINS=https://$WEB_HOST" \
+    "${extra[@]}" \
+    -v "$VAULT/$inst/home:/data/home" -v "$ETC/keys/$inst:/run/unzeen-keys" \
+    "$image:$(basename "$REL")" "$@"
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  status)
+    if vault_open; then echo "volume: unlocked ($(df -h --output=used,size "$VAULT" | tail -1 | tr -s ' '))"; else echo "volume: LOCKED"; fi
+    echo "release: $(basename "${REL:-none}")"
+    [ -n "$REL" ] && dc "$REL" ps --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
+    for i in "${INSTANCES[@]}"; do
+      printf '%-8s /api/pool -> %s\n' "$i" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$(api_port "$i")/api/pool" || echo down)"
+    done;;
+
+  receive)
+    need_root
+    tag="${1:-}"; [[ "$tag" =~ ^[0-9a-f]{7,40}$ ]] || die "usage: receive <git sha>"
+    dst="$OPT/releases/$tag"; [ -e "$dst" ] && die "$dst exists"
+    install -d -m 0755 "$dst.part"
+    tar -x -C "$dst.part"
+    for d in core adapters web infra; do [ -d "$dst.part/$d" ] || { rm -rf "$dst.part"; die "archive has no $d/"; }; done
+    mv "$dst.part" "$dst"
+    say "release $tag received";;
+
+  check-env) check_env && say "env ok";;
+
+  deploy)
+    need_root
+    tag="${1:-}"; mode="${2:-}"
+    rel="$OPT/releases/$tag"; [ -n "$tag" ] && [ -d "$rel" ] || die "usage: deploy <tag> [--web]; releases: $(find "$OPT/releases" -mindepth 1 -maxdepth 1 -printf '%f ')"
+    export UNZEEN_TAG="$tag"
+    if [ "$mode" = "--web" ]; then
+      dc "$rel" build web caddy
+      dc "$rel" up -d --no-deps web caddy
+      ln -sfn "$rel" "$OPT/current"
+      say "web + caddy at $tag"; exit 0
+    fi
+    check_env || die "fix the env/key files first"
+    need_vault
+    say "building images $tag (core release build takes 15-30 min the first time)"
+    dc "$rel" --profile build build build-core build-adapters web caddy
+    for i in "${INSTANCES[@]}"; do
+      say "$i: migrate"
+      dc "$rel" stop "relayer-$i" "scanner-$i" 2>/dev/null || true
+      [ "$i" = hood ] || dc "$rel" stop "intel-$i" 2>/dev/null || true
+      dc "$rel" up -d "pg-$i"
+      wait_healthy "$rel" "pg-$i" 120 || die "pg-$i not healthy"
+      dc "$rel" up -d --no-deps "api-$i"
+      if ! wait_healthy "$rel" "api-$i" 240; then
+        dc "$rel" logs --tail 30 "api-$i" || true
+        die "api-$i not healthy (migration or schema check failed?)"
+      fi
+      migrate_check "$rel" "$i"
+      apply_roles "$rel" "$i"
+    done
+    prev="$(current_rel)"; [ -n "$prev" ] && [ "$prev" != "$rel" ] && ln -sfn "$prev" "$OPT/previous"
+    ln -sfn "$rel" "$OPT/current"
+    dc "$rel" up -d --remove-orphans
+    for t in unzeen-vault-init unzeen-unlock unzeen-lock unzeenctl unzeen-monitor; do
+      install -m 0755 "$rel/infra/deploy/bin/$t" "/usr/local/sbin/$t"
+    done
+    sleep 5
+    REL="$rel" check_proxy || say "WARN: proxy check failed (certificates not issued yet? re-run 'unzeenctl check-proxy')"
+    say "deployed $tag";;
+
+  up)
+    if vault_open; then
+      dc "$REL" up -d
+    else
+      say "volume locked: starting web + caddy only"
+      dc "$REL" up -d --no-deps web caddy
+    fi;;
+
+  stop-backends)
+    [ -n "$REL" ] || exit 0
+    svcs=()
+    for i in "${INSTANCES[@]}"; do
+      svcs+=("relayer-$i" "scanner-$i" "api-$i" "pg-$i"); [ "$i" = hood ] || svcs+=("intel-$i")
+    done
+    dc "$REL" stop "${svcs[@]}";;
+
+  restart|stop|start) [ $# -gt 0 ] || die "usage: $cmd <service...>"; dc "$REL" "$cmd" "$@";;
+  logs) svc="${1:?service}"; shift; dc "$REL" logs --no-log-prefix "$@" "$svc";;
+
+  keys)
+    need_root
+    inst="${1:-}"; valid_inst "$inst" || die "usage: keys devnet|mainnet|hood"
+    command -v age-keygen >/dev/null || die "age-keygen missing (apt install age)"
+    kd="$ETC/keys/$inst"; f="$ETC/$inst.env"
+    [ -f "$f" ] || die "$f missing"
+    install -d -m 0700 -o "$APP_UID" -g "$APP_UID" "$kd"
+    umask 077
+    newfile() { # newfile <name> <generator...>: create once, 0600, owned by the service uid
+      local p="$kd/$1"; shift
+      if [ -e "$p" ]; then echo "keep    $p"; return; fi
+      "$@" > "$p.tmp" 2>/dev/null; chown "$APP_UID:$APP_UID" "$p.tmp"; chmod 0600 "$p.tmp"; mv "$p.tmp" "$p"
+      echo "created $p"
+    }
+    agekey() { age-keygen 2>/dev/null; }
+    newfile pg-password openssl rand -hex 24
+    newfile chat.key openssl rand -hex 32
+    newfile scenario.key openssl rand -hex 32
+    newfile seed.agekey agekey
+    if [ "$inst" = hood ]; then newfile hood-evm.agekey agekey; else newfile solana.agekey agekey; fi
+    cmp -s "$kd/chat.key" "$kd/scenario.key" && die "chat.key == scenario.key (API refuses): delete one and re-run"
+    if grep -qx 'DATABASE_URL=__GENERATE__' "$f"; then
+      printf 'postgres://unzeen:%s@pg-%s:5432/unzeen' "$(cat "$kd/pg-password")" "$inst" | env_fill "$f" DATABASE_URL
+      echo "filled  DATABASE_URL in $f"
+    fi
+    for role in RELAYER INDEXER; do
+      if grep -qx "DATABASE_URL_$role=__GENERATE__" "$f"; then
+        lc="${role,,}"
+        printf 'postgres://unzeen_%s:%s@pg-%s:5432/unzeen' "$lc" "$(openssl rand -hex 24)" "$inst" | env_fill "$f" "DATABASE_URL_$role"
+        echo "filled  DATABASE_URL_$role in $f"
+      fi
+    done
+    say "$inst: keys ready (back up $kd/*.agekey offline: without them the encrypted seeds are lost)";;
+
+  roles) inst="${1:-}"; valid_inst "$inst" || die "usage: roles <instance>"; need_vault; apply_roles "$REL" "$inst";;
+
+  psql)
+    inst="${1:-}"; valid_inst "$inst" || die "usage: psql <instance>"
+    dc "$REL" exec "pg-$inst" psql -U unzeen -d unzeen;;
+
+  scanner|api)
+    inst="${1:-}"; valid_inst "$inst" || die "usage: $cmd <instance> <args...>"; shift
+    docker_oneoff "$inst" unzeen-core "unzeen-$cmd" "$@";;
+
+  tool)
+    inst="${1:-}"; valid_inst "$inst" || die "usage: tool <instance> <script> [args...]"; shift
+    script="${1:?script, e.g. keys:attest}"; shift
+    docker_oneoff "$inst" unzeen-adapters pnpm run --silent "$script" "$@";;
+
+  check-proxy) check_proxy "${1:-}";;
+
+  *) sed -n '2,20p' "$0"; exit 2;;
+esac
