@@ -110,6 +110,8 @@ services:
     build:
       context: ../../core
       dockerfile: ../infra/deploy/docker/core.Dockerfile
+      args:
+        CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-}
     profiles: ["build"]
     command: ["true"]
 

@@ -12,6 +12,9 @@
 set -euo pipefail
 
 ADMIN_USER="${ADMIN_USER:-unzeen}"
+# Two phases so nobody gets locked out: first run keeps root key login (prohibit-password);
+# after a successful login as $ADMIN_USER re-run with DISABLE_ROOT_LOGIN=1.
+DISABLE_ROOT_LOGIN="${DISABLE_ROOT_LOGIN:-0}"
 APP_UID=10001
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEPLOY_DIR="$(dirname "$HERE")"
@@ -92,14 +95,15 @@ fi
 chown "$ADMIN_USER:$ADMIN_USER" "$AK"; chmod 0600 "$AK"
 
 if [ -s "$AK" ]; then
-  log "sshd: key only, no root login, AllowUsers $ADMIN_USER"
+  if [ "$DISABLE_ROOT_LOGIN" = 1 ]; then ROOT_MODE=no; ALLOW="$ADMIN_USER"; else ROOT_MODE=prohibit-password; ALLOW="$ADMIN_USER root"; fi
+  log "sshd: key only, PermitRootLogin $ROOT_MODE, AllowUsers $ALLOW"
   cat > /etc/ssh/sshd_config.d/10-unzeen.conf <<EOF
-PermitRootLogin no
+PermitRootLogin $ROOT_MODE
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 AuthenticationMethods publickey
-AllowUsers $ADMIN_USER
+AllowUsers $ALLOW
 X11Forwarding no
 AllowAgentForwarding no
 MaxAuthTries 3
@@ -207,4 +211,8 @@ install -m 0644 "$DEPLOY_DIR/systemd/unzeen-monitor.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now unzeen-monitor.timer >/dev/null
 
-log "done. Next: log in as $ADMIN_USER in a NEW terminal (keep this one open), then 'sudo unzeen-vault-init'."
+if [ "$DISABLE_ROOT_LOGIN" = 1 ]; then
+  log "done. Root SSH login is off. Next: 'ssh -t $ADMIN_USER@<vps> sudo unzeen-vault-init'."
+else
+  log "done. Check 'ssh $ADMIN_USER@<vps> sudo -n true' in a NEW terminal, then re-run with DISABLE_ROOT_LOGIN=1."
+fi

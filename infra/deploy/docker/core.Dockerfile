@@ -5,11 +5,14 @@
 FROM rust:1.93-bookworm AS build
 WORKDIR /src
 COPY . .
+# CARGO_BUILD_JOBS: cap parallel rustc jobs on small hosts (empty = all CPUs). ~1 GB RAM per job.
+ARG CARGO_BUILD_JOBS=
 # Cache dirs keep rebuilds incremental (registry + target); the binaries are copied out of the cache.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p unzeen-scanner -p unzeen-api \
+    if [ -n "$CARGO_BUILD_JOBS" ]; then export CARGO_BUILD_JOBS; else unset CARGO_BUILD_JOBS; fi \
+ && cargo build --release --locked -p unzeen-scanner -p unzeen-api \
  && install -D -m 0755 -t /out target/release/unzeen-scanner target/release/unzeen-api
 
 FROM debian:bookworm-slim

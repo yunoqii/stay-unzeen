@@ -3,7 +3,8 @@
 # Never prints secrets: passwords are generated into files, URLs with keys are never echoed.
 #
 #   unzeenctl status                         volume, containers, schema versions, API health
-#   unzeenctl receive <tag>                  read a `git archive` tar from stdin into a release dir
+#   unzeenctl receive <tag>                  read a gzipped release tar from stdin into a release dir
+#   unzeenctl build <tag>                    build all images of a release (no volume needed)
 #   unzeenctl deploy <tag> [--web]           build -> migrate (+schema check, roles) -> restart -> proxy check
 #   unzeenctl up | stop-backends             start everything / stop all instance services
 #   unzeenctl restart|stop|start <service...> | logs <service> [--since 10m]
@@ -216,15 +217,23 @@ case "$cmd" in
 
   receive)
     need_root
-    tag="${1:-}"; [[ "$tag" =~ ^[0-9a-f]{7,40}$ ]] || die "usage: receive <git sha>"
+    tag="${1:-}"; [[ "$tag" =~ ^[0-9a-f]{7,40}(-wip)?$ ]] || die "usage: receive <git sha>[-wip]"
     dst="$OPT/releases/$tag"; [ -e "$dst" ] && die "$dst exists"
     install -d -m 0755 "$dst.part"
-    tar -x -C "$dst.part"
+    tar -xz -C "$dst.part"
     for d in core adapters web infra; do [ -d "$dst.part/$d" ] || { rm -rf "$dst.part"; die "archive has no $d/"; }; done
     mv "$dst.part" "$dst"
     say "release $tag received";;
 
   check-env) check_env && say "env ok";;
+
+  build)
+    need_root
+    tag="${1:-}"; rel="$OPT/releases/$tag"; [ -n "$tag" ] && [ -d "$rel" ] || die "usage: build <tag>"
+    export UNZEEN_TAG="$tag"
+    say "building images $tag (CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-all})"
+    dc "$rel" --profile build build build-core build-adapters web caddy
+    say "built: $(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -c ":$tag$") images";;
 
   deploy)
     need_root

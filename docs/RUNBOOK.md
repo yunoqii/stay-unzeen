@@ -612,11 +612,12 @@ Internet :80/:443 ── caddy ──┬── web:3000                     (WEB
 ```bash
 # на Mac
 scp -i ~/.ssh/unzeen_vps -r infra/deploy root@<IP>:/root/unzeen-deploy
-ssh -i ~/.ssh/unzeen_vps root@<IP> 'ADMIN_USER=unzeen bash /root/unzeen-deploy/bin/bootstrap.sh'
-# ~/.ssh/config: Host unzeen-vps / HostName <IP> / User unzeen / IdentityFile ~/.ssh/unzeen_vps
-ssh unzeen-vps 'sudo docker ps'     # в НОВОМ терминале, старый не закрывать, пока не убедились
+ssh -i ~/.ssh/unzeen_vps root@<IP> 'ADMIN_USER=unzeen bash /root/unzeen-deploy/bin/bootstrap.sh'   # фаза 1: root по ключу ещё можно
+# ~/.ssh/config: Host unzeen-vps / HostName <IP> / User unzeen / IdentityFile ~/.ssh/unzeen_vps / IdentitiesOnly yes
+ssh unzeen-vps 'sudo -n true && docker ps'     # проверить вход под unzeen в НОВОМ терминале
+ssh unzeen-vps 'sudo DISABLE_ROOT_LOGIN=1 ADMIN_USER=unzeen bash /root/unzeen-deploy/bin/bootstrap.sh'   # фаза 2: root-вход выключен
 ```
-Что делает: пользователь `unzeen` (sudo без пароля — у него нет пароля, вход только по ключу; группа docker) с ключами root; `sshd`: только ключ, без root, `AllowUsers unzeen` (если ключей нет — шаг пропускается, чтобы не запереть); ufw: 22 (limit), 80, 443; unattended-upgrades только security и **без автоперезагрузки** (ребут запирает том); Docker CE + compose, `daemon.json`: ротация логов 10 MB × 3, `live-restore`; fail2ban на sshd; journald 200 MB / 7 дней; core dumps выключены; предупреждение, если включён своп на незашифрованном диске (лучше `swapoff -a` и убрать из fstab); каталоги `/etc/unzeen`, `/opt/unzeen`, точка монтирования `/srv/unzeen` с `chattr +i`; утилиты в `/usr/local/sbin`; таймер монитора. Повторный запуск безопасен: существующие env-файлы не перезаписывает.
+Что делает: пользователь `unzeen` (sudo без пароля — у него нет пароля, вход только по ключу; группа docker) с ключами root; `sshd`: только ключ; в фазе 1 `PermitRootLogin prohibit-password` + `AllowUsers unzeen root`, в фазе 2 (`DISABLE_ROOT_LOGIN=1`) — `PermitRootLogin no`, `AllowUsers unzeen` (если ключей нет — шаг пропускается, чтобы не запереть); ufw: 22 (limit), 80, 443; unattended-upgrades только security и **без автоперезагрузки** (ребут запирает том); Docker CE + compose, `daemon.json`: ротация логов 10 MB × 3, `live-restore`; fail2ban на sshd; journald 200 MB / 7 дней; core dumps выключены; предупреждение, если включён своп на незашифрованном диске (лучше `swapoff -a` и убрать из fstab); каталоги `/etc/unzeen`, `/opt/unzeen`, точка монтирования `/srv/unzeen` с `chattr +i`; утилиты в `/usr/local/sbin`; таймер монитора. Повторный запуск безопасен: существующие env-файлы не перезаписывает.
 
 Docker публикует порты в обход ufw. Поэтому в `compose.yml` наружу открыт только Caddy (80/443), всё остальное — на `127.0.0.1`.
 
@@ -648,6 +649,9 @@ scp unzeen-vps:/var/lib/unzeen/vault.luks-header ~/offline-backup/   # копи�
 infra/deploy/bin/deploy.sh unzeen-vps          # всё
 infra/deploy/bin/deploy.sh unzeen-vps --web    # только web + caddy (сменились pubkey аттестаций / хосты в stack.env)
 ```
+- Пробная сборка без коммита: `deploy.sh unzeen-vps --wip-build` — шлёт рабочее дерево (tracked + untracked, без ignored) как релиз `<sha>-wip` и только собирает образы (`unzeenctl build`), ничего не перезапускает. Деплоить `-wip` нельзя.
+- Архив идёт сжатым (`gzip -9`): канал до VPS бывает ~20–25 KB/s, 10 MB исходников без сжатия — 7 мин.
+- Сборка на маленьком VPS: `CARGO_BUILD_JOBS` в `stack.env` (≈1 GB RAM на job).
 - `deploy.sh` отказывается работать, если в `core/ adapters/ web/ infra/` есть незакоммиченные изменения. Шлёт `git archive HEAD core adapters web infra`: без `.env`, `node_modules`, `docs/`, `CLAUDE.md`. На VPS это `/opt/unzeen/releases/<sha>`.
 - `unzeenctl deploy <sha>` на VPS:
   1. `check-env`, том открыт;
@@ -734,3 +738,10 @@ sudo unzeenctl psql mainnet ; sudo unzeenctl status ; sudo unzeenctl logs scanne
 - Docker в группе `unzeen` = root-доступ. Ключ SSH владельца — фактически ключ от пула.
 - Логи наших сервисов чистые по коду (аудиты day2–14), но `docker logs` хранит до 30 MB на контейнер. В шаге 14 аудит логов делаем после первого часа работы.
 - Индексатор и API монтируют `home` инстанса на запись (индексатор читает `creator-pubkeys.json`). Сузить до read-only — после проверки, что intel ничего туда не пишет.
+
+### 7.13 Текущий VPS (18.10)
+- Contabo, `169.58.209.71`, Ubuntu 24.04.5 x86_64, 6 vCPU, 11 GiB RAM, 96 GB, свопа нет. Вход: `ssh -i ~/.ssh/unzeen_vps_ed25519 unzeen@169.58.209.71` (root по SSH выключен, пароли выключены).
+- Агентов бэкапа или снапшотов провайдера в ОС нет: нет qemu-guest-agent, нет пакетов backup/Acronis, из сервисов только стандартные Ubuntu. **Владельцу проверить в панели Contabo**: не заказан ли add-on «Auto Backup» и нет ли сделанных снапшотов (Snapshots). Если есть — удалить.
+- Хосты (sslip.io, домена нет): `169-58-209-71.sslip.io`, `api-devnet.169-58-209-71.sslip.io`, `api-mainnet.…`, `api-hood.…`. Mainnet-launch — только после `PINATA_JWT` (7.2).
+- Bootstrap пройден в обе фазы. ufw 22/80/443 включён, fail2ban активен, монитор работает (`--dry-run` видит «volume LOCKED»). Тома ещё нет.
+- Пробная сборка `a76d935e3711-wip`: все 4 образа за ≈4 мин при `CARGO_BUILD_JOBS=4`, пик 3.25 GB RAM. Core против одноразового Postgres: миграции применены, `/api/feed` 200. `deploy.test.sh` на VPS: всё ok. Это сборка рабочего дерева с чужими незакоммиченными правками — только проверка, не деплой.
