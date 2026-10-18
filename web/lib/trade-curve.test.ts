@@ -1,6 +1,6 @@
 // API v0.26: the curve impact estimate, the formula of docs/API.md and core/ledger/src/curve.rs (same cases as its tests).
 import { describe, expect, it } from "vitest";
-import { curveBuyOut, curveMarketCap, curveOf, curveReserves, curveSellOut, effectiveFeeBps, isqrt, parseFeeTiers, quoteSell, tierBps, type CurveParams } from "./trade";
+import { curveBuyOut, curveBuyPartial, curveFor, curveMarketCap, curveOf, tokenCurveOf, curveReserves, curveSellOut, effectiveFeeBps, isqrt, parseFeeTiers, quoteSell, tierBps, type CurveParams } from "./trade";
 
 /** pump.fun devnet Global 15.10, fee off for the AMM cases (as core's DEVNET); the fee is checked on its own. */
 const DEVNET: CurveParams = { virtualSol: BigInt(300_000_000), virtualTokens: BigInt("1073000000000000"), feeBps: 0 };
@@ -124,5 +124,37 @@ describe("pump.fun curve impact (devnet 0.3 SOL / 1.073e15)", () => {
     expect(absDiff(net, BigInt(10_864_197)) <= BigInt(1)).toBe(true);
     const out = (BigInt(560_356_234) * BigInt(10_000 - 125)) / BigInt(10_000);
     expect(absDiff(out, BigInt(553_351_780)) <= BigInt(2)).toBe(true);
+  });
+
+  it("v0.28 buyFee modes, as the contract formula: added / input / output", () => {
+    const s0 = DEVNET.virtualSol + BigInt(13_000_000);
+    const t0 = K / s0;
+    const p = priceSol(s0, t0);
+    const x = BigInt(50_000_000);
+    const at = (c: CurveParams, n: bigint) => {
+      const r = curveReserves(c, p, 6)!;
+      return (r.t * n) / (r.s + n);
+    };
+    const added = { ...DEVNET, feeBps: 125, buyFee: "added" as const };
+    const input = { ...DEVNET, feeBps: 125, buyFee: "input" as const };
+    const output = { ...DEVNET, feeBps: 125, buyFee: "output" as const };
+    expect(curveBuyOut(added, p, 6, x)).toBe(at(added, (x * BigInt(10_000)) / BigInt(10_125)));
+    expect(curveBuyOut(input, p, 6, x)).toBe(at(input, (x * BigInt(9_875)) / BigInt(10_000)));
+    expect(curveBuyOut(output, p, 6, x)).toBe((at(output, x) * BigInt(9_875)) / BigInt(10_000));
+    // The sell takes the fee from the SOL out in every mode.
+    const a = BigInt("10000000000000");
+    expect(curveSellOut(input, p, 6, a)).toBe(curveSellOut(added, p, 6, a));
+  });
+
+  it("v0.28 Token.curve first, then the venue curve, then spot; partial fill past buyLimitLamports", () => {
+    const tc = { virtualSol: "313000000", virtualTokens: "1028434504792332", feeBps: 100, buyFee: "input" as const, buyLimitLamports: "40000000", asOf: 1 };
+    const c = curveFor({ curve: tc }, POOL, "pumpfun")!;
+    expect(c).toMatchObject({ feeBps: 100, buyFee: "input", buyLimitLamports: BigInt(40_000_000) });
+    expect(curveFor({}, POOL, "pumpfun")).toMatchObject({ feeBps: 125 });
+    expect(curveFor({}, POOL, "meteora-dbc")).toBeNull();
+    expect(tokenCurveOf({ ...tc, buyFee: "sideways" as never })).toBeNull();
+    expect(curveBuyPartial(c, BigInt(40_000_000))).toBe(false); // net = 39.6M <= 40M
+    expect(curveBuyPartial(c, BigInt(41_000_000))).toBe(true); // net = 40.59M > 40M
+    expect(curveBuyPartial(null, BigInt(1) << BigInt(60))).toBe(false);
   });
 });

@@ -9,7 +9,7 @@ import { trackRequest } from "@/lib/connectivity";
 import { EXACT_OPS, padAction, padExact, padScenario } from "@/lib/pad";
 import { ApiError, errorFromResponse } from "./errors";
 import * as mock from "./mock";
-import type {
+import type { Pulse,
   ActionReceipt,
   ActionStatus,
   Candle,
@@ -306,3 +306,57 @@ const mocked = makeApi(mockCall, (onEvent, onStatus, opts) => {
 });
 
 export const api: Api = API_MODE === "real" ? real : mocked;
+
+/**
+ * v0.28 /ws/pulse: the server sends the whole board on connect and on every change (<= every 3 s); the client
+ * sends nothing. Mock mode: the same board every 5 s from the in-browser mock. Returns the unsubscribe.
+ */
+export function subscribePulse(onPulse: (p: Pulse) => void, onStatus?: (s: FeedStatus) => void): () => void {
+  if (API_MODE !== "real") {
+    let alive = true;
+    const tick = () =>
+      api
+        .request<Pulse>("/api/pulse")
+        .then((p) => alive && onPulse(p))
+        .catch(() => alive && onStatus?.("offline"));
+    void tick();
+    onStatus?.("live");
+    const id = setInterval(tick, 5_000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }
+  let ws: WebSocket | null = null;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let attempt = 0;
+  let closed = false;
+  const connect = () => {
+    onStatus?.("connecting");
+    ws = new WebSocket(wsBase() + "/ws/pulse");
+    ws.onopen = () => {
+      attempt = 0;
+      onStatus?.("live");
+    };
+    ws.onmessage = (msg) => {
+      try {
+        const p = JSON.parse(msg.data as string) as Pulse;
+        if (p && Array.isArray(p.new) && Array.isArray(p.graduating) && Array.isArray(p.graduated)) onPulse(p);
+      } catch {
+        /* ignore malformed frame */
+      }
+    };
+    ws.onclose = () => {
+      if (closed) return;
+      onStatus?.("offline");
+      retry = setTimeout(connect, Math.min(15_000, 500 * 2 ** attempt++));
+    };
+    ws.onerror = () => ws?.close();
+  };
+  connect();
+  return () => {
+    closed = true;
+    clearTimeout(retry);
+    ws?.close();
+  };
+}

@@ -71,6 +71,7 @@ export function PriceChart({
   trades,
   markers = [],
   triggers = [],
+  onMoveTrigger,
   showMarkers = false,
   denom = { unit: "SOL" },
   denomSwitch,
@@ -82,7 +83,9 @@ export function PriceChart({
   trades: FeedEvent[];
   markers?: readonly Fill[];
   /** v0.8: your open orders' trigger prices, drawn as dashed lines (local only, behind Peek like markers). */
-  triggers?: readonly { id: string; price: number; label: string }[];
+  triggers?: readonly { id: string; price: number; label: string; tone?: "buy" | "sell" | "neutral"; draggable?: boolean }[];
+  /** Drag-to-move of an order line ended at `priceSol` (SOL per whole token); the page confirms and replaces it. */
+  onMoveTrigger?: (id: string, priceSol: number) => void;
   showMarkers?: boolean;
 }) {
   const [tf, setTf] = useState<CandleTimeframe>("5m");
@@ -105,6 +108,10 @@ export function PriceChart({
     scaleRef.current = solScale;
   }, [solScale]);
   const [loadedScale, setLoadedScale] = useState(solScale);
+  const loadedScaleRef = useRef(loadedScale);
+  useEffect(() => {
+    loadedScaleRef.current = loadedScale;
+  }, [loadedScale]);
   const [loadedAt, setLoadedAt] = useState(0);
 
   // Chart instance: once per mount.
@@ -214,18 +221,95 @@ export function PriceChart({
     marks.current.setMarkers(list);
   }, [markers, showMarkers, tf, state, readyTick]);
 
-  // Trigger lines of open orders.
+  // Trigger lines of open orders: limit / TP / SL in their own colours; draggable ones move on the chart.
+  const lineRefs = useRef<Map<string, { line: IPriceLine; price: number; draggable: boolean }>>(new Map());
   useEffect(() => {
     const series = candles.current;
     if (!series || !showMarkers) return;
-    const lines: IPriceLine[] = triggers
-      .filter((t) => t.price > 0)
-      .map((t) => series.createPriceLine({ price: t.price * loadedScale, color: "rgba(244,183,40,0.55)", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: t.label }));
+    const tone = (t: (typeof triggers)[number]) => (t.tone === "buy" ? colors.current.up : t.tone === "sell" ? colors.current.down : "#F4B728");
+    const map = new Map<string, { line: IPriceLine; price: number; draggable: boolean }>();
+    for (const t of triggers) {
+      if (!(t.price > 0)) continue;
+      const price = t.price * loadedScale;
+      const line = series.createPriceLine({ price, color: tone(t) + "b0", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: t.draggable && !pair ? `${t.label} ⇅` : t.label });
+      map.set(t.id, { line, price, draggable: !!t.draggable && !pair });
+    }
+    lineRefs.current = map;
     // On unmount the chart is removed first (effect above): its series are disposed by then.
     return () => {
-      if (chart.current) lines.forEach((l) => series.removePriceLine(l));
+      if (chart.current) map.forEach((l) => series.removePriceLine(l.line));
+      lineRefs.current = new Map();
     };
-  }, [triggers, showMarkers, readyTick, loadedScale]);
+  }, [triggers, showMarkers, readyTick, loadedScale, pair]);
+
+  // Dragging a line: grab within 6 px, the chart stops panning while it moves, the drop is reported in SOL.
+  const moveRef = useRef(onMoveTrigger);
+  useEffect(() => {
+    moveRef.current = onMoveTrigger;
+  });
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    let drag: { id: string; startY: number; price: number } | null = null;
+    const yOf = (e: PointerEvent) => e.clientY - el.getBoundingClientRect().top;
+    const hit = (y: number) => {
+      const series = candles.current;
+      if (!series) return null;
+      for (const [id, l] of lineRefs.current) {
+        if (!l.draggable) continue;
+        const ly = series.priceToCoordinate(l.price);
+        if (ly !== null && Math.abs(ly - y) <= 6) return id;
+      }
+      return null;
+    };
+    const down = (e: PointerEvent) => {
+      if (!moveRef.current || e.button !== 0) return;
+      const id = hit(yOf(e));
+      if (!id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      drag = { id, startY: yOf(e), price: lineRefs.current.get(id)!.price };
+      chart.current?.applyOptions({ handleScroll: false, handleScale: false });
+      el.setPointerCapture(e.pointerId);
+    };
+    const move = (e: PointerEvent) => {
+      const y = yOf(e);
+      if (!drag) {
+        el.style.cursor = moveRef.current && hit(y) ? "ns-resize" : "";
+        return;
+      }
+      const p = candles.current?.coordinateToPrice(y);
+      if (p === null || p === undefined || !(Number(p) > 0)) return;
+      drag.price = Number(p);
+      lineRefs.current.get(drag.id)?.line.applyOptions({ price: drag.price });
+    };
+    const up = (e: PointerEvent) => {
+      if (!drag) return;
+      const d = drag;
+      drag = null;
+      chart.current?.applyOptions({ handleScroll: true, handleScale: true });
+      try {
+        el.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
+      const l = lineRefs.current.get(d.id);
+      if (Math.abs(yOf(e) - d.startY) < 3 || !l) return;
+      // Snap back until the page confirms; a confirmed move redraws from the new order.
+      l.line.applyOptions({ price: l.price });
+      moveRef.current?.(d.id, d.price / loadedScaleRef.current);
+    };
+    el.addEventListener("pointerdown", down, true);
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+    return () => {
+      el.removeEventListener("pointerdown", down, true);
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+    };
+  }, []);
 
   // History for the selected timeframe.
   useEffect(() => {

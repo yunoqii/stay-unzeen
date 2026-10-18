@@ -116,7 +116,14 @@ export function onActionAccepted(l: () => void): () => void {
   return () => void acceptedListeners.delete(l);
 }
 
+/** Extra reaction to a settled action of this tab (the trading workspace's chime), set by TradingWatchers. */
+let announceHook: ((ok: boolean) => void) | null = null;
+export function onAnnounce(f: ((ok: boolean) => void) | null) {
+  announceHook = f;
+}
+
 function announce(a: TrackedAction) {
+  announceHook?.(a.status.status === "executed");
   const what = describe(a);
   if (a.status.status === "executed") toast.success(`${what}: done`, { description: settledText(a) });
   else toast.error(`${what}: failed`, { description: errorText(new ApiError(a.status.error ?? "internal", "")) });

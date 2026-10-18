@@ -11,6 +11,8 @@ import { formatRate } from "@/lib/display";
 import { nativeOf } from "@/lib/network";
 import { useRates } from "@/lib/display-store";
 import { DisplaySwitch } from "@/components/layout/display-switch";
+import { useKeyState } from "@/lib/crypto/session";
+import { setPrefs, useWorkspace } from "@/lib/workspace/store";
 
 const ICON: Record<ExecMode, typeof Lightning> = { now: Lightning, delayed: Timer, max: ShieldCheck };
 
@@ -81,6 +83,7 @@ export function SettingsCard() {
       <QuickTrade network={network} />
 
       <DisplayCurrency />
+      <NotificationSettings />
 
       <p className="mt-5 text-[11px] text-pretty text-faint-foreground">
         Execution and presets are saved in this browser for {NETWORK_CONFIG[network].label} only, the price unit for both networks. Never sent to the server — the
@@ -124,26 +127,53 @@ function QuickTrade({ network }: { network: Network }) {
         </button>
       )}
 
-      <label className="mt-4 flex cursor-pointer items-start gap-3">
-        <input
-          type="checkbox"
-          role="switch"
-          checked={settings.oneTap}
-          onChange={(e) => updateTradeSettings(network, { oneTap: e.target.checked })}
-          className="peer sr-only"
-        />
-        <span
-          aria-hidden
-          className="relative mt-0.5 h-5 w-9 shrink-0 rounded-full border border-border-strong bg-surface-2 transition-colors peer-checked:bg-zec/30 peer-focus-visible:ring-2 peer-focus-visible:ring-ring"
-        >
-          <span className={cn("absolute top-0.5 left-0.5 size-3.5 rounded-full bg-muted-foreground transition-transform duration-200", settings.oneTap && "translate-x-4 bg-zec")} />
-        </span>
-        <span className="text-sm">
-          One-tap presets
-          <span className="mt-0.5 block text-xs text-faint-foreground">A preset signs the order right away, with your slippage and execution mode. Off: a preset only fills the amount.</span>
-        </span>
-      </label>
+      <Toggle
+        className="mt-4"
+        checked={settings.oneTap}
+        onChange={(v) => updateTradeSettings(network, { oneTap: v })}
+        title="Instant trade"
+        hint="A preset, a hotkey (1–3) or “Buy” on a Pulse card signs right away, with your slippage and execution mode. Off (default): a preset only fills the amount, and a card asks once to confirm."
+      />
     </div>
+  );
+}
+
+/** Toasts and the chime: kept with the watchlist and alerts, encrypted on this device. Needs the key unlocked. */
+export function NotificationSettings() {
+  const key = useKeyState();
+  const ws = useWorkspace();
+  if (key.status !== "unlocked" || !ws.ready) return null;
+  const p = ws.file.prefs;
+  return (
+    <div className="mt-5 border-t border-border/60 pt-5">
+      <p className="text-sm">Notifications</p>
+      <Toggle
+        className="mt-3"
+        checked={p.toasts}
+        onChange={(v) => void setPrefs(key.network, key.pubkey, { toasts: v })}
+        title="Toasts when something settles"
+        hint="Delayed and max-privacy batches, triggered orders and scenario steps, read from the portfolio this tab already polls."
+      />
+      <Toggle className="mt-3" checked={p.sound} disabled={!p.toasts} onChange={(v) => void setPrefs(key.network, key.pubkey, { sound: v })} title="Sound" hint="A short chime with them, made in the browser." />
+    </div>
+  );
+}
+
+function Toggle({ checked, onChange, title, hint, className, disabled }: { checked: boolean; onChange: (v: boolean) => void; title: string; hint: string; className?: string; disabled?: boolean }) {
+  return (
+    <label className={cn("flex cursor-pointer items-start gap-3", disabled && "cursor-not-allowed opacity-50", className)}>
+      <input type="checkbox" role="switch" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} className="peer sr-only" />
+      <span
+        aria-hidden
+        className="relative mt-0.5 h-5 w-9 shrink-0 rounded-full border border-border-strong bg-surface-2 transition-colors peer-checked:bg-zec/30 peer-focus-visible:ring-2 peer-focus-visible:ring-ring"
+      >
+        <span className={cn("absolute top-0.5 left-0.5 size-3.5 rounded-full bg-muted-foreground transition-transform duration-200", checked && "translate-x-4 bg-zec")} />
+      </span>
+      <span className="text-sm">
+        {title}
+        <span className="mt-0.5 block text-xs text-pretty text-faint-foreground">{hint}</span>
+      </span>
+    </label>
   );
 }
 

@@ -251,6 +251,28 @@ export interface CurveParams {
   tokenTotalSupply?: bigint;
   /** v0.27: market-cap fee tiers, thresholds strictly ascending (pump.fun FeeConfig, protocol + creator bps). */
   feeTiers?: FeeTier[];
+  /** v0.28: how a buy pays the fee; absent = "added" (pump.fun, the venue curve of PoolInfo). */
+  buyFee?: "added" | "input" | "output";
+  /** v0.28: net lamports the curve (segment) still takes; more fills partially. */
+  buyLimitLamports?: bigint;
+}
+
+/** v0.28: Token.curve (fresh tick of the token's own curve) as parameters; null if absent or malformed. */
+export function tokenCurveOf(c: { virtualSol: string; virtualTokens: string; feeBps: number; buyFee: "added" | "input" | "output"; buyLimitLamports?: string } | undefined): CurveParams | null {
+  if (!c || !/^[1-9]\d{0,38}$/.test(c.virtualSol) || !/^[1-9]\d{0,38}$/.test(c.virtualTokens)) return null;
+  if (!Number.isInteger(c.feeBps) || c.feeBps < 0 || c.feeBps >= 10_000) return null;
+  if (c.buyFee !== "added" && c.buyFee !== "input" && c.buyFee !== "output") return null;
+  const limit = c.buyLimitLamports && /^\d{1,38}$/.test(c.buyLimitLamports) ? BigInt(c.buyLimitLamports) : undefined;
+  return { virtualSol: BigInt(c.virtualSol), virtualTokens: BigInt(c.virtualTokens), feeBps: c.feeBps, buyFee: c.buyFee, buyLimitLamports: limit };
+}
+
+/** The curve a quote uses (v0.28): the token's own, else the venue's (pump.fun), else none (spot). */
+export function curveFor(
+  token: { curve?: Parameters<typeof tokenCurveOf>[0] },
+  pool: Parameters<typeof curveOf>[0],
+  venue: string,
+): CurveParams | null {
+  return tokenCurveOf(token.curve) ?? curveOf(pool, venue);
 }
 
 export interface FeeTier {
@@ -337,6 +359,30 @@ export function curveSellOut(c: CurveParams, priceSol: string, decimals: number,
 export function curveBuyOut(c: CurveParams, priceSol: string, decimals: number, lamports: bigint): bigint | null {
   const r = curveReserves(c, priceSol, decimals);
   if (!r) return null;
-  const net = (lamports * BPS) / (BPS + BigInt(effectiveFeeBps(c, r)));
-  return (r.t * net) / (r.s + net);
+  const fee = BigInt(effectiveFeeBps(c, r));
+  switch (c.buyFee ?? "added") {
+    case "input": {
+      const net = (lamports * (BPS - fee)) / BPS;
+      return (r.t * net) / (r.s + net);
+    }
+    case "output":
+      return (((r.t * lamports) / (r.s + lamports)) * (BPS - fee)) / BPS;
+    default: {
+      const net = (lamports * BPS) / (BPS + fee);
+      return (r.t * net) / (r.s + net);
+    }
+  }
+}
+
+/** v0.28: net lamports a buy of `lamports` puts into the curve (fee mode), for the partial-fill check. */
+export function curveNetIn(c: CurveParams, lamports: bigint, feeBps: number = c.feeBps): bigint {
+  const fee = BigInt(feeBps);
+  if (c.buyFee === "input") return (lamports * (BPS - fee)) / BPS;
+  if (c.buyFee === "output") return lamports;
+  return (lamports * BPS) / (BPS + fee);
+}
+
+/** v0.28: the buy runs past the end of the curve (or the DBC segment): it fills only partially. */
+export function curveBuyPartial(c: CurveParams | null, lamports: bigint): boolean {
+  return !!c && c.buyLimitLamports !== undefined && curveNetIn(c, lamports) > c.buyLimitLamports;
 }

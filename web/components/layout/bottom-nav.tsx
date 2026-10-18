@@ -27,7 +27,7 @@ function BottomNavActive() {
 
 function BottomNavList({ pathname }: { pathname: string | null }) {
   return (
-      <ul className="grid h-(--bottom-nav-h) grid-cols-5">
+      <ul className="grid h-(--bottom-nav-h) grid-cols-6">
         {NAV.map(({ href, label, icon: Icon }) => {
           const active = pathname !== null && isActive(pathname, href);
           return (

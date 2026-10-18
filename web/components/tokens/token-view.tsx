@@ -30,6 +30,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/layout/page-shell";
 import { SharedTarget } from "@/components/motion/shared-element";
 import { TradePanel } from "@/components/trade/trade-panel";
+import { AlertButton } from "@/components/trading/alert-button";
+import { MoveOrderDialog } from "@/components/trading/move-order-dialog";
+import { parseLineId } from "@/lib/order-move";
+import { useKeyState } from "@/lib/crypto/session";
+import { WatchStar } from "@/components/trading/watch-star";
 import { Analyzing } from "./analyzing";
 import { PriceChart } from "./price-chart";
 import { SafetyPanel, useSafety } from "./safety-panel";
@@ -136,6 +141,10 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
     safety.state !== "ready" ? null : safety.data.market.status === "graduated" ? 100 : safety.data.market.curveProgressPct ? Number(safety.data.market.curveProgressPct) : null;
   const ownFills = useMemo(() => fillsOf(history.entries, token.mint), [history.entries, token.mint]);
   const { portfolio } = usePortfolio();
+  const keyState = useKeyState();
+  // Dragged order line awaiting confirmation (cancel + the same order at the new price).
+  const [moving, setMoving] = useState<{ orderId: string; leg?: "tp" | "sl"; to: number } | null>(null);
+  const movingOrder = moving ? portfolio?.orders?.find((o) => o.id === moving.orderId) : undefined;
   // Your open orders as dashed trigger lines: drawn from the owner-only portfolio, behind Peek, never sent anywhere.
   const triggers = useMemo(
     () =>
@@ -144,10 +153,10 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
         .flatMap((o) =>
           o.kind === "bracket"
             ? [
-                { id: `${o.id}:tp`, price: Number(o.triggerPriceSol), label: "Bracket TP" },
-                ...(o.slPriceSol ? [{ id: `${o.id}:sl`, price: Number(o.slPriceSol), label: o.armed ? "Bracket SL · armed" : "Bracket SL" }] : []),
+                { id: `${o.id}:tp`, price: Number(o.triggerPriceSol), label: "Bracket TP", tone: "buy" as const, draggable: true },
+                ...(o.slPriceSol ? [{ id: `${o.id}:sl`, price: Number(o.slPriceSol), label: o.armed ? "Bracket SL · armed" : "Bracket SL", tone: "sell" as const, draggable: true }] : []),
               ]
-            : [{ id: o.id, price: Number(o.triggerPriceSol), label: ORDER_LABEL[o.kind] }],
+            : [{ id: o.id, price: Number(o.triggerPriceSol), label: ORDER_LABEL[o.kind], tone: o.kind === "stop_loss" ? ("sell" as const) : o.kind === "take_profit" ? ("buy" as const) : ("neutral" as const), draggable: true }],
         ),
     [portfolio?.orders, token.mint],
   );
@@ -182,7 +191,11 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
             </CopyButton>
           </div>
         </div>
-        <AutomateLink mint={token.mint} />
+        <div className="flex items-center gap-2">
+          <WatchStar mint={token.mint} symbol={token.symbol} />
+          <AlertButton token={token} priceSol={priceSol} />
+          <AutomateLink mint={token.mint} />
+        </div>
       </header>
 
       {quote === "ZEC" && <ZecPairNote />}
@@ -196,7 +209,19 @@ function TokenLoaded({ token }: { token: TokenWithTrades }) {
       <div aria-hidden className="hatch mt-6 h-3" />
       <div className="ledger grid lg:grid-cols-[minmax(0,1fr)_360px] lg:grid-rows-[auto_1fr]">
         <div className="min-w-0">
-          <PriceChart mint={token.mint} trades={feed.events} markers={ownFills} triggers={triggers} showMarkers={shown} denom={chartDenom} denomSwitch={denomSwitch} />
+          <PriceChart
+            mint={token.mint}
+            trades={feed.events}
+            markers={ownFills}
+            triggers={triggers}
+            onMoveTrigger={keyState.status === "unlocked" ? (id, p) => setMoving({ ...parseLineId(id), to: p }) : undefined}
+            showMarkers={shown}
+            denom={chartDenom}
+            denomSwitch={denomSwitch}
+          />
+          {moving && keyState.status === "unlocked" && movingOrder && (
+            <MoveOrderDialog network={keyState.network} symbol={token.symbol} order={movingOrder} leg={moving.leg} toPriceSol={moving.to} onClose={() => setMoving(null)} />
+          )}
         </div>
 
         <aside className="flex flex-col gap-px bg-border lg:col-start-2 lg:row-span-2 lg:row-start-1 [&>*]:bg-background">

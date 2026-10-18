@@ -9,7 +9,7 @@
 import { base58 } from "@scure/base";
 import { bodyHash, HEADER_NONCE, verifyRequest, type SignedHeaders } from "@/lib/crypto/sign";
 import { isExecMode } from "@/lib/exec";
-import { isSolanaAddress, MIRROR_WINDOW_MS, PAYOUT_REVIEW_ABOVE_ZAT, sellMirrorsBuy } from "@/lib/trade";
+import { isSolanaAddress, lamportsToTokens, MIRROR_WINDOW_MS, PAYOUT_REVIEW_ABOVE_ZAT, sellMirrorsBuy, tokensToLamports } from "@/lib/trade";
 import { checkWithdrawUa } from "@/lib/zcash/ua";
 import { checkUnz1, decodeUnz1, type ChainId } from "@/lib/crypto/unz1";
 import { NETWORK_CONFIG, type Network } from "@/lib/network";
@@ -23,7 +23,9 @@ import type { FairHost, FairMock } from "./mock-fair";
 import type { VerifyMock } from "./mock-verify";
 import type { HoodMock } from "./mock-hood";
 import { ZEC_SPL_MINT } from "@/lib/quotes";
-import type {
+import { boardFromTokens } from "@/lib/pulse/board";
+
+import type { JupiterQuote, Pulse, PulseToken,
   ActionReceipt,
   ActionStatus,
   Candle,
@@ -593,6 +595,25 @@ export async function mockRatesFor(network: Network, now: number, doFetch: typeo
   return mockRates(now);
 }
 
+/** v0.28: Pulse everywhere, the Jupiter quote on mainnet only (as UNZEEN_QUOTE). */
+const v028 = (network: Network) => ({ pulse: true as const, ...(network === "mainnet" ? { quote: true as const } : {}) });
+
+/** v0.28 GET /api/quote of the mock: graduated tokens, amount rounded UP to 2 significant digits, ~1 % impact. */
+export function mockQuote(network: Network, q: URLSearchParams): JupiterQuote {
+  if (network !== "mainnet") throw new ApiError("not_found", "no quote on this network", 404);
+  const side = q.get("side");
+  const amount = q.get("amount") ?? "";
+  if ((side !== "buy" && side !== "sell") || !/^[1-9]\d{0,19}$/.test(amount)) throw new ApiError("bad_request", "side, amount", 400);
+  const s = findToken(q.get("mint") ?? "");
+  if (s.token.status !== "graduated" && s.token.venue !== "jupiter") throw new ApiError("not_found", "curve token: quote it yourself", 404);
+  const a = BigInt(amount);
+  const digits = a.toString().length;
+  const unit = digits > 2 ? BigInt(10) ** BigInt(digits - 2) : BigInt(1);
+  const inAmount = ((a + unit - BigInt(1)) / unit) * unit;
+  const spot = side === "buy" ? lamportsToTokens(inAmount, s.token.priceSol, s.token.decimals, 9) : tokensToLamports(inAmount, s.token.priceSol, s.token.decimals, 9);
+  return { mint: s.token.mint, side, inAmount: inAmount.toString(), outAmount: ((spot * BigInt(99)) / BigInt(100)).toString(), priceImpactPct: "1.00", route: ["PumpSwap"], asOf: Date.now() };
+}
+
 export function mockPool(network: Network): PoolInfo {
   if (process.env.NEXT_PUBLIC_HOOD === "1" && network === "hood" && hood) return hood.pool();
   const extra = {
@@ -600,8 +621,8 @@ export function mockPool(network: Network): PoolInfo {
     // v0.7: with the flag off the key is absent altogether (absent = off). The condition is written on
     // process.env directly so the build drops the whole branch, names included (review F3).
     ...(process.env.NEXT_PUBLIC_MOCK_FAIR_LAUNCH === "1"
-      ? { features: { fullTrades: FULL_FEED, fairLaunch: true, ...CHAT_FEATURES }, ...(fair ? { fairLaunch: fair.params(network) } : {}) }
-      : { features: { fullTrades: FULL_FEED, ...CHAT_FEATURES } }),
+      ? { features: { fullTrades: FULL_FEED, fairLaunch: true, ...CHAT_FEATURES, ...v028(network) }, ...(fair ? { fairLaunch: fair.params(network) } : {}) }
+      : { features: { fullTrades: FULL_FEED, ...CHAT_FEATURES, ...v028(network) } }),
     ...(CHAT_ON ? { chat: mockChatParams(network) } : {}),
     ...(SCENARIOS_ON ? { scenarios: scenarioParams() } : {}),
     orders: ORDER_PARAMS,
@@ -1911,6 +1932,8 @@ export async function handle(
       return discoveryList(Date.now());
     }
     if (p === "/api/tokens") return state!.filter((s) => s.heat > 0).map((s) => withListFields(s, Date.now()));
+    if (p === "/api/quote") return mockQuote(network, q);
+    if (p === "/api/pulse") return mockPulse(state!.filter((s) => s.heat > 0).map((s) => withListFields(s, Date.now())), Date.now());
     if (p === "/api/stats") return stats(Date.now());
 
     if ((m = p.match(/^\/api\/tokens\/([^/]+)$/))) {
@@ -2335,6 +2358,25 @@ function withListFields(s: MockTokenState, now: number): TokenListItem {
     unzeenTrades24h: trades,
     ...(curve ? { curveProgressPct: curve } : {}),
   };
+}
+
+/** v0.28 GET /api/pulse of the mock: the board by the contract's rules, plus holders, safety and a server ETA. */
+export function mockPulse(list: TokenListItem[], now: number): Pulse {
+  const b = boardFromTokens(list, now);
+  const asOf = Math.floor(now / 3_000) * 3_000;
+  const enrich = (t: PulseToken): PulseToken => {
+    const rnd = seeded("pulse:" + t.mint);
+    const p = Number(t.curveProgressPct);
+    const rate = 0.2 + rnd() * 1.5;
+    return {
+      ...t,
+      holders: rnd() < 0.2 ? null : 12 + Math.floor(rnd() * 400),
+      safety: { mintRevoked: true, freezeRevoked: rnd() > 0.1, riskyExtensions: [], top10Pct: (8 + rnd() * 30).toFixed(1), asOf },
+      ...(t.status === "curve" && Number.isFinite(p) && p < 100 ? { eta: { secs: Math.ceil((((100 - p) / rate) * 60) / 10) * 10, ratePctPerMin: rate.toFixed(2), samples: 6 } } : {}),
+      asOf,
+    };
+  };
+  return { ...b, asOf, new: b.new.map(enrich), graduating: b.graduating.map(enrich), graduated: b.graduated.map(enrich) };
 }
 
 let discovery: DiscoveryToken[] | null = null;

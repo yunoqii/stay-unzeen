@@ -1,4 +1,4 @@
-import { Broadcast, Coins, FlowArrow, RocketLaunch, Wallet, SealCheck, type Icon } from "@phosphor-icons/react";
+import { Broadcast, Coins, FlowArrow, Lightning, RocketLaunch, Star, Wallet, SealCheck, type Icon } from "@phosphor-icons/react";
 
 export interface NavItem {
   href: string;
@@ -8,6 +8,7 @@ export interface NavItem {
 
 export const NAV: NavItem[] = [
   { href: "/", label: "Feed", icon: Broadcast },
+  { href: "/pulse", label: "Pulse", icon: Lightning },
   { href: "/tokens", label: "Tokens", icon: Coins },
   { href: "/launch", label: "Launch", icon: RocketLaunch },
   { href: "/portfolio", label: "Portfolio", icon: Wallet },
@@ -16,6 +17,7 @@ export const NAV: NavItem[] = [
 
 /** Desktop header only; on phones these live in the footer. */
 export const NAV_SECONDARY: NavItem[] = [
+  { href: "/watchlist", label: "Watchlist", icon: Star },
   { href: "/scenarios", label: "Scenarios", icon: FlowArrow },
   { href: "/docs", label: "Docs", icon: SealCheck },
 ];

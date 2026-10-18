@@ -13,6 +13,7 @@ import { NetworkBanner } from "./network-banner";
 import { NetworkSwitch } from "./network-switch";
 import { ChainSwitch } from "./chain-switch";
 import { PortfolioSync } from "./portfolio-sync";
+import { TradingWatchers } from "@/components/trading/trading-watchers";
 import { CoverTraffic } from "./cover-traffic";
 import { ConnectionBanner } from "@/components/ui/states";
 import { LogoLink } from "./logo";
@@ -44,6 +45,7 @@ export function SiteHeader() {
           <NetworkSwitch />
           <KeyStatus />
           <PortfolioSync />
+          <TradingWatchers />
           <CoverTraffic />
         </div>
       </div>

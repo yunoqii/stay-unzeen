@@ -27,6 +27,7 @@ import { HoldingsList } from "./holdings-list";
 import { PeekProvider } from "./peek";
 import { SessionActivity } from "./session-activity";
 import { SettingsCard } from "./settings-card";
+import { PnlCard } from "./pnl-card";
 import { WithdrawPanel, type WithdrawTab } from "./withdraw-panel";
 
 // On-demand block, only when the server reports the feature (and the build carries it).
@@ -98,6 +99,7 @@ function PortfolioView() {
         )}
         <BalanceCard portfolio={portfolio} onWithdraw={() => open("zec")} />
         <HoldingsList holdings={portfolio?.holdings ?? null} tokens={tokens} onWithdraw={(m) => open("token", m)} more={holdingsMore} onShowMore={() => void showMore()} loadingMore={loadingMore} />
+        <PnlCard />
         <CreatorFees claimable={portfolio?.claimable ?? null} tokens={tokens} pool={pool} />
         <Link
           href="/creator"

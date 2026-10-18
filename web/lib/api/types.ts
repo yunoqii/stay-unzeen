@@ -111,6 +111,98 @@ export interface Token {
   priceQuote?: DecimalString;
   /** v0.13: only with venue "raydium-launchlab". */
   platform?: LaunchPlatform;
+  /** v0.28: on the curve only, from every price tick ("0.00".."100.00"). */
+  curveProgressPct?: DecimalString;
+  /** v0.28: time to graduation at the current pace; on the curve with a positive pace only. */
+  eta?: CurveEta;
+  /** v0.28: the token's own curve (SOL pairs on a curve, fresh tick). Absent -> PoolInfo.venues[].curve, else spot. */
+  curve?: TokenCurve;
+}
+
+// ---- v0.28 Trading comfort ----
+
+export interface CurveEta {
+  /** Seconds to 100 % at the current pace, rounded up to 10 s; absent past 7 days. */
+  secs: number;
+  /** Pace, percentage points per minute (2 decimals). */
+  ratePctPerMin: DecimalString;
+  /** Ticks in the window (>= 2, span >= 120 s). */
+  samples: number;
+}
+
+export interface TokenCurve {
+  /** S: SOL side at asOf, lamports (virtual + real). */
+  virtualSol: string;
+  /** T: token side at asOf, base units; S·T = k. */
+  virtualTokens: string;
+  /** Total trade fee now, bps. */
+  feeBps: number;
+  /** How a buy pays the fee: on top (pump.fun), from the input (DBC quote fee, LaunchLab), from the output (DBC token fee). */
+  buyFee: "added" | "input" | "output";
+  /** Net lamports the curve (or the current DBC segment) still takes; more fills partially. */
+  buyLimitLamports?: string;
+  /** DBC: tokens down to the lower edge of the current segment. */
+  sellLimitTokens?: string;
+  asOf: number;
+}
+
+export interface PulseSafety {
+  mintRevoked: boolean;
+  freezeRevoked: boolean;
+  riskyExtensions: RiskyExtension[];
+  top10Pct?: DecimalString;
+  asOf: number;
+}
+
+/** v0.28: one card of GET /api/pulse. Public, the same answer for everyone. */
+export interface PulseToken {
+  mint: string;
+  /** May be "" while the metadata is not read yet. */
+  symbol: string;
+  name: string;
+  image?: string;
+  venue: Venue;
+  status: "curve" | "graduated";
+  decimals: number;
+  quote: Quote;
+  priceSol: DecimalString;
+  marketCapSol: DecimalString;
+  createdAt: number;
+  curveProgressPct?: DecimalString;
+  eta?: CurveEta;
+  /** unix ms (down to the minute) of the first tick that saw it graduated. */
+  graduatedAt?: number;
+  /** Holder count of the indexer snapshot; null = not counted. */
+  holders: number | null;
+  safety?: PulseSafety;
+  unzeenLaunch: boolean;
+  /** The pool trades it (it is in GET /api/tokens, with a pool price). */
+  pool: boolean;
+  asOf: number;
+}
+
+/** v0.28: GET /api/pulse and every /ws/pulse message. */
+export interface Pulse {
+  asOf: number;
+  /** Threshold of "About to graduate", %. */
+  graduatingPct: number;
+  etaWindowSecs: number;
+  new: PulseToken[];
+  graduating: PulseToken[];
+  graduated: PulseToken[];
+}
+
+/** v0.28: GET /api/quote (mainnet, graduated / Jupiter only, with features.quote). */
+export interface JupiterQuote {
+  mint: string;
+  side: "buy" | "sell";
+  /** The asked amount rounded UP to 2 significant digits. */
+  inAmount: string;
+  /** Jupiter's output for inAmount, without slippage. */
+  outAmount: string;
+  priceImpactPct: DecimalString;
+  route: string[];
+  asOf: number;
 }
 
 /** v0.12: element of GET /api/tokens (Token + the fields the /tokens filters need). */
@@ -121,8 +213,6 @@ export interface TokenListItem extends Token {
   volume24hSol: DecimalString;
   /** Pool trades of the mint over 24 h. */
   unzeenTrades24h: number;
-  /** Only with status "curve" and an indexer snapshot. */
-  curveProgressPct?: DecimalString;
 }
 
 /** v0.12: element of GET /api/tokens?source=discovery (indexer snapshot), only with features.discovery. */
@@ -228,6 +318,10 @@ export interface PoolInfo {
     noop?: true;
     /** v0.19 scenarios (UNZEEN_SCENARIOS). Absent = off, every scenario_* op -> 400. */
     scenarios?: true;
+    /** v0.28: GET /api/pulse and /ws/pulse (always on v0.28 servers). */
+    pulse?: true;
+    /** v0.28: GET /api/quote (mainnet only, UNZEEN_QUOTE). */
+    quote?: true;
   };
   /** v0.19: only with features.scenarios. */
   scenarios?: ScenarioParams;

@@ -70,6 +70,9 @@ export const chatSlot = (network: Network, pubkey: string) => `chat:${historySlo
 /** Slot of this key's scenario drafts and local plan names (lib/scenarios/store.ts). */
 export const scenarioSlot = (network: Network, pubkey: string) => `scenarios:${historySlot(network, pubkey)}`;
 
+/** Slot of this key's trading workspace: watchlist, price alerts, notification switches (lib/workspace). */
+export const workspaceSlot = (network: Network, pubkey: string) => `workspace:${historySlot(network, pubkey)}`;
+
 // ---- state per slot ----
 
 type Status = "loading" | "ready" | "error";
@@ -162,6 +165,7 @@ export async function forgetHistory(network: Network, pubkey: string): Promise<v
     await storage().del(id);
     await storage().del(chatSlot(network, pubkey));
     await storage().del(scenarioSlot(network, pubkey));
+    await storage().del(workspaceSlot(network, pubkey));
   } catch {
     /* nothing stored */
   }

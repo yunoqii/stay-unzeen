@@ -3,6 +3,9 @@
 import { onTabListKeyDown } from "@/lib/tabs";
 import Link from "next/link";
 import { useEffect, useId, useRef, useState } from "react";
+import { hotkeyIntent, isTyping, onIntent, peekIntent, requestTrade, SELL_SLOTS, takeIntent } from "@/lib/trade-intent";
+import { HotkeysSheet } from "@/components/trading/hotkeys-sheet";
+import { useJupiterQuote } from "@/lib/jupiter-quote";
 import { AnimatePresence, motion } from "motion/react";
 import { CaretDown, Info, Key, LockKey, ShieldCheck, SlidersHorizontal } from "@phosphor-icons/react";
 import { ApiError } from "@/lib/api/client";
@@ -12,7 +15,7 @@ import { useKeyState } from "@/lib/crypto/session";
 import { formatCompact, formatSol, formatUnits, formatZec, parseUnits, unitsToNumber, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
 import { NETWORK_CONFIG, nativeOf, useNetwork } from "@/lib/network";
 import { nowFee as poolNowFee, resolveExec, useDefaultExec, withExec, type ExecMode, type NowFee } from "@/lib/exec";
-import { curveOf, isPriceStale, lamportsToZatCeil, quoteBuy, quoteRate, saleBelowMinimum, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
+import { curveBuyPartial, curveFor, isPriceStale, lamportsToZat, lamportsToZatCeil, withSlippage, quoteBuy, quoteRate, saleBelowMinimum, quoteBuyZecPair, quoteSell, quoteSellZecPair, sellMirrorsBuy } from "@/lib/trade";
 import { useRecentBuys } from "@/hooks/use-recent-buys";
 import { useNow } from "@/hooks/use-now";
 import { usePriceTs } from "@/hooks/use-price-ts";
@@ -40,6 +43,35 @@ const TAB_LABEL: Record<Tab, string> = { buy: "Buy", sell: "Sell", orders: "Orde
 export function TradePanel({ token, priceSol, priceQuote }: { token: Token; priceSol: string; priceQuote?: string }) {
   const key = useKeyState();
   const [side, setSide] = useState<Tab>("buy");
+  const [help, setHelp] = useState(false);
+  const network = useNetwork();
+  const instant = useTradeSettings(network).oneTap;
+  // Hotkeys (B / S / 1–4 / Esc / ?) and intents from the position panel: the side switches here, the form
+  // of that side applies the rest once it is mounted.
+  const sideRef = useRef(side);
+  useEffect(() => {
+    sideRef.current = side;
+  });
+  useEffect(() => {
+    const off = onIntent(() => {
+      const i = peekIntent(token.mint);
+      if (i && i.side !== sideRef.current) setSide(i.side);
+    });
+    const keydown = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || isTyping(e.target)) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      const i = hotkeyIntent(e.key, token.mint, sideRef.current);
+      if (!i) return;
+      e.preventDefault();
+      if (i === "help") setHelp(true);
+      else requestTrade(i);
+    };
+    window.addEventListener("keydown", keydown);
+    return () => {
+      off();
+      window.removeEventListener("keydown", keydown);
+    };
+  }, [token.mint]);
   const tabsId = useId();
   const { pool } = usePool();
   // Public list, same for every visitor: "has the pool traded this mint" decides whether orders apply.
@@ -87,6 +119,12 @@ export function TradePanel({ token, priceSol, priceQuote }: { token: Token; pric
       ) : side !== "orders" ? (
         <OrderForm key={`${side}:${key.pubkey}`} side={side} token={token} priceSol={priceSol} priceQuote={priceQuote} />
       ) : null}
+      <p className="mt-3 hidden text-center text-[11px] text-faint-foreground lg:block">
+        <button type="button" onClick={() => setHelp(true)} className="underline-offset-4 hover:text-muted-foreground hover:underline">
+          Keyboard: B, S, 1–4, Esc · press ? for all
+        </button>
+      </p>
+      <HotkeysSheet open={help} onClose={() => setHelp(false)} instant={instant} />
     </section>
   );
 }
@@ -152,7 +190,7 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
   const pairDecimals = quoteAsset(pool, pair, token.venue)?.decimals ?? QUOTE_DECIMALS[pair];
   // v0.26: a SOL-paired token still on a curve the pool publishes (PoolInfo.venues[].curve, pump.fun today) is
   // quoted on that curve, impact and venue fee included, like the pool's own checks; anything else: spot.
-  const curve = !hood && venue === token.venue && token.status === "curve" && pair === "SOL" ? curveOf(pool, venue) : null;
+  const curve = !hood && venue === token.venue && token.status === "curve" && pair === "SOL" ? curveFor(token, pool, venue) : null;
 
   const zecBalance = portfolio ? BigInt(portfolio.zecBalance) : null;
   const own = portfolio?.holdings.find((h) => h.mint === token.mint);
@@ -197,7 +235,25 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
       inputError = `Worth about ${formatZec(quote.zecOut.toString())} ZEC, under the pool minimum of ${formatZec(minAction.toString())} ZEC for a sale. Sell more of it.`;
     return { parsed, inputError, quote };
   };
-  const { parsed, inputError, quote } = evaluate(amount);
+  /** v0.28: the buy would run past the end of the curve (or the DBC segment): only part of it fills. */
+  const partialFill = (q: ReturnType<typeof evaluate>["quote"]) => isBuy && !!q && "lamports" in q && curveBuyPartial(curve, q.lamports);
+  const shown = evaluate(amount);
+  // v0.28: graduated tokens through Jupiter get Jupiter's own impact (GET /api/quote, mainnet, features.quote),
+  // asked once the amount settles; until it answers (or if it can't) the spot estimate stays.
+  const routed = pool?.features?.quote === true && venue === "jupiter" && pair === "SOL";
+  const routeAmount = !shown.quote ? null : isBuy ? ("lamports" in shown.quote ? shown.quote.lamports : null) : shown.parsed;
+  const jq = useJupiterQuote(routed, token.mint, side, routeAmount);
+  const applyRoute = (q: ReturnType<typeof evaluate>["quote"], parsedAmount: bigint | null): ReturnType<typeof evaluate>["quote"] => {
+    if (!jq || !q || !routed) return q;
+    if (isBuy && "tokensOut" in q && "lamports" in q && q.lamports === jq.amount) return { ...q, tokensOut: jq.out, minOut: withSlippage(jq.out, slippage) };
+    if (!isBuy && "zecOut" in q && "lamports" in q && parsedAmount === jq.amount && rate) {
+      const zecOut = lamportsToZat(jq.out, BigInt(rate.lamportsPerZec));
+      return { ...q, lamports: jq.out, zecOut, minZecOut: withSlippage(zecOut, slippage) };
+    }
+    return q;
+  };
+  const { parsed, inputError } = shown;
+  const quote = applyRoute(shown.quote, shown.parsed);
   const mirrors = !isBuy && parsed !== null && !inputError ? sellMirrorsBuy(parsed, buys, position) : null;
 
   const frozen = portfolio?.frozen ?? false;
@@ -221,7 +277,9 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
   };
 
   const submit = async (value: string = amount, tries = 0) => {
-    const { parsed, inputError, quote } = evaluate(value);
+    const fresh = evaluate(value);
+    const { parsed, inputError } = fresh;
+    const quote = applyRoute(fresh.quote, fresh.parsed);
     // Invalid input stays in the field with its hint; nothing is signed.
     if (busy || parsed === null || inputError || frozen || portfolio === null) return;
     if (hood && limitOf(quote) === BigInt(0)) return; // "Price updating…": the server would answer 400
@@ -262,6 +320,31 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
 
   // Countdown of the stale-price wait, then one automatic retry of the same amount (re-quoted, re-signed).
   const submitRef = useRef(submit);
+  // Intents (hotkeys, "Sell 50 %" on the position panel) for this side, applied once.
+  const applyIntent = () => {
+    const i = takeIntent(token.mint, side);
+    if (!i) return;
+    if (i.kind === "clear") {
+      setError(null);
+      setStale(null);
+      setAmount("");
+    } else if (i.kind === "percent") setPercent(i.pct);
+    else if (i.kind === "slot") {
+      if (isBuy) {
+        if (i.slot <= 3) setPreset(settings.buyPresets[i.slot - 1]);
+        // Max only fills the field, even with instant trade: a full-balance buy is always one more key.
+        else if (zecBalance !== null && zecBalance > BigInt(0)) setAmount(formatUnits(zecBalance.toString(), ZEC_DECIMALS));
+      } else setPercent(SELL_SLOTS[i.slot - 1]);
+    }
+  };
+  const intentRef = useRef(applyIntent);
+  useEffect(() => {
+    intentRef.current = applyIntent;
+  });
+  useEffect(() => {
+    intentRef.current();
+    return onIntent(() => intentRef.current());
+  }, []);
   useEffect(() => {
     submitRef.current = submit;
   });
@@ -356,10 +439,23 @@ function OrderForm({ side, token, priceSol, priceQuote }: { side: Side; token: T
       </div>
       {settings.oneTap && (
         <p className="-mt-2 text-[11px] text-faint-foreground">
-          One-tap is on: a preset signs the order right away.{" "}
+          Instant trade is on: a preset signs the order right away.{" "}
           <Link href="/portfolio#settings" className="underline-offset-4 hover:text-muted-foreground hover:underline">
             Change
           </Link>
+        </p>
+      )}
+
+      {routed && quote && (
+        <p role="note" className="-mt-1 text-[11px] text-pretty text-faint-foreground">
+          {jq
+            ? `Jupiter route${jq.route.length ? ` (${jq.route.join(" → ")})` : ""}, price impact ${jq.impactPct.toFixed(2)} %. Asked by the pool for a rounded amount, not by your browser.`
+            : "Spot estimate until the pool's Jupiter quote arrives."}
+        </p>
+      )}
+      {partialFill(quote) && (
+        <p role="note" className="-mt-1 text-xs text-pretty text-zec">
+          The curve ends before this amount: only part of it fills, the rest of the hold comes back.
         </p>
       )}
 

@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { BellRinging, Eye, Keyboard, Lightning, LockSimple, Star } from "@phosphor-icons/react/ssr";
+import { HOTKEYS } from "@/lib/trade-intent";
 
 // User documentation, English only. Facts follow docs/API.md and the public README; no internal
 // infrastructure details. Fair-launch has its own lazy section (components/fair/docs-section.tsx).
@@ -52,6 +54,30 @@ function List({ children }: { children: React.ReactNode }) {
 
 function Note({ children }: { children: React.ReactNode }) {
   return <p className="hatch-zec rounded-xl border border-zec/25 px-4 py-3 text-sm text-foreground/85">{children}</p>;
+}
+
+/** What a feature keeps on this device and what the server can see of it. */
+function Privacy({ local, server }: { local: React.ReactNode; server: React.ReactNode }) {
+  return (
+    <dl className="ledger grid text-sm sm:grid-cols-2">
+      <div className="p-3.5">
+        <dt className="flex items-center gap-1.5 font-mono text-[10px] tracking-wider text-zec uppercase">
+          <LockSimple size={11} aria-hidden /> Privacy · on this device
+        </dt>
+        <dd className="mt-1.5 text-pretty text-muted-foreground">{local}</dd>
+      </div>
+      <div className="p-3.5">
+        <dt className="flex items-center gap-1.5 font-mono text-[10px] tracking-wider text-faint-foreground uppercase">
+          <Eye size={11} aria-hidden /> What the server sees
+        </dt>
+        <dd className="mt-1.5 text-pretty text-muted-foreground">{server}</dd>
+      </div>
+    </dl>
+  );
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return <kbd className="rounded-md border border-border bg-surface-1 px-1.5 py-0.5 font-mono text-[11px] text-foreground">{children}</kbd>;
 }
 
 function Faq({ q, children }: { q: string; children: React.ReactNode }) {
@@ -204,6 +230,128 @@ export const SECTIONS: DocSection[] = [
     ),
   },
   {
+    id: "pulse",
+    title: "Pulse",
+    body: (
+      <>
+        <p>
+          <A href="/pulse">Pulse</A> <Lightning size={14} className="inline align-[-2px] text-zec" aria-hidden /> is a live board in three columns: <Strong>New</Strong> launches on their
+          curve, curves <Strong>about to graduate</Strong> (70&nbsp;% and up) and tokens that <Strong>graduated</Strong> in the last day. Each card shows price and market cap in ZEC,
+          curve progress with a time to graduation at the current pace, holders, a safety summary (mint and freeze authority) and a &ldquo;via unzeen&rdquo; badge for Unzeen
+          launches.
+        </p>
+        <List>
+          <li>
+            <Strong>Buy from a card</Strong> with your first buy preset and your default execution. With <Strong>Instant trade</Strong> off (default) the first tap shows what it
+            would buy and the second signs; on, the first tap signs. It runs the same checks and price limit as the trade panel.
+          </li>
+          <li>&ldquo;≈ 4 min to graduation&rdquo; is an estimate from how fast the curve has been filling, not a promise.</li>
+        </List>
+        <Privacy
+          local="Nothing: Pulse is the same board for everyone."
+          server="That a Pulse page is open. Everyone gets the same stream on the same rhythm; stars and quick buys never change what the page asks for. A quick buy is an ordinary signed buy."
+        />
+      </>
+    ),
+  },
+  {
+    id: "watchlist",
+    title: "Watchlist and price alerts",
+    body: (
+      <>
+        <p>
+          Tap the <Star size={14} className="inline align-[-2px] text-zec" weight="fill" aria-hidden /> on a token page or a Pulse card to add it to your{" "}
+          <A href="/watchlist">watchlist</A>. On a token page, <BellRinging size={14} className="inline align-[-2px] text-zec" aria-hidden /> <Strong>Alert</Strong> sets a
+          one-shot alert when the price or market cap rises to or falls to a value you choose. It fires once as a toast and, if you allow it, as a browser notification; re-arm it
+          afterwards.
+        </p>
+        <List>
+          <li>Both need your anon key unlocked: they are encrypted with it.</li>
+          <li>Alerts are checked against the public token list while an Unzeen tab is open, so they work for tokens the pool trades.</li>
+          <li>Sparklines show the prices this tab has seen since you opened it.</li>
+        </List>
+        <Privacy
+          local="The watchlist and alerts, encrypted with your anon key in this browser. Forget device wipes them."
+          server="Nothing about them. Prices come from the same public lists every visitor loads on a fixed timer; no request names a token you watch or a price you wait for."
+        />
+      </>
+    ),
+  },
+  {
+    id: "trading-tools",
+    title: "Keyboard, position and orders on the chart",
+    body: (
+      <>
+        <p>
+          <Keyboard size={14} className="inline align-[-2px]" aria-hidden /> On a token page, the keyboard drives the trade panel. Keys never fire while you type in a field; press <Kbd>?</Kbd> for the list.
+        </p>
+        <Table head={["Key", "Does"]} rows={HOTKEYS.map((h) => [h.keys, h.does])} />
+        <List>
+          <li>
+            <Strong>Instant trade</Strong> (Portfolio → Settings, off by default): a preset key or button signs right away with your slippage and execution. Off, a preset only fills the amount and Enter signs. Max
+            balance always needs one more key.
+          </li>
+          <li>
+            <Strong>Your position</Strong> shows size, average entry and PnL worked out from your own trades, plus <Strong>Sell 25 / 50 / 100&nbsp;%</Strong>, which fill the sell form
+            (or sign, with Instant trade).
+          </li>
+          <li>
+            Open orders appear on the chart as lines: green take-profit, red stop-loss, yellow limit. <Strong>Drag a line</Strong> to move it. There is no edit, so a move is a cancel and
+            the same order at the new price, with the time it had left; you confirm it first. Lines show only while Peek is open.
+          </li>
+          <li>Quotes include the curve&rsquo;s price impact and fee, so the default 1&nbsp;% slippage holds on small curves. When a buy would run past the end of the curve, the panel says it fills only partly.</li>
+          <li>Graduated tokens on mainnet show Jupiter&rsquo;s price impact. The pool asks Jupiter for a rounded amount from its own address, never your browser.</li>
+        </List>
+        <Privacy
+          local="Keys, Instant trade and the position maths. Your average entry and PnL come from your trade history, encrypted with your key."
+          server="Only the orders and trades you sign, as always. Moving a line is a signed cancel plus a signed new order."
+        />
+      </>
+    ),
+  },
+  {
+    id: "notifications",
+    title: "Notifications, PnL and CSV",
+    body: (
+      <>
+        <p>
+          A toast, with a short chime, when a Delayed or Max-privacy trade settles, an order triggers or fills, or a scenario step finishes. Switch toasts and sound off in Portfolio →
+          Settings. Portfolio also charts your <Strong>realized PnL</Strong> over time and exports your trades as <Strong>CSV</Strong>.
+        </p>
+        <List>
+          <li>Notifications come from the portfolio your tab already checks on a fixed timer. Nothing extra is asked of the server.</li>
+          <li>The chime is made in the browser. No sound file is downloaded.</li>
+          <li>The CSV is built in your browser and saved by it, in UTC with token amounts in whole tokens. It is never uploaded.</li>
+        </List>
+        <Privacy
+          local="Your trade history, the PnL line and the CSV, all from history encrypted with your key."
+          server="Nothing new. The portfolio check is the same timer as before, alerts or not."
+        />
+      </>
+    ),
+  },
+  {
+    id: "scenarios",
+    title: "Scenarios",
+    body: (
+      <>
+        <p>
+          <A href="/scenarios">Scenarios</A> chain up to 12 blocks into one plan, for example top up → wait → buy → place a bracket → withdraw in shielded ZEC. You sign it once; the pool
+          runs every step in the same batches as manual trades and your device sends nothing while it runs.
+        </p>
+        <List>
+          <li>Start from a template or build your own. Privacy floors are added for you (for example a random wait after a deposit), so the plan can&rsquo;t line its steps up in time.</li>
+          <li>Starting a plan needs at least the pool minimum (0.001 ZEC) available, even one that waits for a deposit.</li>
+          <li>A plan lives up to 3 days (7 without withdrawals). Cancel it any time before a step runs.</li>
+        </List>
+        <Privacy
+          local="Drafts and plan names, encrypted with your key."
+          server="The plan while it runs, for at most its lifetime: blocks, tokens, amounts and triggers. Withdrawal addresses and chat text are sealed and erased once used. Which action belongs to which step is erased 24 h after the plan ends."
+        />
+      </>
+    ),
+  },
+  {
     id: "withdraw",
     title: "Withdraw",
     body: (
@@ -301,4 +449,31 @@ export const SECTIONS: DocSection[] = [
       </div>
     ),
   },
+  // Robinhood Chain: only in builds with NEXT_PUBLIC_HOOD=1 (a default build carries none of this text).
+  ...(process.env.NEXT_PUBLIC_HOOD === "1"
+    ? [
+        {
+          id: "robinhood",
+          title: "Robinhood Chain",
+          body: (
+            <>
+              <p>
+                Switch <Strong>SOL | HOOD</Strong> in the header to trade launchpad tokens on Robinhood Chain (mainnet). You still pay in shielded ZEC; trades settle in ETH on
+                Pons, and on-chain they read &ldquo;unzeen&rdquo; just the same.
+              </p>
+              <List>
+                <li>Robinhood Chain has its own anon key and its own balance, separate from your Solana ones.</li>
+                <li>Withdraw tokens to a fresh 0x address. A small ETH drop pays the gas, and the same rules apply: always delayed, never the exact amount you bought.</li>
+                <li>
+                  When the pool&rsquo;s price for a token is older than a few minutes, Buy and Sell show <Strong>Price updating…</Strong> and wait for a fresh one: a trade never goes out
+                  without a price limit.
+                </li>
+                <li>Verify works the same way. Vault and operator signatures are EVM signatures (EIP-712 and EIP-191), checked in your browser and by the offline script.</li>
+              </List>
+              <Privacy local="Its own encrypted anon key, history, watchlist and alerts." server="The same as on Solana: only what you sign. The two chains' keys are never linked." />
+            </>
+          ),
+        } satisfies DocSection,
+      ]
+    : []),
 ];

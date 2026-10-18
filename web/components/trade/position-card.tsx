@@ -14,6 +14,7 @@ import { QUOTE_DECIMALS, quoteAsset, tokenQuote, zecSpreadBps } from "@/lib/quot
 import { lastRate } from "@/lib/activity";
 import { useNetwork } from "@/lib/network";
 import { cn } from "@/lib/utils";
+import { requestTrade } from "@/lib/trade-intent";
 import { usePool } from "@/hooks/use-pool";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { PeekToggle, Veiled } from "@/components/portfolio/peek";
@@ -108,6 +109,21 @@ export function PositionCard({ token, priceSol, priceQuote }: { token: Token; pr
             </Veiled>
           </Cell>
         </dl>
+      )}
+
+      {held !== null && held > ZERO && (
+        <div className="mt-3 flex gap-1.5" role="group" aria-label="Sell part of your position">
+          {[25, 50, 100].map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => requestTrade({ mint: token.mint, side: "sell", kind: "percent", pct: p })}
+              className="h-8 flex-1 rounded-full border border-border text-xs transition-colors duration-150 hover:border-sell/60 hover:text-sell focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              Sell {p}%
+            </button>
+          ))}
+        </div>
       )}
 
       {incomplete && (
