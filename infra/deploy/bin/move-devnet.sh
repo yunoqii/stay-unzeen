@@ -17,6 +17,9 @@ for f in "$U/seed.agekey" "$U/solana-devnet.agekey" "$U/devnet/chat.key" "$U/dev
 done
 PG="$(docker ps -q --filter name=unzeen-postgres-1)"; [ -n "$PG" ] || { echo "local postgres container not running" >&2; exit 1; }
 say() { printf '[move-devnet] %s\n' "$*"; }
+# One multiplexed connection: ufw LIMIT on 22 rejects more than 6 new connections in 30 s.
+CM="$(mktemp -d)"; trap 'ssh -o ControlPath="$CM/c" -O exit "$HOST" 2>/dev/null; rm -rf "$CM"' EXIT
+ssh() { command ssh -o ControlMaster=auto -o ControlPath="$CM/c" -o ControlPersist=120 "$@"; }
 
 say "stopping Mac devnet services"
 pkill -f 'unzeen-scanner serve' || true
