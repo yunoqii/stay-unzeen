@@ -7,7 +7,7 @@
 #   unzeenctl build <tag>                    build all images of a release (no volume needed)
 #   unzeenctl deploy <tag> [--web]           build -> migrate (+schema check, roles) -> restart -> proxy check
 #   unzeenctl up | stop-backends             start everything / stop all instance services
-#   unzeenctl restart|stop|start <service...> | logs <service> [--since 10m]
+#   unzeenctl restart|stop|start <service...> | logs <service> [--since 10m]   (restart re-reads the env files)
 #   unzeenctl keys <instance>                generate DB passwords (into the env file), pg-password,
 #                                            chat.key, scenario.key, age identities (missing ones only)
 #   unzeenctl roles <instance>               (re)apply relayer/indexer roles (after every migration)
@@ -309,7 +309,9 @@ case "$cmd" in
     done
     dc "$REL" stop "${svcs[@]}";;
 
-  restart|stop|start) [ $# -gt 0 ] || die "usage: $cmd <service...>"; dc "$REL" "$cmd" "$@";;
+  # `compose restart` keeps the old environment: recreate, so edits in /etc/unzeen/*.env apply.
+  restart) [ $# -gt 0 ] || die "usage: restart <service...>"; dc "$REL" up -d --no-deps --force-recreate "$@";;
+  stop|start) [ $# -gt 0 ] || die "usage: $cmd <service...>"; dc "$REL" "$cmd" "$@";;
   logs) svc="${1:?service}"; shift; dc "$REL" logs --no-log-prefix "$@" "$svc";;
 
   keys)
