@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, builder::BoolishValueParser};
 use tracing_subscriber::EnvFilter;
 use unzeen_protocol::{
     SigningKey,
@@ -96,11 +96,12 @@ enum Cmd {
         #[arg(long)]
         once: bool,
         /// Also execute `withdraw_zec` payouts (needs the seed key; mainnet gated).
-        #[arg(long, env = "UNZEEN_PAYOUTS")]
+        /// The env value may be 1/0, true/false, yes/no or on/off (deploy templates use 1/0).
+        #[arg(long, env = "UNZEEN_PAYOUTS", value_parser = BoolishValueParser::new())]
         payouts: bool,
         /// Also run the automatic pool rebalance ZEC -> SOL via 1Click (dry-run unless mainnet
         /// and UNZEEN_ALLOW_MAINNET_REBALANCE=1).
-        #[arg(long, env = "UNZEEN_REBALANCE")]
+        #[arg(long, env = "UNZEEN_REBALANCE", value_parser = BoolishValueParser::new())]
         rebalance: bool,
     },
     /// Operator: ZEC payouts above the mainnet cap (`UNZEEN_MAX_PAYOUT_ZAT`, final audit A2).
@@ -259,6 +260,8 @@ fn main() -> anyhow::Result<()> {
         "UNZEEN_DATA_DIR",
         "UNZEEN_KEYS_DIR",
         "UNZEEN_BIRTHDAY",
+        "UNZEEN_PAYOUTS",
+        "UNZEEN_REBALANCE",
     ] {
         if std::env::var_os(key).is_some_and(|v| v.is_empty()) {
             // SAFETY: no other threads exist yet (the tokio runtime is built below).
@@ -900,4 +903,45 @@ fn print_deposit(d: &Deposit, json: bool, tip: Option<u32>) -> anyhow::Result<()
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deploy env templates set `UNZEEN_PAYOUTS=1` / `UNZEEN_REBALANCE=0`; clap's default bool
+    /// parser only takes true/false and crash-looped `serve` on the first VPS deploy.
+    #[test]
+    fn serve_bool_env_accepts_1_0_and_words() {
+        fn parse(payouts: Option<&str>, rebalance: Option<&str>, args: &[&str]) -> Result<(bool, bool), clap::Error> {
+            // SAFETY: the only test in this crate that touches these variables.
+            unsafe {
+                for (k, v) in [("UNZEEN_PAYOUTS", payouts), ("UNZEEN_REBALANCE", rebalance)] {
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+            let mut argv = vec!["unzeen-scanner", "serve"];
+            argv.extend_from_slice(args);
+            match Cli::try_parse_from(argv)?.cmd {
+                Cmd::Serve { payouts, rebalance, .. } => Ok((payouts, rebalance)),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(parse(Some("1"), Some("0"), &[]).unwrap(), (true, false));
+        assert_eq!(parse(Some("0"), Some("1"), &[]).unwrap(), (false, true));
+        assert_eq!(parse(Some("true"), Some("false"), &[]).unwrap(), (true, false));
+        assert_eq!(parse(Some("yes"), Some("off"), &[]).unwrap(), (true, false));
+        assert_eq!(parse(None, None, &[]).unwrap(), (false, false));
+        assert_eq!(parse(None, None, &["--payouts", "--rebalance"]).unwrap(), (true, true));
+        // A typo must fail loudly, not silently turn payouts off.
+        assert!(parse(Some("maybe"), None, &[]).is_err());
+        assert!(parse(None, Some("2"), &[]).is_err());
+        unsafe {
+            std::env::remove_var("UNZEEN_PAYOUTS");
+            std::env::remove_var("UNZEEN_REBALANCE");
+        }
+    }
 }
