@@ -168,11 +168,20 @@ services:
       RL_WS_EVENTS: ${RL_WS_EVENTS:-30}
       RL_WEB_EVENTS: ${RL_WEB_EVENTS:-600}
     ports: ["80:80", "443:443"]
+    # Extra sites proxy to services on the host: reverse_proxy host.docker.internal:<port>.
+    extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - type: bind
         source: ./Caddyfile
         target: /etc/caddy/Caddyfile
         read_only: true
+      # Extra sites of other projects on this host (owner-managed, kept out of the repo).
+      - type: bind
+        source: /etc/unzeen/caddy.d
+        target: /etc/caddy/sites
+        read_only: true
+        bind:
+          create_host_path: false
       - caddy_data:/data
       - caddy_config:/config
     networks: [edge]

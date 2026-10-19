@@ -145,3 +145,7 @@
 {$API_HOOD_HOST} {
 	import api_site {$UPSTREAM_API_HOOD:api-hood:8080}
 }
+
+# Sites of other projects on this host: /etc/unzeen/caddy.d/*.caddy (owner-managed, not in the repo).
+# An empty directory is fine (no match = nothing imported).
+import /etc/caddy/sites/*.caddy
