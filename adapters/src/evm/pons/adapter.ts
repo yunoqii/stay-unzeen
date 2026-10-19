@@ -14,6 +14,7 @@ import {
 import { AdapterError } from "../../errors";
 import type { CurveStatus } from "../../types";
 import { ceilToStep } from "../fees";
+import { CREATOR_FUNDING_DEFAULTS } from "./creator-funding";
 import type { EvmExecutor, OnSigned, SentEvmTx } from "../executor";
 import type { EvmKeyring } from "../keys";
 import type {
@@ -126,9 +127,9 @@ export interface PonsAdapterOptions {
   lifi?: LifiClient | null;
   /** Deadline of v4 swaps, seconds from now. Default 300. */
   swapDeadlineSec?: number;
-  /** ETH left on a creator for gas (launch tx + later fee claims). Default 0.002 ETH. */
+  /** ETH left on a creator for gas (launch tx + later fee claims). Default 0.002 ETH (HOOD_CREATOR_GAS_RESERVE_WEI via runtime). */
   creatorGasReserveWei?: bigint;
-  /** Funding granularity: funder -> creator transfers are multiples of this. Default 0.01 ETH. */
+  /** Funding granularity: funder -> creator transfers are multiples of this. Default 0.01 ETH (HOOD_CREATOR_FUND_STEP_WEI via runtime). */
   fundStepWei?: bigint;
   /** Max wait for a snipe-tax window (s). Default 65 (contract max 60). */
   maxSnipeWaitSec?: number;
@@ -175,8 +176,8 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
     this.uniswap = o.uniswap ?? UNISWAP_V4_4663;
     this.swapDeadlineSec = o.swapDeadlineSec ?? 300;
     this.lifi = o.lifi ?? null;
-    this.creatorGasReserveWei = o.creatorGasReserveWei ?? 2_000_000_000_000_000n;
-    this.fundStepWei = o.fundStepWei ?? 10_000_000_000_000_000n;
+    this.creatorGasReserveWei = o.creatorGasReserveWei ?? CREATOR_FUNDING_DEFAULTS.gasReserveWei;
+    this.fundStepWei = o.fundStepWei ?? CREATOR_FUNDING_DEFAULTS.fundStepWei;
     this.maxSnipeWaitSec = o.maxSnipeWaitSec ?? 65;
     this.sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     if (this.fundStepWei <= 0n) throw new RangeError("fundStepWei must be > 0");

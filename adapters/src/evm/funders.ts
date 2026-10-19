@@ -50,7 +50,8 @@ export const FUNDER_DEFAULTS = {
 /** Default poll of the rebalance address for new ETH (GAP-8), seconds. */
 export const FUNDER_POLL_DEFAULT_SECS = 300;
 
-function weiEnv(env: NodeJS.ProcessEnv, name: string, dflt: bigint): bigint {
+/** Positive integer wei from env; unset / empty -> `dflt`; anything else -> start-up error. */
+export function weiEnv(env: NodeJS.ProcessEnv, name: string, dflt: bigint): bigint {
   const raw = env[name]?.trim();
   if (!raw) return dflt;
   if (!/^\d+$/.test(raw)) throw new Error(`${name} must be an integer in wei`);

@@ -5,6 +5,7 @@ import { EvmExecutor } from "./executor";
 import { EvmFeeCache } from "./fees";
 import type { EvmKeyring } from "./keys";
 import { PonsAdapter, PONS_ERROR_ABI } from "./pons/adapter";
+import { assertCreatorGasReserve, creatorFundingFromEnv, type CreatorFunding } from "./pons/creator-funding";
 import { PONS_V2_MAINNET, type PonsDeployment } from "./pons/addresses";
 
 export interface HoodClients {
@@ -42,6 +43,8 @@ export function hoodExecutor(cfg: HoodConfig, clients: HoodClients = hoodClients
 /**
  * Pons adapter for a network. Pons exists on mainnet only: on testnet the
  * adapter is returned null (venue unavailable there).
+ * Creator funding comes from HOOD_CREATOR_FUND_STEP_WEI / HOOD_CREATOR_GAS_RESERVE_WEI;
+ * throws when the gas reserve cannot cover one create at the current fee cap.
  */
 export function hoodPonsAdapter(
   cfg: HoodConfig,
@@ -49,7 +52,17 @@ export function hoodPonsAdapter(
   keyring: EvmKeyring,
   funders: FunderPool = new FunderPool({ executor, keyring }),
   deployment: PonsDeployment = PONS_V2_MAINNET,
+  funding: CreatorFunding = creatorFundingFromEnv(),
 ): PonsAdapter | null {
   if (cfg.chainId !== deployment.chainId) return null;
-  return new PonsAdapter({ executor, keyring, funders, deployment });
+  const maxFee = executor.fees.maxFeePerGas > cfg.maxFeeFloorWei ? executor.fees.maxFeePerGas : cfg.maxFeeFloorWei;
+  assertCreatorGasReserve(funding, maxFee);
+  return new PonsAdapter({
+    executor,
+    keyring,
+    funders,
+    deployment,
+    fundStepWei: funding.fundStepWei,
+    creatorGasReserveWei: funding.gasReserveWei,
+  });
 }

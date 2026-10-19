@@ -8,7 +8,9 @@
  *   UNZEEN_ALLOW_HOOD_MAINNET=yes (mainnet sends; lead's approval), HOOD_KEYS_AGE_KEY_FILE,
  *   DATABASE_URL_RELAYER (role unzeen_relayer of the HOOD instance DB), HOOD_VAULTS (2), HOOD_FUNDERS (8),
  *   HOOD_FEE_SWEEP=1 (creator-fee loop), HOOD_FUNDER_TARGET_WEI / HOOD_FUNDER_LOW_WEI / HOOD_FUNDER_LOT_WEI
- *   (funder thresholds, default 0.02 / 0.011 / 0.005 ETH), HOOD_FUNDER_POLL_SECS (rebalance poll, 300).
+ *   (funder thresholds, default 0.02 / 0.011 / 0.005 ETH), HOOD_FUNDER_POLL_SECS (rebalance poll, 300),
+ *   HOOD_CREATOR_FUND_STEP_WEI / HOOD_CREATOR_GAS_RESERVE_WEI (funder -> creator step and creator gas
+ *   reserve, default 0.01 / 0.002 ETH; a reserve below one create's upfront gas refuses to start).
  *
  * Logs: event kind + outcome code + counts only. Never hashes, addresses, amounts or ids.
  */
@@ -22,6 +24,7 @@ import { openEvmKeys } from "../src/evm/keys";
 import { PgLaunchStore, FileLaunchStore, type LaunchStore } from "../src/evm/relayer/launches";
 import { hoodNetworkId, runHoodRelayer } from "../src/evm/relayer/runtime";
 import { hoodClients, hoodExecutor, hoodPonsAdapter } from "../src/evm/runtime";
+import { creatorFundingFromEnv, creatorFundingWarning } from "../src/evm/pons/creator-funding";
 import { checkMintVaultsAccess, checkRelayerRole } from "../src/relayer/runtime";
 
 loadRepoEnv();
@@ -44,6 +47,7 @@ async function main(): Promise<void> {
   // GAP-7/8: validated before anything starts (bad values refuse to start).
   const funderOpts = funderOptionsFromEnv();
   const funderPollMs = funderPollMsFromEnv();
+  const creatorFunding = creatorFundingFromEnv();
   const db = new pg.Pool({ connectionString: url, max: 6 });
   const lockDb = new pg.Pool({ connectionString: url, max: vaultCount + 4 });
   db.on("error", () => undefined);
@@ -61,9 +65,17 @@ async function main(): Promise<void> {
   await executor.fees.refresh();
   // ONE pool: the adapter picks from it, the runtime tops it up (shared serialization).
   const funders = new FunderPool({ executor, keyring, count: funderCount, ...funderOpts });
-  const adapter = hoodPonsAdapter(cfg, executor, keyring, funders);
+  const adapter = hoodPonsAdapter(cfg, executor, keyring, funders, undefined, creatorFunding);
   if (!adapter) throw new Error("Pons V2 is not deployed on this network (testnet): nothing to relay");
   await adapter.verifyDeployment();
+  // A funder at its target must be able to pay one create (warning only: funders may hold more).
+  await adapter
+    .factoryTerms()
+    .then((t) => {
+      const w = creatorFundingWarning(creatorFunding, { funderTargetWei: funderOpts.targetWei, launchFeeWei: t.launchFee, maxFeePerGas: executor.fees.maxFeePerGas });
+      if (w) log(`WARN ${w}`);
+    })
+    .catch(() => log("WARN could not read the Pons launch fee: creator funding not checked"));
 
   // relayer_launches (core 0028) when this role may use it; else the 0600 file next to the keys.
   const pgLaunches = await db
