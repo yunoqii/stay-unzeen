@@ -6,7 +6,7 @@
 # 2. stops the devnet services on the VPS (pg-devnet stays up)
 # 3. copies ~/.unzeen/{test,devnet} into the volume and the four devnet keys into /etc/unzeen/keys/devnet
 #    (replaces the unused ones created by `unzeenctl keys devnet`)
-# 4. pg_dump on the Mac -> pg_restore into pg-devnet, roles, start services
+# 4. pg_dump (schema public only: test runs leave t_* schemas) on the Mac -> pg_restore into pg-devnet, roles, start services
 # Prints no secrets. The dump never touches the VPS disk (streamed into pg_restore).
 # shellcheck disable=SC2029  # key name is meant to expand on the client side
 set -euo pipefail
@@ -50,7 +50,7 @@ put_key "$U/devnet/chat.key" chat.key
 put_key "$U/devnet/scenario.key" scenario.key
 
 say "restoring the devnet database"
-docker exec "$PG" pg_dump -U unzeen -d unzeen -Fc \
+docker exec "$PG" pg_dump -U unzeen -d unzeen -n public -Fc \
   | ssh "$HOST" 'sudo docker exec -i unzeen-vps-pg-devnet-1 pg_restore -U unzeen -d unzeen --clean --if-exists --no-owner --no-privileges --single-transaction'
 
 say "roles and start"
