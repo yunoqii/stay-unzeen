@@ -19,8 +19,10 @@ avail_gb=$(( $(df --output=avail -k /var/lib/unzeen | tail -1) / 1024 / 1024 ))
 echo "Creating ${SIZE_GB} GB encrypted container (fully allocated)."
 fallocate -l "${SIZE_GB}G" "$IMG"
 chmod 0600 "$IMG"
+# Until luksFormat succeeds the file holds nothing; drop it so a retry is possible.
+trap 'cryptsetup isLuks "$IMG" 2>/dev/null || rm -f "$IMG"' EXIT
 # Default LUKS2 (aes-xts-plain64, argon2id). The header is backed up below, outside the volume.
-cryptsetup luksFormat --type luks2 --batch-mode=no --verify-passphrase "$IMG"
+cryptsetup luksFormat --type luks2 --verify-passphrase "$IMG"
 cryptsetup open "$IMG" "$NAME"
 mkfs.ext4 -q -L unzeen -m 0 "/dev/mapper/$NAME"
 chattr -i /srv/unzeen 2>/dev/null || true
