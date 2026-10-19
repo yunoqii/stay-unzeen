@@ -14,7 +14,7 @@ import {
 import { AdapterError } from "../../errors";
 import type { CurveStatus } from "../../types";
 import { ceilToStep } from "../fees";
-import { CREATOR_FUNDING_DEFAULTS } from "./creator-funding";
+import { CREATOR_FUNDING_DEFAULTS, creatorReserveWei } from "./creator-funding";
 import type { EvmExecutor, OnSigned, SentEvmTx } from "../executor";
 import type { EvmKeyring } from "../keys";
 import type {
@@ -588,9 +588,13 @@ export class PonsAdapter implements EvmLaunchpadAdapter {
   // Helpers
   // -------------------------------------------------------------------------
 
-  /** Funder -> creator top-up, ceil to `fundStepWei` (round amounts), skipped if the creator already has enough. */
+  /**
+   * Funder -> creator top-up, ceil to `fundStepWei` (round amounts), skipped if the creator already has enough.
+   * Gas part = max(reserve, PONS_CREATE_GAS_LIMIT x current pool fee cap): a cap that rose after start-up
+   * tops the creator up (a retry on the same creator gets one more step) instead of a stuck create.
+   */
   private async fundCreator(creator: Address, txValue: bigint): Promise<EvmSideTx | null> {
-    const need = txValue + this.creatorGasReserveWei;
+    const need = txValue + creatorReserveWei(this.creatorGasReserveWei, this.ex.fees.maxFeePerGas);
     const have = await this.ex.balance(creator);
     if (have >= need) return null;
     const value = ceilToStep(need - have, this.fundStepWei);

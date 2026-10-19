@@ -453,7 +453,7 @@ Web: `NEXT_PUBLIC_API_URL_MAINNET=http://127.0.0.1:8081`, `NEXT_PUBLIC_ATTESTATI
 | `DATABASE_URL_RELAYER` | роль `unzeen_relayer` **БД hood-инстанса** (после миграций перезапустить `infra/relayer-role.sql`) |
 | `HOOD_VAULTS` (2), `HOOD_FUNDERS` (8), `HOOD_FEE_SWEEP=1` | число vault, число funder'ов в ротации, сбор комиссий создателя |
 | `HOOD_FUNDER_TARGET_WEI` / `_LOW_WEI` / `_LOT_WEI` | GAP-7: цель / порог / лот пополнения funder'а, по умолчанию 0.02 / 0.011 / 0.005 ETH (`low < target`, `lot ≤ target`, иначе релейер не стартует) |
-| `HOOD_CREATOR_FUND_STEP_WEI` / `HOOD_CREATOR_GAS_RESERVE_WEI` | шаг пополнения funder → creator (кратно ему, круглые суммы) и запас газа creator, по умолчанию 0.01 / 0.002 ETH. Запас < 5.6M gas × `maxFeePerGas` — релейер не стартует; WARN, если `HOOD_FUNDER_TARGET_WEI` не покрывает один create |
+| `HOOD_CREATOR_FUND_STEP_WEI` / `HOOD_CREATOR_GAS_RESERVE_WEI` | шаг пополнения funder → creator (кратно ему, круглые суммы) и запас газа creator, по умолчанию 0.01 / 0.002 ETH; оба кратны 0.0001 ETH. Запас < 6.0M gas × `maxFeePerGas` — релейер не стартует (при росте кэша комиссии creator доливается до 6.0M × fee); WARN, если `HOOD_FUNDER_TARGET_WEI` не покрывает один create |
 | `HOOD_FUNDER_POLL_SECS` | GAP-8: опрос адреса ребаланса на приход ETH, по умолчанию 300 с (30..3600) |
 | `HOOD_MAX_FEE_WEI`, `HOOD_RPC_MAX_RPS` | минимум единого `maxFeePerGas` (0,2 gwei) и лимит запросов |
 

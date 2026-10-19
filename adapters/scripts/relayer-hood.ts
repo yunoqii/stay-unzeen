@@ -12,7 +12,8 @@
  *   HOOD_CREATOR_FUND_STEP_WEI / HOOD_CREATOR_GAS_RESERVE_WEI (funder -> creator step and creator gas
  *   reserve, default 0.01 / 0.002 ETH; a reserve below one create's upfront gas refuses to start).
  *
- * Logs: event kind + outcome code + counts only. Never hashes, addresses, amounts or ids.
+ * Logs: event kind + outcome code + counts only. Never per-job hashes, addresses, amounts or ids;
+ * pool-wide config constants (env thresholds, fee cap, launch fee) at start-up are allowed.
  */
 import path from "node:path";
 import pg from "pg";
