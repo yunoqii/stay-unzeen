@@ -41,11 +41,15 @@ for i in "${INSTANCES[@]}"; do valid_inst "$i" || die "bad UNZEEN_INSTANCES entr
 api_port() { case "$1" in devnet) echo 8080;; mainnet) echo 8081;; hood) echo 8082;; esac; }
 api_host() { case "$1" in devnet) echo "$API_DEVNET_HOST";; mainnet) echo "$API_MAINNET_HOST";; hood) echo "$API_HOOD_HOST";; esac; }
 
-current_rel() { readlink -f "$OPT/current" 2>/dev/null || true; }
+# -e: empty while there is no current release (with -f the first deploy pointed "previous" at
+# the "current" link itself, so a rollback target never existed).
+current_rel() { readlink -e "$OPT/current" 2>/dev/null || true; }
 REL="${REL:-$(current_rel)}"
 
 dc() { # dc <release dir> <compose args...>
-  local rel="$1"; shift
+  # Loop variables in functions are local: callers iterate instances with "$i" too, and a
+  # global "$i" here made the deploy loop migrate and apply roles for the last instance only.
+  local rel="$1" i; shift
   [ -n "$rel" ] && [ -f "$rel/infra/deploy/compose.yml" ] || die "no release deployed yet (unzeenctl deploy <tag>)"
   local profiles=()
   for i in "${INSTANCES[@]}"; do profiles+=(--profile "$i"); done
@@ -96,7 +100,7 @@ os.replace(tmp, path)
 ' "$1" "$2"; }
 
 check_env() {
-  local bad=0 f
+  local bad=0 f i k
   for i in "${INSTANCES[@]}"; do
     f="$ETC/$i.env"
     [ -f "$f" ] || { echo "missing $f"; bad=1; continue; }
@@ -152,17 +156,32 @@ apply_roles() { # relayer + indexer roles; the env file is the source of truth f
   { printf "\\set pw '''%s'''\n" "$pw"; cat "$rel/infra/relayer-role.sql"; printf 'ALTER ROLE unzeen_relayer PASSWORD :pw;\n'; } \
     | psql_owner "$rel" "$inst" -q >/dev/null
   pw="$(url_password "$f" DATABASE_URL_INDEXER)"
+  # devnet/mainnet run intel-<inst>: without its role the indexer crash-loops on auth.
+  [ -n "$pw" ] || [ "$inst" = hood ] || die "$inst: DATABASE_URL_INDEXER has no password (unzeenctl keys $inst)"
   if [ -n "$pw" ]; then
     [[ "$pw" =~ ^[A-Za-z0-9]+$ ]] || die "$inst: role passwords must be alphanumeric"
     { printf "\\set pw '''%s'''\n" "$pw"; cat "$rel/infra/indexer-role.sql"; printf 'ALTER ROLE unzeen_indexer PASSWORD :pw;\n'; } \
       | psql_owner "$rel" "$inst" -q >/dev/null
   fi
   unset pw
-  say "$inst: roles applied"
+  role_login_check "$rel" "$inst" unzeen_relayer DATABASE_URL_RELAYER
+  [ "$inst" = hood ] || role_login_check "$rel" "$inst" unzeen_indexer DATABASE_URL_INDEXER
+  say "$inst: roles applied (login checked)"
+}
+
+role_login_check() { # role_login_check <rel> <inst> <role> <env key>: log in over TCP as the service does
+  # Via the service name, not 127.0.0.1 (pg_hba trusts loopback), so scram really checks the
+  # password. The password goes over stdin: never in argv, the container env or the output.
+  local rel="$1" inst="$2" role="$3" key="$4"
+  # shellcheck disable=SC2016  # $1/$2 expand inside the container shell
+  url_password "$ETC/$inst.env" "$key" \
+    | dc "$rel" exec -T "pg-$inst" sh -c 'IFS= read -r PGPASSWORD; export PGPASSWORD; exec psql -h "$1" -U "$2" -d unzeen -tAqc "SELECT 1"' \
+      sh "pg-$inst" "$role" >/dev/null 2>&1 \
+    || die "$inst: $role cannot log in with the password from $key (re-run 'unzeenctl roles $inst')"
 }
 
 check_proxy() {
-  local insecure=() bad=0 h p ce code
+  local insecure=() bad=0 h p ce code i
   [ "${1:-}" = "--insecure" ] && insecure=(-k)
   for i in "${INSTANCES[@]}"; do
     h="$(api_host "$i")"

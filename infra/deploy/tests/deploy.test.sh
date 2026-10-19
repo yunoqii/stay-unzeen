@@ -27,6 +27,72 @@ else
   echo "skip: shellcheck (no binary, no docker)"
 fi
 
+# unzeenctl: helpers must not clobber the caller's loop variable. The first VPS deploy (19.10)
+# migrated and applied roles for "hood" three times because dc() used a global "$i", so the
+# devnet/mainnet DBs never got unzeen_relayer / unzeen_indexer.
+python3 - "$D/bin/unzeenctl" <<'PY' && ok "unzeenctl: loop vars in functions are local" || bad "unzeenctl: function loop var not local"
+import re, sys
+src = open(sys.argv[1]).read()
+errs = []
+# Multi-line shell functions only (one-liners close on their own line, python helpers are not bash).
+for m in re.finditer(r"^([a-z_]+)\(\) \{([^\n]*)\n(.*?)^\}$", src, re.S | re.M):
+    name, head, body = m.group(1), m.group(2), m.group(3)
+    if "python3" in head or "}" in head.split("#")[0]:
+        continue
+    local = set()
+    for l in re.findall(r"^\s*local\s+(.*)$", body, re.M):
+        local |= {w.split("=")[0] for w in l.split()}
+    for v in set(re.findall(r"\bfor\s+([A-Za-z_]+)\s+in\b", body)) - local - {"_"}:
+        errs.append(f"{name}(): 'for {v}' without 'local {v}'")
+for e in errs: print("  " + e)
+sys.exit(1 if errs else 0)
+PY
+(
+  mkdir -p "$T/rel/infra/deploy"; : > "$T/rel/infra/deploy/compose.yml"
+  docker() { :; }
+  die() { echo "$*" >&2; exit 1; }
+  ETC="$T" PROJECT=p INSTANCES=(devnet mainnet hood)
+  eval "$(sed -n '/^dc() {/,/^}/p' "$D/bin/unzeenctl")"
+  seen=""
+  for i in "${INSTANCES[@]}"; do dc "$T/rel" ps; seen+="$i "; done
+  [ "$seen" = "devnet mainnet hood " ]
+) && ok "unzeenctl: dc() keeps the caller's instance" || bad "unzeenctl: dc() clobbers the caller's \$i"
+
+# Env templates: flag values match what core / adapters compare against (core and the adapters
+# only take "1" for most flags; the scanner's clap flags take 1/0 since 19.10).
+python3 - "$D"/env/*.env.example <<'PY' && ok "env templates: flag and number formats" || bad "env templates: flag/number format"
+import re, sys
+one_zero = {"UNZEEN_PAYOUTS", "UNZEEN_REBALANCE", "UNZEEN_CREATE_ENABLED", "UNZEEN_FAIR_LAUNCH", "UNZEEN_CHAT",
+    "UNZEEN_SCENARIOS", "UNZEEN_VERIFY_DAILY", "UNZEEN_STATS_DAILY", "UNZEEN_DISCOVERY", "INTEL_DISCOVERY",
+    "INTEL_DISCOVERY_LAUNCHLAB", "RELAYER_FEE_SWEEP", "HOOD_FEE_SWEEP", "UNZEEN_ALLOW_MAINNET_SEND",
+    "UNZEEN_ALLOW_MAINNET_ACTIONS", "UNZEEN_ALLOW_MAINNET_REBALANCE", "UNZEEN_QUOTE", "UNZEEN_REBALANCE_ZEC_SPL",
+    "UNZEEN_INTEL_FULL_TRADES", "NEXT_PUBLIC_HOOD"}
+words = {"UNZEEN_ALLOW_MAINNET": {"yes"}, "UNZEEN_ALLOW_HOOD_MAINNET": {"yes"}, "UNZEEN_HOOD": {"on"}}
+ints = re.compile(r"^(UNZEEN_CONFIRMATIONS|UNZEEN_MAX_PAYOUT_ZAT|MIN_CLAIM_ZAT|HOOD_VAULTS|HOOD_FUNDERS|"
+    r"SOLANA_SEND_MIN_INTERVAL_MS|UNZEEN_REBALANCE_[A-Z_]+_(ZAT|LAMPORTS|SECS)|UNZEEN_REBALANCE_MAX_PER_DAY|"
+    r"UNZEEN_PULSE_[A-Z_]+|UNZEEN_QUOTE_(RPS|ROUND_SECS|MAX_MINTS)|ALERT_REPEAT_SECS|[A-Z_]+_MAX_AGE_SECS|RL_[A-Z_]+)$")
+nums = re.compile(r"^(API_RL_[A-Z_]+|INTEL_READ_RPS|DEVNET_ZEC_SOL_RATE)$")
+errs = []
+for path in sys.argv[1:]:
+    for n, line in enumerate(open(path), 1):
+        line = line.rstrip("\n")
+        if not line or line.lstrip().startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if v == "":
+            continue
+        if k in one_zero and v not in ("0", "1"):
+            errs.append(f"{path}:{n}: {k}={v} (expected 0 or 1)")
+        elif k in words and v not in words[k]:
+            errs.append(f"{path}:{n}: {k}={v} (expected {'/'.join(sorted(words[k]))})")
+        elif ints.match(k) and not v.isdigit():
+            errs.append(f"{path}:{n}: {k}={v} (expected an integer)")
+        elif nums.match(k) and not re.fullmatch(r"\d+(\.\d+)?", v):
+            errs.append(f"{path}:{n}: {k}={v} (expected a number)")
+for e in errs: print("  " + e)
+sys.exit(1 if errs else 0)
+PY
+
 # Env dir from the templates.
 for f in stack devnet mainnet hood; do cp "$D/env/$f.env.example" "$T/$f.env"; done
 sed -i.bak "s#^UNZEEN_ETC=.*#UNZEEN_ETC=$T#" "$T/stack.env" && rm -f "$T/stack.env.bak"
