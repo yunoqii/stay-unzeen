@@ -1,8 +1,8 @@
 # Mainnet-прогон LITE: минимальный бюджет (внутренний план)
 
-Дата: 2026-10-19. Автор: analyst. Код сверен на HEAD `d878fb8`, только чтение. На mainnet ничего не отправлялось. Полный план: `docs/submission/mainnet-demo-run.md` (дальше просто «полный план»). Порядок шагов, пре-флайт, гарды, откат и «не показывать» берём оттуда. Здесь только то, что меняется.
+Дата: 2026-10-19. Автор: analyst. Код сверен на HEAD `d878fb8`, только чтение. **Обновлено 19.10 после `7b544af`** (env `HOOD_CREATOR_*` теперь есть, ревью: `docs/analysis/review-hood-l1.md`). На mainnet ничего не отправлялось. Полный план: `docs/submission/mainnet-demo-run.md` (дальше просто «полный план»). Порядок шагов, пре-флайт, гарды, откат и «не показывать» берём оттуда. Здесь только то, что меняется.
 
-**Вывод.** Минимальный путь на mainnet (депозит ZEC → баланс → create → buy → sell → withdraw → Verify) на Solana и на hood укладывается в **≈0.030 ZEC** из ZODL (вариант L1, нужна одна правка кода hood) или в **≈0.046 ZEC** без правок кода (вариант L0). Сгорит **≈$5–6** вместо $15–20. Почти всё остальное остаётся оборотным капиталом пула: его можно вернуть, либо он сразу возвращается выводом на камеру. Главное, что раздувало бюджет: лот 0.06 ZEC на hood под funder с запасом 0.022 ETH. Второе: шаг пополнения creator зашит в код, 0.01 ETH (`adapters/src/evm/pons/adapter.ts:179`).
+**Вывод.** Минимальный путь на mainnet (депозит ZEC → баланс → create → buy → sell → withdraw → Verify) на Solana и на hood укладывается в **≈0.030 ZEC** из ZODL (вариант L1, правка кода hood сделана в `7b544af`) или в **≈0.046 ZEC** без правок кода (вариант L0). Сгорит **≈$5–6** вместо $15–20. Почти всё остальное остаётся оборотным капиталом пула: его можно вернуть, либо он сразу возвращается выводом на камеру. Главное, что раздувало бюджет: лот 0.06 ZEC на hood под funder с запасом 0.022 ETH. Второе: шаг пополнения creator был зашит в код, 0.01 ETH. С `7b544af` он задаётся через `HOOD_CREATOR_FUND_STEP_WEI`.
 
 Курсы (`GET https://api-mainnet.169-58-209-71.sslip.io/api/rates`, 19.10): ZEC $1138.19, SOL $104.46, ETH $2409.32, ZEC/SOL 10.896, ZEC/ETH 0.4724.
 
@@ -23,10 +23,10 @@
 `timeEstimate` 452–454 с. Минимум 132 000 zat одинаков для SOL и ETH, валидация в коде есть (`rebalance.rs:176`). Спред на малых лотах около 0.3–0.5 %, в долларах это центы.
 
 ### 1.2 Robinhood Chain (RPC `https://rpc.mainnet.chain.robinhood.com`)
-- `eth_gasPrice` = base fee = **0.02046 gwei** (блок 92 700 328).
+- `eth_gasPrice` = base fee = **0.02046 gwei** (блок 92 700 328). Перепроверка 19.10 ≈17:10: **0.020368 gwei**, `eth_maxPriorityFeePerGas` = 0, блок 92 710 620. Пуловый кэш `maxFeePerGas` = max(ceil(base × 4, 0.1 gwei), пол 0.2) = **0.2 gwei**. Выше пола он уйдёт, только если base > 0.05 gwei. `eth_estimateGas` перевода = 21 000 (L1-компоненты нет), значит gasLimit перевода = 100k.
 - `launchFee()` фабрики Pons `0x7eD5…EC7e` = **0.0005 ETH**, `launchEnabled = true` (eth_call 19.10).
-- Create+buy ≈4.56M gas ≈ 0.00009 ETH ($0.23) (`docs/analysis/robinhood-chain.md:166`). Buy/sell ≈ $0.01 [не подтверждено симуляцией].
-- **Но:** Arbitrum требует на балансе `gasLimit × maxFeePerGas + value` заранее. При пуловом `maxFeePerGas` 0.2 gwei (`HOOD_MAX_FEE_WEI` по умолчанию) и gasLimit create ≈5.5M нужно ≈0.0011 ETH сверху. Это определяет минимальный запас газа у creator.
+- Create+buy ≈4.56M gas ≈ 0.00009 ETH ($0.23) (`docs/analysis/robinhood-chain.md:166`). Выборка 19.10, 36 чужих `launchAndBuy` за 40k блоков: gasUsed 3.73M / 3.86M / **4.61M** (min/медиана/max). Buy/sell ≈ $0.01 [не подтверждено симуляцией].
+- **Но:** Arbitrum требует на балансе `gasLimit × maxFeePerGas + value` заранее. При пуловом `maxFeePerGas` 0.2 gwei (`HOOD_MAX_FEE_WEI` по умолчанию) и gasLimit create 5.5–5.6M нужно ≈0.0011 ETH сверху. Код (`creator-funding.ts`) закладывает 5.6M × кэш = 0.00112 ETH. Это определяет минимальный запас газа у creator.
 - На Pons идут живые запуски: 197 логов фабрики за последние 50k блоков (≈1.4 ч).
 
 ### 1.3 pump.fun на mainnet (4 свежие tx `CreateV2` через публичный RPC, 19.10: `4qnNbhRkn6zB…`, `DMTZHoyuMcsF…`, `5K8pT4DLmkbb…`, `4UMRe1Mash3t…`)
@@ -54,8 +54,8 @@
 | `MIN_FUND_LAMPORTS` | `adapters/src/rebalance.rs:32` | 0.01 SOL | не мешает |
 | hood `FUND_STEP_WEI` (доли vault) | `adapters/src/evm/relayer/pool-state.ts:99` | 0.001 ETH, округление **вниз** | на 2 vault нужно ≥0.002 ETH к раздаче |
 | hood `fundVaults` gas reserve | `pool-state.ts:139` | 2M × maxFee = 0.0004 ETH | учесть в keep |
-| hood `fundStepWei` (funder→creator) | `adapters/src/evm/pons/adapter.ts:179` | **0.01 ETH, env нет** | creator получает минимум 0.01 ETH на любой create |
-| hood `creatorGasReserveWei` | `adapter.ts:178` | 0.002 ETH, env нет | — |
+| hood `fundStepWei` (funder→creator) | `adapters/src/evm/pons/creator-funding.ts:13`, env `HOOD_CREATOR_FUND_STEP_WEI` (с `7b544af`) | 0.01 ETH по умолчанию | без env creator получает минимум 0.01 ETH на любой create |
+| hood `creatorGasReserveWei` | `creator-funding.ts:15`, env `HOOD_CREATOR_GAS_RESERVE_WEI` (с `7b544af`) | 0.002 ETH по умолчанию | меньше 5.6M × кэш `maxFeePerGas`: релейер не стартует |
 | `HOOD_FUNDER_*_WEI` | `adapters/src/evm/funders.ts:46` | 0.02 / 0.011 / 0.005 | с правкой кода хватает 0.0026; без правки 0.0101 |
 | Пороги ключей аттестаций | `adapters/scripts/attest-keys.ts:37`, `relayer-run.ts:99`, `relayer-hood.ts:83` | 0.001 SOL / 0.0002 ETH | пополнять 0.002 SOL / 0.0003 ETH |
 
@@ -129,10 +129,12 @@ L0 отличается только hood: +0.016 ZEC оборотного. Из
 | `HOOD_FUNDER_TARGET_WEI` | `2600000000000000` | `10100000000000000` | ровно одно пополнение creator + газ (`funders.ts:pick`: нужно `value + 100k×maxFee`) |
 | `HOOD_FUNDER_LOW_WEI` | `2550000000000000` | `10050000000000000` | должно быть < target |
 | `HOOD_FUNDER_LOT_WEI` | `100000000000000` | `100000000000000` | 0.0001: пополнение ровно до target |
-| `HOOD_CREATOR_FUND_STEP_WEI` *(новая, §5)* | `500000000000000` | — | creator получает 0.0025 вместо 0.01 |
-| `HOOD_CREATOR_GAS_RESERVE_WEI` *(новая, §5)* | `1500000000000000` | — | ≥ gasLimit create 5.5M × 0.2 gwei = 0.0011 + запас |
+| `HOOD_CREATOR_FUND_STEP_WEI` *(с `7b544af`)* | `500000000000000` | — | creator получает 0.0025 вместо 0.01 |
+| `HOOD_CREATOR_GAS_RESERVE_WEI` *(с `7b544af`)* | `1800000000000000` (было 1500000000000000) | — | Стартовая проверка: ≥ 5.6M × кэш. 0.0018 проходит при кэше до 0.3 gwei (0.0015 только до 0.2). Перевод тот же: ceil(0.0005 + 0.0001 + 0.0018, 0.0005) = 0.0025. Ограничение: initial buy ≤ 0.0002 ETH, иначе шаг 0.003 > funder |
 | `HOOD_VAULTS` / `HOOD_FUNDERS` | `2` / `1` | то же | |
 | `HOOD_MAX_FEE_WEI` | не трогать (0.2 gwei) | то же | меньше 0.1 gwei кэш всё равно не опустится (`FEE_HEADROOM` 4 × base 0.02) |
+
+Проверки `7b544af` при живом газе 19.10 (кэш 0.2 gwei): старт 0.0018 ≥ 0.00112 ✓; WARN funder: ceil(0.0005 + 0.0018 + 1 wei, 0.0005) + 100k × 0.2 gwei = 0.00252 ≤ 0.0026 ✓; tx creator: 0.0006 + 5.6M × 0.2 gwei = 0.00172 ≤ 0.0025 ✓. В логе старта не должно быть `WARN HOOD_FUNDER_TARGET_WEI=… does not cover one create`. **Пре-флайт H5:** `eth_gasPrice` ≤ 0.05 gwei прямо перед create. Если base fee выше, кэш поднимется до 0.3+ gwei. При 0.4 gwei create с 0.0025 зависнет: отказ «insufficient funds», повтор на том же creator, review-hood-l1 M1. Тогда ждать снижения или поднять reserve и funder target на шаг 0.0005.
 
 Порядок денег hood L1. 1Click → `rebalance-0` (≈0.0054). `topUpOnArrival` → funder 0.0026. `fund_vaults` раздаёт 0.002 (две доли по 0.001). Create: funder → creator 0.0025, creator платит `launchFee` 0.0005 + initial buy 0.0001 + газ. Гонку «funder или fund_vaults первым» закрывает keep: при любом порядке денег хватает обоим.
 
@@ -174,7 +176,7 @@ L0 отличается только hood: +0.016 ZEC оборотного. Из
 
 ---
 
-## 5. Правка кода (только для L1; делает backend, не analyst)
+## 5. Правка кода (только для L1; делает backend, не analyst). **Сделано в `7b544af`**, ревью `docs/analysis/review-hood-l1.md`: блокеров нет, остаток M1 (`max(reserve, 5.6M × текущий fee)` в `fundCreator`) после прогона
 
 **Файл `adapters/src/evm/runtime.ts:54`.** Сейчас `new PonsAdapter({ executor, keyring, funders, deployment })`: `creatorGasReserveWei` и `fundStepWei` берутся из дефолтов `adapter.ts:178–179` (0.002 / 0.01 ETH), env для них нет.
 
@@ -202,7 +204,7 @@ L0 отличается только hood: +0.016 ZEC оборотного. Из
 Пополнить vault напрямую с внешнего кошелька (≈0.09 SOL + ≈0.005 ETH ≈ $21) и не делать ребаланс. Тогда из ZODL уходит только 0.009 ZEC (два депозита). Плюсы: нет ожидания 1Click и нет риска refund. Минусы: публичная связь кошелька оператора с vault (vault и так публичны через Verify, к пользователям она не ведёт). Главное: пропадает история «деньги входят только как ZEC». По сумме капитала выигрыш мал, по сгоранию выигрыша нет. **Не рекомендую.**
 
 ## Открытые вопросы лиду
-1. L1 (правка кода hood, ≈0.030 ZEC) или L0 (без правок, ≈0.046 ZEC)? Правка небольшая, около часа у backend с тестами, но её надо снова отдать на ревью.
+1. ~~L1 или L0?~~ Правка L1 в `7b544af`, ревью пройдено (`docs/analysis/review-hood-l1.md`). Остаётся L1 с reserve 0.0018.
 2. Solana buy: чужой T1 с живой панелью безопасности (+$0.35) или T2, без новой ренты, с пустой панелью? Рекомендую T1.
 3. Hood: сделка «buy → sell 100 %» без вывода токена устраивает? Вывод токена на hood: +0.0045 ZEC оборотных.
 4. Пресеты `/pay` (0.1 по умолчанию): дать frontend-задачу или снимать с ручным вводом?
