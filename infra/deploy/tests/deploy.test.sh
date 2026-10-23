@@ -153,4 +153,49 @@ UNZEEN_ETC="$T" bash "$D/bin/unzeenctl" check-env > "$T/out" 2>&1 && ok "check-e
 echo 'DEVNET_ZEC_SOL_RATE=11.5' >> "$T/mainnet.env"
 UNZEEN_ETC="$T" bash "$D/bin/unzeenctl" check-env > "$T/out" 2>&1 && bad "check-env accepted DEVNET_ZEC_SOL_RATE on mainnet" || ok "check-env refuses devnet rate on mainnet"
 
+# deploy --web: backend images of the current release get the new tag before current moves (the
+# 22.10 --web deploy left current at a tag without unzeen-core/unzeen-adapters, so restarts and
+# one-offs tried to pull them from Docker Hub). Stub docker/id/readlink, image store in a file.
+mkdir -p "$T/stub" "$T/opt/releases"
+cat > "$T/stub/docker" <<'SH'
+#!/usr/bin/env bash
+store="$STUB_STORE"
+case "$1 $2" in
+  "image inspect") grep -qx "$3" "$store";;
+  "tag "*) grep -qx "$2" "$store" && echo "$3" >> "$store";;
+  "compose "*) echo "compose ${*: -3}" >> "$STUB_LOG";;
+  *) exit 1;;
+esac
+SH
+printf '#!/bin/sh\necho 0\n' > "$T/stub/id"
+cat > "$T/stub/readlink" <<'SH'
+#!/bin/sh
+[ "$1" = -e ] || exit 1
+python3 -c 'import os,sys; p=os.path.realpath(sys.argv[1]); sys.exit(0 if os.path.exists(p) and print(p) is None else 1)' "$2"
+SH
+chmod +x "$T/stub/"*
+for r in aaa1111 bbb2222 ccc3333; do mkdir -p "$T/opt/releases/$r/infra/deploy"; cp "$D/compose.yml" "$T/opt/releases/$r/infra/deploy/"; done
+ln -sfn "$T/opt/releases/aaa1111" "$T/opt/current"      # state after a full deploy of aaa1111
+printf '%s\n' unzeen-core:aaa1111 unzeen-adapters:aaa1111 unzeen-web:aaa1111 unzeen-caddy:aaa1111 > "$T/store"
+ctl() { PATH="$T/stub:$PATH" STUB_STORE="$T/store" STUB_LOG="$T/log" UNZEEN_ETC="$T" UNZEEN_OPT="$T/opt" bash "$D/bin/unzeenctl" "$@"; }
+: > "$T/log"
+if ctl deploy bbb2222 --web > "$T/out" 2>&1 \
+   && grep -qx unzeen-core:bbb2222 "$T/store" && grep -qx unzeen-adapters:bbb2222 "$T/store" \
+   && [ "$(basename "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$T/opt/current")")" = bbb2222 ]; then
+  ok "deploy --web: backend images tagged with the new release"
+else cat "$T/out" "$T/log"; bad "deploy --web: backend tags missing for the new release"; fi
+grep -qE '^unzeen-(web|caddy):bbb2222$' "$T/store" && bad "deploy --web: retagged web/caddy (they are built)" || ok "deploy --web: web/caddy not retagged"
+# Chained --web (current is itself a --web release) works off the retagged images.
+ctl deploy ccc3333 --web > "$T/out" 2>&1 && grep -qx unzeen-core:ccc3333 "$T/store" && grep -qx unzeen-adapters:ccc3333 "$T/store" \
+  && ok "deploy --web after --web: backend tags carried over" || { cat "$T/out"; bad "deploy --web after --web"; }
+# Missing backend images: abort before build and before current moves.
+ln -sfn "$T/opt/releases/aaa1111" "$T/opt/current"
+grep -vx unzeen-adapters:aaa1111 "$T/store" > "$T/store2"; mv "$T/store2" "$T/store"
+: > "$T/log"
+if ctl deploy bbb2222 --web > "$T/out" 2>&1; then bad "deploy --web accepted missing backend images"
+elif grep -q "unzeen-adapters:aaa1111" "$T/out" && [ ! -s "$T/log" ] \
+   && [ "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$T/opt/current")" = "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$T/opt/releases/aaa1111")" ]; then
+  ok "deploy --web refuses missing backend images (no build, current kept)"
+else cat "$T/out" "$T/log"; bad "deploy --web missing images: wrong error or current moved"; fi
+
 exit $fail

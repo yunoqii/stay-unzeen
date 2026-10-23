@@ -21,7 +21,7 @@
 set -euo pipefail
 
 ETC="${UNZEEN_ETC:-/etc/unzeen}"
-OPT=/opt/unzeen
+OPT="${UNZEEN_OPT:-/opt/unzeen}"
 PROJECT=unzeen-vps
 APP_UID=10001
 
@@ -55,6 +55,30 @@ dc() { # dc <release dir> <compose args...>
   for i in "${INSTANCES[@]}"; do profiles+=(--profile "$i"); done
   UNZEEN_TAG="${UNZEEN_TAG:-$(basename "$rel")}" \
     docker compose -p "$PROJECT" -f "$rel/infra/deploy/compose.yml" --env-file "$ETC/stack.env" "${profiles[@]}" "$@"
+}
+
+# Backend images of a release: every unzeen-* image tagged ${UNZEEN_TAG} in compose, except web/caddy.
+backend_images() {
+  grep -oE 'unzeen-[a-z0-9-]+:[$][{]UNZEEN_TAG' "$1/infra/deploy/compose.yml" | cut -d: -f1 | sort -u \
+    | grep -vxE 'unzeen-(web|caddy)' || true
+}
+
+# --web builds web + caddy only, but compose and the one-offs take the tag from basename(current):
+# give the running backend images (tag of the current release) the new tag too, before current moves.
+retag_backend() { # retag_backend <new release dir> <new tag>
+  local rel="$1" tag="$2" prev old img imgs missing=()
+  prev="$(current_rel)"
+  [ -n "$prev" ] || die "--web needs a full deploy first (no current release)"
+  old="$(basename "$prev")"
+  [ "$old" = "$tag" ] && return 0
+  read -r -a imgs <<< "$(backend_images "$rel" | tr '\n' ' ')"
+  [ "${#imgs[@]}" -gt 0 ] || die "no backend images found in $rel/infra/deploy/compose.yml"
+  for img in "${imgs[@]}"; do
+    docker image inspect "$img:$old" >/dev/null 2>&1 || missing+=("$img:$old")
+  done
+  [ "${#missing[@]}" -eq 0 ] || die "--web: backend images of the current release missing: ${missing[*]} (run a full 'unzeenctl deploy $tag'); current not switched"
+  for img in "${imgs[@]}"; do docker tag "$img:$old" "$img:$tag"; done
+  say "backend images $old tagged $tag: ${imgs[*]}"
 }
 
 vault_open() { mountpoint -q "$VAULT" && [ -f "$VAULT/.unzeen-volume" ]; }
@@ -260,6 +284,7 @@ case "$cmd" in
     rel="$OPT/releases/$tag"; [ -n "$tag" ] && [ -d "$rel" ] || die "usage: deploy <tag> [--web]; releases: $(find "$OPT/releases" -mindepth 1 -maxdepth 1 -printf '%f ')"
     export UNZEEN_TAG="$tag"
     if [ "$mode" = "--web" ]; then
+      retag_backend "$rel" "$tag"
       dc "$rel" build web caddy
       dc "$rel" up -d --no-deps web caddy
       ln -sfn "$rel" "$OPT/current"
