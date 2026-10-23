@@ -37,6 +37,7 @@
 - Ресёрч Solana + правила хакатона: `docs/analysis/solana-launchpads.md`, `docs/analysis/hackathon-rules.md`
 
 ## В работе
+- 23.10 (владелец): платные RPC отключены — остановлены relayer-*, intel-*, scanner-hood (devnet/mainnet/hood). Работают web, caddy, api-*, pg-*, scanner-devnet/mainnet (только lightwalletd). Вернуть: `sudo unzeenctl start relayer-devnet relayer-mainnet relayer-hood intel-devnet intel-mainnet scanner-hood`. Перед mainnet-прогоном — обязательно.
 - 19.10: **VPS задеплоен** (Contabo, `https://169-58-209-71.sslip.io`, релиз 86ec1af): зашифрованный том, 3 сети, 16 контейнеров healthy; devnet перенесён с Mac (кошелёк, vault, БД, demo-ключи); кошельки пула mainnet и hood созданы, ключи Solana/EVM сгенерированы, pubkey аттестаций вшиты в web; Pinata JWT, Alchemy RPC hood; env под lite-лоты. Mainnet-прогон по `docs/submission/mainnet-demo-run-lite.md` (≈0.0295 ZEC) — 20.10 с записью экрана.
 - ранее: devnet e2e (15.10) пройден вживую целиком — депозит, pump.fun/DBC create/buy/sell, ордера, выводы токенов и ZEC, сценарии, Verify с якорем, чат, creator fees, fair-launch с 3 tlock-заявками, UI в браузере. Найденные баги закрыты (sub-lamport оценка, minOut=0 после перезагрузки и на сервере, минимум до среза, импакт и комиссии кривой из FeeConfig, выбор vault для нового mint, порядок actions, диапазон initial buy).
 - Ждёт владельца: mainnet Solana (~0.5 SOL, 0.05–0.1 ZEC), Robinhood (~0.022 ETH, RPC 4663, решение по сабмиту), подготовка деплоя.
