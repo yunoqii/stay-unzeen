@@ -172,7 +172,40 @@ pub async fn sample(st: &AppState) -> ApiResult<()> {
     )
     .await
     .map_err(db)?;
+    sync_pool_prices(st, &c, now).await?;
     Ok(())
+}
+
+/// Solana: `tokens.price_sol` is written by the relayer after the pool's own trades only, so
+/// trades by anyone else on the venue left it stale (devnet 18.10–23.10; on mainnet a bot buy
+/// between create and the next pool buy makes the UI's 1 % minOut unreachable). Copy the
+/// indexer's newer tick price (public chain data, on core's own timer, never per request) into
+/// `tokens` when it differs; `market_cap_sol` scales with it (same supply). Only fresh ticks
+/// (≤ `TOKEN_CURVE_MAX_AGE_MS`) newer than the last write, same status, SOL pairs only (ZEC
+/// pairs are priced by `value_zec_pair`). Robinhood Chain has no indexer: untouched.
+pub async fn sync_pool_prices(
+    st: &AppState,
+    c: &unzeen_ledger::deadpool_postgres::Object,
+    now_ms: i64,
+) -> ApiResult<u64> {
+    if crate::actions::is_hood(st) {
+        return Ok(0);
+    }
+    c.execute(
+        "UPDATE tokens t
+            SET market_cap_sol = CASE WHEN t.price_sol > 0
+                                      THEN round(t.market_cap_sol * p.price_sol / t.price_sol, 9)
+                                      ELSE t.market_cap_sol END,
+                price_sol = p.price_sol
+           FROM intel_prices p
+          WHERE p.mint = t.mint AND t.quote_mint IS NULL AND p.status = t.status AND p.price_sol > 0
+            AND p.tick_at >= $1
+            AND p.tick_at > COALESCE((extract(epoch FROM t.price_at) * 1000)::bigint, 0)
+            AND p.price_sol IS DISTINCT FROM t.price_sol",
+        &[&(now_ms - unzeen_ledger::curve::TOKEN_CURVE_MAX_AGE_MS)],
+    )
+    .await
+    .map_err(db)
 }
 
 // ------------------------------------------------------------------ token extras

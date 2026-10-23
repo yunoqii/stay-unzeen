@@ -6419,6 +6419,59 @@ mod comfort_v028 {
         e.drop_schema().await;
     }
 
+    /// B2 (pre-submit audit 23.10): trades by others moved the curve, `tokens.price_sol` kept the
+    /// pool's last trade. The sampler copies a newer, fresh indexer tick (price, cap scaled).
+    #[tokio::test]
+    async fn sampler_syncs_pool_price_from_fresh_tick() {
+        let Some(e) = setup().await else {
+            return;
+        };
+        let s = e.schema.clone();
+        let t = now();
+        e.sql(&format!(
+            "INSERT INTO {s}.tokens (mint, venue, symbol, name, decimals, price_sol, market_cap_sol, status) VALUES
+               ('{P1}', 'pumpfun', 'P1', 'P1', 6, 0.00000003, 30, 'curve'),
+               ('{DBC}', 'pumpfun', 'D', 'D', 6, 0.00000003, 30, 'curve');
+             UPDATE {s}.tokens SET price_at = now() - interval '5 days';
+             INSERT INTO {s}.intel_prices (mint, price_sol, status, tick_at) VALUES
+               ('{P1}', 0.000000045, 'curve', {t}),
+               ('{DBC}', 0.000000045, 'curve', {stale});",
+            stale = t - 200_000
+        ))
+        .await;
+        unzeen_api::comfort::sample(&e.state).await.unwrap();
+        let v = e.get(&format!("/api/tokens/{P1}")).await.body;
+        assert_eq!(v["priceSol"], "0.000000045");
+        assert_eq!(v["marketCapSol"], "45");
+        let fresh = e
+            .one_i64(&format!(
+                "SELECT (price_at > now() - interval '1 minute')::int::bigint FROM {s}.tokens WHERE mint = '{P1}'"
+            ))
+            .await;
+        assert_eq!(fresh, 1);
+        // A tick older than 180 s is not copied.
+        let d = e.get(&format!("/api/tokens/{DBC}")).await.body;
+        assert_eq!(d["priceSol"], "0.00000003");
+        // The pool's own later trade wins over an older tick.
+        e.sql(&format!(
+            "UPDATE {s}.tokens SET price_sol = 0.00000005 WHERE mint = '{P1}';
+             UPDATE {s}.intel_prices SET price_sol = 0.00000004, tick_at = {old} WHERE mint = '{P1}';",
+            old = t - 60_000
+        ))
+        .await;
+        unzeen_api::comfort::sample(&e.state).await.unwrap();
+        assert_eq!(e.get(&format!("/api/tokens/{P1}")).await.body["priceSol"], "0.00000005");
+        // Different status (graduated by the indexer) or a ZEC pair: untouched.
+        e.sql(&format!(
+            "UPDATE {s}.intel_prices SET price_sol = 0.00000009, status = 'graduated', tick_at = {n} WHERE mint = '{P1}'",
+            n = now() + 1_000
+        ))
+        .await;
+        unzeen_api::comfort::sample(&e.state).await.unwrap();
+        assert_eq!(e.get(&format!("/api/tokens/{P1}")).await.body["priceSol"], "0.00000005");
+        e.drop_schema().await;
+    }
+
     /// Core's estimates follow the token's curve state: the sell minimum (B2) and a fired
     /// order's min_out, from a thin DBC-like / pump curve the venue's launch row knows nothing of.
     #[tokio::test]

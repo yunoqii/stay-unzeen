@@ -283,7 +283,7 @@ interface Token {
   mint: string; symbol: string; name: string; image?: string;
   venue: Venue; status: "curve" | "graduated";
   decimals: number;      // decimals SPL-токена
-  priceSol: string;      // десятичная строка: SOL за 1 целый токен (UI-единицы)
+  priceSol: string;      // десятичная строка: SOL за 1 целый токен (UI-единицы). Solana (23.10): кроме сделок пула, core раз в 20 с копирует сюда более новую цену тика индексатора (≤ 180 с, тот же статус, SOL-пары), чтобы чужие сделки не делали её устаревшей
   priceTs?: number;      // v0.23: время последней записи цены пулом, unix мс, вниз до 10 с; нет — цены нет (hood: сравнивать с PoolInfo.chain.priceMaxAgeSecs)
   marketCapSol: string;  // десятичная строка, SOL (UI-единицы)
   createdAt: number;     // unix ms

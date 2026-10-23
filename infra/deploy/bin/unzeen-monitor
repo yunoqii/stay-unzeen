@@ -102,9 +102,19 @@ if mountpoint -q "$VAULT"; then
     [ -n "$n" ] && [ "$n" != 0 ] && fire "payout-held-$i" "$i: $n ZEC payout(s) waiting > 30 min (above cap? unzeenctl scanner $i payout list-held)"
     n="$(sql "$i" "SELECT count(*) FROM zec_payouts WHERE status = 'sent' AND updated_at < now() - interval '2 hours'")"
     [ -n "$n" ] && [ "$n" != 0 ] && fire "payout-stuck-$i" "$i: $n ZEC payout(s) sent > 2 h without confirmation"
-    age="$(sql "$i" "SELECT COALESCE(extract(epoch FROM now() - max(price_at))::bigint, -1) FROM tokens")"
-    if [ -n "$age" ] && [ "$age" -gt "$PRICE_MAX" ] 2>/dev/null; then
-      fire "price-$i" "$i: newest token price is ${age}s old (stale_price for buy/sell; indexer/relayer down?)"
+    if [ "$i" = hood ]; then
+      # Robinhood Chain: buy/sell need tokens.price_at newer than priceMaxAgeSecs (relayer pool-state).
+      age="$(sql "$i" "SELECT COALESCE(extract(epoch FROM now() - max(price_at))::bigint, -1) FROM tokens")"
+      if [ -n "$age" ] && [ "$age" -gt "$PRICE_MAX" ] 2>/dev/null; then
+        fire "price-$i" "$i: newest token price is ${age}s old (stale_price for buy/sell; relayer down?)"
+      fi
+    else
+      # Solana: no stale_price guard; tokens.price_at only moves on a price change. The live feed is the
+      # indexer tick of pool tokens on the curve (core copies it into tokens, comfort sampler).
+      age="$(sql "$i" "SELECT COALESCE(extract(epoch FROM now())::bigint - max(p.tick_at) / 1000, -1) FROM intel_prices p JOIN tokens t ON t.mint = p.mint WHERE t.status = 'curve' AND t.quote_mint IS NULL")"
+      if [ -n "$age" ] && [ "$age" -gt "$PRICE_MAX" ] 2>/dev/null; then
+        fire "price-$i" "$i: indexer price tick of pool tokens is ${age}s old (curve state and minOut estimates stale; intel down?)"
+      fi
     fi
     age="$(sql "$i" "SELECT COALESCE(extract(epoch FROM now() - max(updated_at))::bigint, -1) FROM pool_sol_inventory")"
     if [ -n "$age" ] && [ "$age" -gt "$INV_MAX" ] 2>/dev/null; then
