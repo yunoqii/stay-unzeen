@@ -224,13 +224,16 @@ describe("tick and decoys (docs/INTEL.md)", () => {
     const fresh = { mint: keyS(), hot: true, asOf: now - 60_000 };
     const staleHot = { mint: keyS(), hot: true, asOf: now - 6 * 60_000 };
     const freshCold = { mint: keyS(), hot: false, asOf: now - 20 * 60_000 };
-    const none = Array.from({ length: 25 }, () => ({ mint: keyS(), hot: false, asOf: null }));
+    // Without a snapshot only pinned / discovery entries are refreshed here (card-lane mints wait for a main batch).
+    const none = Array.from({ length: 25 }, (_, i) => ({ mint: keyS(), hot: false, asOf: null, ...(i % 2 ? { pinned: true } : { discovery: true }) }));
     const due = pickWarmDue([fresh, staleHot, freshCold, ...none], now, seededRng(6));
     expect(due).toHaveLength(20);
     expect(due).not.toContain(fresh.mint);
     expect(due).not.toContain(freshCold.mint);
     expect(due).not.toContain(staleHot.mint); // 25 without snapshot come first
     expect(pickWarmDue([fresh, staleHot, freshCold], now, seededRng(6))).toEqual([staleHot.mint]);
+    const carded = { mint: keyS(), hot: false, asOf: null };
+    expect(pickWarmDue([staleHot, carded], now, seededRng(6))).toEqual([staleHot.mint]);
   });
 });
 

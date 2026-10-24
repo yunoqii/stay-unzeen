@@ -74,6 +74,8 @@ export interface WarmEntry {
   pinned?: boolean;
   /** as_of of the current snapshot (unix ms), null = none yet. */
   asOf: number | null;
+  /** Admitted discovery candidate (public create stream): snapshotted ahead of any click. */
+  discovery?: boolean;
 }
 
 /** Token card for mints not in `tokens` (intel_tokens). */
@@ -115,6 +117,24 @@ export interface TickCommit {
   prices?: PriceRow[];
   /** UNZEEN_INTEL_FULL_TRADES=1: trades of hot warm mints since the last tick (`market_trades`). */
   marketTrades?: MarketTradeRow[];
+  /**
+   * Active discovery candidates (public create stream, never user-driven): kept in the warm set
+   * (intel_warm.expires_at >= now + 1 h, renewed every tick) so their snapshots exist before a click.
+   */
+  discovery?: string[];
+}
+
+/** What one card-lane tick writes (ONE transaction): token cards only, never token_safety rows. */
+export interface CardCommit {
+  /** Minute of the card tick start (unix ms). */
+  asOf: number;
+  /** Start of the next card tick (intel_meta.next_card_at: retryAfterMs of GET /api/tokens/:mint). */
+  nextCardAt: number;
+  cards: TokenCard[];
+  /** Not an SPL mint -> token_safety.missing (404 at once). */
+  missing: string[];
+  /** Every mint of the card batch (real and decoys alike): intel_warm.expires_at >= now + 15 min. */
+  batch: string[];
 }
 
 /** `intel_prices` row: SOL per 1 whole token (> 0), curve status. */
@@ -150,6 +170,8 @@ export interface IntelStore {
   /** Socials / image already in the current snapshot (uri JSON is immutable): no refetch. */
   offchain(mint: string): Promise<OffchainInfo | null>;
   commitTick(t: TickCommit): Promise<void>;
+  /** Card lane: cards (+ missing) of one card batch, one transaction. Never consumes the queue. */
+  commitCards(c: CardCommit): Promise<void>;
 }
 
 export interface OffchainInfo {

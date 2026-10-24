@@ -1,4 +1,4 @@
-import type { CurveUpdate, IntelStore, OffchainInfo, TickCommit, TokenCard, TokenSafety, WarmEntry, PriceRow } from "./types";
+import type { CardCommit, CurveUpdate, IntelStore, OffchainInfo, TickCommit, TokenCard, TokenSafety, WarmEntry, PriceRow } from "./types";
 
 /**
  * In-memory IntelStore for tests and `pnpm intel:run --memory`. Same
@@ -20,6 +20,8 @@ export class MemoryIntelStore implements IntelStore {
   readonly commits: TickCommit[] = [];
   subscriptions: TickCommit["subscriptions"] = [];
   meta: { nextTickAt: number; lastTickAt: number } | null = null;
+  readonly cardCommits: CardCommit[] = [];
+  nextCardAt: number | null = null;
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -82,6 +84,11 @@ export class MemoryIntelStore implements IntelStore {
       const w = this.warm.get(m);
       this.warm.set(m, { hot: w?.hot ?? false, pinned: w?.pinned ?? false, expiresAt: Math.max(w?.expiresAt ?? 0, exp) });
     }
+    const dexp = this.now() + 3600_000;
+    for (const m of t.discovery ?? []) {
+      const w = this.warm.get(m);
+      this.warm.set(m, { hot: w?.hot ?? false, pinned: w?.pinned ?? false, expiresAt: Math.max(w?.expiresAt ?? 0, dexp) });
+    }
     for (const m of t.consumed) {
       const i = this.lookups.indexOf(m);
       if (i >= 0) this.lookups.splice(i, 1);
@@ -102,5 +109,20 @@ export class MemoryIntelStore implements IntelStore {
     }
     this.subscriptions = t.subscriptions;
     this.meta = { nextTickAt: t.nextTickAt, lastTickAt: t.tickStartedAt };
+  }
+
+  async commitCards(c: CardCommit): Promise<void> {
+    this.cardCommits.push(c);
+    for (const card of c.cards) this.cards.set(card.mint, card);
+    for (const m of c.missing) {
+      if (this.safety.has(m)) continue;
+      this.missing.add(m);
+    }
+    const exp = this.now() + 15 * 60_000;
+    for (const m of c.batch) {
+      const w = this.warm.get(m);
+      this.warm.set(m, { hot: w?.hot ?? false, pinned: w?.pinned ?? false, expiresAt: Math.max(w?.expiresAt ?? 0, exp) });
+    }
+    this.nextCardAt = c.nextCardAt;
   }
 }

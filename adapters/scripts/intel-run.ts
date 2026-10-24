@@ -81,8 +81,13 @@ async function main(): Promise<void> {
     if (cfg.streamUrl) tradeStream = new ParsedTradeStream(cfg.streamUrl, { maxPerHour: cfg.tradesMaxPerHour });
     else log("WARN UNZEEN_INTEL_FULL_TRADES=1 but no Parsed Streams URL (INTEL_TRADES_STREAM_URL / Helius key, mainnet): feed off");
   }
+  let discovery: Discovery | null = null;
   const indexer = new IntelIndexer({
     store,
+    // Card lane (INTEL.md): fixed 6–10 s base snapshots so a cold CA opens in ~10 s. INTEL_CARD_LANE=0 turns it off.
+    cardLane: process.env.INTEL_CARD_LANE?.trim() !== "0",
+    // Discovery candidates are pre-indexed (warm set): public stream, never user-driven.
+    discoveryMints: () => discovery?.activeMints() ?? [],
     reader,
     rng: cryptoRng,
     offchain: { media, ipfsGateway: cfg.ipfsGateway },
@@ -104,7 +109,6 @@ async function main(): Promise<void> {
     `tick #${r.tick} batch=${r.batch} warm=${r.warm} saved=${r.saved} missing=${r.missing} subs+${r.subsAdded}/-${r.subsRemoved} errors=${r.errors} ${r.ms}ms next=${Math.round(r.nextInMs / 1000)}s`;
   // Discovery (FEATURES 9): all fresh pump.fun / DBC tokens, OFF unless INTEL_DISCOVERY=1. Own tick, public stream only.
   const dcfg = loadDiscoveryConfig(cfg.cluster);
-  let discovery: Discovery | null = null;
   if (dcfg.enabled) {
     if (!dcfg.rpcUrl) throw new Error("INTEL_DISCOVERY=1 needs INTEL_DISCOVERY_RPC_URL_* or SOLANA_RPC_URL_* (Helius)");
     const chain = new RpcDiscoveryChain(dcfg.rpcUrl, { rps: dcfg.rps, wsUrl: dcfg.wsUrl });
@@ -176,8 +180,21 @@ async function main(): Promise<void> {
       }
       for (const s of createFeed) s.stop?.();
     })();
+    // Card lane: one summary line per 10 card ticks (counts only).
+    const agg = { n: 0, batch: 0, cards: 0, missing: 0, errors: 0, ms: 0 };
+    const onCard = (r: Awaited<ReturnType<IntelIndexer["cardTick"]>>) => {
+      agg.n++;
+      agg.batch += r.batch;
+      agg.cards += r.cards;
+      agg.missing += r.missing;
+      agg.errors += r.errors;
+      agg.ms = Math.max(agg.ms, r.ms);
+      if (agg.n < 10) return;
+      log(`cards x${agg.n} batch=${agg.batch} cards=${agg.cards} missing=${agg.missing} errors=${agg.errors} max=${agg.ms}ms`);
+      Object.assign(agg, { n: 0, batch: 0, cards: 0, missing: 0, errors: 0, ms: 0 });
+    };
     await Promise.all([
-      indexer.run(ac.signal, (r) => log(fmt(r) + (r.trades !== undefined ? ` trades=${r.trades}` : ""))),
+      indexer.run(ac.signal, (r) => log(fmt(r) + (r.trades !== undefined ? ` trades=${r.trades}` : "")), onCard),
       discovery ? discovery.run(ac.signal, (r) => log(dfmt(r))) : Promise.resolve(),
       feed,
     ]);

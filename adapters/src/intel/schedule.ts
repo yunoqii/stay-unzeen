@@ -15,6 +15,17 @@ export const MAX_REAL_PER_BATCH = 4;
 /** Warm set entries refreshed per tick at most (docs/INTEL.md). */
 export const WARM_PER_TICK = 20;
 export const HOT_INTERVAL_MS = 5 * 60_000;
+/**
+ * Card lane (docs/INTEL.md "Быстрая карточка"): its own fixed timer, uniform
+ * 6–10 s, independent of any request. Each card tick reads a base snapshot
+ * (mint, metadata, curve: ONE getMultipleAccounts on the read provider, no
+ * index calls) of a fixed-size batch, so a cold CA gets its token card within
+ * ~10 s; the full safety snapshot follows on the main tick.
+ */
+export const CARD_TICK_BASE_MS = 8_000;
+export const CARD_TICK_JITTER_MS = 2_000;
+/** Discovery candidates kept in the warm set (newest first). */
+export const DISCOVERY_WARM_MAX = 250;
 export const WARM_INTERVAL_MS = 30 * 60_000;
 
 /** Delay to the next tick: uniform 45–75 s (60 ± 15), independent of any request. */
@@ -71,7 +82,12 @@ export function pickWarmDue(
   hotMs = HOT_INTERVAL_MS,
   warmMs = WARM_INTERVAL_MS,
 ): string[] {
-  const due = entries.filter((e) => !exclude.has(e.mint) && (e.asOf === null || now - e.asOf >= (e.hot ? hotMs : warmMs)));
+  // An entry without a snapshot is refreshed only when it is pinned or a discovery candidate: the
+  // card lane's batch mints sit in the warm set briefly (their cards must survive core's warm sync)
+  // and get their full snapshot from a main-tick batch, never from this pass.
+  const due = entries.filter(
+    (e) => !exclude.has(e.mint) && (e.asOf === null ? e.pinned === true || e.discovery === true : now - e.asOf >= (e.hot ? hotMs : warmMs)),
+  );
   // Ties broken randomly so equal ages do not keep a stable (observable) order.
   const keyed = shuffle(due, rng).sort((a, b) => (a.asOf ?? -1) - (b.asOf ?? -1));
   return shuffle(keyed.slice(0, max).map((e) => e.mint), rng);

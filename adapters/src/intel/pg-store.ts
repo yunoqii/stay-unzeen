@@ -1,7 +1,7 @@
 import { curveJson } from "./curves";
 import type pg from "pg";
 import type { CreatorPubkeyFile } from "../keys";
-import type { IntelStore, OffchainInfo, TickCommit, TokenSafety, WarmEntry } from "./types";
+import type { CardCommit, IntelStore, OffchainInfo, TickCommit, TokenCard, TokenSafety, WarmEntry } from "./types";
 
 /**
  * IntelStore on core's tables (docs/INTEL.md v1, migration 0007), role
@@ -155,6 +155,38 @@ export class PgIntelStore implements IntelStore {
     return this.tradesWritable;
   }
 
+  /**
+   * Card lane (docs/INTEL.md): cards of one card batch, one transaction. A missing mint never
+   * replaces an existing snapshot; the queue and intel_meta.next_tick_at are untouched.
+   */
+  async commitCards(k: CardCommit): Promise<void> {
+    const c = await this.db.connect();
+    try {
+      await c.query("BEGIN");
+      const asOf = k.asOf / 1000;
+      // Cards first, then the warm set: the same table order as commitTick.
+      for (const m of [...k.missing].sort()) {
+        await c.query(
+          `INSERT INTO token_safety (mint, as_of, missing, data) VALUES ($1, to_timestamp($2), TRUE, NULL) ON CONFLICT (mint) DO NOTHING`,
+          [m, asOf],
+        );
+      }
+      for (const card of [...k.cards].sort((a, b) => (a.mint < b.mint ? -1 : 1))) await upsertCard(c, card, asOf);
+      await extendWarm(c, k.batch, "15 minutes");
+      await c.query(
+        `INSERT INTO intel_meta (key, value, updated_at) VALUES ('next_card_at', $1, now())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+        [String(k.nextCardAt)],
+      );
+      await c.query("COMMIT");
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => undefined);
+      throw e;
+    } finally {
+      c.release();
+    }
+  }
+
   async commitTick(t: TickCommit): Promise<void> {
     const trades = t.marketTrades && t.marketTrades.length > 0 && (await this.canWriteTrades()) ? t.marketTrades : [];
     // One row per mint: a duplicate in one INSERT ... ON CONFLICT DO UPDATE aborts the whole tick.
@@ -163,38 +195,26 @@ export class PgIntelStore implements IntelStore {
     try {
       await c.query("BEGIN");
       const asOf = t.asOf / 1000;
-      for (const row of t.rows) {
+      // Sorted rows: the card lane writes the same tables concurrently (same lock order, no deadlock).
+      for (const row of [...t.rows].sort((a, b) => (a.mint < b.mint ? -1 : 1))) {
         await c.query(
           `INSERT INTO token_safety (mint, as_of, missing, data) VALUES ($1, to_timestamp($2), FALSE, $3::jsonb)
            ON CONFLICT (mint) DO UPDATE SET as_of = EXCLUDED.as_of, missing = FALSE, data = EXCLUDED.data`,
           [row.mint, asOf, JSON.stringify(safetyData(row))],
         );
       }
-      for (const m of t.missing) {
+      for (const m of [...t.missing].sort()) {
         await c.query(
           `INSERT INTO token_safety (mint, as_of, missing, data) VALUES ($1, to_timestamp($2), TRUE, NULL)
            ON CONFLICT (mint) DO UPDATE SET as_of = EXCLUDED.as_of, missing = TRUE, data = NULL`,
           [m, asOf],
         );
       }
-      for (const card of t.cards) {
-        await c.query(
-          `INSERT INTO intel_tokens (mint, venue, symbol, name, image, decimals, status, price_sol, market_cap_sol, created_at, as_of)
-           SELECT $1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, to_timestamp($10), to_timestamp($11)
-            WHERE NOT EXISTS (SELECT 1 FROM tokens WHERE mint = $1)
-           ON CONFLICT (mint) DO UPDATE SET venue = EXCLUDED.venue, symbol = EXCLUDED.symbol, name = EXCLUDED.name,
-             image = EXCLUDED.image, decimals = EXCLUDED.decimals, status = EXCLUDED.status, price_sol = EXCLUDED.price_sol,
-             market_cap_sol = EXCLUDED.market_cap_sol, as_of = EXCLUDED.as_of`,
-          [card.mint, card.venue, card.symbol, card.name, card.image, card.decimals, card.status, card.priceSol, card.marketCapSol, card.createdAt / 1000, asOf],
-        );
-      }
-      if (t.batch.length > 0) {
-        await c.query(
-          `INSERT INTO intel_warm (mint, expires_at) SELECT unnest($1::text[]), now() + interval '7 days'
-           ON CONFLICT (mint) DO UPDATE SET expires_at = GREATEST(intel_warm.expires_at, EXCLUDED.expires_at)`,
-          [t.batch],
-        );
-      }
+      for (const card of [...t.cards].sort((a, b) => (a.mint < b.mint ? -1 : 1))) await upsertCard(c, card, asOf);
+      // Sorted: the card lane upserts intel_warm concurrently, same lock order = no deadlock.
+      await extendWarm(c, t.batch, "7 days");
+      // Discovery candidates (public stream): renewed every tick, they expire 1 h after leaving discovery.
+      await extendWarm(c, t.discovery ?? [], "1 hour");
       if (t.consumed.length > 0) await c.query("DELETE FROM intel_requests WHERE mint = ANY($1::text[])", [t.consumed]);
       for (const u of t.curveUpdates) {
         // Live curve state since the last snapshot; written only now, with the tick's minute.
@@ -269,6 +289,28 @@ export class PgIntelStore implements IntelStore {
       c.release();
     }
   }
+}
+
+async function upsertCard(c: pg.PoolClient, card: TokenCard, asOf: number): Promise<void> {
+  await c.query(
+    `INSERT INTO intel_tokens (mint, venue, symbol, name, image, decimals, status, price_sol, market_cap_sol, created_at, as_of)
+     SELECT $1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, to_timestamp($10), to_timestamp($11)
+      WHERE NOT EXISTS (SELECT 1 FROM tokens WHERE mint = $1)
+     ON CONFLICT (mint) DO UPDATE SET venue = EXCLUDED.venue, symbol = EXCLUDED.symbol, name = EXCLUDED.name,
+       image = COALESCE(EXCLUDED.image, intel_tokens.image), decimals = EXCLUDED.decimals, status = EXCLUDED.status,
+       price_sol = EXCLUDED.price_sol, market_cap_sol = EXCLUDED.market_cap_sol, as_of = GREATEST(intel_tokens.as_of, EXCLUDED.as_of)`,
+    [card.mint, card.venue, card.symbol, card.name, card.image, card.decimals, card.status, card.priceSol, card.marketCapSol, card.createdAt / 1000, asOf],
+  );
+}
+
+/** intel_warm.expires_at >= now + `ttl` for every mint (never shortened); sorted lock order. */
+async function extendWarm(c: pg.PoolClient, mints: readonly string[], ttl: "7 days" | "1 hour" | "15 minutes"): Promise<void> {
+  if (mints.length === 0) return;
+  await c.query(
+    `INSERT INTO intel_warm (mint, expires_at) SELECT unnest($1::text[]), now() + $2::interval
+     ON CONFLICT (mint) DO UPDATE SET expires_at = GREATEST(intel_warm.expires_at, EXCLUDED.expires_at)`,
+    [[...new Set(mints)].sort(), ttl],
+  );
 }
 
 /** token_safety.data: TokenSafety without mint / asOf / unzeen (core sets them) and without holders.asOf. */

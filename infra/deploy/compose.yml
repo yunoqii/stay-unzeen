@@ -247,6 +247,8 @@ services:
       <<: *adapters-env
       DATABASE_URL_RELAYER: ""
       SOLANA_KEYS_AGE_KEY_FILE: ""
+      # Token images mirrored into the same media dir the API serves (/data/home/<cluster>/media).
+      UNZEEN_METADATA_BASE_URL: https://${API_DEVNET_HOST}/media
     depends_on: { api-devnet: { condition: service_healthy } }
     networks: [devnet]
     volumes:
@@ -314,6 +316,8 @@ services:
       <<: *adapters-env
       DATABASE_URL_RELAYER: ""
       SOLANA_KEYS_AGE_KEY_FILE: ""
+      # Token images mirrored into the same media dir the API serves (/data/home/<cluster>/media).
+      UNZEEN_METADATA_BASE_URL: https://${API_MAINNET_HOST}/media
     depends_on: { api-mainnet: { condition: service_healthy } }
     networks: [mainnet]
     volumes:

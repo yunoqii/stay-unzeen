@@ -591,6 +591,11 @@ export class Discovery {
     return r;
   }
 
+  /** Active candidates, newest first (public stream; the indexer keeps them in its warm set). */
+  activeMints(): string[] {
+    return [...this.active.values()].sort((a, b) => b.createdAt - a.createdAt).map((c) => c.mint);
+  }
+
   async run(signal: AbortSignal, onTick?: (r: DiscoveryReport) => void): Promise<void> {
     while (!signal.aborted) {
       const rep = await this.tick();

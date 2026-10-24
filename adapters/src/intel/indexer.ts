@@ -36,8 +36,19 @@ import {
 } from "./metrics";
 import { fetchOffchain, type OffchainDeps } from "./offchain";
 import { isMintAddress, type ChainReader } from "./reader";
-import { BATCH_SIZE, MAX_REAL_PER_BATCH, SubscriptionPlanner, assembleBatch, nextTickDelay, pickWarmDue, tickBoundary } from "./schedule";
-import type { CurveUpdate, IntelStore, MarketTradeRow, OffchainInfo, PriceRow, TickCommit, TokenCard, TokenSafety } from "./types";
+import {
+  BATCH_SIZE,
+  CARD_TICK_BASE_MS,
+  CARD_TICK_JITTER_MS,
+  DISCOVERY_WARM_MAX,
+  MAX_REAL_PER_BATCH,
+  SubscriptionPlanner,
+  assembleBatch,
+  nextTickDelay,
+  pickWarmDue,
+  tickBoundary,
+} from "./schedule";
+import type { CardCommit, CurveUpdate, IntelStore, MarketTradeRow, OffchainInfo, PriceRow, TickCommit, TokenCard, TokenSafety, WarmEntry } from "./types";
 
 /**
  * Intel indexer (pnpm intel:run), contract: docs/INTEL.md v1.
@@ -53,6 +64,20 @@ import type { CurveUpdate, IntelStore, MarketTradeRow, OffchainInfo, PriceRow, T
  * 4. everything is written in one transaction (store.commitTick), with
  *    as_of = minute of the tick start and next_tick_at.
  * Logs and TickReport: batch size, warm count, durations, error counts only.
+ *
+ * Card lane (`cardLane: true`, docs/INTEL.md "Быстрая карточка"): its own fixed
+ * timer (uniform 6–10 s, never woken by a request). Every card tick takes a
+ * batch of EXACTLY 8 mints (<= 4 queued CAs not carded yet + decoys), reads a
+ * base snapshot (one getMultipleAccounts on the read provider, no index calls)
+ * and writes token cards only, so GET /api/tokens/:mint answers 200 within
+ * ~10 s. The queue is consumed by the main tick as before (full safety); when
+ * the card lane runs, the main batch takes only CAs that already went through
+ * a card batch and draws its decoys from the card batches since the previous
+ * main tick, so every mint of a main batch was in a card batch (no "the one
+ * that was never carded" signal for the read provider).
+ *
+ * Discovery (`discoveryMints`): active candidates of the public create stream
+ * join the warm set, so they are snapshotted before anyone opens them.
  */
 
 export interface CurveWatcher {
@@ -140,6 +165,16 @@ export class PollingCurveWatcher implements CurveWatcher {
 
 export interface IndexerOptions {
   store: IntelStore;
+  /**
+   * Card lane (docs/INTEL.md): fixed 6–10 s timer, base snapshots of a fixed-size batch, cards only.
+   * Default off (tests drive tick() directly); intel-run turns it on.
+   */
+  cardLane?: boolean;
+  /**
+   * Active discovery candidates (public create stream, never user-driven). They join the warm set
+   * (newest first, at most DISCOVERY_WARM_MAX) and are snapshotted ahead of any click.
+   */
+  discoveryMints?: () => readonly string[];
   reader: ChainReader;
   rng: Rng;
   now?: () => number;
@@ -185,6 +220,17 @@ export interface IndexerOptions {
   /** Randomness of the price sampling moment (default: CSPRNG, independent of the tick rng). */
   priceRng?: Rng;
   sleep?: (ms: number) => Promise<void>;
+}
+
+/** Card lane counts only (never mints, never real/decoy). */
+export interface CardReport {
+  tick: number;
+  batch: number;
+  cards: number;
+  missing: number;
+  errors: number;
+  ms: number;
+  nextInMs: number;
 }
 
 /** Counts only: nothing here tells a request from a decoy. */
@@ -246,6 +292,17 @@ export class IntelIndexer {
   private dbcConfigState: PoolConfig | null = null;
   private ticks = 0;
   private decoyCursor: string | null = null;
+  /** Card lane: queued CAs already carded (mint -> when), mints of card batches since the last main batch. */
+  private readonly carded = new Map<string, number>();
+  private cardSeen = new Set<string>();
+  private cardTicks = 0;
+  /** Last main tick's warm set and pool facts (card lane decoys / T1 sets). */
+  private warmCache: string[] = [];
+  private poolCache: PoolSets | null = null;
+  /** Successful off-chain fetches (uri JSON is immutable): no second fetch between card and main tick. */
+  private readonly offOk = new Map<string, OffchainInfo>();
+  /** Card and main commits never overlap (same tables, one process). */
+  private commitChain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly o: IndexerOptions) {
     this.now = o.now ?? Date.now;
@@ -281,6 +338,20 @@ export class IntelIndexer {
         this.o.store.poolCreators(),
       ]);
       const pool: PoolSets = { launches, vaults, creators };
+      this.poolCache = pool;
+      // Discovery candidates (public create stream): warm entries, snapshotted before any click.
+      const disc = this.discoveryList();
+      if (disc.length > 0) {
+        const ds = new Set(disc);
+        const have = new Set<string>();
+        for (const w of warm) {
+          have.add(w.mint);
+          if (ds.has(w.mint)) w.discovery = true;
+        }
+        for (const m of disc) if (!have.has(m)) warm.push({ mint: m, hot: false, pinned: false, asOf: null, discovery: true } satisfies WarmEntry);
+        commit.discovery = disc;
+      }
+      this.warmCache = warm.map((w) => w.mint);
       // 0. Price pass (INTEL v2): ALL pinned mints, every tick, at a random moment inside the
       // tick. The set depends on nothing but `pinned` (orders never cause a read).
       const pinned = warm.filter((w) => w.pinned).map((w) => w.mint);
@@ -297,9 +368,15 @@ export class IntelIndexer {
       }
 
       // 1. The batch: always 8 when the pools allow it, queue or not.
-      const real = [...new Set((await this.o.store.peekLookups(MAX_REAL_PER_BATCH)).filter(isMintAddress))];
+      // Card lane on: only CAs that already went through a card batch, decoys from the card batches
+      // since the previous main batch (every mint of this batch was carded, real or not).
+      const peeked = (await this.o.store.peekLookups(this.o.cardLane ? 4 * MAX_REAL_PER_BATCH : MAX_REAL_PER_BATCH)).filter(isMintAddress);
+      const real = [...new Set(this.o.cardLane ? peeked.filter((m) => this.carded.has(m)) : peeked)].slice(0, MAX_REAL_PER_BATCH);
       const queued = new Set(real);
-      const b = assembleBatch(real, [...this.recent, ...warm.map((w) => w.mint)], this.o.rng, BATCH_SIZE);
+      const seen = [...this.cardSeen].filter((m) => !queued.has(m));
+      this.cardSeen = new Set();
+      const decoyPool = this.o.cardLane && seen.length >= BATCH_SIZE - real.length ? seen : [...seen, ...this.recent, ...warm.map((w) => w.mint)];
+      const b = assembleBatch(real, decoyPool, this.o.rng, BATCH_SIZE);
       report.batch = b.mints.length;
       if (b.mints.length > 0) {
         try {
@@ -317,6 +394,8 @@ export class IntelIndexer {
       }
       const malformed = (await this.o.store.peekLookups(MAX_REAL_PER_BATCH)).filter((m) => !isMintAddress(m) && !queued.has(m));
       commit.consumed.push(...malformed);
+      for (const m of commit.consumed) this.carded.delete(m);
+      for (const [m, at] of this.carded) if (started - at > 15 * 60_000) this.carded.delete(m);
 
       // 2. Warm set by snapshot age.
       const due = pickWarmDue(warm, started, this.o.rng, new Set(b.mints));
@@ -359,7 +438,7 @@ export class IntelIndexer {
     report.priced = commit.prices.length;
     // 4. One transaction. Even when everything failed, next_tick_at is published.
     try {
-      await this.o.store.commitTick(commit);
+      await this.serialized(() => this.o.store.commitTick(commit));
       report.saved = commit.rows.length;
       report.missing = commit.missing.length;
     } catch {
@@ -369,8 +448,88 @@ export class IntelIndexer {
     return report;
   }
 
-  /** Runs ticks until `signal` aborts. `onTick` gets counts only. */
-  async run(signal: AbortSignal, onTick: (r: TickReport) => void = () => undefined): Promise<void> {
+  /** Newest discovery candidates (valid mints, at most DISCOVERY_WARM_MAX). */
+  private discoveryList(): string[] {
+    if (!this.o.discoveryMints) return [];
+    try {
+      return [...new Set(this.o.discoveryMints())].filter(isMintAddress).slice(0, DISCOVERY_WARM_MAX);
+    } catch {
+      return [];
+    }
+  }
+
+  private serialized<T>(f: () => Promise<T>): Promise<T> {
+    const r = this.commitChain.then(f, f);
+    this.commitChain = r.catch(() => undefined);
+    return r;
+  }
+
+  /**
+   * One card-lane tick (docs/INTEL.md): a batch of exactly 8 mints (<= 4 queued CAs that have no
+   * card from this lane yet, the rest decoys), base snapshot only (no index calls), cards written.
+   * Never throws. Waits for the first main tick (decoy pool, T1 sets).
+   */
+  async cardTick(): Promise<CardReport> {
+    const started = this.now();
+    const asOf = tickBoundary(started);
+    const nextInMs = nextTickDelay(this.o.rng, CARD_TICK_BASE_MS, CARD_TICK_JITTER_MS);
+    this.cardTicks++;
+    const rep: CardReport = { tick: this.cardTicks, batch: 0, cards: 0, missing: 0, errors: 0, ms: 0, nextInMs };
+    const k: CardCommit = { asOf, nextCardAt: started + nextInMs, cards: [], missing: [], batch: [] };
+    const pool = this.poolCache;
+    try {
+      if (pool) {
+        const peeked = (await this.o.store.peekLookups(4 * MAX_REAL_PER_BATCH)).filter(isMintAddress);
+        const real = [...new Set(peeked.filter((m) => !this.carded.has(m)))].slice(0, MAX_REAL_PER_BATCH);
+        const b = assembleBatch(real, [...this.recent, ...this.warmCache], this.o.rng, BATCH_SIZE);
+        rep.batch = b.mints.length;
+        if (b.mints.length > 0) {
+          try {
+            const r = await this.snapshot(b.mints, asOf, pool, { base: true });
+            k.cards = r.cards;
+            k.missing = r.missing;
+            k.batch = b.mints.filter((m) => !r.failed.has(m));
+            rep.errors += r.failed.size;
+          } catch {
+            rep.errors++;
+          }
+        }
+        for (const m of k.batch) this.cardSeen.add(m);
+        for (const m of real) if (k.batch.includes(m)) this.carded.set(m, started);
+      }
+    } catch {
+      rep.errors++;
+    }
+    try {
+      await this.serialized(() => this.o.store.commitCards(k));
+      rep.cards = k.cards.length;
+      rep.missing = k.missing.length;
+    } catch {
+      rep.errors++;
+    }
+    rep.ms = this.now() - started;
+    return rep;
+  }
+
+  /** Runs ticks until `signal` aborts. `onTick` / `onCardTick` get counts only. */
+  async run(signal: AbortSignal, onTick: (r: TickReport) => void = () => undefined, onCardTick: (r: CardReport) => void = () => undefined): Promise<void> {
+    const cards = this.o.cardLane ? this.runCards(signal, onCardTick) : Promise.resolve();
+    await this.runMain(signal, onTick);
+    await cards;
+  }
+
+  private async runCards(signal: AbortSignal, onCardTick: (r: CardReport) => void): Promise<void> {
+    while (!signal.aborted) {
+      const r = await this.cardTick();
+      onCardTick(r);
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, Math.max(500, r.nextInMs - r.ms));
+        signal.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
+      });
+    }
+  }
+
+  private async runMain(signal: AbortSignal, onTick: (r: TickReport) => void): Promise<void> {
     while (!signal.aborted) {
       const r = await this.tick();
       onTick(r);
@@ -519,7 +678,9 @@ export class IntelIndexer {
     mints: readonly string[],
     asOf: number,
     ps: PoolSets,
+    opts: { base?: boolean } = {},
   ): Promise<{ rows: TokenSafety[]; cards: TokenCard[]; missing: string[]; failed: Set<string> }> {
+    const base = opts.base === true;
     const vaults = ps.vaults;
     const failed = new Set<string>();
     const pks = mints.map((m) => new PublicKey(m));
@@ -592,7 +753,7 @@ export class IntelIndexer {
     });
 
     // Index provider: one getTokenLargestAccounts per mint, decoys included.
-    if (this.o.reader.hasIndex) {
+    if (this.o.reader.hasIndex && !base) {
       for (const w of work) {
         try {
           w.largest = await this.o.reader.getTokenLargestAccounts(w.mint);
@@ -618,7 +779,8 @@ export class IntelIndexer {
       if (w.largest) w.devAtas.forEach(want);
       if (w.pool) want(w.pool.lpMint);
     }
-    const accs2 = second.length > 0 ? await this.o.reader.getMultipleAccounts(second) : [];
+    // Base snapshot (card lane): no second read (holders / LP burn come with the full snapshot).
+    const accs2 = second.length > 0 && !base ? await this.o.reader.getMultipleAccounts(second) : [];
     const acc2 = (k: PublicKey | string) => accs2[idx.get(typeof k === "string" ? k : k.toBase58()) ?? -1] ?? null;
 
     const rows: TokenSafety[] = [];
@@ -626,7 +788,7 @@ export class IntelIndexer {
     for (const w of work) {
       if (failed.has(w.key)) continue;
       try {
-        const { row, card } = await this.buildRow(w, asOf, vaults, acc2);
+        const { row, card } = await this.buildRow(w, asOf, vaults, acc2, base);
         rows.push(row);
         cards.push(card);
       } catch {
@@ -655,6 +817,7 @@ export class IntelIndexer {
     asOf: number,
     vaults: ReadonlySet<string>,
     acc2: (k: PublicKey | string) => AccountInfo<Buffer> | null,
+    base = false,
   ): Promise<{ row: TokenSafety; card: TokenCard }> {
     const dbcCfg = this.dbcConfigState;
     const dbc = w.dbc && dbcCfg ? w.dbc : null;
@@ -730,7 +893,7 @@ export class IntelIndexer {
     if (off?.image) row.image = off.image;
 
     // Any venue: first blocks come from the mint's own signatures (pump.fun, DBC, LaunchLab).
-    if (this.o.full) await this.fullTier(w.mint, w.key, w.facts.supply, vaults, row, w.unzeen);
+    if (this.o.full && !base) await this.fullTier(w.mint, w.key, w.facts.supply, vaults, row, w.unzeen);
 
     const pc =
       w.curve && onCurve
@@ -755,13 +918,19 @@ export class IntelIndexer {
 
   private async offchainFor(mint: string, uri: string | null): Promise<OffchainInfo | null> {
     if (!this.o.offchain || !uri) return null;
+    const mem = this.offOk.get(mint);
+    if (mem) return mem;
     const cached = await this.o.store.offchain(mint);
     if (cached) return cached;
     const failedAt = this.offFailed.get(mint);
     if (failedAt !== undefined && this.now() - failedAt < (this.o.offchainRetryMs ?? 6 * 3600_000)) return null;
     const info = await fetchOffchain(uri, this.o.offchain).catch(() => ({ fetchedAt: this.now(), ok: false }) as OffchainInfo);
     if (!info.ok) this.offFailed.set(mint, this.now());
-    else this.offFailed.delete(mint);
+    else {
+      this.offFailed.delete(mint);
+      if (this.offOk.size >= 5_000) this.offOk.delete(this.offOk.keys().next().value!);
+      this.offOk.set(mint, info);
+    }
     return info;
   }
 

@@ -43,13 +43,39 @@ pub fn retry_after_ms(next_tick_at: Option<i64>, now: i64) -> i64 {
     }
 }
 
-pub async fn pending(c: &Client) -> ApiResult<Response> {
-    let next: Option<i64> = c
-        .query_opt("SELECT value FROM intel_meta WHERE key = 'next_tick_at'", &[])
+/// Extra time after `next_card_at` for the card lane to read and write its batch.
+const CARD_MARGIN_MS: i64 = 3_000;
+
+/// `retryAfterMs` of a cold `GET /api/tokens/:mint`: the indexer's card lane (fixed 6–10 s
+/// timer, docs/INTEL.md) when it publishes a live schedule, else the main tick.
+pub fn card_retry_after_ms(next_card_at: Option<i64>, next_tick_at: Option<i64>, now: i64) -> i64 {
+    match next_card_at {
+        Some(t) if t + 30_000 >= now => (t - now + CARD_MARGIN_MS).max(1_000),
+        _ => retry_after_ms(next_tick_at, now),
+    }
+}
+
+async fn meta_ms(c: &Client, key: &str) -> ApiResult<Option<i64>> {
+    Ok(c
+        .query_opt("SELECT value FROM intel_meta WHERE key = $1", &[&key])
         .await
         .map_err(db)?
-        .and_then(|r| r.get::<_, String>(0).parse().ok());
-    let retry = retry_after_ms(next, crate::rate::now_ms() as i64);
+        .and_then(|r| r.get::<_, String>(0).parse().ok()))
+}
+
+/// 202 for `GET /api/tokens/:mint` (token card pending): retry on the card lane's schedule.
+pub async fn pending_card(c: &Client) -> ApiResult<Response> {
+    let card = meta_ms(c, "next_card_at").await?;
+    let tick = meta_ms(c, "next_tick_at").await?;
+    Ok(pending_response(card_retry_after_ms(card, tick, crate::rate::now_ms() as i64)))
+}
+
+pub async fn pending(c: &Client) -> ApiResult<Response> {
+    let next = meta_ms(c, "next_tick_at").await?;
+    Ok(pending_response(retry_after_ms(next, crate::rate::now_ms() as i64)))
+}
+
+fn pending_response(retry: i64) -> Response {
     let mut r = (
         StatusCode::ACCEPTED,
         Json(json!({ "status": "pending", "retryAfterMs": retry })),
@@ -59,7 +85,7 @@ pub async fn pending(c: &Client) -> ApiResult<Response> {
     if let Ok(h) = HeaderValue::from_str(&format!("public, max-age={secs}")) {
         r.headers_mut().insert(header::CACHE_CONTROL, h);
     }
-    Ok(r)
+    r
 }
 
 /// Queue a cold mint for the next tick (bounded; pool tokens are pinned in the warm set and
@@ -376,6 +402,17 @@ mod tests {
             "unzeen": { "launch": true, "rules": ["fake"] },
             "extra": 1
         })
+    }
+
+    #[test]
+    fn card_retry_prefers_a_live_card_lane() {
+        let now = 1_000_000;
+        assert_eq!(card_retry_after_ms(Some(now + 5_000), Some(now + 50_000), now), 8_000);
+        // Card lane due right now: at least 1 s.
+        assert_eq!(card_retry_after_ms(Some(now - 4_000), None, now), 1_000);
+        // Card lane stale (off / down): the main tick's schedule.
+        assert_eq!(card_retry_after_ms(Some(now - 60_000), Some(now + 20_000), now), 30_000);
+        assert_eq!(card_retry_after_ms(None, None, now), DEFAULT_RETRY_MS);
     }
 
     #[test]

@@ -343,9 +343,10 @@ async fn cold_token(st: &AppState, c: &unzeen_ledger::deadpool_postgres::Object,
         }
         // A safety snapshot without a token card (indexer still writing): wait for the tick.
         Some(false) => crate::intel::pending(c).await,
+        // v0.29: the card lane writes the token card within ~10 s; retry on its schedule.
         None => {
             crate::intel::enqueue(st, c, mint).await?;
-            crate::intel::pending(c).await
+            crate::intel::pending_card(c).await
         }
     }
 }
