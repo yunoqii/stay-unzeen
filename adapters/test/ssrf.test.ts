@@ -55,6 +55,16 @@ describe("checkUrl", () => {
     "",
   ])("rejects %s", (u) => expect(() => checkUrl(u, GW)).toThrow(SsrfError));
 
+  it("rewrites public gateway links (path and subdomain style) to our one gateway", () => {
+    const cid = "bafkreia5srcytkvbkn2hedwejljmwjxb5gcpmfxtlgcwo3six2mu62wbwu";
+    expect(checkUrl(`https://ipfs.io/ipfs/${cid}`, GW).toString()).toBe(`${GW}/${cid}`);
+    expect(checkUrl(`https://pump.mypinata.cloud/ipfs/${cid}/a.png?img-width=64`, GW).toString()).toBe(`${GW}/${cid}/a.png`);
+    expect(checkUrl(`https://${cid}.ipfs.dweb.link/`, GW).toString()).toBe(`${GW}/${cid}`);
+    expect(checkUrl(`https://${cid}.ipfs.w3s.link/meta.json`, GW).toString()).toBe(`${GW}/${cid}/meta.json`);
+    // Not a known gateway: left alone (and still SSRF-checked).
+    expect(checkUrl(`https://example.com/ipfs/${cid}`, GW).toString()).toBe(`https://example.com/ipfs/${cid}`);
+  });
+
   it("rewrites ipfs:// to our one gateway", () => {
     const cid = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
     expect(checkUrl(`ipfs://${cid}`, GW).toString()).toBe(`${GW}/${cid}`);
@@ -220,6 +230,21 @@ describe("off-chain metadata", () => {
     expect(info.ok).toBe(true);
     expect(info.image).toMatch(/^https:\/\/unzeen\.example\/media\/[0-9a-f]{40}\.jpg$/);
     expect(stored[0]!.includes(Buffer.from(MARK))).toBe(false);
+    expect(info.socials).toEqual({ twitter: "https://x.com/abc" });
+  });
+
+  it("an image the gateway refuses (429) is flagged for a retry; socials still count", async () => {
+    const info = await fetchOffchain("https://meta.example/m.json", {
+      media: { putMedia: async (name) => `https://unzeen.example/media/${name}` },
+      ipfsGateway: GW,
+      fetcher: async (url) => {
+        if (url.endsWith(".json")) return { body: Buffer.from(JSON.stringify({ image: "ipfs://bafkreia5srcytkvbkn2hedwejljmwjxb5gcpmfxtlgcwo3six2mu62wbwu", twitter: "x.com/abc" })), contentType: null };
+        throw new SsrfError("http 429");
+      },
+    });
+    expect(info.ok).toBe(true);
+    expect(info.imageFailed).toBe(true);
+    expect(info.image).toBeUndefined();
     expect(info.socials).toEqual({ twitter: "https://x.com/abc" });
   });
 

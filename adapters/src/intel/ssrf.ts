@@ -124,12 +124,38 @@ export type PinnedRequest = (
   o: { timeoutMs: number; maxBytes: number; accept: string },
 ) => Promise<{ status: number; location: string | null; contentType: string | null; body: Buffer }>;
 
+/**
+ * Public IPFS gateways token authors link to (pump.fun writes https://ipfs.io/ipfs/<cid>). Their
+ * paths are rewritten to OUR one gateway: ipfs.io / dweb.link answer 429 to our host (24.10), and
+ * one gateway means one more party sees the CIDs, not several.
+ */
+const PUBLIC_IPFS_GATEWAYS = new Set([
+  "ipfs.io", "gateway.ipfs.io", "dweb.link", "cloudflare-ipfs.com", "cf-ipfs.com", "gateway.pinata.cloud",
+  "nftstorage.link", "w3s.link", "4everland.io", "ipfs.filebase.io", "ipfs.4everland.io",
+]);
+
+function ipfsPath(s: string): { cid: string; rest: string } | null {
+  const scheme = /^ipfs:\/\/(?:ipfs\/)?([A-Za-z0-9]{20,100})(\/[^\s?#]*)?$/.exec(s);
+  if (scheme) return { cid: scheme[1]!, rest: scheme[2] ?? "" };
+  // https://<public gateway>/ipfs/<cid>[/path], or https://<anything>.mypinata.cloud/ipfs/<cid>.
+  const path = /^https:\/\/([a-z0-9.-]+)\/ipfs\/([A-Za-z0-9]{20,100})(\/[^\s?#]*)?(?:[?#].*)?$/i.exec(s);
+  if (path) {
+    const host = path[1]!.toLowerCase();
+    if (PUBLIC_IPFS_GATEWAYS.has(host) || host.endsWith(".mypinata.cloud")) return { cid: path[2]!, rest: path[3] ?? "" };
+  }
+  // Subdomain gateways: https://<cid>.ipfs.<gateway>/[path].
+  const sub = /^https:\/\/([a-z0-9]{50,100})\.ipfs\.([a-z0-9.-]+)(\/[^\s?#]*)?(?:[?#].*)?$/i.exec(s);
+  if (sub && PUBLIC_IPFS_GATEWAYS.has(sub[2]!.toLowerCase())) return { cid: sub[1]!, rest: sub[3] && sub[3] !== "/" ? sub[3] : "" };
+  return null;
+}
+
 /** Validates and normalizes a token-author URL. Throws SsrfError. */
 export function checkUrl(raw: string, ipfsGateway: string): URL {
   const s = raw.trim();
   if (s.length === 0 || s.length > 512) throw new SsrfError("bad url length");
   let u: URL;
-  const ipfs = /^ipfs:\/\/(?:ipfs\/)?([A-Za-z0-9]{20,100})(\/[^\s?#]*)?$/.exec(s);
+  const p = ipfsPath(s);
+  const ipfs = p ? [s, p.cid, p.rest] : null;
   try {
     u = ipfs ? new URL(`${ipfsGateway.replace(/\/+$/, "")}/${ipfs[1]}${ipfs[2] ?? ""}`) : new URL(s);
   } catch {

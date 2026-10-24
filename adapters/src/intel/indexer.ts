@@ -921,16 +921,18 @@ export class IntelIndexer {
     const mem = this.offOk.get(mint);
     if (mem) return mem;
     const cached = await this.o.store.offchain(mint);
-    if (cached) return cached;
+    if (cached?.image) return cached;
+    // No image yet (gateway 429 / timeout last time): retried after offchainRetryMs, old socials kept.
     const failedAt = this.offFailed.get(mint);
-    if (failedAt !== undefined && this.now() - failedAt < (this.o.offchainRetryMs ?? 6 * 3600_000)) return null;
+    if (failedAt !== undefined && this.now() - failedAt < (this.o.offchainRetryMs ?? 10 * 60_000)) return cached;
     const info = await fetchOffchain(uri, this.o.offchain).catch(() => ({ fetchedAt: this.now(), ok: false }) as OffchainInfo);
-    if (!info.ok) this.offFailed.set(mint, this.now());
+    if (!info.ok || info.imageFailed) this.offFailed.set(mint, this.now());
     else {
       this.offFailed.delete(mint);
       if (this.offOk.size >= 5_000) this.offOk.delete(this.offOk.keys().next().value!);
       this.offOk.set(mint, info);
     }
+    if (!info.ok) return cached;
     return info;
   }
 

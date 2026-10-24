@@ -49,7 +49,7 @@ export async function fetchOffchain(uri: string, d: OffchainDeps): Promise<Offch
       const img = await sanitizeImage(r.body); // re-encoded from pixels: no EXIF/XMP/ICC, no polyglot tail
       info.image = await d.media.putMedia(contentName(img.bytes, img.ext), img.bytes, img.mime);
     } catch {
-      /* no image: socials still count */
+      info.imageFailed = true; // socials still count; the image is retried later
     }
   }
   return info;

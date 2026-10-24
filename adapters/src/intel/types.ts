@@ -179,6 +179,8 @@ export interface OffchainInfo {
   image?: string;
   fetchedAt: number;
   ok: boolean;
+  /** The JSON names an image but it could not be fetched / re-encoded (429, timeout): retry later. */
+  imageFailed?: boolean;
 }
 
 /** `market_trades` row (INTEL.md): public trade, tags already applied (T1 respected). */

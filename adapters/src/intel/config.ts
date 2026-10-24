@@ -68,7 +68,8 @@ export function loadIntelConfig(env: NodeJS.ProcessEnv = process.env): IntelConf
     indexUrl,
     indexSource,
     rps: Number.isFinite(rps) && rps > 0 ? Math.min(rps, 10) : 5,
-    ipfsGateway: env.INTEL_IPFS_GATEWAY?.trim() || "https://ipfs.io/ipfs",
+    // ipfs.io / dweb.link rate-limit our VPS (429, 24.10); Filebase answered every probe in < 60 ms.
+    ipfsGateway: env.INTEL_IPFS_GATEWAY?.trim() || "https://ipfs.filebase.io/ipfs",
     full: env.INTEL_FULL?.trim() === "1",
     curveMode: curveMode(env.INTEL_CURVE_MODE),
     fullTrades: env.UNZEEN_INTEL_FULL_TRADES?.trim() === "1",
