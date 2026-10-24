@@ -10,6 +10,7 @@ import {
   Discovery,
   MemoryDiscoveryStore,
   PUMP_MINT_AUTHORITY,
+  PumpLogsSource,
   PumpPollSource,
   dbcCreatesFromNotification,
   dbcStreamRequest,
@@ -428,6 +429,29 @@ describe("Discovery fast pass (INTEL_DISCOVERY_TICK_SECS)", () => {
     expect(reports.length).toBe(1);
     expect(store.rows.size).toBe(2); // the second create landed through a fast pass, no metrics pass in between
   }, 10_000);
+});
+
+describe("pump logs source watchdog", () => {
+  it("socket events are drained as is; after 30 s of silence the poll fallback is drained instead", async () => {
+    let cb: ((l: unknown, ctx: { slot: number }) => void) | null = null;
+    const conn = { onLogs: (_k: unknown, f: typeof cb) => ((cb = f), 1), removeOnLogsListener: async () => undefined };
+    const fb = new ListSource();
+    let now = T0;
+    const src = new PumpLogsSource(conn as never, 500, { fallback: fb, now: () => now });
+    cb!({ err: null, signature: PUMP.signature, logs: PUMP.logs }, { slot: 7 });
+    const a = await src.drain();
+    expect(a.map((c) => c.mint)).toEqual([PUMP.mint]);
+    expect(a[0]!.creator).toBeTruthy();
+    fb.queue = [fakeCreate(1)];
+    now += 10_000;
+    expect(await src.drain()).toEqual([]); // quiet for 10 s: still the socket
+    now += 25_000;
+    expect((await src.drain()).map((c) => c.signature)).toEqual(["s1"]); // 35 s silent: fallback
+    expect(src.fallbackDrains).toBe(1);
+    cb!({ err: null, signature: "x", logs: [] }, { slot: 8 }); // any notification = alive again
+    fb.queue = [fakeCreate(2)];
+    expect(await src.drain()).toEqual([]);
+  });
 });
 
 describe("graduated prices (AMM)", () => {

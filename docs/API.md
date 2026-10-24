@@ -7,6 +7,8 @@
 - **`GET /api/tokens/:mint/safety`** по-прежнему `202`, пока основной тик (≈ 60 с) не сделает полный снимок (холдеры, авторитеты, socials). Значит, у нового CA страница токена открывается сразу, а панель безопасности показывает своё pending-состояние и догружается сама (повтор через её `retryAfterMs`). Фронту: не держать всю страницу на «Analyzing… (up to a minute)», если `/api/tokens/:mint` уже `200`; pending только в панели безопасности.
 - **Токены Pulse (discovery)** индексатор снимает заранее (warm set), поэтому `/api/tokens/:mint` и `/safety` для них обычно сразу `200`, а у `PulseToken.image` есть картинка из `/media`.
 
+**v0.29b (24.10, миграция 0036, форма ответов не меняется):** у токена Pulse (discovery) `GET /api/tokens/:mint` берёт `venue`, `status`, `priceSol`, `marketCapSol`, `createdAt`, `priceTs` из прохода метрик discovery (≤ ~1 мин; после выпуска с кривой — цена пула AMM: PumpSwap, Meteora DAMM v2), а не `venue: "jupiter"` с нулевой ценой. Свечи таких mint — см. «Свечи (OHLC)». В Pulse у graduated-токенов `priceSol`/`marketCapSol` тоже из пула AMM. Raydium LaunchLab после выпуска (CPMM) — пока последняя цена кривой.
+
 Изменения v0.28 против v0.27 — раздел «Trading comfort (v0.28)» ниже:
 - **`GET /api/pulse`** + **`/ws/pulse`** — три колонки New / About to graduate / Graduated по всем индексируемым площадкам (`PulseToken`), один ответ всем, кэш 3 с.
 - **Состояние кривой токена** `Token.curve?: TokenCurve` (pump.fun, Meteora DBC, Raydium LaunchLab; SOL-пары на кривой) и **общая формула оценки** с режимом комиссии `buyFee`. Core считает по ней проверку минимума sell, `min_out` ордеров и шагов сценариев.
@@ -1364,6 +1366,7 @@ interface JupiterQuote {
 - `tf`: `1m | 5m | 15m | 1h | 4h | 1d`; по умолчанию `5m`.
 - `from`/`to` необязательны; по умолчанию — последние 300 баров. Максимум 1000 баров за запрос.
 - Бары без сделок не отдаются (lightweight-charts рисует разрыв). Сортировка по `time` по возрастанию.
+- v0.29b (24.10): для mint, которого нет в пуле (`tokens`), бары строятся из полной ленты `market_trades` (если индексатор её пишет) **и** из ценовых сэмплов discovery (одна точка на проход метрик, ≈ 1 мин). Бар только из сэмплов — `volume: "0"`. Параметр `quote=1` для таких mint — как SOL.
 - Фронт конвертирует строки в `number` только для графика.
 
 ## Подпись запросов anon-ключом

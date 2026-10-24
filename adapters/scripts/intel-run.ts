@@ -114,7 +114,8 @@ async function main(): Promise<void> {
     const chain = new RpcDiscoveryChain(dcfg.rpcUrl, { rps: dcfg.rps, wsUrl: dcfg.wsUrl });
     const sources: CreateSource[] = [];
     if (dcfg.pump === "poll") sources.push(new PumpPollSource(chain.conn));
-    if (dcfg.pump === "ws") sources.push(new PumpLogsSource(chain.conn));
+    // ws: creates pushed with mint + creator (dev index), no poll / getTransaction; the poll is only the watchdog fallback.
+    if (dcfg.pump === "ws") sources.push(new PumpLogsSource(chain.conn, 500, { fallback: new PumpPollSource(chain.conn) }));
     if (dcfg.dbcStreamUrl) sources.push(new DbcStreamSource(dcfg.dbcStreamUrl, { maxPerHour: dcfg.dbcMaxPerHour }));
     // Dev index: LaunchLab creates too (not discovery candidates); pump creators need the logs source.
     // API v0.28 Pulse: LaunchLab creates are discovery candidates too (mainnet, Parsed Streams; INTEL_DISCOVERY_LAUNCHLAB=0 turns it off).

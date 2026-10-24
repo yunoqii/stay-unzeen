@@ -178,16 +178,27 @@ export function pumpCreateFromLogs(logs: Logs): CreateSeen | null {
   };
 }
 
-/** pump.fun via logsSubscribe(mentions = mint-authority PDA): creates only, parsed from logs. Bounded buffer. */
+/**
+ * pump.fun via logsSubscribe(mentions = mint-authority PDA): creates only, parsed from logs
+ * (mint, name, symbol, creator: no getTransaction). Bounded buffer. Watchdog: when the
+ * socket has been silent for `silentMs` (pump.fun creates ~20/min, so silence = a dead
+ * subscription), `fallback` (the poll source) is drained instead until events flow again.
+ */
 export class PumpLogsSource implements CreateSource {
-  readonly name = "pump-logs";
+  readonly name: string = "pump-logs";
   private buf: CreateSeen[] = [];
   private id: number | null = null;
+  private lastEvent: number;
+  /** Diagnostics (counts only): drains served by the fallback. */
+  fallbackDrains = 0;
   constructor(
     private readonly conn: Pick<Connection, "onLogs" | "removeOnLogsListener">,
     private readonly maxBuffer = 500,
+    private readonly o: { fallback?: CreateSource; silentMs?: number; now?: () => number } = {},
   ) {
+    this.lastEvent = (o.now ?? Date.now)();
     this.id = conn.onLogs(PUMP_MINT_AUTHORITY, (l, ctx) => {
+      this.lastEvent = (this.o.now ?? Date.now)();
       const c = pumpCreateFromLogs(l);
       if (!c) return;
       this.buf.push({ ...c, slot: ctx.slot });
@@ -197,6 +208,11 @@ export class PumpLogsSource implements CreateSource {
   async drain(): Promise<CreateSeen[]> {
     const out = this.buf;
     this.buf = [];
+    const fb = this.o.fallback;
+    if (fb && out.length === 0 && (this.o.now ?? Date.now)() - this.lastEvent >= (this.o.silentMs ?? 30_000)) {
+      this.fallbackDrains++;
+      return fb.drain();
+    }
     return out;
   }
   stop(): void {
