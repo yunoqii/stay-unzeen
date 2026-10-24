@@ -685,9 +685,17 @@ export class Discovery {
     return r;
   }
 
-  /** Published candidates, newest first (public stream; the indexer keeps them in its warm set). */
+  /**
+   * Published candidates for the indexer's warm set (public stream), in Pulse order of what people
+   * open: graduated, then about to graduate (progress >= 70 %), then the rest; newest first inside.
+   * The warm set keeps only the first DISCOVERY_WARM_MAX, so older Pulse columns stay covered.
+   */
   activeMints(): string[] {
-    return [...this.active.values()].filter((c) => c.verified).sort((a, b) => b.createdAt - a.createdAt).map((c) => c.mint);
+    const rank = (c: Tracked) => (c.status === "graduated" ? 0 : Number(c.progressPct ?? 0) >= 70 ? 1 : 2);
+    return [...this.active.values()]
+      .filter((c) => c.verified)
+      .sort((a, b) => rank(a) - rank(b) || b.createdAt - a.createdAt)
+      .map((c) => c.mint);
   }
 
   /**

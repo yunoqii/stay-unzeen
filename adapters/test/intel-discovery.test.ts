@@ -431,6 +431,19 @@ describe("Discovery fast pass (INTEL_DISCOVERY_TICK_SECS)", () => {
   }, 10_000);
 });
 
+describe("warm order", () => {
+  it("activeMints: graduated first, then about to graduate, then the newest", async () => {
+    const store = new MemoryDiscoveryStore();
+    const row = (mint: string, createdAt: number, status: "curve" | "graduated", progressPct: string | null) =>
+      ({ mint, venue: "pumpfun" as const, createdAt, name: null, symbol: null, status, priceSol: "1", marketCapSol: "1", progressPct, asOf: T0 });
+    const m = Array.from({ length: 4 }, () => Keypair.generate().publicKey.toBase58());
+    await store.commit({ asOf: T0, removed: [], upserts: [row(m[0]!, T0 + 4, "curve", "5.00"), row(m[1]!, T0 + 1, "graduated", null), row(m[2]!, T0 + 2, "curve", "80.00"), row(m[3]!, T0 + 3, "curve", "10.00")] });
+    const d = new Discovery({ store, chain: new AnyCurveChain(), sources: [], rng: seededRng(1), now: () => T0 });
+    await d.collect({ readFresh: false });
+    expect(d.activeMints()).toEqual([m[1], m[2], m[0], m[3]]);
+  });
+});
+
 describe("pump logs source watchdog", () => {
   it("socket events are drained as is; after 30 s of silence the poll fallback is drained instead", async () => {
     let cb: ((l: unknown, ctx: { slot: number }) => void) | null = null;

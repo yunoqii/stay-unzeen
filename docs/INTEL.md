@@ -222,3 +222,4 @@ Discovery работает на двух своих таймерах (оба н�
 
 ## Источник pump.fun: ws (24.10)
 `INTEL_DISCOVERY_PUMP=ws` (рекомендуется на mainnet): `logsSubscribe(mentions = mint-authority)` отдаёт CreateEvent прямо в логах (mint, имя, символ, creator) — без poll и без `getTransaction`, создатели pump.fun попадают в dev index (`intel_creates`). Сторож: если сокет молчит ≥ 30 с (pump.fun ~20 create/мин), drain берёт poll-источник, пока события не пойдут снова. Кредиты: ~13 МБ/ч WS ≈ 270 кредитов/ч против ~900 (poll раз в 4 с) + ~250 (`getTransaction` допущенных) ≈ 1 150/ч у poll.
+- **Порядок discovery в warm set** (24.10): graduated → «about to graduate» (прогресс ≥ 70 %) → остальные, внутри — новейшие. При 250 допусков/ч кэп 250 (`DISCOVERY_WARM_MAX`) иначе покрывал бы только последний час, и у старых graduated-токенов Pulse не было карточки (202 до тика карточек). Кредиты не растут: warm-проход и так 20 mint/тик.
