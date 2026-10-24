@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { GearSix, Key, LockKey, LockKeyOpen } from "@phosphor-icons/react";
+import { Key, LockKey, LockKeyOpen } from "@phosphor-icons/react";
 import { useKeyState } from "@/lib/crypto/session";
 import { cn } from "@/lib/utils";
 
@@ -30,20 +30,6 @@ export function KeyStatus() {
       <span className="hidden sm:max-md:inline lg:inline">{label}</span>
     </Link>
   );
-  if (state.status !== "unlocked") return chip;
-  // Settings (default execution mode) live in /portfolio; reachable straight from the key chip on xl+ (narrower
-  // headers have no room for it: Portfolio is one tap away).
-  return (
-    <span className="inline-flex items-center gap-1">
-      {chip}
-      <Link
-        href="/portfolio#settings"
-        aria-label="Settings"
-        title="Settings"
-        className="hidden size-8 place-items-center rounded-full border border-border text-muted-foreground xl:grid transition-colors duration-150 hover:border-border-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-      >
-        <GearSix size={14} weight="light" />
-      </Link>
-    </span>
-  );
+  // Settings (default execution mode, /portfolio#settings) moved to the header "More" menu: no room here.
+  return chip;
 }

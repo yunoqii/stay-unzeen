@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense } from "react";
 import { usePathname } from "next/navigation";
 import { motion } from "motion/react";
 import { DropdownMenu } from "radix-ui";
-import { CaretDown, Info } from "@phosphor-icons/react";
+import { CaretDown, DotsThreeCircle, GearSix, Info } from "@phosphor-icons/react";
 import { API_MODE } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
 import { DockItem, ProximityDock } from "@/components/motion/proximity-dock";
@@ -80,37 +80,39 @@ function DesktopNavActive() {
   return <DesktopNavList pathname={usePathname()} />;
 }
 
-// Fits 768–1440 px on one row (owner review 24.10): Feed, Tokens, Launch, Portfolio always inline; Pulse and
-// Verify inline from lg; Watchlist, Scenarios and Docs always in "More". Plain CSS breakpoints, no measuring.
+// Fits 768–1440 px on one row (owner review 24.10): every item has its icon (the same as the bottom nav);
+// under xl the label is visually hidden (still the accessible name) and shown as a tooltip. Watchlist,
+// Scenarios and Docs live in "More". Plain CSS breakpoints, no measuring.
 function DesktopNavList({ pathname }: { pathname: string | null }) {
   const inMore = NAV_SECONDARY.some((i) => pathname !== null && isActive(pathname, i.href));
-  const wideActive = NAV.some((i) => i.wide && pathname !== null && isActive(pathname, i.href));
   return (
     // New style (owner review): the proximity dock runs on the feed and token pages only for now.
     <ProximityDock enabled={pathname === "/feed" || !!pathname?.startsWith("/token/")} className="flex items-center gap-0.5 lg:gap-1">
-      {NAV.map((item) => {
-        const active = pathname !== null && isActive(pathname, item.href);
+      {NAV.map(({ href, label, icon: Icon }) => {
+        const active = pathname !== null && isActive(pathname, href);
         return (
-          <DockItem key={item.href} className={cn("relative", item.wide && "hidden lg:block")}>
+          <DockItem key={href} className="relative">
             <Link
-              href={item.href}
+              href={href}
+              title={label}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "relative z-10 block rounded-full px-2.5 py-1.5 text-sm whitespace-nowrap transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none xl:px-3",
+                "relative z-10 flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-sm whitespace-nowrap transition-colors xl:px-2 duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
                 active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {item.label}
+              <Icon size={16} weight={active ? "duotone" : "light"} className={cn("shrink-0", active && "text-zec")} aria-hidden />
+              {/* Under xl the label is the tooltip; the current page keeps its label from 900 px (room for one). */}
+              <span className={active ? "max-[899px]:sr-only" : "max-xl:sr-only"}>{label}</span>
             </Link>
             {active && <NavPill />}
           </DockItem>
         );
       })}
       <DockItem className="relative">
-        <MoreMenu pathname={pathname} items={[...NAV.filter((i) => i.wide), ...NAV_SECONDARY]} />
-        {/* Lit when the page lives in the menu; Pulse/Verify only count while they are hidden (under lg). */}
+        <MoreMenu pathname={pathname} items={NAV_SECONDARY} active={inMore} />
+        {/* Lit when the page lives in the menu. */}
         {inMore && <NavPill />}
-        {!inMore && wideActive && <NavPill className="lg:hidden" />}
       </DockItem>
     </ProximityDock>
   );
@@ -123,30 +125,23 @@ function NavPill({ className }: { className?: string }) {
 const MENU_ITEM =
   "flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-muted-foreground outline-none select-none data-[highlighted]:bg-surface-2 data-[highlighted]:text-foreground";
 
-/** lg and up: Pulse and Verify are inline, so the menu drops them (CSS-hidden items would trap arrow keys). */
-function useLg(): boolean {
-  const [lg, setLg] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia("(min-width: 1024px)");
-    const on = () => setLg(mq.matches);
-    on();
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, []);
-  return lg;
-}
-
-function MoreMenu({ pathname, items }: { pathname: string | null; items: NavItem[] }) {
-  const lg = useLg();
+function MoreMenu({ pathname, items, active }: { pathname: string | null; items: NavItem[]; active: boolean }) {
   return (
     <DropdownMenu.Root modal={false}>
-      <DropdownMenu.Trigger className="group relative z-10 flex items-center gap-1 rounded-full px-2.5 py-1.5 text-sm whitespace-nowrap text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-[state=open]:text-foreground xl:px-3">
-        More
+      <DropdownMenu.Trigger
+        title="More"
+        className={cn(
+          "group relative z-10 flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-sm xl:px-2 whitespace-nowrap transition-colors xl:px-2 duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-[state=open]:text-foreground",
+          active ? "text-foreground" : "text-muted-foreground",
+        )}
+      >
+        <DotsThreeCircle size={16} weight={active ? "duotone" : "light"} className={cn("shrink-0", active && "text-zec")} aria-hidden />
+        <span className="sr-only">More</span>
         <CaretDown size={12} weight="bold" aria-hidden className="transition-transform duration-150 group-data-[state=open]:rotate-180" />
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content align="end" sideOffset={8} className="z-50 min-w-48 rounded-xl border border-border bg-popover p-1 shadow-xl">
-          {items.filter((i) => !(lg && i.wide)).map(({ href, label, icon: Icon }) => {
+          {items.map(({ href, label, icon: Icon }) => {
             const active = pathname !== null && isActive(pathname, href);
             return (
               <DropdownMenu.Item key={href} asChild className={cn(MENU_ITEM, active && "text-foreground")}>
@@ -158,6 +153,12 @@ function MoreMenu({ pathname, items }: { pathname: string | null; items: NavItem
             );
           })}
           <DropdownMenu.Separator className="my-1 h-px bg-border" />
+          <DropdownMenu.Item asChild className={MENU_ITEM}>
+            <Link href="/portfolio#settings">
+              <GearSix size={16} weight="light" aria-hidden />
+              Settings
+            </Link>
+          </DropdownMenu.Item>
           <DropdownMenu.Item asChild className={MENU_ITEM}>
             <Link href="/">
               <Info size={16} weight="light" aria-hidden />

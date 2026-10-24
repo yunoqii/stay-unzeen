@@ -61,8 +61,8 @@ export function ChainSwitch() {
             {on && <motion.span layoutId={pillId} className="absolute inset-0 rounded-full bg-surface-3" transition={{ type: "spring", bounce: 0, duration: 0.3 }} />}
             <span className="relative inline-flex items-center gap-1 font-mono text-[11px] tracking-wide" title={CHAIN_LABEL[c] === "Robinhood" ? "Robinhood Chain" : CHAIN_LABEL[c]}>
               {c === "solana" ? <CoinSol size={10} className="text-current" /> : <CoinEth size={12} className="text-current" />}
-              {/* Under xl: icons only, the header row is full there (aria-label names the chain). */}
-              <span className="max-xl:sr-only">{c === "solana" ? "SOL" : "HOOD"}</span>
+              {/* Icons only: the header row is full (aria-label names the chain, title is the tooltip). */}
+              <span className="sr-only">{c === "solana" ? "SOL" : "HOOD"}</span>
             </span>
           </button>
         );

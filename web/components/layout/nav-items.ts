@@ -4,17 +4,15 @@ export interface NavItem {
   href: string;
   label: string;
   icon: Icon;
-  /** Desktop header: inline from lg (1024px) up only; under it the item sits in the "More" menu. */
-  wide?: boolean;
 }
 
 export const NAV: NavItem[] = [
   { href: "/feed", label: "Feed", icon: Broadcast },
-  { href: "/pulse", label: "Pulse", icon: Lightning, wide: true },
+  { href: "/pulse", label: "Pulse", icon: Lightning },
   { href: "/tokens", label: "Tokens", icon: Coins },
   { href: "/launch", label: "Launch", icon: RocketLaunch },
   { href: "/portfolio", label: "Portfolio", icon: Wallet },
-  { href: "/verify", label: "Verify", icon: SealCheck, wide: true },
+  { href: "/verify", label: "Verify", icon: SealCheck },
 ];
 
 /** Desktop header "More" menu; on phones these live in the footer. */
