@@ -254,7 +254,7 @@ function Frame({ children }: { children: React.ReactNode }) {
   return (
     <div className="mx-auto w-full max-w-6xl px-4 pt-6 sm:px-6 sm:pt-8">
       <Link
-        href="/"
+        href="/feed"
         className="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft size={14} weight="light" />

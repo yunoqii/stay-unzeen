@@ -6,6 +6,7 @@ import { MotionProvider } from "@/components/motion/motion-provider";
 import { SiteHeader } from "@/components/layout/site-header";
 import { BottomNav } from "@/components/layout/bottom-nav";
 import { SiteFooter } from "@/components/layout/site-footer";
+import { OffLanding } from "@/components/layout/off-landing";
 import { ChaosMount } from "@/components/dev/chaos-mount";
 import "./globals.css";
 
@@ -46,10 +47,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <MotionProvider>
           <SiteHeader />
           <main className="relative flex-1">{children}</main>
-          <div className="pb-safe-nav">
-            <SiteFooter />
-          </div>
-          <BottomNav />
+          <OffLanding>
+            <div className="pb-safe-nav">
+              <SiteFooter />
+            </div>
+            <BottomNav />
+          </OffLanding>
           <ChaosMount />
         </MotionProvider>
         <Toaster theme="dark" position="top-center" toastOptions={{ className: "font-sans" }} />
