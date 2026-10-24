@@ -3,7 +3,7 @@
 import { onTabListKeyDown } from "@/lib/tabs";
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import type { CandlestickData, IChartApi, IPriceLine, ISeriesApi, ISeriesMarkersPluginApi, HistogramData, SeriesMarker, Time, UTCTimestamp } from "lightweight-charts";
+import type { CandlestickData, IChartApi, IPriceLine, ISeriesApi, ISeriesMarkersPluginApi, HistogramData, SeriesMarker, Time, UTCTimestamp, WhitespaceData, AutoscaleInfo } from "lightweight-charts";
 import { api, errorText } from "@/lib/api/client";
 import type { Candle, CandleTimeframe, FeedEvent } from "@/lib/api/types";
 import type { Fill } from "@/lib/pnl";
@@ -29,6 +29,21 @@ interface Bar {
 const hourLabel = new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
 const dayLabel = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
 const fullTime = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+
+const ZEC = "#F4B728";
+
+/**
+ * Bars of a token we have no trades for are the pool's per-minute price samples: every bar has volume 0
+ * (and mostly o = h = l = c). Drawn as candles they read as a row of dashes, so a series that is mostly
+ * samples is drawn as a price line instead. Real trades always carry volume.
+ */
+const SAMPLED_SHARE = 0.8;
+function isSampled(bars: readonly Bar[]) {
+  if (!bars.length) return false;
+  return bars.filter((b) => !(b.volume > 0)).length / bars.length >= SAMPLED_SHARE;
+}
+
+type Mode = "candles" | "line";
 
 /** v0.17: `volume` is a base-unit string (no i64 limit): lamports, or the pair quote's base units with quote=1. */
 const toBar = (c: Candle, decimals: number, k = 1): Bar => ({
@@ -94,6 +109,10 @@ export function PriceChart({
   const chart = useRef<IChartApi | null>(null);
   const candles = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volume = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const area = useRef<ISeriesApi<"Area"> | null>(null);
+  const [mode, setMode] = useState<Mode>("candles");
+  const modeRef = useRef<Mode>("candles");
+  const [points, setPoints] = useState(0);
   const marks = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const last = useRef<Bar | null>(null);
   const applied = useRef<Set<string>>(new Set());
@@ -165,6 +184,29 @@ export function PriceChart({
         priceLineVisible: false,
       });
       volume.current.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+      // Price line of sampled-only series (see isSampled); hidden while real candles are shown.
+      area.current = c.addSeries(lc.AreaSeries, {
+        lineColor: ZEC,
+        lineWidth: 2,
+        // Straight segments: a curved line overshoots between samples and draws prices that never were.
+        lineType: lc.LineType.Simple,
+        topColor: "rgba(244,183,40,0.22)",
+        bottomColor: "rgba(244,183,40,0)",
+        priceFormat: { type: "custom", formatter: (p: number) => formatPrice(p), minMove: 1e-12 },
+        priceLineColor: "rgba(244,183,40,0.6)",
+        crosshairMarkerBorderColor: ZEC,
+        crosshairMarkerBackgroundColor: "#0b0b0d",
+        visible: false,
+        // A flat run of samples would collapse the axis to one repeated label: keep at least ±5% around it.
+        autoscaleInfoProvider: (base: () => AutoscaleInfo | null) => {
+          const a = base();
+          if (!a?.priceRange) return a;
+          const { minValue, maxValue } = a.priceRange;
+          const mid = (minValue + maxValue) / 2;
+          const half = Math.abs(mid) * 0.05;
+          return maxValue - minValue >= half * 2 ? a : { ...a, priceRange: { minValue: mid - half, maxValue: mid + half } };
+        },
+      });
       marks.current = lc.createSeriesMarkers(candles.current, []);
       chart.current = c;
       setReadyTick((t) => t + 1);
@@ -175,6 +217,7 @@ export function PriceChart({
       chart.current = null;
       candles.current = null;
       volume.current = null;
+      area.current = null;
       marks.current = null;
     };
   }, []);
@@ -311,6 +354,32 @@ export function PriceChart({
     };
   }, []);
 
+  /**
+   * Line mode: the candlestick series stays (markers, order lines and drag hang off it) but goes invisible and
+   * flat at the close, the area draws the price, no volume pane, and the scale hugs the data. With one or two
+   * samples the last price runs across the chart as a line instead of a lone dot.
+   */
+  function applyMode(m: Mode, n: number) {
+    const line = m === "line";
+    const { up, down } = colors.current;
+    const clear = "rgba(0,0,0,0)";
+    candles.current?.applyOptions({
+      upColor: line ? clear : up,
+      downColor: line ? clear : down,
+      wickUpColor: line ? clear : up,
+      wickDownColor: line ? clear : down,
+      lastValueVisible: !line,
+      priceLineVisible: !line,
+    });
+    area.current?.applyOptions({
+      visible: line,
+      // One or two samples: no filled block, the price line carries it across the chart.
+      topColor: n <= 2 ? "rgba(244,183,40,0)" : "rgba(244,183,40,0.22)",
+      lineVisible: n > 2, priceLineVisible: line, priceLineStyle: n <= 2 ? 0 : 2, priceLineWidth: n <= 2 ? 2 : 1, priceLineColor: n <= 2 ? ZEC : "rgba(244,183,40,0.6)" });
+    volume.current?.applyOptions({ visible: !line });
+    chart.current?.priceScale("right").applyOptions({ scaleMargins: line ? { top: 0.18, bottom: 0.14 } : { top: 0.12, bottom: 0.24 } });
+  }
+
   // History for the selected timeframe.
   useEffect(() => {
     if (!chart.current) return;
@@ -319,13 +388,18 @@ export function PriceChart({
     api
       .getCandles(mint, { tf, ...(pair ? { quote: 1 as const } : {}) })
       .then((list) => {
-        if (!alive || !candles.current || !volume.current) return;
+        if (!alive || !candles.current || !volume.current || !area.current) return;
         const k = scaleRef.current;
         const bars = list.map((c) => toBar(c, pair ? denom.pairDecimals! : 9, k));
         setLoadedScale(k);
-        const { up, down } = colors.current;
-        candles.current.setData(bars.map((b) => ({ time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close })));
-        volume.current.setData(bars.map((b) => volumeBar(b, up, down)));
+        const m: Mode = isSampled(bars) ? "line" : "candles";
+        modeRef.current = m;
+        setMode(m);
+        setPoints(bars.length);
+        applyMode(m, bars.length);
+        candles.current.setData(bars.map((b) => candleOf(b, m)));
+        volume.current.setData(m === "line" ? [] : bars.map((b) => volumeBar(b, colors.current.up, colors.current.down)));
+        area.current.setData(m === "line" ? bars.map((b) => ({ time: b.time as UTCTimestamp, value: b.close })) : []);
         last.current = bars.at(-1) ?? null;
         applied.current = new Set();
         chart.current?.timeScale().fitContent();
@@ -361,8 +435,9 @@ export function PriceChart({
           ? { ...prev, high: Math.max(prev.high, price), low: Math.min(prev.low, price), close: price, volume: prev.volume + paid }
           : { time: t, open: prev?.close ?? price, high: Math.max(prev?.close ?? price, price), low: Math.min(prev?.close ?? price, price), close: price, volume: paid };
       last.current = bar;
-      candles.current?.update({ time: bar.time as UTCTimestamp, open: bar.open, high: bar.high, low: bar.low, close: bar.close } satisfies CandlestickData);
-      volume.current?.update(volumeBar(bar, colors.current.up, colors.current.down));
+      candles.current?.update(candleOf(bar, modeRef.current));
+      if (modeRef.current === "line") area.current?.update({ time: bar.time as UTCTimestamp, value: bar.close });
+      else volume.current?.update(volumeBar(bar, colors.current.up, colors.current.down));
     }
   }, [trades, tf, state, denom.unit, pair, loadedScale]);
 
@@ -397,7 +472,7 @@ export function PriceChart({
         </div>
       </header>
       <div className="relative h-64 sm:h-80">
-        <div ref={box} className="absolute inset-0" aria-label={`Candlestick chart, ${tf} bars`} role="img" />
+        <div ref={box} className="absolute inset-0" aria-label={mode === "line" ? `Price line, ${tf} pool samples` : `Candlestick chart, ${tf} bars`} role="img" />
         {state === "loading" && <Skeleton className="absolute inset-3 rounded-xl bg-skeleton" />}
         {state === "empty" && !trades.some((e) => e.kind !== "create" && e.ts >= loadedAt) && (
           <p className="absolute inset-0 grid place-items-center text-sm text-muted-foreground">No trades in this range yet.</p>
@@ -408,13 +483,29 @@ export function PriceChart({
           </p>
         )}
       </div>
-      <p className="border-t border-border/60 px-4 py-2 text-[11px] text-pretty text-faint-foreground">
-        Chart: TradingView Lightweight Charts™
+      <p className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-border/60 px-4 py-2 text-[11px] text-pretty text-faint-foreground">
+        {mode === "line" && state === "ready" ? (
+          <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+            <span aria-hidden className="h-0.5 w-3 rounded-full bg-zec/80" />
+            {points <= 2 ? "Latest price from pool reserves. History fills in each minute." : "Price from pool reserves, sampled each minute. No trades indexed in this range."}
+          </span>
+        ) : (
+          <span />
+        )}
+        <span>Chart: TradingView Lightweight Charts™</span>
       </p>
     </section>
   );
 }
 
-function volumeBar(b: Bar, up: string, down: string): HistogramData {
+/** Zero-volume bars (price samples between trades) draw nothing: whitespace keeps the time slot. */
+function volumeBar(b: Bar, up: string, down: string): HistogramData | WhitespaceData {
+  if (!(b.volume > 0)) return { time: b.time as UTCTimestamp };
   return { time: b.time as UTCTimestamp, value: b.volume, color: (b.close >= b.open ? up : down) + "40" };
+}
+
+/** Line mode keeps the (invisible) candle flat at the close so wicks of stray trades don't stretch the scale. */
+function candleOf(b: Bar, m: Mode): CandlestickData {
+  const t = b.time as UTCTimestamp;
+  return m === "line" ? { time: t, open: b.close, high: b.close, low: b.close, close: b.close } : { time: t, open: b.open, high: b.high, low: b.low, close: b.close };
 }

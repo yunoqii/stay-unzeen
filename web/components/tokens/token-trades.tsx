@@ -4,6 +4,7 @@ import { ErrorState } from "@/components/ui/states";
 import { onTabListKeyDown } from "@/lib/tabs";
 import { useEffect, useId, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
+import { Waveform } from "@phosphor-icons/react";
 import { api, errorText } from "@/lib/api/client";
 import type { TokenTrade, TradeFilter } from "@/lib/api/types";
 import { formatCompact, lamportsToSol, shortAddr, timeAgo, unitsToNumber } from "@/lib/format";
@@ -152,7 +153,13 @@ function FilteredTrades({ mint, filter }: { mint: string; filter: TradeFilter })
       </ul>
     );
   if (list.length === 0)
-    return <EmptyState title={filter === "whales" ? "No whale trades yet." : filter === "dev" ? "The dev has not traded." : "No trades yet."} className="m-4" />;
+    return filter === "whales" || filter === "dev" ? (
+      <EmptyState title={filter === "whales" ? "No whale trades yet." : "The dev has not traded."} className="m-4 py-8" />
+    ) : (
+      <EmptyState icon={<Waveform size={22} weight="light" aria-hidden />} title="No trades indexed yet for this token" className="m-4 py-8">
+        Unzeen shows trades it has indexed; pool trades appear here live.
+      </EmptyState>
+    );
 
   return (
     <ol className="divide-y divide-border/60">
