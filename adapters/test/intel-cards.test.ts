@@ -205,3 +205,23 @@ describe("discovery candidates are pre-indexed (warm set)", () => {
     expect(store.commits[0]!.discovery).toBeUndefined();
   });
 });
+
+describe("gateway token bucket", () => {
+  it("burst 2, then one slot per 1/rate s; available() never waits", async () => {
+    const { TokenBucket } = await import("../src/intel/indexer");
+    let t = 0;
+    const slept: number[] = [];
+    const b = new TokenBucket(1, 2, () => t, async (ms) => {
+      slept.push(ms);
+      t += ms;
+    });
+    await b.take();
+    await b.take();
+    expect(slept).toEqual([]);
+    expect(b.available()).toBeLessThan(1);
+    await b.take();
+    expect(slept).toEqual([1000]);
+    t += 5_000;
+    expect(b.available()).toBe(2);
+  });
+});

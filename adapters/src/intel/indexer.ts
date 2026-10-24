@@ -35,6 +35,7 @@ import {
   type LargestAccount,
 } from "./metrics";
 import { fetchOffchain, type OffchainDeps } from "./offchain";
+import { safeFetch } from "./ssrf";
 import { isMintAddress, type ChainReader } from "./reader";
 import {
   BATCH_SIZE,
@@ -197,8 +198,14 @@ export interface IndexerOptions {
   } | null;
   /** Refresh the decoy pool of recent pump.fun mints every N ticks (and every tick while it is small). */
   decoyRefreshTicks?: number;
-  /** Retry failed off-chain fetches (process memory) after this long. */
+  /** Retry failed off-chain fetches (process memory) after this long (default 10 min). */
   offchainRetryMs?: number;
+  /**
+   * Requests per second to the IPFS gateway / metadata hosts (default 0.9, burst 2: Filebase answers
+   * 429 above ~1 rps, measured 24.10). The main tick waits for a slot; the card lane never waits:
+   * without two free slots it writes the card without fetching (the main tick fetches it).
+   */
+  offchainRps?: number;
   /**
    * Unzeen's Meteora DBC config key (src/meteora.ts `dbcConfigAddress`). When
    * set, every mint of a batch (decoys included) also gets its DBC pool PDA
@@ -303,11 +310,16 @@ export class IntelIndexer {
   private readonly offOk = new Map<string, OffchainInfo>();
   /** Card and main commits never overlap (same tables, one process). */
   private commitChain: Promise<unknown> = Promise.resolve();
+  private readonly offBucket: TokenBucket;
+  private readonly offDeps: OffchainDeps | null;
 
   constructor(private readonly o: IndexerOptions) {
     this.now = o.now ?? Date.now;
     this.subs = new SubscriptionPlanner(o.rng);
     this.tradeSubs = new SubscriptionPlanner(o.rng);
+    this.offBucket = new TokenBucket(o.offchainRps ?? 0.9, 2, this.now, o.sleep ?? defaultSleep);
+    const inner = o.offchain?.fetcher ?? safeFetch;
+    this.offDeps = o.offchain ? { ...o.offchain, fetcher: async (url, fo) => (await this.offBucket.take(), inner(url, fo)) } : null;
   }
 
   /** One tick. Never throws; returns counts and the delay to the next tick. */
@@ -888,7 +900,7 @@ export class IntelIndexer {
       row.holders = { ...stats, devPct: w.unzeen ? null : stats.devPct, asOf };
     }
 
-    const off = await this.offchainFor(w.key, w.meta?.uri ?? null);
+    const off = await this.offchainFor(w.key, w.meta?.uri ?? null, base);
     if (off?.socials) row.socials = off.socials;
     if (off?.image) row.image = off.image;
 
@@ -916,8 +928,8 @@ export class IntelIndexer {
     return { row, card };
   }
 
-  private async offchainFor(mint: string, uri: string | null): Promise<OffchainInfo | null> {
-    if (!this.o.offchain || !uri) return null;
+  private async offchainFor(mint: string, uri: string | null, cardLane = false): Promise<OffchainInfo | null> {
+    if (!this.offDeps || !uri) return null;
     const mem = this.offOk.get(mint);
     if (mem) return mem;
     const cached = await this.o.store.offchain(mint);
@@ -925,7 +937,9 @@ export class IntelIndexer {
     // No image yet (gateway 429 / timeout last time): retried after offchainRetryMs, old socials kept.
     const failedAt = this.offFailed.get(mint);
     if (failedAt !== undefined && this.now() - failedAt < (this.o.offchainRetryMs ?? 10 * 60_000)) return cached;
-    const info = await fetchOffchain(uri, this.o.offchain).catch(() => ({ fetchedAt: this.now(), ok: false }) as OffchainInfo);
+    // Card lane: never waits for the gateway (JSON + image = 2 slots); the main tick fetches instead.
+    if (cardLane && this.offBucket.available() < 2) return cached;
+    const info = await fetchOffchain(uri, this.offDeps).catch(() => ({ fetchedAt: this.now(), ok: false }) as OffchainInfo);
     if (!info.ok || info.imageFailed) this.offFailed.set(mint, this.now());
     else {
       this.offFailed.delete(mint);
@@ -1039,6 +1053,42 @@ export class IntelIndexer {
       marketCapSol: pc.marketCapSol,
       slot,
     });
+  }
+}
+
+/** Requests to the gateway: `rate` per second, at most `burst` at once. */
+export class TokenBucket {
+  private tokens: number;
+  private last: number;
+  private chain: Promise<void> = Promise.resolve();
+  constructor(
+    private readonly rate: number,
+    private readonly burst: number,
+    private readonly now: () => number,
+    private readonly sleep: (ms: number) => Promise<void>,
+  ) {
+    this.tokens = burst;
+    this.last = now();
+  }
+  available(): number {
+    this.refill();
+    return this.tokens;
+  }
+  /** Waits for a slot (FIFO). */
+  take(): Promise<void> {
+    const r = this.chain.then(async () => {
+      this.refill();
+      if (this.tokens < 1) await this.sleep(Math.ceil(((1 - this.tokens) / this.rate) * 1000));
+      this.refill();
+      this.tokens = Math.max(0, this.tokens - 1);
+    });
+    this.chain = r.catch(() => undefined);
+    return r;
+  }
+  private refill(): void {
+    const t = this.now();
+    this.tokens = Math.min(this.burst, this.tokens + ((t - this.last) / 1000) * this.rate);
+    this.last = t;
   }
 }
 
