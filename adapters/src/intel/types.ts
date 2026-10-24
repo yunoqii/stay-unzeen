@@ -76,6 +76,8 @@ export interface WarmEntry {
   asOf: number | null;
   /** Admitted discovery candidate (public create stream): snapshotted ahead of any click. */
   discovery?: boolean;
+  /** The current card has no mirrored image (Pg: intel_tokens.image IS NULL). */
+  noImage?: boolean;
 }
 
 /** Token card for mints not in `tokens` (intel_tokens). */

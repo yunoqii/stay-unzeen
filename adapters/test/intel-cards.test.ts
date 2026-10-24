@@ -5,7 +5,7 @@ import { IntelIndexer } from "../src/intel/indexer";
 import { MemoryIntelStore } from "../src/intel/memory-store";
 import type { LargestAccount } from "../src/intel/metrics";
 import type { ChainReader } from "../src/intel/reader";
-import { BATCH_SIZE, CARD_TICK_BASE_MS, CARD_TICK_JITTER_MS, nextTickDelay } from "../src/intel/schedule";
+import { BATCH_SIZE, CARD_TICK_BASE_MS, CARD_TICK_JITTER_MS, nextTickDelay, pickWarmDue } from "../src/intel/schedule";
 import { seededRng } from "../src/relayer/random";
 
 const keyS = () => Keypair.generate().publicKey.toBase58();
@@ -183,6 +183,15 @@ describe("discovery candidates are pre-indexed (warm set)", () => {
     await idx.tick();
     const again = reader.calls.slice(n).filter((c) => c.method === "getTokenLargestAccounts").map((c) => c.keys[0]);
     for (const m of disc) expect(again.filter((x) => x === m).length).toBeLessThanOrEqual(1); // at most as a random decoy
+  });
+
+  it("a discovery card without a mirrored image is refreshed after 10 min, not 30", () => {
+    const now = 10 * 3600_000;
+    const e = (o: object) => ({ mint: keyS(), hot: false, asOf: now - 11 * 60_000, ...o });
+    const noImg = e({ discovery: true, noImage: true });
+    const withImg = e({ discovery: true });
+    const plain = e({ noImage: true });
+    expect(pickWarmDue([noImg, withImg, plain], now, seededRng(9))).toEqual([noImg.mint]);
   });
 
   it("a throwing / malformed source never breaks the tick", async () => {

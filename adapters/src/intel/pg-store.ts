@@ -52,12 +52,13 @@ export class PgIntelStore implements IntelStore {
   }
 
   async warmSet(): Promise<WarmEntry[]> {
-    const r = await this.db.query<{ mint: string; hot: boolean; pinned: boolean; as_of: string | null }>(
-      `SELECT w.mint, w.hot, w.pinned, (extract(epoch FROM s.as_of) * 1000)::bigint::text AS as_of
-         FROM intel_warm w LEFT JOIN token_safety s ON s.mint = w.mint
+    const r = await this.db.query<{ mint: string; hot: boolean; pinned: boolean; as_of: string | null; no_image: boolean }>(
+      `SELECT w.mint, w.hot, w.pinned, (extract(epoch FROM s.as_of) * 1000)::bigint::text AS as_of,
+              (it.mint IS NOT NULL AND it.image IS NULL) AS no_image
+         FROM intel_warm w LEFT JOIN token_safety s ON s.mint = w.mint LEFT JOIN intel_tokens it ON it.mint = w.mint
         WHERE w.pinned OR w.expires_at > now()`,
     );
-    return r.rows.map((x) => ({ mint: x.mint, hot: x.hot, pinned: x.pinned, asOf: x.as_of === null ? null : Number(x.as_of) }));
+    return r.rows.map((x) => ({ mint: x.mint, hot: x.hot, pinned: x.pinned, asOf: x.as_of === null ? null : Number(x.as_of), ...(x.no_image ? { noImage: true } : {}) }));
   }
 
   async peekLookups(max: number): Promise<string[]> {

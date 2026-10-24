@@ -39,7 +39,10 @@ export class MemoryIntelStore implements IntelStore {
     const now = this.now();
     return [...this.warm]
       .filter(([, w]) => w.pinned || (w.expiresAt ?? 0) > now)
-      .map(([mint, w]) => ({ mint, hot: w.hot, pinned: w.pinned, asOf: this.safety.get(mint)?.asOf ?? null }));
+      .map(([mint, w]) => {
+        const c = this.cards.get(mint);
+        return { mint, hot: w.hot, pinned: w.pinned, asOf: this.safety.get(mint)?.asOf ?? null, ...(c && !c.image ? { noImage: true } : {}) };
+      });
   }
 
   async peekLookups(max: number): Promise<string[]> {

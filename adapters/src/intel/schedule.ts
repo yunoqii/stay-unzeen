@@ -27,6 +27,8 @@ export const CARD_TICK_JITTER_MS = 2_000;
 /** Discovery candidates kept in the warm set (newest first). */
 export const DISCOVERY_WARM_MAX = 250;
 export const WARM_INTERVAL_MS = 30 * 60_000;
+/** Discovery candidate whose image is not mirrored yet (gateway 429 / timeout): refreshed this often. */
+export const DISCOVERY_NO_IMAGE_INTERVAL_MS = 10 * 60_000;
 
 /** Delay to the next tick: uniform 45–75 s (60 ± 15), independent of any request. */
 export function nextTickDelay(rng: Rng, base = TICK_BASE_MS, jitter = TICK_JITTER_MS): number {
@@ -86,7 +88,11 @@ export function pickWarmDue(
   // card lane's batch mints sit in the warm set briefly (their cards must survive core's warm sync)
   // and get their full snapshot from a main-tick batch, never from this pass.
   const due = entries.filter(
-    (e) => !exclude.has(e.mint) && (e.asOf === null ? e.pinned === true || e.discovery === true : now - e.asOf >= (e.hot ? hotMs : warmMs)),
+    (e) =>
+      !exclude.has(e.mint) &&
+      (e.asOf === null
+        ? e.pinned === true || e.discovery === true
+        : now - e.asOf >= (e.hot ? hotMs : e.discovery && e.noImage ? Math.min(warmMs, DISCOVERY_NO_IMAGE_INTERVAL_MS) : warmMs)),
   );
   // Ties broken randomly so equal ages do not keep a stable (observable) order.
   const keyed = shuffle(due, rng).sort((a, b) => (a.asOf ?? -1) - (b.asOf ?? -1));
