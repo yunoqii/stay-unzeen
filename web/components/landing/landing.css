@@ -1,0 +1,115 @@
+/* Landing only (imported by components/landing/landing.tsx). Tokens come from app/globals.css. */
+
+.landing {
+  --landing-gutter: 1rem;
+  scroll-padding-top: 5rem;
+}
+@media (min-width: 640px) {
+  .landing {
+    --landing-gutter: 1.5rem;
+  }
+}
+
+/* "Pause animations" and prefers-reduced-motion: every CSS loop on the page stops on its current frame. */
+.landing[data-paused] *,
+.landing[data-paused] *::before,
+.landing[data-paused] *::after {
+  animation-play-state: paused !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .landing *,
+  .landing *::before,
+  .landing *::after {
+    animation-play-state: paused !important;
+  }
+}
+
+/* Flow line: dashes march from source to destination. Horizontal from md, vertical below. */
+@keyframes uz-march-x {
+  to {
+    background-position: 24px 0;
+  }
+}
+@keyframes uz-march-y {
+  to {
+    background-position: 0 24px;
+  }
+}
+.flow-line {
+  background-image: linear-gradient(to bottom, var(--uz-fog-1) 0 12px, transparent 12px 24px);
+  background-size: 1px 24px;
+  background-repeat: repeat-y;
+  background-position-x: center;
+  animation: uz-march-y 1.2s linear infinite;
+}
+.flow-line[data-tone="zec"] {
+  background-image: linear-gradient(to bottom, rgb(244 183 40 / 0.75) 0 12px, transparent 12px 24px);
+}
+@media (min-width: 768px) {
+  .flow-line {
+    background-image: linear-gradient(to right, var(--uz-fog-1) 0 12px, transparent 12px 24px);
+    background-size: 24px 1px;
+    background-repeat: repeat-x;
+    background-position: 0 center;
+    animation-name: uz-march-x;
+  }
+  .flow-line[data-tone="zec"] {
+    background-image: linear-gradient(to right, rgb(244 183 40 / 0.75) 0 12px, transparent 12px 24px);
+  }
+}
+
+
+/* FAQ: native <details>, the caret turns and the answer fades in. */
+.faq summary::-webkit-details-marker {
+  display: none;
+}
+.faq summary {
+  list-style: none;
+}
+.faq details[open] .faq-caret {
+  transform: rotate(45deg);
+}
+.faq details[open] .faq-body {
+  animation: uz-faq-in var(--uz-dur-3) var(--uz-ease-expo-out);
+}
+@keyframes uz-faq-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .faq details[open] .faq-body {
+    animation: none;
+  }
+}
+
+/* Phone screen: no scrollbars in the illustration. */
+.phone-screen {
+  scrollbar-width: none;
+}
+.phone-screen::-webkit-scrollbar {
+  display: none;
+}
+
+/* Tour tabs on phones scroll sideways; hide the bar, keep the scroll. */
+.tour-tabs {
+  scrollbar-width: none;
+}
+.tour-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+/* Progress of the auto-playing tour scene. */
+@keyframes uz-fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+.tour-progress {
+  transform-origin: left center;
+  animation: uz-fill linear forwards;
+}

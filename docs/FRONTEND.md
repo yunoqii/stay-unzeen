@@ -47,7 +47,7 @@
 - На Top up подсказка: “Top up in advance — faster trades and better privacy”.
 
 ## Страницы
-1. `/` — лента + горячие токены
+1. `/` — маркетинговый лендинг (`web/components/landing/`, своя лёгкая шапка, «Open app» → `/feed`); `/feed` — лента + горячие токены (бывшая главная, `HomeClient`). Ссылки «в ленту» внутри приложения ведут на `/feed`, PWA `start_url` = `/feed` (24.10)
 2. `/token/[mint]` — график, сделки, купить / продать
 3. `/launch` — название, тикер, картинка, площадка (pump.fun / Meteora), режим fair-launch
 4. `/pay/[intentId]` — только пополнение баланса (Top up): QR ZIP-321, адрес, сумма, статус (“Waiting for payment” → “Seen” → “Credited”). Оплаты за отдельное действие нет
