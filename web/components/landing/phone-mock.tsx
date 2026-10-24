@@ -98,7 +98,7 @@ export function PhoneMock() {
               <TapeMark className="size-5" />
               unzeen
             </span>
-            <span className="rounded-full border border-border px-2 py-0.5 font-mono text-[10px] text-faint-foreground">Devnet</span>
+            <span className="rounded-full border border-zec/40 bg-zec/10 px-2 py-0.5 font-mono text-[10px] text-zec">Mainnet</span>
           </div>
 
           {/* Balance: taped over, like the app’s Peek */}
