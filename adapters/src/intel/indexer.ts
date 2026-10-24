@@ -288,7 +288,8 @@ export class IntelIndexer {
   private readonly state = new Map<string, MintState>();
   private readonly pendingCurves = new Map<string, CurveUpdate>();
   private readonly recent: string[] = []; // decoy pool (recent pump.fun mints)
-  private readonly offFailed = new Map<string, number>();
+  /** Failed off-chain fetches: when, and how many times in a row (retry backoff). */
+  private readonly offFailed = new Map<string, { at: number; n: number }>();
   private readonly firstBlocksDone = new Map<string, NonNullable<TokenSafety["firstBlocks"]>>();
   private readonly createUser = new Map<string, string>();
   private readonly createSlot = new Map<string, number>();
@@ -935,12 +936,17 @@ export class IntelIndexer {
     const cached = await this.o.store.offchain(mint);
     if (cached?.image) return cached;
     // No image yet (gateway 429 / timeout last time): retried after offchainRetryMs, old socials kept.
-    const failedAt = this.offFailed.get(mint);
-    if (failedAt !== undefined && this.now() - failedAt < (this.o.offchainRetryMs ?? 10 * 60_000)) return cached;
+    // Backoff: base (10 min), doubled per consecutive failure, at most 6 h.
+    const failed = this.offFailed.get(mint);
+    const base = this.o.offchainRetryMs ?? 10 * 60_000;
+    if (failed && this.now() - failed.at < Math.min(6 * 3600_000, base * 2 ** (failed.n - 1))) return cached;
     // Card lane: never waits for the gateway (JSON + image = 2 slots); the main tick fetches instead.
     if (cardLane && this.offBucket.available() < 2) return cached;
     const info = await fetchOffchain(uri, this.offDeps).catch(() => ({ fetchedAt: this.now(), ok: false }) as OffchainInfo);
-    if (!info.ok || info.imageFailed) this.offFailed.set(mint, this.now());
+    if (!info.ok || info.imageFailed) {
+      if (this.offFailed.size >= 20_000 && !failed) this.offFailed.delete(this.offFailed.keys().next().value!);
+      this.offFailed.set(mint, { at: this.now(), n: Math.min((failed?.n ?? 0) + 1, 16) });
+    }
     else {
       this.offFailed.delete(mint);
       if (this.offOk.size >= 5_000) this.offOk.delete(this.offOk.keys().next().value!);
