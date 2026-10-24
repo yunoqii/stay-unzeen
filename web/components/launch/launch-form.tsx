@@ -3,18 +3,18 @@
 import Link from "next/link";
 import { useId, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowRight, Feather, Key, Lightning, LockKey, RocketLaunch, ShieldCheck, ShoppingBag, Stack, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, ArrowSquareOut, Feather, Key, Lightning, LockKey, RocketLaunch, ShieldCheck, ShoppingBag, Stack, WarningCircle } from "@phosphor-icons/react";
 import { useNative } from "@/lib/chain";
 import { ApiError, errorText } from "@/lib/api/client";
 import type { LaunchPlatform, PoolInfo, Quote, SignedAction, Venue } from "@/lib/api/types";
 import { submitAction, useAction } from "@/lib/activity";
 import { useKeyState } from "@/lib/crypto/session";
 import { nowFee, useDefaultExec, withExec, type ExecMode } from "@/lib/exec";
-import { formatSol, formatUnits, formatZec, lamportsToSol, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
+import { formatSol, formatUnits, formatZec, lamportsToSol, shortAddr, VENUE_LABEL, ZEC_DECIMALS } from "@/lib/format";
 import { BAGS_NO_CURVE_TEXT, checkInitialBuy, isBagsNotReady, validateMeta, type MetaInput } from "@/lib/launch";
 import { maxInitialBuyLamports, maxInitialBuyZat, minInitialBuyZat } from "@/lib/launch-rules";
 import { useNetwork } from "@/lib/network";
-import { launchQuotes, PLATFORM_LABEL, venueInfo, venueLabel } from "@/lib/quotes";
+import { launchQuotes, PLATFORM_LABEL, quoteAsset, venueInfo, venueLabel } from "@/lib/quotes";
 import { cn } from "@/lib/utils";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ import { ActionStatusCard } from "@/components/trade/action-status";
 import { ExecSwitch } from "@/components/trade/exec-switch";
 import { TokenMetaFields } from "./token-meta-fields";
 import { RedactionTape } from "@/components/motion/redaction-tape";
+import { QuoteCoin } from "@/components/icons/coin-quote";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 const ZERO = BigInt(0);
@@ -219,6 +220,8 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
   const [quotePick, setQuote] = useState<Quote>("SOL");
   // A pair the picked venue does not offer falls back to SOL (the pick is kept for when it comes back).
   const quote: Quote = quotes.includes(quotePick) ? quotePick : "SOL";
+  // The quote token's mint on this venue (PoolInfo.quotes, v0.13); SOL is native and has none.
+  const quoteMint = quoteAsset(pool, quote, venue)?.mint ?? null;
   const [buy, setBuy] = useState("");
   const [tried, setTried] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -355,25 +358,53 @@ export function LaunchForm({ pool, meta, onMeta }: { pool: PoolInfo | null; meta
         </FormStep>
 
         <FormStep n="03" title="Pair" hint={quotes.length === 1 ? `${native} only here` : undefined}>
-          <div role="radiogroup" aria-label="Pair" className="flex flex-wrap gap-1.5">
+          <div role="radiogroup" aria-label="Pair" className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
             {(native === "ETH" ? (["SOL"] as const) : (["SOL", "ZEC", "USDC", "USD1"] as const)).map((q) => {
               const offered = quotes.includes(q);
+              const on = quote === q;
               return (
-                <Chip
+                <button
                   key={q}
+                  type="button"
                   role="radio"
-                  aria-checked={quote === q}
-                  active={quote === q}
+                  aria-checked={on}
                   disabled={busy || !offered}
                   onClick={() => setQuote(q)}
                   title={offered ? undefined : `${venueLabel(venue)} has no ${q} pair on this pool`}
-                  className={cn("font-mono", quote === q && q === "ZEC" && "shadow-[0_0_18px_-4px_rgba(244,183,40,0.45)]")}
+                  className={cn(
+                    "group flex h-11 min-w-0 items-center gap-2.5 rounded-xl border pr-3.5 pl-2.5 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed",
+                    on ? "border-zec/50 bg-zec/[0.06] text-foreground" : "border-border text-muted-foreground hover:border-border-strong hover:bg-surface-1 hover:text-foreground",
+                    !offered && "opacity-40 hover:border-border hover:bg-transparent hover:text-muted-foreground",
+                    on && q === "ZEC" && "shadow-[0_0_18px_-4px_rgba(244,183,40,0.45)]",
+                  )}
                 >
-                  ${meta.symbol || "TICKER"}/{q === "SOL" ? native : q}
-                </Chip>
+                  <span aria-hidden className={cn("grid size-7 shrink-0 place-items-center rounded-full border transition-colors", on ? "border-zec/30 bg-background" : "border-border bg-surface-1")}>
+                    <QuoteCoin quote={q} native={native} size={16} className={q === "ZEC" ? undefined : "text-current"} />
+                  </span>
+                  <span className="min-w-0 truncate font-mono text-xs">
+                    <span className={cn("transition-colors", on ? "text-muted-foreground" : "text-faint-foreground")}>${meta.symbol || "TICKER"}/</span>
+                    {q === "SOL" ? native : q}
+                  </span>
+                </button>
               );
             })}
           </div>
+          {quoteMint && (
+            <p className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-faint-foreground">
+              <span>{quote === "ZEC" ? "ZEC on Solana (bridged)" : quote} mint</span>
+              <Link
+                href={`/token/${quoteMint}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={quoteMint}
+                aria-label={`View ${quote} token page (opens in a new tab)`}
+                className="inline-flex items-center gap-1 rounded-md font-mono text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              >
+                {shortAddr(quoteMint)}
+                <ArrowSquareOut size={12} weight="light" aria-hidden />
+              </Link>
+            </p>
+          )}
           <p className="mt-2 text-xs text-pretty text-faint-foreground">{process.env.NEXT_PUBLIC_HOOD === "1" && quote === "SOL" && native === "ETH" ? "The pair on Pons. Trades settle in ETH on the curve; buyers still pay from their ZEC balance." : QUOTE_NOTE[quote]}</p>
         </FormStep>
 
