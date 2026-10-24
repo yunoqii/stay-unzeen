@@ -350,7 +350,91 @@ describe("Discovery tick", () => {
   });
 });
 
+describe("Discovery fast pass (INTEL_DISCOVERY_TICK_SECS)", () => {
+  it("collect: a new create is committed in the same pass with its metrics; only the admitted are read", async () => {
+    const chain = pumpChain();
+    chain.txs.set(PUMP.signature, PUMP.logs);
+    const src = new ListSource();
+    const store = new MemoryDiscoveryStore();
+    let now = PUMP.blockTime * 1000 + 3_000;
+    const d = new Discovery({ store, chain, sources: [src], rng: seededRng(5), now: () => now });
+    await d.refresh(); // an earlier metrics pass (nothing active)
+    chain.keysRead = [];
+    src.queue = [{ venue: "pumpfun", signature: PUMP.signature, slot: PUMP.slot, createdAt: PUMP.blockTime * 1000 }];
+    const r = await d.collect();
+    expect(r.admitted).toBe(1);
+    expect(r.nextInMs).toBeGreaterThanOrEqual(3_000);
+    expect(r.nextInMs).toBeLessThanOrEqual(5_000);
+    expect(r.lagMaxMs).toBe(3_000);
+    const row = store.rows.get(PUMP.mint)!;
+    expect(Number(row.marketCapSol)).toBeGreaterThan(0);
+    expect(chain.keysRead).toEqual([[GLOBAL_PDA.toBase58(), bondingCurvePda(new PublicKey(PUMP.mint)).toBase58()]]);
+    expect(d.activeMints()).toEqual([PUMP.mint]);
+    // an empty pass reads nothing but the pump poll (none here) and commits nothing
+    const commits = store.commits;
+    now += 4_000;
+    const e = await d.collect();
+    expect(e.reads).toBe(0);
+    expect(store.commits).toBe(commits);
+  });
+
+  it("collect: a create whose curve is not there is never published (not in the store, not in the warm set)", async () => {
+    const chain = pumpChain();
+    const src = new ListSource();
+    const store = new MemoryDiscoveryStore();
+    const d = new Discovery({ store, chain, sources: [src], rng: seededRng(6), now: () => T0 });
+    src.queue = [{ venue: "pumpfun", signature: "x", slot: 1, createdAt: T0 - 1_000, mint: Keypair.generate().publicKey.toBase58() }];
+    const r = await d.collect();
+    expect(r.admitted).toBe(1);
+    expect(store.rows.size).toBe(0);
+    expect(d.activeMints()).toEqual([]);
+    expect(r.active).toBe(0);
+  });
+
+  it("collect does not apply the window; refresh does (and reads every candidate in one batch)", async () => {
+    const chain = new AnyCurveChain();
+    const src = new ListSource();
+    const store = new MemoryDiscoveryStore();
+    let now = T0;
+    const d = new Discovery({ store, chain, sources: [src], rng: seededRng(7), now: () => now, windowMs: 3_600_000, burst: 50, max: 50 });
+    src.queue = Array.from({ length: 3 }, (_, i) => fakeCreate(i, now));
+    await d.collect();
+    expect(store.rows.size).toBe(3);
+    now += 3_600_000 + 100;
+    await d.collect();
+    expect(store.rows.size).toBe(3);
+    const r = await d.refresh();
+    expect(r.removed).toBe(3);
+    expect(store.rows.size).toBe(0);
+  });
+
+  it("run: fast passes every ~passMs, ONE aggregated report per metrics pass", async () => {
+    const chain = new AnyCurveChain();
+    const src = new ListSource();
+    const store = new MemoryDiscoveryStore();
+    const d = new Discovery({ store, chain, sources: [src], rng: seededRng(8), passMs: 1_000, burst: 50, max: 50 });
+    const reports: Array<{ passes?: number; admitted: number }> = [];
+    const ac = new AbortController();
+    src.queue = [fakeCreate(1, Date.now())];
+    const done = d.run(ac.signal, (r) => reports.push(r));
+    await new Promise((r) => setTimeout(r, 2_600));
+    src.queue = [fakeCreate(2, Date.now())];
+    await new Promise((r) => setTimeout(r, 1_400));
+    ac.abort();
+    await done;
+    // the metrics pass is 45–75 s: only its first run reported, the rest are folded fast passes
+    expect(reports.length).toBe(1);
+    expect(store.rows.size).toBe(2); // the second create landed through a fast pass, no metrics pass in between
+  }, 10_000);
+});
+
 describe("config", () => {
+  it("fast pass period: INTEL_DISCOVERY_TICK_SECS (default 4 s, 1..60)", () => {
+    expect(loadDiscoveryConfig("mainnet-beta", {}).passMs).toBe(4_000);
+    expect(loadDiscoveryConfig("mainnet-beta", { INTEL_DISCOVERY_TICK_SECS: "3" }).passMs).toBe(3_000);
+    expect(() => loadDiscoveryConfig("mainnet-beta", { INTEL_DISCOVERY_TICK_SECS: "0.5" })).toThrow();
+  });
+
   it("OFF by default; mainnet DBC stream URL from the Helius key; DBC can be switched off", () => {
     expect(loadDiscoveryConfig("devnet", {}).enabled).toBe(false);
     const m = loadDiscoveryConfig("mainnet-beta", { INTEL_DISCOVERY: "1", SOLANA_RPC_URL_MAINNET: "https://mainnet.helius-rpc.com/?api-key=abc" });

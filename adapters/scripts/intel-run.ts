@@ -131,6 +131,9 @@ async function main(): Promise<void> {
     discovery = new Discovery({
       store: dstore,
       chain,
+      // Metrics pass on its own limiter: its batch of ~max/100 calls never queues ahead of the fast pass.
+      metricsChain: new RpcDiscoveryChain(dcfg.rpcUrl, { rps: dcfg.rps }),
+      passMs: dcfg.passMs,
       sources,
       rng: cryptoRng,
       max: dcfg.max,
@@ -139,7 +142,7 @@ async function main(): Promise<void> {
       launchLabProgram: llDiscovery ? LAUNCHLAB_PROGRAM["mainnet-beta"] : null,
       ...(devIndex ? { onCreates: (c) => devIndex!.record(c) } : {}),
     });
-    log(`discovery ON rpc=${maskUrl(dcfg.rpcUrl)} (${dcfg.rpcSource}) pump=${dcfg.pump} dbc=${dcfg.dbcStreamUrl ? "stream" : "off"} launchlab=${llDiscovery ? "stream" : "off"} max=${dcfg.max}/${dcfg.windowMs / 3_600_000}h`);
+    log(`discovery ON rpc=${maskUrl(dcfg.rpcUrl)} (${dcfg.rpcSource}) pump=${dcfg.pump} dbc=${dcfg.dbcStreamUrl ? "stream" : "off"} launchlab=${llDiscovery ? "stream" : "off"} max=${dcfg.max}/${dcfg.windowMs / 3_600_000}h pass=${dcfg.passMs / 1000}s`);
   }
   // Dev index without discovery: the same public create streams, drained every 60 s.
   let createFeed: CreateSource[] = [];
@@ -156,7 +159,8 @@ async function main(): Promise<void> {
     for (const s of createFeed) await devIndex!.record(await s.drain()).catch(() => log("WARN dev index write failed"));
   };
   const dfmt = (r: Awaited<ReturnType<Discovery["tick"]>>) =>
-    `discovery #${r.tick} seen=${r.seen} admitted=${r.admitted} active=${r.active} removed=${r.removed} reads=${r.reads} errors=${r.errors} ${r.ms}ms`;
+    `discovery #${r.tick}${r.passes !== undefined ? ` passes=${r.passes}` : ""} seen=${r.seen} admitted=${r.admitted} active=${r.active} removed=${r.removed} reads=${r.reads} errors=${r.errors}` +
+    `${r.lagMaxMs !== undefined ? ` lag=${(r.lagAvgMs! / 1000).toFixed(1)}/${(r.lagMaxMs / 1000).toFixed(1)}s` : ""} max=${r.ms}ms`;
 
   if (process.argv.includes("--once")) {
     const r = await indexer.tick();

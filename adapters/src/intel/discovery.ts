@@ -18,9 +18,10 @@ import { nextTickDelay, tickBoundary } from "./schedule";
  * (it costs provider credits); on for the video and tests.
  *
  * Privacy: a pure public stream. Nothing here depends on users: no request, no
- * view, no search ever triggers a read. Candidates come from the chain, metrics
- * are read only on the discovery tick (45–75 s, own timer), for the whole
- * candidate set at once. Logs carry counts only.
+ * view, no search ever triggers a read. Candidates come from the chain; the
+ * fast pass (~4 s, own timer) admits new creates and reads only their metrics,
+ * the metrics pass (45–75 s, own timer) reads the whole candidate set at once.
+ * Logs carry counts only (one aggregated line per metrics pass).
  *
  * Sources (measured on mainnet 13.10, read-only):
  * - pump.fun: every create / create_v2 touches the `mint-authority` PDA and
@@ -427,6 +428,8 @@ export class DbcStreamSource implements CreateSource {
 export interface DiscoveryOptions {
   store: DiscoveryStore;
   chain: DiscoveryChain;
+  /** Reads of the metrics pass (all candidates); default `chain`. Own limiter so a long batch never delays the fast pass. */
+  metricsChain?: DiscoveryChain;
   sources: CreateSource[];
   rng: Rng;
   now?: () => number;
@@ -436,6 +439,8 @@ export interface DiscoveryOptions {
   windowMs?: number;
   /** Admission bucket size (INTEL_DISCOVERY_BURST, default 10). */
   burst?: number;
+  /** Fast pass period (INTEL_DISCOVERY_TICK_SECS, default 4 s), +-25 % jitter. */
+  passMs?: number;
   /** Raydium LaunchLab program (API v0.28 Pulse): LaunchLab creates become candidates (SOL pools only). null = dev index only. */
   launchLabProgram?: PublicKey | null;
   /** Every create drained this tick (all venues, before admission): the dev index (INTEL_FULL). */
@@ -453,18 +458,36 @@ export interface DiscoveryReport {
   errors: number;
   ms: number;
   nextInMs: number;
+  /** Fast passes folded into this report (run()). */
+  passes?: number;
+  /** Admission delay after the on-chain create (public timestamps): mean / max ms of the admitted ones. */
+  lagAvgMs?: number;
+  lagMaxMs?: number;
 }
 
 interface Tracked extends DiscoveryCandidate {
   decimals: number;
   supply: bigint | null;
+  /** Metrics read once (the venue account is what the create said). Unverified rows are never published. */
+  verified: boolean;
 }
 
+export const DISCOVERY_PASS_MS = 4_000;
+
+/**
+ * Two passes (24.10). Fast pass (`collect`, every ~4 s): drain the create
+ * sources, admit through the token bucket, read metrics of the admitted ones
+ * only (one small batch) and commit them, so a new token is in
+ * `intel_discovery` (Pulse) seconds after its create. Metrics pass (`refresh`,
+ * 45–75 s): window, metrics of every candidate in one batched read, one commit.
+ * Both are timers of their own; neither depends on users.
+ */
 export class Discovery {
   private readonly now: () => number;
   private readonly max: number;
   private readonly windowMs: number;
   private readonly burst: number;
+  private readonly passMs: number;
   private allowance: number;
   private lastRefill: number;
   private readonly active = new Map<string, Tracked>();
@@ -472,7 +495,8 @@ export class Discovery {
   private readonly seen = new Map<string, number>();
   private readonly configs = new Map<string, PoolConfig>();
   private global: Global | null = null;
-  private loaded = false;
+  private loading: Promise<void> | null = null;
+  private writing: Promise<void> = Promise.resolve();
   private ticks = 0;
 
   constructor(private readonly o: DiscoveryOptions) {
@@ -480,35 +504,45 @@ export class Discovery {
     this.max = o.max ?? 200;
     this.windowMs = o.windowMs ?? 6 * 3_600_000;
     this.burst = o.burst ?? 10;
-    if (this.max < 1 || this.windowMs < 60_000 || this.burst < 1) throw new RangeError("bad discovery limits");
+    this.passMs = o.passMs ?? DISCOVERY_PASS_MS;
+    if (this.max < 1 || this.windowMs < 60_000 || this.burst < 1 || this.passMs < 1_000) throw new RangeError("bad discovery limits");
     this.allowance = this.burst;
     this.lastRefill = this.now();
   }
 
-  /** One tick. Never throws. */
+  private load(): Promise<void> {
+    this.loading ??= (async () => {
+      for (const c of await this.o.store.load()) this.active.set(c.mint, { ...c, decimals: 6, supply: null, verified: true });
+    })().catch((e) => {
+      this.loading = null;
+      throw e;
+    });
+    return this.loading;
+  }
+
+  /** Store writes never overlap (fast and metrics pass run on their own timers). */
+  private commit(c: DiscoveryCommit): Promise<void> {
+    const w = this.writing.then(() => this.o.store.commit(c));
+    this.writing = w.catch(() => undefined);
+    return w;
+  }
+
+  /** Both passes once (smoke test, tests). Never throws. */
   async tick(): Promise<DiscoveryReport> {
+    const a = await this.collect({ readFresh: false });
+    const b = await this.refresh();
+    return { ...b, seen: a.seen, admitted: a.admitted, reads: a.reads + b.reads, errors: a.errors + b.errors, ms: a.ms + b.ms, ...(a.lagMaxMs !== undefined ? { lagAvgMs: a.lagAvgMs, lagMaxMs: a.lagMaxMs } : {}) };
+  }
+
+  /** Fast pass: new creates -> admission -> metrics of the admitted -> commit of the admitted. Never throws. */
+  async collect(opt: { readFresh?: boolean } = {}): Promise<DiscoveryReport> {
     const started = this.now();
     const asOf = tickBoundary(started);
-    const nextInMs = nextTickDelay(this.o.rng);
-    this.ticks++;
-    const r: DiscoveryReport = { tick: this.ticks, seen: 0, admitted: 0, active: 0, removed: 0, reads: 0, errors: 0, ms: 0, nextInMs };
+    const r: DiscoveryReport = { tick: this.ticks, seen: 0, admitted: 0, active: 0, removed: 0, reads: 0, errors: 0, ms: 0, nextInMs: this.passMs + this.o.rng.int(-this.passMs / 4, this.passMs / 4) };
     try {
-      if (!this.loaded) {
-        for (const c of await this.o.store.load()) this.active.set(c.mint, { ...c, decimals: 6, supply: null });
-        this.loaded = true;
-      }
-      // 1. Window: drop old candidates and old dedupe keys.
+      await this.load();
       const horizon = started - this.windowMs;
-      const removed: string[] = [];
-      for (const [m, c] of this.active) {
-        if (c.createdAt < horizon) {
-          this.active.delete(m);
-          removed.push(m);
-        }
-      }
-      for (const [k, t] of this.seen) if (t < horizon) this.seen.delete(k);
-
-      // 2. New creates from every source (a failing source does not stop the others).
+      // 1. New creates from every source (a failing source does not stop the others).
       const fresh: CreateSeen[] = [];
       const drained: CreateSeen[] = [];
       for (const s of this.o.sources) {
@@ -528,7 +562,7 @@ export class Discovery {
       r.seen = fresh.length;
       if (this.o.onCreates && drained.length > 0) await Promise.resolve(this.o.onCreates(drained)).catch(() => r.errors++);
 
-      // 3. Admission: token bucket (max / window), never above `max` active; newest first.
+      // 2. Admission: token bucket (max / window), never above `max` active; newest first.
       this.refill(started);
       fresh.sort((a, b) => (b.createdAt ?? started) - (a.createdAt ?? started));
       const admitted: Tracked[] = [];
@@ -564,6 +598,7 @@ export class Discovery {
           asOf,
           decimals: 6,
           supply: null,
+          verified: false,
           ...(full.pool ? { pool: full.pool } : {}),
           ...(full.config ? { config: full.config } : {}),
         });
@@ -571,17 +606,57 @@ export class Discovery {
       for (const a of admitted) this.active.set(a.mint, a);
       r.admitted = admitted.length;
 
-      // 4. Metrics of EVERY active candidate, on the tick only (one batched read).
-      const reads = await this.refreshMetrics(asOf, new Set(admitted.map((a) => a.mint)));
+      // 3. Metrics of the admitted only (one small batch), then their commit.
+      if (opt.readFresh !== false && admitted.length > 0) {
+        const reads = await this.refreshMetrics(this.o.chain, asOf, admitted);
+        r.reads += reads.calls;
+        r.errors += reads.errors;
+        for (const m of reads.gone) this.active.delete(m);
+        const ok = admitted.filter((a) => a.verified && this.active.has(a.mint));
+        if (ok.length > 0) {
+          await this.commit({ asOf, upserts: ok.map(publicRow), removed: [] });
+          const t = this.now();
+          const lags = ok.map((a) => Math.max(0, t - a.createdAt));
+          r.lagMaxMs = Math.max(...lags);
+          r.lagAvgMs = Math.round(lags.reduce((x, y) => x + y, 0) / lags.length);
+        }
+      }
+    } catch {
+      r.errors++;
+    }
+    r.active = this.active.size;
+    r.ms = this.now() - started;
+    return r;
+  }
+
+  /** Metrics pass: window, metrics of EVERY candidate (one batched read), one commit. Never throws. */
+  async refresh(): Promise<DiscoveryReport> {
+    const started = this.now();
+    const asOf = tickBoundary(started);
+    const nextInMs = nextTickDelay(this.o.rng);
+    this.ticks++;
+    const r: DiscoveryReport = { tick: this.ticks, seen: 0, admitted: 0, active: 0, removed: 0, reads: 0, errors: 0, ms: 0, nextInMs };
+    try {
+      await this.load();
+      // 1. Window: drop old candidates and old dedupe keys.
+      const horizon = started - this.windowMs;
+      const removed: string[] = [];
+      for (const [m, c] of this.active) {
+        if (c.createdAt < horizon) {
+          this.active.delete(m);
+          removed.push(m);
+        }
+      }
+      for (const [k, t] of this.seen) if (t < horizon) this.seen.delete(k);
+      // 2. Metrics of every candidate.
+      const reads = await this.refreshMetrics(this.o.metricsChain ?? this.o.chain, asOf, [...this.active.values()]);
       r.reads += reads.calls;
       r.errors += reads.errors;
       for (const m of reads.gone) {
-        this.active.delete(m);
-        removed.push(m);
+        if (this.active.delete(m)) removed.push(m);
       }
-
-      // 5. One commit.
-      await this.o.store.commit({ asOf, upserts: [...this.active.values()].map(publicRow), removed });
+      // 3. One commit (verified rows only; an admitted candidate the fast pass could not read yet waits).
+      await this.commit({ asOf, upserts: [...this.active.values()].filter((c) => c.verified).map(publicRow), removed });
       r.removed = removed.length;
     } catch {
       r.errors++;
@@ -591,20 +666,58 @@ export class Discovery {
     return r;
   }
 
-  /** Active candidates, newest first (public stream; the indexer keeps them in its warm set). */
+  /** Published candidates, newest first (public stream; the indexer keeps them in its warm set). */
   activeMints(): string[] {
-    return [...this.active.values()].sort((a, b) => b.createdAt - a.createdAt).map((c) => c.mint);
+    return [...this.active.values()].filter((c) => c.verified).sort((a, b) => b.createdAt - a.createdAt).map((c) => c.mint);
   }
 
+  /**
+   * Fast pass every ~passMs, metrics pass every 45–75 s, each on its own timer.
+   * `onTick` gets ONE aggregated report per metrics pass (fast passes folded in),
+   * so the log keeps one discovery line per minute.
+   */
   async run(signal: AbortSignal, onTick?: (r: DiscoveryReport) => void): Promise<void> {
-    while (!signal.aborted) {
-      const rep = await this.tick();
-      onTick?.(rep);
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(resolve, Math.max(1_000, rep.nextInMs - rep.ms));
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, Math.max(250, ms));
         signal.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
       });
-    }
+    const agg = { passes: 0, seen: 0, admitted: 0, reads: 0, errors: 0, ms: 0, lagSum: 0, lagN: 0, lagMax: 0 };
+    const fast = (async () => {
+      while (!signal.aborted) {
+        const p = await this.collect();
+        agg.passes++;
+        agg.seen += p.seen;
+        agg.admitted += p.admitted;
+        agg.reads += p.reads;
+        agg.errors += p.errors;
+        agg.ms = Math.max(agg.ms, p.ms);
+        if (p.lagMaxMs !== undefined) {
+          agg.lagSum += (p.lagAvgMs ?? 0) * p.admitted;
+          agg.lagN += p.admitted;
+          agg.lagMax = Math.max(agg.lagMax, p.lagMaxMs);
+        }
+        await sleep(p.nextInMs - p.ms);
+      }
+    })();
+    const slow = (async () => {
+      while (!signal.aborted) {
+        const m = await this.refresh();
+        onTick?.({
+          ...m,
+          passes: agg.passes,
+          seen: agg.seen,
+          admitted: agg.admitted,
+          reads: m.reads + agg.reads,
+          errors: m.errors + agg.errors,
+          ms: Math.max(m.ms, agg.ms),
+          ...(agg.lagN > 0 ? { lagAvgMs: Math.round(agg.lagSum / agg.lagN), lagMaxMs: agg.lagMax } : {}),
+        });
+        Object.assign(agg, { passes: 0, seen: 0, admitted: 0, reads: 0, errors: 0, ms: 0, lagSum: 0, lagN: 0, lagMax: 0 });
+        await sleep(m.nextInMs - m.ms);
+      }
+    })();
+    await Promise.all([fast, slow]);
     for (const s of this.o.sources) s.stop?.();
   }
 
@@ -619,27 +732,30 @@ export class Discovery {
    * DBC: pool, its config (once per config), the mint (+ Metaplex metadata) once
    * per new candidate. <= 100 keys per getMultipleAccounts.
    */
-  private async refreshMetrics(asOf: number, fresh: ReadonlySet<string>): Promise<{ calls: number; errors: number; gone: string[] }> {
+  private async refreshMetrics(chain: DiscoveryChain, asOf: number, list: readonly Tracked[]): Promise<{ calls: number; errors: number; gone: string[] }> {
     const keys: PublicKey[] = [GLOBAL_PDA];
     const plan: Array<{ c: Tracked; idx: Record<string, number> }> = [];
     const add = (k: PublicKey) => keys.push(k) - 1;
     const wantConfig = new Map<string, number>();
-    for (const c of this.active.values()) {
+    for (const c of list) {
       const idx: Record<string, number> = {};
       const mintPk = new PublicKey(c.mint);
       if (c.venue === "pumpfun") idx.curve = add(bondingCurvePda(mintPk));
       else if (c.venue === "raydium-launchlab") {
         if (!this.o.launchLabProgram) continue;
         idx.ll = add(getPdaLaunchpadPoolId(this.o.launchLabProgram, mintPk, NATIVE_MINT).publicKey);
-        if (fresh.has(c.mint) || c.supply === null) {
+        if (!c.verified || c.supply === null) {
           idx.mint = add(mintPk);
           idx.meta = add(metaplexMetadataPda(mintPk));
         }
       } else {
-        if (!c.pool) continue; // unknown pool: never guess the PDA of a foreign config
+        if (!c.pool) {
+          c.verified = true; // unknown pool: never guess the PDA of a foreign config (row without metrics)
+          continue;
+        }
         idx.pool = add(new PublicKey(c.pool));
         if (c.config && !this.configs.has(c.config) && !wantConfig.has(c.config)) wantConfig.set(c.config, add(new PublicKey(c.config)));
-        if (fresh.has(c.mint) || c.supply === null) {
+        if (!c.verified || c.supply === null) {
           idx.mint = add(mintPk);
           idx.meta = add(metaplexMetadataPda(mintPk));
         }
@@ -649,7 +765,7 @@ export class Discovery {
     let accs: (AccountInfo<Buffer> | null)[];
     try {
       accs = [];
-      for (let i = 0; i < keys.length; i += 100) accs.push(...(await this.o.chain.getMultipleAccounts(keys.slice(i, i + 100))));
+      for (let i = 0; i < keys.length; i += 100) accs.push(...(await chain.getMultipleAccounts(keys.slice(i, i + 100))));
     } catch {
       return { calls: Math.ceil(keys.length / 100), errors: 1, gone: [] };
     }
@@ -671,7 +787,7 @@ export class Discovery {
         // SOL-quoted curves only (as the trading adapter): a USDC / pump-coin quote would read as SOL.
         const curve = decoded && isLegacyQuoteMint(normalizeQuoteMint(decoded.quoteMint)) ? decoded : null;
         if (!curve) {
-          if (fresh.has(c.mint)) gone.push(c.mint); // not a SOL pump curve after all
+          if (!c.verified) gone.push(c.mint); // not a SOL pump curve after all
           else errors++;
           continue;
         }
@@ -681,6 +797,7 @@ export class Discovery {
         c.priceSol = pc.priceSol;
         c.marketCapSol = pc.marketCapSol;
         c.progressPct = st === "curve" && this.global ? curveProgress(curve, this.global).progressPct : null;
+        c.verified = true;
       } else {
         if (idx.mint !== undefined) {
           const f = mintFacts(new PublicKey(c.mint), accs[idx.mint] ?? null);
@@ -696,13 +813,14 @@ export class Discovery {
           const la = accs[idx.ll!];
           const pool = la && this.o.launchLabProgram && la.owner.equals(this.o.launchLabProgram) ? safe(() => LaunchpadPool.decode(la.data)) : null;
           if (!pool || !pool.mintA.equals(new PublicKey(c.mint)) || !pool.mintB.equals(NATIVE_MINT)) {
-            if (fresh.has(c.mint)) gone.push(c.mint); // not a SOL LaunchLab pool
+            if (!c.verified) gone.push(c.mint); // not a SOL LaunchLab pool
             else errors++;
             continue;
           }
           const onCurve = Number(pool.status) === 0;
           c.status = onCurve ? "curve" : "graduated";
           c.progressPct = onCurve ? launchLabProgress(pool) : null;
+          c.verified = true;
           const sq = BigInt(pool.virtualB.toString()) + BigInt(pool.realB.toString());
           const tq = BigInt(pool.virtualA.toString()) - BigInt(pool.realA.toString());
           if (sq > 0n && tq > 0n) {
@@ -716,10 +834,11 @@ export class Discovery {
         const st = a && a.owner.equals(DBC_PROGRAM_ID) ? safe(() => (dbcCoder().accounts.decode("virtualPool", a.data) as VirtualPool).poolState) : null;
         const cfg = c.config ? this.configs.get(c.config) : undefined;
         if (!st || !st.baseMint.equals(new PublicKey(c.mint))) {
-          if (fresh.has(c.mint)) gone.push(c.mint);
+          if (!c.verified) gone.push(c.mint);
           else errors++;
           continue;
         }
+        c.verified = true;
         if (cfg) {
           const s = dbcStatus(st, cfg);
           c.status = s;
@@ -737,7 +856,7 @@ export class Discovery {
 }
 
 function publicRow(c: Tracked): DiscoveryCandidate {
-  const { decimals: _d, supply: _s, ...row } = c;
+  const { decimals: _d, supply: _s, verified: _v, ...row } = c;
   return row;
 }
 
@@ -784,6 +903,8 @@ export interface DiscoveryConfig {
   dbcStreamUrl: string | null;
   dbcMaxPerHour: number;
   rps: number;
+  /** Fast pass period (INTEL_DISCOVERY_TICK_SECS, default 4 s). */
+  passMs: number;
 }
 
 /**
@@ -840,5 +961,6 @@ export function loadDiscoveryConfig(cluster: "devnet" | "mainnet-beta", env: Nod
     dbcStreamUrl,
     dbcMaxPerHour: num("INTEL_DISCOVERY_DBC_MAX_PER_H", 600, 1, 100_000),
     rps: num("INTEL_DISCOVERY_RPS", 2, 0.2, 20),
+    passMs: num("INTEL_DISCOVERY_TICK_SECS", 4, 1, 60) * 1000,
   };
 }
