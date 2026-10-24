@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { GLOBAL_PDA, PUMP_PROGRAM_ID, bondingCurvePda } from "@pump-fun/pump-sdk";
+import { GLOBAL_PDA, PUMP_PROGRAM_ID, bondingCurvePda, canonicalPumpPoolPda } from "@pump-fun/pump-sdk";
+import { ammPriceAndCap } from "../src/intel/metrics";
 import { Keypair, PublicKey, type AccountInfo } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import {
@@ -14,6 +15,7 @@ import {
   dbcStreamRequest,
   loadDiscoveryConfig,
   pumpCreateFromLogs,
+  dammV2PoolOf,
   type CreateSeen,
   type CreateSource,
   type DiscoveryChain,
@@ -426,6 +428,58 @@ describe("Discovery fast pass (INTEL_DISCOVERY_TICK_SECS)", () => {
     expect(reports.length).toBe(1);
     expect(store.rows.size).toBe(2); // the second create landed through a fast pass, no metrics pass in between
   }, 10_000);
+});
+
+describe("graduated prices (AMM)", () => {
+  it("ammPriceAndCap: SOL per whole token from the reserves, cap = price x supply", () => {
+    // 85 SOL against 200M tokens (6 decimals), 1B supply
+    const r = ammPriceAndCap(200_000_000n * 10n ** 6n, 85n * 10n ** 9n, 6, 1_000_000_000n * 10n ** 6n)!;
+    expect(r.priceSol).toBe("0.000000425");
+    expect(r.marketCapSol).toBe("425");
+    expect(ammPriceAndCap(0n, 1n, 6, null)).toBeNull();
+  });
+
+  it("dammV2PoolOf: the pool a DBC launch migrated to (mainnet 24.10: RCws.. -> EtZu..)", () => {
+    const cfg = { migrationOption: 1, migrationFeeOption: 6, quoteMint: NATIVE_MINT };
+    expect(dammV2PoolOf(cfg, new PublicKey("RCwsR2zbS8h9CLg6uGjqB2BVBZ2zpdEHRaVFdA5FeEP"))!.toBase58()).toBe("EtZurYTvvLVc2zGrTf75ivpvs52H163WyDKNt3mpeUo");
+    expect(dammV2PoolOf({ ...cfg, migrationOption: 0 }, NATIVE_MINT)).toBeNull(); // DAMM v1
+  });
+
+  it("graduated pump coin: PumpSwap pool, then its vaults (same pass), price from the reserves", async () => {
+    const chain = pumpChain();
+    const mint = new PublicKey(PUMP.mint);
+    const curve = Buffer.from(PUMP.curve.data, "base64");
+    curve[48] = 1; // complete
+    chain.accounts.set(bondingCurvePda(mint).toBase58(), { data: curve, owner: new PublicKey(PUMP.curve.owner), lamports: 1, executable: false });
+    const baseVault = Keypair.generate().publicKey;
+    const quoteVault = Keypair.generate().publicKey;
+    const pool = Buffer.alloc(8 + 1 + 2 + 32 * 6 + 8);
+    NATIVE_MINT.toBuffer().copy(pool, 8 + 1 + 2 + 64);
+    baseVault.toBuffer().copy(pool, 8 + 1 + 2 + 32 * 4);
+    quoteVault.toBuffer().copy(pool, 8 + 1 + 2 + 32 * 5);
+    chain.accounts.set(canonicalPumpPoolPda(mint).toBase58(), { data: pool, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false });
+    const ta = (amount: bigint) => {
+      const b = Buffer.alloc(165);
+      b.writeBigUInt64LE(amount, 64);
+      return { data: b, owner: PUMP_PROGRAM_ID, lamports: 1, executable: false };
+    };
+    chain.accounts.set(baseVault.toBase58(), ta(200_000_000n * 10n ** 6n));
+    chain.accounts.set(quoteVault.toBase58(), ta(85n * 10n ** 9n));
+    const src = new ListSource();
+    src.queue = [{ venue: "pumpfun", signature: "g", slot: 1, createdAt: T0, mint: PUMP.mint, name: "G", symbol: "G" }];
+    const store = new MemoryDiscoveryStore();
+    let now = T0 + 60_000;
+    const d = new Discovery({ store, chain, sources: [src], rng: seededRng(9), now: () => now });
+    await d.tick(); // learns "graduated" from the curve
+    expect(store.rows.get(PUMP.mint)!.status).toBe("graduated");
+    now += 60_000;
+    await d.refresh(); // pool account -> vaults -> price
+    expect(store.rows.get(PUMP.mint)).toMatchObject({ priceSol: "0.000000425", marketCapSol: "425", progressPct: null });
+    now += 60_000;
+    chain.keysRead = [];
+    await d.refresh(); // vaults known: read directly in the batch
+    expect(chain.keysRead).toEqual([[GLOBAL_PDA.toBase58(), bondingCurvePda(mint).toBase58(), baseVault.toBase58(), quoteVault.toBase58()]]);
+  });
 });
 
 describe("config", () => {

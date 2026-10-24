@@ -1,11 +1,12 @@
-import { GLOBAL_PDA, PUMP_PROGRAM_ID, PUMP_SDK, bondingCurvePda, isLegacyQuoteMint, normalizeQuoteMint, type Global } from "@pump-fun/pump-sdk";
-import type { PoolConfig, VirtualPool } from "@meteora-ag/dynamic-bonding-curve-sdk";
-import { PublicKey, type AccountInfo, type Connection, type Logs, type VersionedTransactionResponse } from "@solana/web3.js";
+import { GLOBAL_PDA, PUMP_PROGRAM_ID, PUMP_SDK, bondingCurvePda, canonicalPumpPoolPda, isLegacyQuoteMint, normalizeQuoteMint, type Global } from "@pump-fun/pump-sdk";
+import { DAMM_V2_MIGRATION_FEE_ADDRESS, DAMM_V2_PROGRAM_ID, createDammV2Program, deriveDammV2PoolAddress, type PoolConfig, type VirtualPool } from "@meteora-ag/dynamic-bonding-curve-sdk";
+import { Connection, PublicKey, type AccountInfo, type Logs, type VersionedTransactionResponse } from "@solana/web3.js";
+import type BN from "bn.js";
 import { extractCreateEvents } from "../events";
 import { DBC_PROGRAM_ID, dbcCoder, dbcPriceAndCap, dbcProgressPct, dbcStatus } from "../meteora";
 import { curveStatus, priceAndCap } from "../pumpfun";
 import type { Rng } from "../relayer/random";
-import { curveProgress, metaplexMetadataPda, mintFacts, parseMetaplexMetadata } from "./metrics";
+import { ammPriceAndCap, curveProgress, metaplexMetadataPda, mintFacts, parseMetaplexMetadata, parsePumpPool, pumpPoolQuoteMint, tokenAccountAmount } from "./metrics";
 import { LaunchpadPool, getPdaLaunchpadPoolId } from "@raydium-io/raydium-sdk-v2";
 import { NATIVE_MINT } from "@solana/spl-token";
 import { formatUnits } from "../math";
@@ -468,6 +469,8 @@ export interface DiscoveryReport {
 interface Tracked extends DiscoveryCandidate {
   decimals: number;
   supply: bigint | null;
+  /** Graduated pump.fun: PumpSwap pool vaults (base, quote), read once from the pool account. */
+  ammVaults?: [string, string];
   /** Metrics read once (the venue account is what the create said). Unverified rows are never published. */
   verified: boolean;
 }
@@ -740,8 +743,16 @@ export class Discovery {
     for (const c of list) {
       const idx: Record<string, number> = {};
       const mintPk = new PublicKey(c.mint);
-      if (c.venue === "pumpfun") idx.curve = add(bondingCurvePda(mintPk));
-      else if (c.venue === "raydium-launchlab") {
+      if (c.venue === "pumpfun") {
+        idx.curve = add(bondingCurvePda(mintPk));
+        // Graduated: spot price from the PumpSwap pool (vaults once known, else the pool account).
+        if (c.status === "graduated") {
+          if (c.ammVaults) {
+            idx.ab = add(new PublicKey(c.ammVaults[0]));
+            idx.aq = add(new PublicKey(c.ammVaults[1]));
+          } else idx.amm = add(canonicalPumpPoolPda(mintPk));
+        }
+      } else if (c.venue === "raydium-launchlab") {
         if (!this.o.launchLabProgram) continue;
         idx.ll = add(getPdaLaunchpadPoolId(this.o.launchLabProgram, mintPk, NATIVE_MINT).publicKey);
         if (!c.verified || c.supply === null) {
@@ -758,6 +769,12 @@ export class Discovery {
         if (!c.verified || c.supply === null) {
           idx.mint = add(mintPk);
           idx.meta = add(metaplexMetadataPda(mintPk));
+        }
+        // Graduated to DAMM v2 (migrationOption 1): the pool the DBC migration created.
+        const cfg = c.config ? this.configs.get(c.config) : undefined;
+        if (c.status === "graduated" && cfg) {
+          const damm = dammV2PoolOf(cfg, mintPk);
+          if (damm) idx.damm = add(damm);
         }
       }
       plan.push({ c, idx });
@@ -779,6 +796,8 @@ export class Discovery {
     }
     let errors = 0;
     const gone: string[] = [];
+    /** Pump candidates whose PumpSwap vaults were just learned: one small follow-up read in the same pass. */
+    const followUp: Tracked[] = [];
     for (const { c, idx } of plan) {
       c.asOf = asOf;
       if (c.venue === "pumpfun") {
@@ -798,6 +817,18 @@ export class Discovery {
         c.marketCapSol = pc.marketCapSol;
         c.progressPct = st === "curve" && this.global ? curveProgress(curve, this.global).progressPct : null;
         c.verified = true;
+        if (st === "graduated") {
+          const amm = idx.amm !== undefined ? accs[idx.amm] : null;
+          if (amm && !c.ammVaults) {
+            const pp = parsePumpPool(amm.data);
+            if (pp && pumpPoolQuoteMint(amm.data)?.equals(NATIVE_MINT)) {
+              c.ammVaults = [pp.baseVault.toBase58(), pp.quoteVault.toBase58()];
+              followUp.push(c);
+            }
+          }
+          const ap = idx.ab !== undefined ? ammPriceAndCap(tokenAccountAmount(accs[idx.ab]) ?? 0n, tokenAccountAmount(accs[idx.aq!]) ?? 0n, c.decimals, c.supply ?? PUMP_SUPPLY) : null;
+          if (ap) Object.assign(c, ap);
+        }
       } else {
         if (idx.mint !== undefined) {
           const f = mintFacts(new PublicKey(c.mint), accs[idx.mint] ?? null);
@@ -838,6 +869,11 @@ export class Discovery {
           else errors++;
           continue;
         }
+        // SOL-quoted configs only (as pump / LaunchLab): a USDC quote would read as SOL.
+        if (cfg && !cfg.quoteMint.equals(NATIVE_MINT)) {
+          gone.push(c.mint);
+          continue;
+        }
         c.verified = true;
         if (cfg) {
           const s = dbcStatus(st, cfg);
@@ -848,15 +884,56 @@ export class Discovery {
           const pc = dbcPriceAndCap(st.sqrtPrice, c.supply, c.decimals);
           c.priceSol = pc.priceSol;
           c.marketCapSol = pc.marketCapSol;
+          // Graduated: the DAMM v2 pool's price (same Q64 sqrt price as the curve).
+          const da = idx.damm !== undefined ? accs[idx.damm] : null;
+          const dp = da && da.owner.equals(DAMM_V2_PROGRAM_ID) ? safe(() => dammCoder().accounts.decode("pool", da.data) as { tokenAMint: PublicKey; tokenBMint: PublicKey; sqrtPrice: BN }) : null;
+          if (dp && dp.tokenAMint.equals(new PublicKey(c.mint)) && dp.tokenBMint.equals(NATIVE_MINT) && !dp.sqrtPrice.isZero()) {
+            const ap = dbcPriceAndCap(dp.sqrtPrice, c.supply, c.decimals);
+            c.priceSol = ap.priceSol;
+            c.marketCapSol = ap.marketCapSol;
+          }
         }
       }
     }
-    return { calls, errors, gone };
+    let more = 0;
+    if (followUp.length > 0) {
+      const vk = followUp.flatMap((c) => c.ammVaults!.map((k) => new PublicKey(k)));
+      try {
+        const va: (AccountInfo<Buffer> | null)[] = [];
+        for (let i = 0; i < vk.length; i += 100) {
+          more++;
+          va.push(...(await chain.getMultipleAccounts(vk.slice(i, i + 100))));
+        }
+        followUp.forEach((c, i) => {
+          const ap = ammPriceAndCap(tokenAccountAmount(va[2 * i]) ?? 0n, tokenAccountAmount(va[2 * i + 1]) ?? 0n, c.decimals, c.supply ?? PUMP_SUPPLY);
+          if (ap) Object.assign(c, ap);
+        });
+      } catch {
+        errors++;
+      }
+    }
+    return { calls: calls + more, errors, gone };
   }
 }
 
+/** pump.fun total supply (1e9 tokens, 6 decimals): market cap of a graduated pump coin. */
+const PUMP_SUPPLY = 1_000_000_000n * 10n ** 6n;
+
+let sharedDammCoder: { accounts: { decode(name: string, data: Buffer): unknown } } | null = null;
+function dammCoder() {
+  sharedDammCoder ??= createDammV2Program(new Connection("http://127.0.0.1:8899")).coder as unknown as NonNullable<typeof sharedDammCoder>;
+  return sharedDammCoder;
+}
+
+/** DAMM v2 pool a DBC launch migrates to (migrationOption 1), SOL quote; null otherwise. */
+export function dammV2PoolOf(cfg: Pick<PoolConfig, "migrationOption" | "migrationFeeOption" | "quoteMint">, baseMint: PublicKey): PublicKey | null {
+  if (Number(cfg.migrationOption) !== 1 || !cfg.quoteMint.equals(NATIVE_MINT)) return null;
+  const feeCfg = DAMM_V2_MIGRATION_FEE_ADDRESS[Number(cfg.migrationFeeOption)];
+  return feeCfg ? deriveDammV2PoolAddress(feeCfg, baseMint, cfg.quoteMint) : null;
+}
+
 function publicRow(c: Tracked): DiscoveryCandidate {
-  const { decimals: _d, supply: _s, verified: _v, ...row } = c;
+  const { decimals: _d, supply: _s, verified: _v, ammVaults: _a, ...row } = c;
   return row;
 }
 

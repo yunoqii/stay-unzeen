@@ -35,6 +35,8 @@ use crate::{
 
 /// `curve_progress` samples are kept this long (ETA windows are ≤ 1 h).
 const SAMPLE_RETENTION_MS: i64 = 3_600_000;
+/// `price_samples` retention (discovery window is 6 h by default).
+const PRICE_SAMPLE_RETENTION_MS: i64 = 24 * 3_600_000;
 /// Minimum span of the ETA window, ms.
 const ETA_MIN_SPAN_MS: i64 = 120_000;
 /// An ETA beyond this is not published.
@@ -144,6 +146,24 @@ pub async fn sample(st: &AppState) -> ApiResult<()> {
             AND NOT EXISTS (SELECT 1 FROM intel_prices p WHERE p.mint = d.mint AND p.progress_pct IS NOT NULL)
          ON CONFLICT DO NOTHING",
         &[&st.cfg.cluster],
+    )
+    .await
+    .map_err(db)?;
+    // Price samples of discovery candidates (not pool tokens): the token page's chart when no
+    // trade feed covers the mint. One row per candidate and metrics pass (as_of = minute).
+    c.execute(
+        "INSERT INTO price_samples (mint, tick_at, price_sol)
+         SELECT d.mint, (extract(epoch FROM d.as_of) * 1000)::bigint, d.price_sol FROM intel_discovery d
+          WHERE d.network = $1 AND d.price_sol > 0
+            AND NOT EXISTS (SELECT 1 FROM tokens t WHERE t.mint = d.mint)
+         ON CONFLICT DO NOTHING",
+        &[&st.cfg.cluster],
+    )
+    .await
+    .map_err(db)?;
+    c.execute(
+        "DELETE FROM price_samples WHERE tick_at < $1",
+        &[&(now - PRICE_SAMPLE_RETENTION_MS)],
     )
     .await
     .map_err(db)?;

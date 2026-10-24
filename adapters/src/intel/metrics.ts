@@ -14,6 +14,7 @@ import {
   unpackMint,
 } from "@solana/spl-token";
 import { PublicKey, type AccountInfo } from "@solana/web3.js";
+import { formatUnits } from "../math";
 import type { RiskyExtension } from "./types";
 
 /**
@@ -209,6 +210,28 @@ export function parsePumpPool(data: Buffer): PumpPoolFacts | null {
     quoteVault: new PublicKey(data.subarray(LP_MINT + 64, LP_MINT + 96)),
     lpSupply: data.readBigUInt64LE(LP_MINT + 96),
   };
+}
+
+/** quote_mint of a PumpSwap pool (same layout as parsePumpPool). */
+export function pumpPoolQuoteMint(data: Buffer): PublicKey | null {
+  const Q = 8 + 1 + 2 + 32 * 2;
+  return data.length >= Q + 32 ? new PublicKey(data.subarray(Q, Q + 32)) : null;
+}
+
+/** SPL / Token-2022 token account amount (offset 64), null when not a token account. */
+export function tokenAccountAmount(a: { data: Buffer } | null | undefined): bigint | null {
+  return a && a.data.length >= 72 ? a.data.readBigUInt64LE(64) : null;
+}
+
+/**
+ * Constant-product AMM spot price from the pool's reserves (PumpSwap: base / quote vault
+ * balances; SOL quote): price in SOL per whole token, market cap = price x supply.
+ */
+export function ammPriceAndCap(baseReserve: bigint, quoteLamports: bigint, decimals: number, supply: bigint | null): { priceSol: string; marketCapSol: string } | null {
+  if (baseReserve <= 0n || quoteLamports <= 0n) return null;
+  const price18 = (quoteLamports * 10n ** BigInt(decimals) * 10n ** 18n) / (baseReserve * 1_000_000_000n);
+  const cap = supply !== null ? (quoteLamports * supply) / baseReserve : 0n;
+  return { priceSol: formatUnits(price18, 18), marketCapSol: formatUnits(cap, 9) };
 }
 
 /** burned% = 1 − lpMint.supply / pool.lp_supply (PUMP_SWAP_README). */

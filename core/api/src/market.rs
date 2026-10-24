@@ -65,8 +65,6 @@ fn trade_json(r: &Row) -> Value {
     v
 }
 
-const TOKEN_COLS: &str = "mint, symbol, name, image, venue, status, decimals,
-     trim_scale(price_sol)::text, trim_scale(market_cap_sol)::text, (extract(epoch FROM created_at) * 1000)::bigint";
 /// `tokens` only (v0.13): + quote pair, quote price, LaunchLab platform.
 const TOKEN_COLS_Q: &str = "mint, symbol, name, image, venue, status, decimals,
      trim_scale(price_sol)::text, trim_scale(market_cap_sol)::text, (extract(epoch FROM created_at) * 1000)::bigint,
@@ -316,10 +314,22 @@ pub async fn token(State(st): State<AppState>, Path(mint): Path<String>) -> ApiR
 }
 
 async fn cold_token(st: &AppState, c: &unzeen_ledger::deadpool_postgres::Object, mint: &str) -> ApiResult<Response> {
+    // Discovery candidates (public create stream): price / cap / venue / status of the discovery
+    // metrics pass (<= ~1 min old, AMM pool after graduation) win over the card's snapshot.
     if let Some(t) = c
         .query_opt(
-            &format!("SELECT {TOKEN_COLS} FROM intel_tokens WHERE mint = $1"),
-            &[&mint],
+            "SELECT it.mint, COALESCE(NULLIF(it.symbol, ''), d.symbol, '') AS symbol,
+                    COALESCE(NULLIF(it.name, ''), d.name, '') AS name, it.image,
+                    CASE WHEN d.mint IS NOT NULL AND it.venue = 'jupiter' THEN d.venue ELSE it.venue END AS venue,
+                    COALESCE(d.status, it.status) AS status, it.decimals,
+                    trim_scale(CASE WHEN d.price_sol > 0 THEN d.price_sol ELSE it.price_sol END)::text,
+                    trim_scale(CASE WHEN d.price_sol > 0 THEN d.market_cap_sol ELSE it.market_cap_sol END)::text,
+                    (extract(epoch FROM COALESCE(d.created_at, it.created_at)) * 1000)::bigint,
+                    CASE WHEN d.price_sol > 0 THEN (floor(extract(epoch FROM d.as_of) / 10) * 10000)::bigint END AS price_ts
+               FROM intel_tokens it
+               LEFT JOIN intel_discovery d ON d.mint = it.mint AND d.network = $2
+              WHERE it.mint = $1",
+            &[&mint, &st.cfg.cluster],
         )
         .await
         .map_err(db)?
@@ -615,6 +625,37 @@ pub async fn candles(
            GROUP BY b) x
          ORDER BY b"
     );
+    // Not a pool token: the full trade feed (`market_trades`, indexer flag) plus the discovery
+    // price samples (`price_samples`, one per metrics pass) — public chain data, no volume
+    // from samples. SOL valuation only (these rows have no quote columns).
+    let pool_token = c
+        .query_opt("SELECT 1 FROM tokens WHERE mint = $1", &[&mint])
+        .await
+        .map_err(db)?
+        .is_some();
+    let sql = if pool_token {
+        sql
+    } else {
+        "SELECT b,
+                trim_scale(round(o, 18))::text, trim_scale(round(h, 18))::text,
+                trim_scale(round(l, 18))::text, trim_scale(round(cl, 18))::text, v::text
+         FROM (
+           SELECT (floor(extract(epoch FROM ts) / $2::float8) * $2::float8)::bigint AS b,
+                  (array_agg(p ORDER BY ts, id))[1] AS o, max(p) AS h, min(p) AS l,
+                  (array_agg(p ORDER BY ts DESC, id DESC))[1] AS cl, sum(vol)::numeric AS v
+           FROM (SELECT id, ts, sol_amount AS vol,
+                        (sol_amount::numeric / 1000000000) / (token_amount::numeric / power(10::numeric, decimals)) AS p
+                   FROM market_trades
+                  WHERE mint = $1 AND kind IN ('buy', 'sell') AND token_amount > 0
+                    AND ts >= to_timestamp($3::float8) AND ts < to_timestamp($4::float8)
+                 UNION ALL
+                 SELECT 0, to_timestamp(tick_at / 1000.0), 0, price_sol
+                   FROM price_samples
+                  WHERE mint = $1 AND tick_at >= ($3::float8 * 1000)::bigint AND tick_at < ($4::float8 * 1000)::bigint) t
+           GROUP BY b) x
+         ORDER BY b"
+            .to_string()
+    };
     let rows = c
         .query(&sql, &[&mint, &(tf as f64), &(from as f64), &(to as f64)])
         .await

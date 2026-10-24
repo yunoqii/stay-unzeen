@@ -306,6 +306,9 @@ pool_sol_inventory.slot bigint
 pool_sol_inventory.updated_at timestamp with time zone
 pool_sol_inventory.vault_count integer
 pool_sol_inventory.vault_lamports numeric
+price_samples.mint text
+price_samples.price_sol numeric
+price_samples.tick_at bigint
 relayer_creator_counter.network text
 relayer_creator_counter.next_index integer
 relayer_jobs.action_id bytea

@@ -1172,6 +1172,36 @@ async fn token_safety_pending_and_snapshots() {
     assert_eq!(e.get(&format!("/api/tokens/{MINT2}/candles")).await.body, json!([]));
     assert_eq!(e.get(&format!("/api/tokens/{MINT2}/trades")).await.body, json!([]));
 
+    // 24.10: a discovery candidate's card takes the discovery pass's price / cap / venue / status
+    // (graduated: the AMM pool), and its chart comes from the price samples + market_trades.
+    e.sql(&format!(
+        "UPDATE {s}.intel_tokens SET venue = 'jupiter', status = 'graduated', price_sol = 0, market_cap_sol = 0 WHERE mint = '{MINT2}';
+         INSERT INTO {s}.intel_discovery (network, mint, venue, created_at, name, symbol, status, price_sol, market_cap_sol, progress_pct, as_of)
+         VALUES ('devnet', '{MINT2}', 'meteora-dbc', to_timestamp(1800000000), 'Foo', 'FOO', 'graduated', 0.0000005, 500, NULL, to_timestamp(1800000060));
+         INSERT INTO {s}.price_samples (mint, tick_at, price_sol) VALUES
+           ('{MINT2}', 1800000060000, 0.0000004), ('{MINT2}', 1800000120000, 0.0000006);
+         INSERT INTO {s}.market_trades (mint, kind, venue, symbol, trader, unzeen, tags, token_amount, sol_amount, decimals, signature, ix, slot, ts)
+         VALUES ('{MINT2}', 'buy', 'meteora-dbc', 'FOO', 'Trader1', FALSE, '{{}}', 1000000, 500, 6, 'SIGMT', 0, 1, to_timestamp(1800000130));"
+    ))
+    .await;
+    let t = e.get(&format!("/api/tokens/{MINT2}")).await;
+    assert_eq!(
+        (&t.body["venue"], &t.body["status"], &t.body["priceSol"], &t.body["marketCapSol"], &t.body["createdAt"], &t.body["priceTs"]),
+        (&json!("meteora-dbc"), &json!("graduated"), &json!("0.0000005"), &json!("500"), &json!(1_800_000_000_000i64), &json!(1_800_000_060_000i64)),
+        "{:?}",
+        t.body
+    );
+    let c = e
+        .get(&format!("/api/tokens/{MINT2}/candles?tf=1m&from=1800000000&to=1800000240"))
+        .await;
+    assert_eq!(
+        c.body,
+        json!([
+            {"time": 1800000060, "open": "0.0000004", "high": "0.0000004", "low": "0.0000004", "close": "0.0000004", "volume": "0"},
+            {"time": 1800000120, "open": "0.0000006", "high": "0.0000006", "low": "0.0000005", "close": "0.0000005", "volume": "500"}
+        ])
+    );
+
     // The indexer found no such mint -> 404 on both.
     e.sql(&format!(
         "INSERT INTO {s}.token_safety (mint, as_of, missing) VALUES ('{MINT3}', date_trunc('minute', now()), TRUE)"
