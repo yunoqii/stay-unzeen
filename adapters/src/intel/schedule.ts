@@ -95,7 +95,9 @@ export function pickWarmDue(
         : now - e.asOf >= (e.hot ? hotMs : e.discovery && e.noImage ? Math.min(warmMs, DISCOVERY_NO_IMAGE_INTERVAL_MS) : warmMs)),
   );
   // Ties broken randomly so equal ages do not keep a stable (observable) order.
-  const keyed = shuffle(due, rng).sort((a, b) => (a.asOf ?? -1) - (b.asOf ?? -1));
+  // Tiers: no snapshot, then discovery candidates (Pulse: what people are about to open), then the rest; oldest first.
+  const tier = (e: WarmEntry) => (e.asOf === null ? 0 : e.discovery ? 1 : 2);
+  const keyed = shuffle(due, rng).sort((a, b) => tier(a) - tier(b) || (a.asOf ?? -1) - (b.asOf ?? -1));
   return shuffle(keyed.slice(0, max).map((e) => e.mint), rng);
 }
 

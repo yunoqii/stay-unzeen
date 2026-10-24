@@ -194,6 +194,15 @@ describe("discovery candidates are pre-indexed (warm set)", () => {
     expect(pickWarmDue([noImg, withImg, plain], now, seededRng(9))).toEqual([noImg.mint]);
   });
 
+  it("due discovery candidates come before older plain warm entries", () => {
+    const now = 10 * 3600_000;
+    const old = Array.from({ length: 30 }, () => ({ mint: keyS(), hot: false, asOf: now - 5 * 3600_000 }));
+    const disc = Array.from({ length: 5 }, () => ({ mint: keyS(), hot: false, asOf: now - 31 * 60_000, discovery: true }));
+    const due = pickWarmDue([...old, ...disc], now, seededRng(10));
+    expect(due).toHaveLength(20);
+    for (const d of disc) expect(due).toContain(d.mint);
+  });
+
   it("a throwing / malformed source never breaks the tick", async () => {
     const { store, idx } = setup(8, {
       discovery: () => {
