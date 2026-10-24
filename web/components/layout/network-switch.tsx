@@ -65,8 +65,9 @@ export function NetworkSwitch() {
               />
             )}
             <span className="relative">
-              <span className="sm:hidden">{SHORT[n]}</span>
-              <span className="hidden sm:inline">{NETWORK_CONFIG[n].label}</span>
+              {/* Short under sm and again md–lg, where the desktop nav shares the row. */}
+              <span className="sm:max-md:hidden lg:hidden">{SHORT[n]}</span>
+              <span className="hidden sm:max-md:inline lg:inline">{NETWORK_CONFIG[n].label}</span>
             </span>
           </button>
         );

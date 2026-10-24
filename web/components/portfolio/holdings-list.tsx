@@ -57,7 +57,7 @@ export function HoldingsList({
             Pick one from the feed. The pool buys it; the chain only sees “unzeen”.
           </p>
           <Link
-            href="/"
+            href="/feed"
             className="mt-4 rounded-full text-sm text-zec underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
           >
             Open the feed

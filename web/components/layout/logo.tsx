@@ -107,7 +107,8 @@ const SESSION_FLAG = "uz-peeled";
  * itself ~600 ms after the first load of a browser session (a flag in sessionStorage, nothing else), never
  * on scroll, never in a loop.
  */
-export function LogoLink({ className }: { className?: string }) {
+/** Header logo: goes to the app (the feed), not the landing at "/". */
+export function LogoLink({ className, href = "/feed" }: { className?: string; href?: string }) {
   const [hover, setHover] = useState(false);
   const [focus, setFocus] = useState(false);
   const [auto, setAuto] = useState(false);
@@ -132,16 +133,19 @@ export function LogoLink({ className }: { className?: string }) {
 
   return (
     <Link
-      href="/"
+      href={href}
       aria-label="unzeen"
       onPointerEnter={(e) => e.pointerType === "mouse" && setHover(true)}
       onPointerLeave={() => setHover(false)}
       onFocus={(e) => setFocus(e.currentTarget.matches(":focus-visible"))}
       onBlur={() => setFocus(false)}
-      className={cn("inline-flex items-center gap-2 rounded-md focus-visible:ring-2 focus-visible:ring-zec focus-visible:outline-none", className)}
+      className={cn("inline-flex shrink-0 items-center gap-2 rounded-md focus-visible:ring-2 focus-visible:ring-zec focus-visible:outline-none", className)}
     >
       <TapeMark />
-      <Wordmark peeled={hover || focus || auto} />
+      {/* Under 360 px (iPhone SE 1st gen) the switches need the room: the mark alone stays. */}
+      <span className="contents max-[359px]:hidden">
+        <Wordmark peeled={hover || focus || auto} />
+      </span>
     </Link>
   );
 }

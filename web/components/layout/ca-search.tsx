@@ -21,16 +21,27 @@ const EASE = [0.16, 1, 0.3, 1] as const;
 export function CaSearch() {
   const [open, setOpen] = useState(false);
   const network = useNetwork(); // the ticker list belongs to one network: reset on switch
+  // The header has no room for an inline box at 768–1440 px (owner review 24.10): one icon at every width,
+  // "/" opens it on keyboards.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      e.preventDefault();
+      setOpen(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   return (
     <>
-      <div className="hidden lg:block">
-        <SearchBox key={network} />
-      </div>
       <button
         type="button"
         onClick={() => setOpen(true)}
         aria-label="Search token by address"
-        className="grid size-8 place-items-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none lg:hidden"
+        title="Search token (/)"
+        className="grid size-8 place-items-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
       >
         <MagnifyingGlass size={16} weight="light" />
       </button>
@@ -41,9 +52,9 @@ export function CaSearch() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.2, ease: EASE }}
-            className="fixed inset-x-0 top-0 z-50 border-b border-border/60 bg-background/95 px-3 py-2.5 backdrop-blur-xl lg:hidden"
+            className="fixed inset-x-0 top-0 z-50 border-b border-border/60 bg-background/95 px-3 py-2.5 backdrop-blur-xl"
           >
-            <div className="flex items-center gap-2">
+            <div className="mx-auto flex max-w-2xl items-center gap-2">
               <SearchBox key={network} autoFocus onDone={() => setOpen(false)} className="flex-1" />
               <button
                 type="button"
@@ -125,7 +136,7 @@ function SearchBox({ autoFocus, onDone, className }: { autoFocus?: boolean; onDo
       </label>
       <span
         className={cn(
-          "flex h-9 items-center gap-2 rounded-full border bg-surface-1 px-3 transition-[border-color,width] duration-200 focus-within:border-ring lg:h-8 lg:w-56 lg:focus-within:w-80",
+          "flex h-9 items-center gap-2 rounded-full border bg-surface-1 px-3 transition-colors duration-200 focus-within:border-ring",
           error ? "border-destructive/60" : "border-border",
         )}
       >
@@ -185,7 +196,7 @@ function SearchBox({ autoFocus, onDone, className }: { autoFocus?: boolean; onDo
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.15 }}
-            className="absolute top-full right-0 left-0 z-50 mt-1.5 overflow-hidden rounded-xl border border-border bg-popover shadow-xl lg:w-80"
+            className="absolute top-full right-0 left-0 z-50 mt-1.5 overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
           >
             {error ? (
               <p id={`${id}-err`} role="alert" className="px-3 py-2.5 text-xs text-sell">

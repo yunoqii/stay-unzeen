@@ -12,7 +12,7 @@ export default function NotFound() {
         <div className="flex flex-col justify-center gap-3 px-6 py-10">
           <p className="text-lg font-medium">This page stayed unzeen.</p>
           <p className="text-sm text-pretty text-muted-foreground">The address is wrong, or the page was never here. The feed is.</p>
-          <Link href="/" className="mt-2 text-sm text-foreground underline underline-offset-4 hover:text-zec">
+          <Link href="/feed" className="mt-2 text-sm text-foreground underline underline-offset-4 hover:text-zec">
             Back to the feed
           </Link>
         </div>
