@@ -214,6 +214,19 @@ impl RebalanceCfg {
         (self, src)
     }
 
+    /// Config of a `rebalance` CLI subcommand (M1): target flavour, then the same GAP-2 pool
+    /// refund as `serve`, so `plan`/`check`/`quote` agree with `serve` on LIVE vs dry-run.
+    /// `target`: sol | eth | native | zec-spl.
+    pub fn for_cli(self, target: &str, pool_taddr: Option<String>) -> anyhow::Result<(Self, RefundSource)> {
+        // `sol` is the chain's native coin: SOL on Solana, ETH on Robinhood Chain (target `eth`).
+        let cfg = match target {
+            "sol" | "eth" | "native" => self,
+            "zec-spl" | "zec_spl" => self.zec_spl()?,
+            other => bail!("--target: sol | eth | zec-spl (got {other:?})"),
+        };
+        Ok(cfg.with_pool_refund(pool_taddr))
+    }
+
     /// `None` = live sends allowed; `Some(reason)` = dry-run.
     pub fn dry_reason(&self) -> Option<&'static str> {
         if self.zcash != NetName::Main || !matches!(self.network, "mainnet-beta" | "hood") {
@@ -1079,6 +1092,30 @@ mod tests {
         };
         let (c, src) = test.with_pool_refund(Some(taddr(5)));
         assert_eq!((src, c.refund_taddr), (RefundSource::Missing, None));
+    }
+
+    #[test]
+    fn cli_subcommands_use_pool_refund_like_serve() {
+        // M1: `plan` without UNZEEN_REBALANCE_REFUND_TADDR on main must plan LIVE (dry=false),
+        // not a dry-run row that `serve` would silently execute as a no-op.
+        let bare = RebalanceCfg {
+            refund_taddr: None,
+            ..cfg(true)
+        };
+        for target in ["sol", "native", "zec-spl"] {
+            let (c, src) = bare.clone().for_cli(target, Some(taddr(5))).unwrap();
+            assert_eq!(src, RefundSource::PoolWallet, "{target}");
+            assert_eq!(c.refund_taddr, Some(taddr(5)), "{target}");
+            assert_eq!(c.dry_reason(), None, "{target}");
+        }
+        // No wallet DB / no t-address: still dry-run, with the reason shown.
+        let (c, src) = bare.clone().for_cli("sol", None).unwrap();
+        assert_eq!(src, RefundSource::Missing);
+        assert_eq!(c.dry_reason(), Some("UNZEEN_REBALANCE_REFUND_TADDR not set"));
+        // Explicit env refund is kept.
+        let (c, src) = cfg(true).for_cli("sol", Some(taddr(5))).unwrap();
+        assert_eq!((src, c.refund_taddr), (RefundSource::External, Some(taddr(9))));
+        assert!(bare.for_cli("btc", None).is_err());
     }
 
     // ------------------------------------------------------------ mocks

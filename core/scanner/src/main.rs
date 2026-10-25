@@ -670,13 +670,13 @@ async fn run() -> anyhow::Result<()> {
 async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd, target: &str) -> anyhow::Result<()> {
     use rebalance::{RebalanceCfg, Trigger};
     let policy = service::policy_from_env(c)?;
-    let cfg = RebalanceCfg::from_env(c, policy.chain.trade)?;
-    // `sol` is the chain's native coin: SOL on Solana, ETH on Robinhood Chain (target `eth`).
-    let cfg = match target {
-        "sol" | "eth" | "native" => cfg,
-        "zec-spl" | "zec_spl" => cfg.zec_spl()?,
-        other => bail!("--target: sol | eth | zec-spl (got {other:?})"),
-    };
+    // M1: every subcommand (not only `quote`) takes the pool's own t-address as the default
+    // refund, exactly like `serve`; otherwise `plan` writes a dry-run row that `serve` executes
+    // as a no-op and `check` reports dry-run while `serve` is LIVE.
+    let pool_t = wallet::open_db(c)
+        .ok()
+        .and_then(|mut db| transparent::pool_refund_taddr(c, &mut db));
+    let (cfg, refund) = RebalanceCfg::from_env(c, policy.chain.trade)?.for_cli(target, pool_t)?;
     let ledger = || async {
         let url = std::env::var("DATABASE_URL").context("DATABASE_URL")?;
         let l = unzeen_ledger::Ledger::connect(&url, policy).await?;
@@ -689,11 +689,6 @@ async fn rebalance_cmd(c: &Common, cmd: RebalanceCmd, target: &str) -> anyhow::R
     let sol = |l: u64| format!("{}.{:09}", l / 1_000_000_000, l % 1_000_000_000);
     match cmd {
         RebalanceCmd::Quote => {
-            let pool_t = wallet::open_db(c)
-                .and_then(|mut db| transparent::pool_taddr(&mut db))
-                .map(|t| transparent::encode(c, &t))
-                .ok();
-            let (cfg, refund) = cfg.with_pool_refund(pool_t);
             println!(
                 "refund:         {}",
                 match refund {

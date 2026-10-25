@@ -44,7 +44,7 @@
 | 6 | Внешний ETH-кошелёк (сеть 4663) → ключ `attest` hood | 0.001 ETH | `HOOD_NETWORK=mainnet pnpm evm:keys 2` (строка `attest`) |
 | 7 | — (адрес ребаланса Solana → в env сканера) | — | `pnpm keys:attest` → `rebal` → `UNZEEN_REBALANCE_SOL_ADDRESS` |
 | 8 | — (адрес ребаланса hood → в env hood-сканера) | — | `pnpm evm:keys 2` → `rebalance-0` → `UNZEEN_REBALANCE_ETH_ADDRESS` |
-| 9 | — refund t-адрес 1Click | — | Ничего делать не надо: `UNZEEN_REBALANCE_REFUND_TADDR` не задаём, refund идёт на собственный t-адрес кошелька пула (GAP-2 закрыт). Проверка: `rebalance quote` → `refund: pool wallet t-address` |
+| 9 | — refund t-адрес 1Click | — | Ничего делать не надо: `UNZEEN_REBALANCE_REFUND_TADDR` не задаём, refund идёт на собственный t-адрес кошелька пула (GAP-2 закрыт). Проверка: `rebalance quote` → `refund: pool wallet t-address`; `rebalance check` → `mode: LIVE`, `plan` → `planned #N (LIVE)` (с фиксом M1; на сборке до него `plan` без env пишет dry-run — не использовать) |
 | 10 | Внешний SOL-кошелёк → partner-ключ (только если Meteora/LaunchLab «Unzeen») | ≈0.016 SOL | `pnpm meteora:config --simulate` и `pnpm launchlab:platform --simulate` (mainnet, печатают адрес и недостающую сумму) |
 
 Переводы 1 и 3 (оборотный ZEC) сделать за 1+ час до 2 и 4 и не на камеру.

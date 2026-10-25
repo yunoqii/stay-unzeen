@@ -521,7 +521,7 @@ HOOD_NETWORK=mainnet UNZEEN_HOOD=on UNZEEN_ALLOW_HOOD_MAINNET=yes pnpm relayer:h
 
 ### 6.1 Refund 1Click → `shield` (GAP-2)
 - У кошелька пула есть собственный прозрачный адрес: внешний P2PKH-receiver того же аккаунта (тот же сид). В UA пула (`/api/pool`, QR) его **нет**, в API и UI он не публикуется. Печатает только `unzeen-scanner address --transparent` (одна строка, адрес).
-- `serve --rebalance` и `rebalance quote` на mainnet сами берут его как refund-адрес, если `UNZEEN_REBALANCE_REFUND_TADDR` пуст (`refund: pool wallet t-address`). Если env задан и указывает на чужой адрес — WARN «`shield` cannot recover refunds there».
+- `serve --rebalance` и все подкоманды `rebalance` (`quote`, `check`, `plan`, …; M1, 26.10) на mainnet сами берут его как refund-адрес, если `UNZEEN_REBALANCE_REFUND_TADDR` пуст (`refund: pool wallet t-address`). До M1 это делали только `serve` и `quote`: `plan` без env писал строку `dry_run=true`, которую `serve` молча исполнял как no-op, а `check` показывал dry-run при LIVE `serve`. Если env задан и указывает на чужой адрес — WARN «`shield` cannot recover refunds there».
 - Признак refund: `rebalance status` → `refunded`/`attention`. Закрыть: `rebalance close <id> --status refunded`.
 - Шилд (сканер `serve` должен работать — кошелёк синхронизирован):
 ```bash

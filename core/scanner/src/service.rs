@@ -201,10 +201,7 @@ pub async fn serve(c: &Common, interval_secs: u64, once: bool, payouts: bool, re
     let rebalance_cfg = if rebalance {
         let cfg = crate::rebalance::RebalanceCfg::from_env(c, trade)?;
         // GAP-2: default refund address = the pool wallet's own t-address (never logged).
-        let pool_t = crate::transparent::pool_taddr(&mut db)
-            .map(|t| crate::transparent::encode(c, &t))
-            .ok();
-        let (cfg, refund) = cfg.with_pool_refund(pool_t);
+        let (cfg, refund) = cfg.with_pool_refund(crate::transparent::pool_refund_taddr(c, &mut db));
         match refund {
             crate::rebalance::RefundSource::PoolWallet => {
                 info!("rebalance refunds go to the pool wallet's own t-address (recover with `shield`)")

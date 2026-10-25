@@ -83,6 +83,12 @@ fn lowest_external(db: &Db, account: zcash_client_sqlite::AccountUuid) -> anyhow
     Ok(best.map(|(_, a)| a))
 }
 
+/// GAP-2 default refund address for every rebalance path (`serve` and the `rebalance` CLI):
+/// the encoded pool t-address, `None` if the wallet has none. Never logged.
+pub fn pool_refund_taddr(common: &Common, db: &mut Db) -> Option<String> {
+    pool_taddr(db).map(|t| encode(common, &t)).ok()
+}
+
 pub fn encode(common: &Common, a: &TransparentAddress) -> String {
     a.encode(&common.params())
 }
