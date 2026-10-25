@@ -16,7 +16,8 @@ import {
   senderUrl,
   txPipeline,
 } from "../src/sender";
-import { SendGate, poolPrefix, signTx } from "../src/tx";
+import { SendGate, broadcastAndConfirm, maskTipAccounts, poolPrefix, signTx } from "../src/tx";
+import { AddressLookupTableAccount } from "@solana/web3.js";
 import { TokenWithdrawer } from "../src/withdraw";
 
 const TIP_SET = new Set(SENDER_TIP_ACCOUNTS);
@@ -181,6 +182,51 @@ describe("Sender broadcaster", () => {
     await expect(b.send(raw, { preflight: true })).rejects.toThrow(/simulation failed/);
     expect(posted).toHaveLength(0);
     expect(VersionedTransaction.deserialize(raw)).toBeDefined();
+  });
+
+  it("Sender refusal (HTTP 500 + JSON-RPC -32602, e.g. no static tip) is a preflight-stage rejection", async () => {
+    const b = new HeliusSenderBroadcaster("https://sender.example/fast", new SendGate(0), null, (async () =>
+      new Response(JSON.stringify({ code: -32602, message: "Invalid Request: transaction must send a tip of at least 5000 lamports" }), { status: 500 })) as never);
+    // Sender's body here is a bare error object; also the JSON-RPC envelope form.
+    const b2 = new HeliusSenderBroadcaster("https://sender.example/fast", new SendGate(0), null, (async () =>
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: "unzeen", error: { code: -32602, message: "Invalid Request: tip" } }), { status: 500 })) as never);
+    const payer = Keypair.generate();
+    const signed = await signTx({ getLatestBlockhash: async () => ({ blockhash: BLOCKHASH, lastValidBlockHeight: 1 }) } as never,
+      [SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: Keypair.generate().publicKey, lamports: 1 })], payer, [], { computeUnits: 1, priorityMicroLamports: 0 });
+    for (const x of [b, b2]) {
+      const e = await broadcastAndConfirm({} as never, signed, x).catch((err: unknown) => err as { stage?: string });
+      expect(e).toMatchObject({ stage: "preflight" });
+    }
+    await expect(b2.send(signed.raw, { preflight: false })).rejects.toThrow(/preflight rejected -32602/);
+    // other HTTP failures stay transport errors (may have been forwarded)
+    const b3 = new HeliusSenderBroadcaster("https://sender.example/fast", new SendGate(0), null, (async () => new Response("bad gateway", { status: 502 })) as never);
+    await expect(b3.send(signed.raw, { preflight: false })).rejects.toThrow(/sender HTTP 502/);
+  });
+
+  it("tip account stays STATIC in a v0 tx even when the lookup table holds it (Sender only sees static tips)", async () => {
+    const payer = Keypair.generate();
+    const tip = senderTip(SWQOS_MIN_TIP_LAMPORTS, () => 0);
+    const other = Keypair.generate().publicKey;
+    const table = new AddressLookupTableAccount({
+      key: Keypair.generate().publicKey,
+      state: { deactivationSlot: BigInt("18446744073709551615"), lastExtendedSlot: 0, lastExtendedSlotStartIndex: 0, addresses: [other, ...tip.accounts] },
+    });
+    const ix = SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: other, lamports: 1 });
+    const signed = await signTx({ getLatestBlockhash: async () => ({ blockhash: BLOCKHASH, lastValidBlockHeight: 1 }) } as never,
+      [ix], payer, [], { computeUnits: 1, priorityMicroLamports: 0, tip, lookupTables: [table] });
+    const msg = VersionedTransaction.deserialize(signed.raw).message;
+    const stat = msg.staticAccountKeys.map((k) => k.toBase58());
+    expect(stat).toContain(tip.accounts[0]!.toBase58());
+    // the non-tip entry still comes through the table, at its on-chain index 0
+    expect(stat).not.toContain(other.toBase58());
+    expect(msg.addressTableLookups[0]!.writableIndexes).toEqual([0]);
+    // masking keeps indices and leaves tables without tips untouched
+    const masked = maskTipAccounts([table], tip.accounts)[0]!;
+    expect(masked.state.addresses).toHaveLength(table.state.addresses.length);
+    expect(masked.state.addresses[0]!.equals(other)).toBe(true);
+    expect(masked.state.addresses.some((a) => TIP_SET.has(a.toBase58()))).toBe(false);
+    const plain = new AddressLookupTableAccount({ key: table.key, state: { ...table.state, addresses: [other] } });
+    expect(maskTipAccounts([plain], tip.accounts)[0]).toBe(plain);
   });
 
   it("send gate: one send per interval, FIFO; rebroadcast dropped while busy", async () => {

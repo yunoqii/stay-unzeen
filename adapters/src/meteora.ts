@@ -1039,11 +1039,11 @@ export class MeteoraDbcAdapter implements LaunchpadAdapter {
     build: (mint: PublicKey, payer: PublicKey, creator: PublicKey) => Promise<TransactionInstruction[]>,
   ): Promise<AddressLookupTableAccount> {
     // Shared with a build for an unrelated mint / creator by the SAME vault (its own table: its ATAs
-    // belong in it), plus the Sender tip accounts (added by signTx, not in `ixs`).
+    // belong in it). Tip accounts stay static (Sender rejects a tip through a table: src/tx.ts).
     const r = () => Keypair.generate().publicKey;
     const other = await build(r(), vault.publicKey, r());
     try {
-      return await this.alts.ensure(vault, [...staticAccounts(ixs, other), ...(this.pipeline?.tip?.accounts ?? [])]);
+      return await this.alts.ensure(vault, [...staticAccounts(ixs, other)]);
     } catch (e) {
       throw this.classify(e);
     }

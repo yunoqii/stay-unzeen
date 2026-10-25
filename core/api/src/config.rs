@@ -183,6 +183,17 @@ pub fn known_quotes(mainnet: bool) -> Vec<QuoteCfg> {
     }
 }
 
+/// The ZEC pair without pump.fun unless `pump_zec` (PUMP_QUOTE_ZEC=1, owner decision 25.10).
+pub fn gate_pump_zec(mut q: QuoteCfg, pump_zec: bool) -> QuoteCfg {
+    if q.is_zec() && !pump_zec && q.venues.contains(&"pumpfun") {
+        q.venues = match q.venues {
+            ["pumpfun", "raydium-launchlab"] => &["raydium-launchlab"],
+            _ => &[],
+        };
+    }
+    q
+}
+
 impl QuotesConfig {
     /// The quote asset of `quote` on `venue` (None: not enabled there).
     pub fn for_venue(&self, quote: &str, venue: &str) -> Option<&QuoteCfg> {
@@ -853,10 +864,15 @@ impl Config {
                         bail!("UNZEEN_QUOTES: unknown quote {w:?} (USDC | USD1 | ZEC)");
                     }
                 }
+                // Same gate as the relayer (adapters `quoteAssets`): pump.fun serves the ZEC pair
+                // only with PUMP_QUOTE_ZEC=1, so it is never advertised for pump.fun without it.
+                let pump_zec = var("PUMP_QUOTE_ZEC").as_deref().map(str::trim) == Some("1");
                 QuotesConfig {
                     list: known_quotes(mainnet)
                         .into_iter()
                         .filter(|q| wanted.iter().any(|w| w == q.quote))
+                        .map(|q| gate_pump_zec(q, pump_zec))
+                        .filter(|q| !q.venues.is_empty())
                         .collect(),
                     zec_spread_bps: num::<u64>("UNZEEN_ZEC_SPL_SPREAD_BPS", 30)?.min(1000),
                     zec_virtual_units: num::<u64>("UNZEEN_LAUNCH_VIRTUAL_ZEC_UNITS", 271_890_000)?.max(1),
@@ -957,6 +973,17 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn pump_zec_gate() {
+        use super::*;
+        let zec = known_quotes(true).into_iter().find(|q| q.is_zec()).unwrap();
+        assert_eq!(gate_pump_zec(zec.clone(), true).venues, &["pumpfun", "raydium-launchlab"]);
+        assert_eq!(gate_pump_zec(zec, false).venues, &["raydium-launchlab"]);
+        let usdc = known_quotes(true).into_iter().find(|q| q.quote == "USDC").unwrap();
+        assert_eq!(gate_pump_zec(usdc.clone(), false), usdc);
+    }
+
     #[test]
     fn gap5_metadata_problem() {
         use super::metadata_problem as m;

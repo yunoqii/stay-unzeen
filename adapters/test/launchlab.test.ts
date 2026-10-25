@@ -230,7 +230,8 @@ describe("LaunchLabAdapter.prepareCreate (mainnet snapshot, offline)", () => {
       const table = s.tables.at(-1)!.map((k) => k.toBase58());
       expect(table).toContain(getAssociatedTokenAddressSync(NATIVE_MINT, s.vault.publicKey, true).toBase58());
       expect(table).toContain(getAssociatedTokenAddressSync(USD1, s.vault.publicKey, true).toBase58());
-      for (const t of SENDER_TIP_ACCOUNTS) expect(table).toContain(t);
+      // Sender only sees a static tip (refuses one through a table, mainnet 25.10)
+      for (const t of SENDER_TIP_ACCOUNTS) expect(table).not.toContain(t);
       expect(table).not.toContain(p.mint);
       expect(table).not.toContain(p.creator);
     });

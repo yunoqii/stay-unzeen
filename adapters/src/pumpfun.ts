@@ -871,14 +871,15 @@ export class PumpFunAdapter implements LaunchpadAdapter {
     global: Global,
   ): Promise<AddressLookupTableAccount> {
     // Static accounts = those shared with a build for an unrelated mint / creator by the SAME vault
-    // (the table is the vault's own: its ATAs / PDAs belong in it), plus the Sender tip accounts.
+    // (the table is the vault's own: its ATAs / PDAs belong in it). Tip accounts stay static:
+    // Sender rejects a tip resolved through a table (src/tx.ts maskTipAccounts).
     const r = () => Keypair.generate().publicKey;
     const other = await build(r(), vault.publicKey, r());
     const feeRecipients = [global.feeRecipient, ...global.feeRecipients, ...global.buybackFeeRecipients].filter(
       (p) => !p.equals(PublicKey.default),
     );
     try {
-      return await this.alts.ensure(vault, [...staticAccounts(ixs, other), ...feeRecipients, ...(this.pipeline?.tip?.accounts ?? [])]);
+      return await this.alts.ensure(vault, [...staticAccounts(ixs, other), ...feeRecipients]);
     } catch (e) {
       throw classifyError(e, null, PUMP_ERRORS, PUMP_PROGRAM_ID.toBase58());
     }

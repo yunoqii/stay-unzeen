@@ -103,10 +103,25 @@ export class HeliusSenderBroadcaster implements Broadcaster {
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     // Status and JSON error only: the URL (api key) never goes into the message.
+    // Sender answers a refused tx with HTTP 500 + a JSON-RPC error: read it either way.
+    type RpcErr = { code?: number; message?: string };
+    const j = (await res.json().catch(() => null)) as ({ error?: RpcErr } & RpcErr) | null;
+    // JSON-RPC envelope, or (seen 25.10 with HTTP 500) a bare `{code, message}` object.
+    const err: RpcErr | undefined = j?.error ?? (typeof j?.code === "number" ? j : undefined);
+    if (err && isSenderRefusal(err.code)) {
+      // Refused before forwarding (e.g. no static tip): these bytes can never land, so it is a
+      // preflight-stage rejection (no waiting for the blockhash to expire).
+      throw new Error(`sender preflight rejected ${err.code}: ${(err.message ?? "").slice(0, 120)}`);
+    }
     if (!res.ok) throw new Error(`sender HTTP ${res.status}`);
-    const j = (await res.json()) as { error?: { code?: number; message?: string } };
-    if (j.error) throw new Error(`sender error ${j.error.code ?? ""}: ${(j.error.message ?? "").slice(0, 200)}`);
+    if (!j) throw new Error("sender: malformed response");
+    if (err) throw new Error(`sender error ${err.code ?? ""}: ${(err.message ?? "").slice(0, 200)}`);
   }
+}
+
+/** JSON-RPC "Invalid Request" / "Invalid params": the tx was refused, not forwarded. */
+export function isSenderRefusal(code: number | undefined): boolean {
+  return code === -32600 || code === -32602;
 }
 
 export function senderRequest(raw: Uint8Array): unknown {

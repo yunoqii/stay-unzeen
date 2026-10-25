@@ -1,13 +1,14 @@
 import bs58 from "bs58";
 import {
+  AddressLookupTableAccount,
   ComputeBudgetProgram,
+  Keypair,
   PublicKey,
   SystemProgram,
   MessageV0,
   SendTransactionError,
   Transaction,
   VersionedTransaction,
-  type AddressLookupTableAccount,
   type Connection,
   type Signer,
   type TransactionInstruction,
@@ -310,6 +311,26 @@ function signatureOf(raw: Uint8Array): string {
   return bs58.encode(raw.subarray(1, 65));
 }
 
+/**
+ * Lookup tables with every tip account replaced by a throwaway key (indices
+ * unchanged), so the compiler keeps the tip account STATIC. Helius Sender and
+ * Jito only see a tip whose account is in the static keys: a tip resolved
+ * through a table is rejected by Sender ("must send a tip", HTTP 500) and the
+ * transaction never lands (mainnet 25.10: every v0 create). Older per-vault
+ * tables already hold the Sender tip accounts, hence masking at compile time.
+ */
+export function maskTipAccounts(
+  tables: readonly AddressLookupTableAccount[],
+  tipAccounts: readonly PublicKey[],
+): AddressLookupTableAccount[] {
+  const tips = new Set(tipAccounts.map((a) => a.toBase58()));
+  return tables.map((t) => {
+    if (!t.state.addresses.some((a) => tips.has(a.toBase58()))) return t;
+    const addresses = t.state.addresses.map((a) => (tips.has(a.toBase58()) ? Keypair.generate().publicKey : a));
+    return new AddressLookupTableAccount({ key: t.key, state: { ...t.state, addresses } });
+  });
+}
+
 function buildSigned(
   ixs: TransactionInstruction[],
   feePayer: Signer,
@@ -324,7 +345,7 @@ function buildSigned(
         payerKey: feePayer.publicKey,
         instructions: ixs,
         recentBlockhash: blockhash,
-        addressLookupTableAccounts: opts.lookupTables,
+        addressLookupTableAccounts: opts.tip ? maskTipAccounts(opts.lookupTables, opts.tip.accounts) : opts.lookupTables,
       });
       const vtx = new VersionedTransaction(msg);
       vtx.sign([feePayer, ...extraSigners]);

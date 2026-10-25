@@ -794,13 +794,14 @@ export class LaunchLabAdapter {
 
   private async lookupTable(vault: Signer, ixs: TransactionInstruction[], build: (m: PublicKey, p: PublicKey, c: PublicKey) => Promise<TransactionInstruction[]>): Promise<AddressLookupTableAccount> {
     // Stable across this vault's launches: everything but the mint / creator side. The table is the
-    // vault's own, so its ATAs (wSOL, quote) belong in it, and so do the Sender tip accounts
-    // (added by signTx, not in `ixs`). 13.10 local run: USD1 create + CLMM leg with 32/10/80-byte
-    // metadata was 1233+ B without these (limit 1232), see scripts/launchlab-leg-local.ts.
+    // vault's own, so its ATAs (wSOL, quote) belong in it. Tip accounts never: Sender only sees a
+    // static tip (src/tx.ts maskTipAccounts). 13.10 local run: USD1 create + CLMM leg with
+    // 32/10/80-byte metadata was ~1233 B with a static tip (limit 1232), see
+    // scripts/launchlab-leg-local.ts: keep LaunchLab metadata short on that path.
     const r = () => Keypair.generate().publicKey;
     const other = await build(r(), vault.publicKey, r());
     try {
-      return await this.alts.ensure(vault, [...staticAccounts(ixs, other), ...(this.pipeline?.tip?.accounts ?? [])]);
+      return await this.alts.ensure(vault, [...staticAccounts(ixs, other)]);
     } catch (e) {
       throw this.classify(e);
     }
