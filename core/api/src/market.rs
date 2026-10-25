@@ -633,13 +633,15 @@ pub async fn candles(
         .await
         .map_err(db)?
         .is_some();
+    // Bars connect: open = the previous bar's close (high / low widened to it), so sparse
+    // sample-only bars are not isolated dashes. The first bar of the range keeps its own open.
     let sql = if pool_token {
         sql
     } else {
         "SELECT b,
-                trim_scale(round(o, 18))::text, trim_scale(round(h, 18))::text,
-                trim_scale(round(l, 18))::text, trim_scale(round(cl, 18))::text, v::text
-         FROM (
+                trim_scale(round(oo, 18))::text, trim_scale(round(greatest(h, oo), 18))::text,
+                trim_scale(round(least(l, oo), 18))::text, trim_scale(round(cl, 18))::text, v::text
+         FROM (SELECT b, COALESCE(lag(cl) OVER (ORDER BY b), o) AS oo, h, l, cl, v FROM (
            SELECT (floor(extract(epoch FROM ts) / $2::float8) * $2::float8)::bigint AS b,
                   (array_agg(p ORDER BY ts, id))[1] AS o, max(p) AS h, min(p) AS l,
                   (array_agg(p ORDER BY ts DESC, id DESC))[1] AS cl, sum(vol)::numeric AS v
@@ -652,7 +654,7 @@ pub async fn candles(
                  SELECT 0, to_timestamp(tick_at / 1000.0), 0, price_sol
                    FROM price_samples
                   WHERE mint = $1 AND tick_at >= ($3::float8 * 1000)::bigint AND tick_at < ($4::float8 * 1000)::bigint) t
-           GROUP BY b) x
+           GROUP BY b) x) y
          ORDER BY b"
             .to_string()
     };

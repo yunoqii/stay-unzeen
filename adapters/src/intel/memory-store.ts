@@ -114,6 +114,16 @@ export class MemoryIntelStore implements IntelStore {
     this.meta = { nextTickAt: t.nextTickAt, lastTickAt: t.tickStartedAt };
   }
 
+  async commitMarketTrades(rows: NonNullable<TickCommit["marketTrades"]>): Promise<number> {
+    let n = 0;
+    for (const m of rows) {
+      if ([...this.marketTrades.values()].some((x) => x.signature === m.signature && x.mint === m.mint)) continue;
+      this.marketTrades.set(`${m.signature}:${m.ix}`, m);
+      n++;
+    }
+    return n;
+  }
+
   async commitCards(c: CardCommit): Promise<void> {
     this.cardCommits.push(c);
     for (const card of c.cards) this.cards.set(card.mint, card);

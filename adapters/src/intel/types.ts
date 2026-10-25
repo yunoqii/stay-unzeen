@@ -174,6 +174,11 @@ export interface IntelStore {
   commitTick(t: TickCommit): Promise<void>;
   /** Card lane: cards (+ missing) of one card batch, one transaction. Never consumes the queue. */
   commitCards(c: CardCommit): Promise<void>;
+  /**
+   * Trade backfill (docs/INTEL.md "Бэкфилл сделок"): public trades into `market_trades`, a tx
+   * already stored for the same mint (any ix) is skipped. Returns rows inserted. Optional.
+   */
+  commitMarketTrades?(rows: MarketTradeRow[]): Promise<number>;
 }
 
 export interface OffchainInfo {

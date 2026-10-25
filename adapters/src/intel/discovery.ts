@@ -699,6 +699,28 @@ export class Discovery {
   }
 
   /**
+   * Trade backfill universe (docs/INTEL.md "Бэкфилл сделок"): the newest `perColumn` candidates of
+   * each Pulse column (graduated, about to graduate, new), interleaved, with the price of the last
+   * metrics pass (activity signal). Public stream only, never user-driven.
+   */
+  backfillCandidates(perColumn = 30): { mint: string; priceSol: string; symbol: string | null; venue: DiscoveryVenue }[] {
+    const cols: Tracked[][] = [[], [], []];
+    const rank = (c: Tracked) => (c.status === "graduated" ? 0 : Number(c.progressPct ?? 0) >= 70 ? 1 : 2);
+    for (const c of [...this.active.values()].filter((x) => x.verified).sort((a, b) => b.createdAt - a.createdAt)) {
+      const col = cols[rank(c)]!;
+      if (col.length < perColumn) col.push(c);
+    }
+    const out: { mint: string; priceSol: string; symbol: string | null; venue: DiscoveryVenue }[] = [];
+    for (let i = 0; i < perColumn; i++) {
+      for (const col of cols) {
+        const c = col[i];
+        if (c) out.push({ mint: c.mint, priceSol: c.priceSol, symbol: c.symbol, venue: c.venue });
+      }
+    }
+    return out;
+  }
+
+  /**
    * Fast pass every ~passMs, metrics pass every 45–75 s, each on its own timer.
    * `onTick` gets ONE aggregated report per metrics pass (fast passes folded in),
    * so the log keeps one discovery line per minute.

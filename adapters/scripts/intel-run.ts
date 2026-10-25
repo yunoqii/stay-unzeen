@@ -19,6 +19,7 @@ import { defaultMediaDir } from "../src/relayer/runtime";
 import { loadIntelConfig } from "../src/intel/config";
 import { RpcFullIntel } from "../src/intel/full";
 import { ConnectionCurveWatcher, IntelIndexer, PollingCurveWatcher } from "../src/intel/indexer";
+import { JsonRpcBackfill, TradeBackfill, type BackfillReport } from "../src/intel/backfill";
 import { MemoryIntelStore } from "../src/intel/memory-store";
 import { PgIntelStore } from "../src/intel/pg-store";
 import { CreatorPubkeyFile } from "../src/keys";
@@ -82,7 +83,30 @@ async function main(): Promise<void> {
     else log("WARN UNZEEN_INTEL_FULL_TRADES=1 but no Parsed Streams URL (INTEL_TRADES_STREAM_URL / Helius key, mainnet): feed off");
   }
   let discovery: Discovery | null = null;
+  // Trade backfill (INTEL.md): batch + indexer-picked discovery candidates on the index provider. Logs: counts only.
+  const bfAgg = { n: 0, mints: 0, credits: 0, trades: 0, errors: 0, ms: 0 };
+  const backfill =
+    cfg.backfill.enabled && tradeStream && cfg.indexUrl
+      ? {
+          lane: new TradeBackfill({ rpc: new JsonRpcBackfill(cfg.indexUrl, cfg.backfill.rps), maxTxCredits: cfg.backfill.maxTxCredits }),
+          discoveryPerTick: cfg.backfill.discoveryPerTick,
+          candidates: () => discovery?.backfillCandidates() ?? [],
+          onReport: (r: BackfillReport) => {
+            bfAgg.n++;
+            bfAgg.mints += r.mints;
+            bfAgg.credits += r.credits;
+            bfAgg.trades += r.trades;
+            bfAgg.errors += r.errors;
+            bfAgg.ms = Math.max(bfAgg.ms, r.ms);
+            if (bfAgg.n < 10) return;
+            log(`backfill x${bfAgg.n} mints=${bfAgg.mints} credits=${bfAgg.credits} trades=${bfAgg.trades} errors=${bfAgg.errors} max=${bfAgg.ms}ms`);
+            Object.assign(bfAgg, { n: 0, mints: 0, credits: 0, trades: 0, errors: 0, ms: 0 });
+          },
+        }
+      : null;
+  log(`trade backfill ${backfill ? `ON maxTx=${cfg.backfill.maxTxCredits}/tick discovery=${cfg.backfill.discoveryPerTick}/tick` : "off"}`);
   const indexer = new IntelIndexer({
+    backfill,
     store,
     // Card lane (INTEL.md): fixed 6–10 s base snapshots so a cold CA opens in ~10 s. INTEL_CARD_LANE=0 turns it off.
     cardLane: process.env.INTEL_CARD_LANE?.trim() !== "0",

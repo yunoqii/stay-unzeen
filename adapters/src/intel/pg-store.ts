@@ -1,7 +1,7 @@
 import { curveJson } from "./curves";
 import type pg from "pg";
 import type { CreatorPubkeyFile } from "../keys";
-import type { CardCommit, IntelStore, OffchainInfo, TickCommit, TokenCard, TokenSafety, WarmEntry } from "./types";
+import type { CardCommit, IntelStore, MarketTradeRow, OffchainInfo, TickCommit, TokenCard, TokenSafety, WarmEntry } from "./types";
 
 /**
  * IntelStore on core's tables (docs/INTEL.md v1, migration 0007), role
@@ -160,6 +160,16 @@ export class PgIntelStore implements IntelStore {
    * Card lane (docs/INTEL.md): cards of one card batch, one transaction. A missing mint never
    * replaces an existing snapshot; the queue and intel_meta.next_tick_at are untouched.
    */
+  async commitMarketTrades(rows: MarketTradeRow[]): Promise<number> {
+    if (rows.length === 0 || !(await this.canWriteTrades())) return 0;
+    const c = await this.db.connect();
+    try {
+      return await insertMarketTrades(c, rows);
+    } finally {
+      c.release();
+    }
+  }
+
   async commitCards(k: CardCommit): Promise<void> {
     const c = await this.db.connect();
     try {
@@ -230,22 +240,8 @@ export class PgIntelStore implements IntelStore {
           [u.mint, u.graduated ? "graduated" : "curve", u.priceSol, u.marketCapSol, asOf],
         );
       }
-      if (trades.length > 0) {
-        // Public trades of hot warm mints since the last tick; replays of a tx are ignored (UNIQUE signature, ix).
-        await c.query(
-          `INSERT INTO market_trades (mint, kind, venue, symbol, trader, unzeen, tags, token_amount, sol_amount, decimals, signature, ix, slot, ts)
-           SELECT m, k, v, sy, tr, u, COALESCE(string_to_array(NULLIF(tg, ''), ','), '{}'::text[]), ta, sa, d, sig, ix, sl, to_timestamp(ts / 1000.0)
-             FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::boolean[], $7::text[], $8::numeric[], $9::numeric[],
-                         $10::smallint[], $11::text[], $12::smallint[], $13::bigint[], $14::bigint[])
-                  AS x(m, k, v, sy, tr, u, tg, ta, sa, d, sig, ix, sl, ts)
-           ON CONFLICT (signature, ix) DO NOTHING`,
-          [
-            trades.map((x) => x.mint), trades.map((x) => x.kind), trades.map((x) => x.venue), trades.map((x) => x.symbol.slice(0, 16)), trades.map((x) => x.trader),
-            trades.map((x) => x.unzeen), trades.map((x) => x.tags.join(",")), trades.map((x) => x.tokenAmount.toString()), trades.map((x) => x.solAmount.toString()),
-            trades.map((x) => x.decimals), trades.map((x) => x.signature), trades.map((x) => x.ix), trades.map((x) => x.slot), trades.map((x) => x.ts),
-          ],
-        );
-      }
+      // Public trades of hot warm mints since the last tick; replays of a tx are ignored.
+      if (trades.length > 0) await insertMarketTrades(c, trades);
       if (prices.length > 0) {
         // INTEL v2: current + previous value; an older tick never overwrites a newer one.
         await c.query(
@@ -339,4 +335,35 @@ export function uniqueByMint<T extends { mint: string }>(rows: readonly T[]): T[
   const m = new Map<string, T>();
   for (const r of rows) m.set(r.mint, r);
   return [...m.values()];
+}
+
+/**
+ * market_trades insert shared by the stream (tick) and the backfill lane. A tx already stored for
+ * the same mint (UNIQUE (signature, ix); the backfill writes ix 0, the stream the event position)
+ * is skipped, and duplicates inside one call keep the first row.
+ */
+async function insertMarketTrades(c: { query: (sql: string, params?: unknown[]) => Promise<{ rowCount: number | null }> }, rows: readonly MarketTradeRow[]): Promise<number> {
+  const seen = new Set<string>();
+  const trades = rows.filter((x) => {
+    const k = `${x.signature}:${x.mint}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  if (trades.length === 0) return 0;
+  const r = await c.query(
+    `INSERT INTO market_trades (mint, kind, venue, symbol, trader, unzeen, tags, token_amount, sol_amount, decimals, signature, ix, slot, ts)
+     SELECT m, k, v, sy, tr, u, COALESCE(string_to_array(NULLIF(tg, ''), ','), '{}'::text[]), ta, sa, d, sig, ix, sl, to_timestamp(ts / 1000.0)
+       FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::boolean[], $7::text[], $8::numeric[], $9::numeric[],
+                   $10::smallint[], $11::text[], $12::smallint[], $13::bigint[], $14::bigint[])
+            AS x(m, k, v, sy, tr, u, tg, ta, sa, d, sig, ix, sl, ts)
+      WHERE NOT EXISTS (SELECT 1 FROM market_trades e WHERE e.signature = x.sig AND e.mint = x.m)
+     ON CONFLICT (signature, ix) DO NOTHING`,
+    [
+      trades.map((x) => x.mint), trades.map((x) => x.kind), trades.map((x) => x.venue), trades.map((x) => x.symbol.slice(0, 16)), trades.map((x) => x.trader),
+      trades.map((x) => x.unzeen), trades.map((x) => x.tags.join(",")), trades.map((x) => x.tokenAmount.toString()), trades.map((x) => x.solAmount.toString()),
+      trades.map((x) => x.decimals), trades.map((x) => x.signature), trades.map((x) => x.ix), trades.map((x) => x.slot), trades.map((x) => x.ts),
+    ],
+  );
+  return r.rowCount ?? 0;
 }

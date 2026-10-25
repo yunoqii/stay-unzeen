@@ -1198,7 +1198,8 @@ async fn token_safety_pending_and_snapshots() {
         c.body,
         json!([
             {"time": 1800000060, "open": "0.0000004", "high": "0.0000004", "low": "0.0000004", "close": "0.0000004", "volume": "0"},
-            {"time": 1800000120, "open": "0.0000006", "high": "0.0000006", "low": "0.0000005", "close": "0.0000005", "volume": "500"}
+            // open = the previous bar's close (bars connect), low widened to it
+            {"time": 1800000120, "open": "0.0000004", "high": "0.0000006", "low": "0.0000004", "close": "0.0000005", "volume": "500"}
         ])
     );
 

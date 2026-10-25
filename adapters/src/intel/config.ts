@@ -29,6 +29,12 @@ export interface IntelConfig {
   /** Budget guards, notifications per hour (1 credit each): trade feed / LaunchLab creates of the dev index. */
   tradesMaxPerHour: number;
   createsMaxPerHour: number;
+  /**
+   * Trade backfill (docs/INTEL.md "Бэкфилл сделок"): on with the full feed and an index provider,
+   * INTEL_TRADE_BACKFILL=0 turns it off. Body credits per main tick (INTEL_TRADE_BACKFILL_MAX_TX),
+   * discovery picks per tick (INTEL_TRADE_BACKFILL_DISCOVERY), index rps (INTEL_TRADE_BACKFILL_RPS).
+   */
+  backfill: { enabled: boolean; maxTxCredits: number; discoveryPerTick: number; rps: number };
   /** UNZEEN_WHALE_LAMPORTS (default 1 SOL, the threshold core uses for pool trades). */
   whaleLamports: bigint;
   /** INTEL_SNIPER_SLOTS: buys within create slot .. + N (default 4). */
@@ -76,6 +82,12 @@ export function loadIntelConfig(env: NodeJS.ProcessEnv = process.env): IntelConf
     streamUrl: streamUrl(cluster, env),
     tradesMaxPerHour: posInt(env.INTEL_TRADES_MAX_PER_H, 600),
     createsMaxPerHour: posInt(env.INTEL_CREATES_MAX_PER_H, 300),
+    backfill: {
+      enabled: env.UNZEEN_INTEL_FULL_TRADES?.trim() === "1" && indexUrl !== null && env.INTEL_TRADE_BACKFILL?.trim() !== "0",
+      maxTxCredits: posInt(env.INTEL_TRADE_BACKFILL_MAX_TX, 24),
+      discoveryPerTick: nonNegInt(env.INTEL_TRADE_BACKFILL_DISCOVERY, 8),
+      rps: Math.min(posInt(env.INTEL_TRADE_BACKFILL_RPS, 5), 20),
+    },
     whaleLamports: BigInt(posInt(env.UNZEEN_WHALE_LAMPORTS, 1_000_000_000)),
     sniperSlots: posInt(env.INTEL_SNIPER_SLOTS, 4),
     warnings,
@@ -101,6 +113,12 @@ function curveMode(v: string | undefined): IntelConfig["curveMode"] {
 function posInt(v: string | undefined, d: number): number {
   const n = Number(v?.trim() || d);
   if (!Number.isSafeInteger(n) || n <= 0) throw new Error(`expected a positive integer, got "${v}"`);
+  return n;
+}
+
+function nonNegInt(v: string | undefined, d: number): number {
+  const n = Number(v?.trim() || d);
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error(`expected a non-negative integer, got "${v}"`);
   return n;
 }
 

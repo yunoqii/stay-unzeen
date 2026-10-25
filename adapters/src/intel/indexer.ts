@@ -23,6 +23,7 @@ import { dbcCurveState, dbcProgress, launchLabCurveState, launchLabProgress, pum
 import { cryptoRng, type Rng } from "../relayer/random";
 import type { FullIntel } from "./full";
 import { tagTrade, type TagContext, type TradeSource } from "./trades";
+import { pickDiscoveryBackfill, type BackfillCandidate, type BackfillReport, type TradeBackfill } from "./backfill";
 import {
   METAPLEX_METADATA_PROGRAM_ID,
   curveProgress,
@@ -196,6 +197,18 @@ export interface IndexerOptions {
     /** Buys within create slot .. + N are `sniper` (default 4, as the first-blocks window). */
     sniperSlots: number;
   } | null;
+  /**
+   * Trade backfill (docs/INTEL.md "Бэкфилл сделок"; needs `trades` for tagging). Started on every
+   * main tick right after the batch snapshot, on the same index provider: the whole batch (real
+   * and decoys alike) + up to `discoveryPerTick` discovery candidates picked by the indexer
+   * (Pulse columns, activity). Runs in the background, writes through store.commitMarketTrades.
+   */
+  backfill?: {
+    lane: TradeBackfill;
+    discoveryPerTick: number;
+    candidates: () => readonly BackfillCandidate[];
+    onReport?: (r: BackfillReport) => void;
+  } | null;
   /** Refresh the decoy pool of recent pump.fun mints every N ticks (and every tick while it is small). */
   decoyRefreshTicks?: number;
   /** Retry failed off-chain fetches (process memory) after this long (default 10 min). */
@@ -312,6 +325,8 @@ export class IntelIndexer {
   /** Card and main commits never overlap (same tables, one process). */
   private commitChain: Promise<unknown> = Promise.resolve();
   private readonly offBucket: TokenBucket;
+  /** The running backfill pass (one at a time; a tick never waits for it). */
+  private backfillRun: Promise<void> | null = null;
   private readonly offDeps: OffchainDeps | null;
 
   constructor(private readonly o: IndexerOptions) {
@@ -405,6 +420,8 @@ export class IntelIndexer {
           report.errors++; // whole batch failed: nothing written for it, requests stay queued
         }
       }
+      for (const c of commit.cards) this.cardOf.set(c.mint, { symbol: c.symbol, decimals: c.decimals });
+      if (this.o.backfill && this.o.trades && commit.batch.length > 0) this.startBackfill(commit.batch, pool);
       const malformed = (await this.o.store.peekLookups(MAX_REAL_PER_BATCH)).filter((m) => !isMintAddress(m) && !queued.has(m));
       commit.consumed.push(...malformed);
       for (const m of commit.consumed) this.carded.delete(m);
@@ -459,6 +476,61 @@ export class IntelIndexer {
     }
     report.ms = this.now() - started;
     return report;
+  }
+
+  /**
+   * One backfill pass in the background: the batch + indexer-picked discovery candidates, shuffled
+   * together (nothing in the order or the calls tells a queued CA from a decoy or a pick).
+   * Skipped while the previous pass still runs (then the batch is simply not backfilled).
+   */
+  private startBackfill(batch: readonly string[], pool: PoolSets): void {
+    const bf = this.o.backfill!;
+    if (this.backfillRun) return;
+    let cands: readonly BackfillCandidate[] = [];
+    try {
+      cands = bf.candidates().filter((c) => isMintAddress(c.mint));
+    } catch {
+      cands = [];
+    }
+    const inBatch = new Set(batch);
+    const picks = pickDiscoveryBackfill(cands.filter((c) => !inBatch.has(c.mint)), bf.lane.cursors, this.now(), bf.discoveryPerTick);
+    const meta = new Map(cands.map((c) => [c.mint, c]));
+    const mints = [...batch, ...picks.map((c) => c.mint)];
+    for (let i = mints.length - 1; i > 0; i--) {
+      const j = this.o.rng.int(0, i);
+      [mints[i], mints[j]] = [mints[j]!, mints[i]!];
+    }
+    const price = new Map(picks.map((c) => [c.mint, c.priceSol]));
+    const t = this.o.trades!;
+    const ctx: TagContext = {
+      poolVaults: pool.vaults,
+      unzeenLaunches: pool.launches,
+      devOf: (m) => this.createUser.get(m),
+      createSlotOf: (m) => this.createSlot.get(m),
+      whaleLamports: t.whaleLamports,
+      sniperSlots: t.sniperSlots,
+    };
+    this.backfillRun = (async () => {
+      const { trades, report } = await bf.lane.run(mints, price);
+      const rows: MarketTradeRow[] = trades.map((tr) => {
+        const { unzeen, tags } = tagTrade(tr, ctx);
+        const m = meta.get(tr.mint);
+        return { ...tr, venue: m?.venue ?? tr.venue, symbol: this.cardOf.get(tr.mint)?.symbol ?? m?.symbol ?? "", unzeen, tags };
+      });
+      if (rows.length > 0 && this.o.store.commitMarketTrades) {
+        report.trades = await this.serialized(() => this.o.store.commitMarketTrades!(rows)).catch(() => (report.errors++, 0));
+      } else report.trades = 0;
+      bf.onReport?.(report);
+    })()
+      .catch(() => undefined)
+      .finally(() => {
+        this.backfillRun = null;
+      });
+  }
+
+  /** Test hook: wait for the background backfill pass. */
+  async backfillIdle(): Promise<void> {
+    await this.backfillRun;
   }
 
   /** Newest discovery candidates (valid mints, at most DISCOVERY_WARM_MAX). */
