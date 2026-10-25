@@ -1,7 +1,7 @@
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import { fetchOffchain, normalizeSocials, type MediaSink } from "../src/intel/offchain";
-import { SsrfError, checkUrl, isPublicIp, safeFetch, type PinnedRequest } from "../src/intel/ssrf";
+import { SsrfError, checkUrl, isPublicIp, orderAddresses, safeFetch, tlsServername, type PinnedRequest } from "../src/intel/ssrf";
 
 const GW = "https://ipfs.io/ipfs";
 
@@ -181,6 +181,114 @@ describe("safeFetch", () => {
     });
     expect(seen!.maxBytes).toBe(64 * 1024);
     expect(seen!.timeoutMs).toBeLessThanOrEqual(3000);
+  });
+
+  it("IPv6 literal URL: pinned to the bare address, no bracketed SNI", async () => {
+    const pinned: string[] = [];
+    const res = await safeFetch("https://[2606:4700::1]/x", {
+      maxBytes: 1000,
+      timeoutMs: 1000,
+      ipfsGateway: GW,
+      lookup: async () => {
+        throw new Error("literal must not be resolved");
+      },
+      request: async (url, addr) => (pinned.push(`${addr.address}/${addr.family}/${tlsServername(url) ?? "-"}`), ok("{}")),
+    });
+    expect(res.body.toString()).toBe("{}");
+    expect(pinned).toEqual(["2606:4700::1/6/-"]);
+    expect(tlsServername(new URL("https://[2606:4700::1]/x"))).toBeUndefined();
+    expect(tlsServername(new URL("https://1.1.1.1/x"))).toBeUndefined();
+    expect(tlsServername(new URL("https://Example.COM/x"))).toBe("example.com");
+  });
+
+  it("orders IPv4 first (resolver order kept within a family), deduplicated", () => {
+    expect(
+      orderAddresses([
+        { address: "2606:4700::1", family: 6 },
+        { address: "1.1.1.1", family: 4 },
+        { address: "2606:4700::2", family: 6 },
+        { address: "1.0.0.1", family: 4 },
+        { address: "1.1.1.1", family: 4 },
+      ]).map((a) => a.address),
+    ).toEqual(["1.1.1.1", "1.0.0.1", "2606:4700::1", "2606:4700::2"]);
+  });
+
+  it("AAAA unreachable, A works: falls back to the next checked address", async () => {
+    const tried: string[] = [];
+    const unreachable = Object.assign(new Error("connect ENETUNREACH"), { code: "ENETUNREACH" });
+    const res = await safeFetch("https://dual.example/x", {
+      maxBytes: 1000,
+      timeoutMs: 1000,
+      ipfsGateway: GW,
+      // verbatim order: AAAA first, and the v4 one fails too so both are exercised.
+      lookup: async () => [
+        { address: "2606:4700::1", family: 6 },
+        { address: "93.184.216.34", family: 4 },
+        { address: "1.1.1.1", family: 4 },
+      ],
+      request: async (_u, addr) => {
+        tried.push(addr.address);
+        if (addr.address !== "1.1.1.1") throw unreachable;
+        return ok('{"ok":1}');
+      },
+    });
+    expect(res.body.toString()).toBe('{"ok":1}');
+    expect(tried).toEqual(["93.184.216.34", "1.1.1.1"]);
+  });
+
+  it("retries only connect errors; every candidate unreachable rethrows the last one", async () => {
+    const tried: string[] = [];
+    await expect(
+      safeFetch("https://dual.example/x", {
+        maxBytes: 1000,
+        timeoutMs: 1000,
+        ipfsGateway: GW,
+        lookup: async () => [
+          { address: "2606:4700::1", family: 6 },
+          { address: "93.184.216.34", family: 4 },
+        ],
+        request: async (_u, addr) => {
+          tried.push(addr.address);
+          throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+        },
+      }),
+    ).rejects.toThrow("ECONNREFUSED");
+    expect(tried).toEqual(["93.184.216.34", "2606:4700::1"]);
+    // A size-limit error (or an HTTP status) is final: no second address.
+    const tried2: string[] = [];
+    await expect(
+      safeFetch("https://dual.example/x", {
+        maxBytes: 1000,
+        timeoutMs: 1000,
+        ipfsGateway: GW,
+        lookup: async () => [
+          { address: "93.184.216.34", family: 4 },
+          { address: "1.1.1.1", family: 4 },
+        ],
+        request: async (_u, addr) => {
+          tried2.push(addr.address);
+          throw new SsrfError("too large");
+        },
+      }),
+    ).rejects.toThrow("too large");
+    expect(tried2).toEqual(["93.184.216.34"]);
+  });
+
+  it("a private address among dual-stack answers still refuses before any connect", async () => {
+    let connected = false;
+    await expect(
+      safeFetch("https://dual.example/x", {
+        maxBytes: 1000,
+        timeoutMs: 1000,
+        ipfsGateway: GW,
+        lookup: async () => [
+          { address: "93.184.216.34", family: 4 },
+          { address: "fd00::1", family: 6 },
+        ],
+        request: async () => ((connected = true), ok("{}")),
+      }),
+    ).rejects.toThrow("private address");
+    expect(connected).toBe(false);
   });
 
   it("times out a slow DNS answer", async () => {

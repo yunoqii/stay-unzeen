@@ -184,10 +184,12 @@ export async function safeFetch(raw: string, o: SafeFetchOptions): Promise<{ bod
     const host = url.hostname.replace(/^\[|\]$/g, "");
     const addrs = net.isIP(host) ? [{ address: host, family: net.isIP(host) }] : await withTimeout(lookup(host), deadline);
     if (addrs.length === 0) throw new SsrfError("no address");
+    // Every resolved address (hence every candidate below) must be public, as before.
     if (!addrs.every((a) => isPublicIp(a.address))) throw new SsrfError("private address");
-    const left = deadline - Date.now();
-    if (left <= 0) throw new SsrfError("timeout");
-    const res = await request(url, addrs[0]!, { timeoutMs: left, maxBytes: o.maxBytes, accept: o.accept ?? "*/*" });
+    const res = await requestFirstReachable(request, url, orderAddresses(addrs), deadline, {
+      maxBytes: o.maxBytes,
+      accept: o.accept ?? "*/*",
+    });
     if (res.status >= 300 && res.status < 400) {
       if (!res.location) throw new SsrfError("redirect without location");
       url = checkUrl(new URL(res.location, url).toString(), o.ipfsGateway);
@@ -197,6 +199,66 @@ export async function safeFetch(raw: string, o: SafeFetchOptions): Promise<{ bod
     return { body: res.body, contentType: res.contentType };
   }
   throw new SsrfError("too many redirects");
+}
+
+/** Most candidates tried per hop (all already checked public); bounds work on a long answer. */
+const MAX_CANDIDATES = 4;
+
+/**
+ * IPv4 first, then IPv6, each in resolver order (M2): with `verbatim` the AAAA often comes first,
+ * and a host without an IPv6 route fails it with ENETUNREACH. Deduplicated.
+ */
+export function orderAddresses(addrs: { address: string; family: number }[]): { address: string; family: number }[] {
+  const seen = new Set<string>();
+  const uniq = addrs.filter((a) => (seen.has(a.address) ? false : (seen.add(a.address), true)));
+  const fam = (a: { address: string; family: number }) => net.isIP(a.address) || a.family;
+  return [...uniq.filter((a) => fam(a) === 4), ...uniq.filter((a) => fam(a) !== 4)];
+}
+
+/** Errors raised before any HTTP response: the next address may still work. */
+const CONNECT_ERRORS = new Set([
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "ECONNREFUSED",
+  "EADDRNOTAVAIL",
+  "EAFNOSUPPORT",
+  "ECONNRESET",
+  "EPROTO",
+]);
+
+function isConnectError(e: unknown): boolean {
+  if (e instanceof SsrfError) return false; // size limit, timeout: final
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && CONNECT_ERRORS.has(code);
+}
+
+async function requestFirstReachable(
+  request: PinnedRequest,
+  url: URL,
+  candidates: { address: string; family: number }[],
+  deadline: number,
+  o: { maxBytes: number; accept: string },
+): Promise<Awaited<ReturnType<PinnedRequest>>> {
+  let last: unknown = new SsrfError("no address");
+  for (const addr of candidates.slice(0, MAX_CANDIDATES)) {
+    // Defence in depth: never connect to an address that is not public, whatever the caller did.
+    if (!isPublicIp(addr.address)) throw new SsrfError("private address");
+    const left = deadline - Date.now();
+    if (left <= 0) throw new SsrfError("timeout");
+    try {
+      return await request(url, addr, { timeoutMs: left, maxBytes: o.maxBytes, accept: o.accept });
+    } catch (e) {
+      if (!isConnectError(e)) throw e;
+      last = e;
+    }
+  }
+  throw last;
+}
+
+/** TLS SNI for the request: none for an IP literal (brackets stripped for IPv6), else the host. */
+export function tlsServername(url: URL): string | undefined {
+  const h = url.hostname.replace(/^\[|\]$/g, "");
+  return net.isIP(h) ? undefined : h;
 }
 
 async function withTimeout<T>(p: Promise<T>, deadline: number): Promise<T> {
@@ -221,7 +283,7 @@ export const pinnedHttpsRequest: PinnedRequest = (url, address, o) =>
         path: `${url.pathname}${url.search}`,
         method: "GET",
         headers: { accept: o.accept, "user-agent": "unzeen-intel/1", "accept-encoding": "identity" },
-        servername: net.isIP(url.hostname) ? undefined : url.hostname,
+        servername: tlsServername(url),
         lookup: (_h, _opts, cb) => {
           // Node may ask with {all:true}: answer in the matching shape.
           if ((_opts as { all?: boolean }).all) (cb as unknown as (e: null, a: { address: string; family: number }[]) => void)(null, [address]);
