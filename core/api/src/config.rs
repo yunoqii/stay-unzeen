@@ -978,7 +978,10 @@ mod tests {
     fn pump_zec_gate() {
         use super::*;
         let zec = known_quotes(true).into_iter().find(|q| q.is_zec()).unwrap();
-        assert_eq!(gate_pump_zec(zec.clone(), true).venues, &["pumpfun", "raydium-launchlab"]);
+        assert_eq!(
+            gate_pump_zec(zec.clone(), true).venues,
+            &["pumpfun", "raydium-launchlab"]
+        );
         assert_eq!(gate_pump_zec(zec, false).venues, &["raydium-launchlab"]);
         let usdc = known_quotes(true).into_iter().find(|q| q.quote == "USDC").unwrap();
         assert_eq!(gate_pump_zec(usdc.clone(), false), usdc);
