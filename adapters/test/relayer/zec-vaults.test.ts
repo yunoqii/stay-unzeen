@@ -52,6 +52,22 @@ describe("vault choice by ZEC SPL stock", () => {
     expect(await ex.vaultRequestAsync({ kind: "create", venue: "raydium-launchlab", meta: { name: "N", symbol: "S" }, lamportsIn: 20_000_000n, minOut: 0n })).toBeNull();
   });
 
+  it("create SOL request = the venue's own prepareCreate requirement + margin (pump.fun), 35M fallback", async () => {
+    const { PUMP_CREATE_SOL_NEED } = await import("../../src/pumpfun");
+    const { CREATE_SOL_MARGIN } = await import("../../src/relayer/executors");
+    expect(PUMP_CREATE_SOL_NEED).toBe(27_100_000n);
+    const pump = { createSolNeed: PUMP_CREATE_SOL_NEED, quotePairFor: (s: string) => (s === "ZEC" ? { quoteMint: ZEC, stockOnly: true } : null) } as unknown as TradeVenue;
+    const ex = new VenueTradeExecutor(pump, null);
+    const need = PUMP_CREATE_SOL_NEED + CREATE_SOL_MARGIN;
+    expect(ex.vaultRequest({ kind: "create", venue: "pumpfun", meta: { name: "N", symbol: "S" }, lamportsIn: 0n, minOut: 0n })).toEqual({ minSol: need });
+    expect(ex.vaultRequest({ kind: "create", venue: "pumpfun", meta: { name: "N", symbol: "S" }, lamportsIn: 5_000_000n, minOut: 0n })).toEqual({ minSol: need + 5_000_000n });
+    expect(await ex.vaultRequestAsync({ kind: "create", venue: "pumpfun", meta: { name: "N", symbol: "S" }, lamportsIn: 0n, minOut: 0n, quote: "ZEC" })).toEqual({ minSol: need, quote: { mint: ZEC, minUnits: 0n } });
+    // a vault with 0.034 SOL (mainnet 25.10) now qualifies for a buy-0 pump.fun create
+    expect(34_000_000n >= need).toBe(true);
+    const other = new VenueTradeExecutor({} as unknown as TradeVenue, null);
+    expect(other.vaultRequest({ kind: "create", venue: "meteora-dbc", meta: { name: "N", symbol: "S" }, lamportsIn: 0n, minOut: 0n })).toEqual({ minSol: 35_000_000n });
+  });
+
   it("engine uses the async request: a 3 ZEC buy lands on the only vault with the stock", async () => {
     class ZecExecutor extends FakeExecutor {
       async vaultRequestAsync(spec: JobSpec): Promise<VaultRequest | null> {

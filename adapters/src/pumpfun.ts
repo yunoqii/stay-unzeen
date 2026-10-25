@@ -64,6 +64,12 @@ const ACCUMULATOR_RENT_HEADROOM = 2_000_000n;
 const CREATE_RENT_HEADROOM = 15_000_000n;
 /** First create of a vault also creates its address lookup table. */
 const ALT_RENT_HEADROOM = 10_000_000n;
+/**
+ * SOL a vault must hold for a create with no SOL first buy (SOL pair buy 0, or a
+ * stock-only ZEC pair): exactly what `prepareCreate`'s own check requires. The
+ * relayer chooses the vault by it (single source of truth, not a second guess).
+ */
+export const PUMP_CREATE_SOL_NEED = CREATE_RENT_HEADROOM + ACCUMULATOR_RENT_HEADROOM + ALT_RENT_HEADROOM + FEE_HEADROOM;
 /** Global / FeeConfig rarely change; cache them briefly. */
 const PARAMS_TTL_MS = 30_000;
 /**
@@ -249,6 +255,9 @@ export class PumpFunAdapter implements LaunchpadAdapter {
   }
 
   /** Quote pair of a curve (null = SOL), for the relayer's vault choice. */
+  /** SOL a vault needs for a create on top of its SOL first buy (relayer vault choice). */
+  readonly createSolNeed: bigint = PUMP_CREATE_SOL_NEED;
+
   async quotePairOf(mint: string): Promise<{ quoteMint: string; stockOnly: boolean } | null> {
     const info = await this.rpc(() => this.connection.getAccountInfo(bondingCurvePda(parseMint(mint)), "confirmed"));
     if (!info) return null;

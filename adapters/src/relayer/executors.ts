@@ -85,6 +85,8 @@ export class RpcChainProbe implements ChainProbe {
  * ~0.01 SOL of rent (devnet 12.10): one headroom for both venues.
  */
 const CREATE_SOL_HEADROOM = 35_000_000n;
+/** Over a venue's own create requirement (`TradeVenue.createSolNeed`): balance drift between pick and sign. */
+export const CREATE_SOL_MARGIN = 1_000_000n;
 
 type PumpSpec = Extract<JobSpec, { kind: "buy" | "sell" | "create" | "fair_create" }>;
 
@@ -106,6 +108,8 @@ export interface TradeVenue {
   quotePairOf?(mint: string): Promise<QuotePair | null>;
   /** Quote pair a create with `meta.quote = symbol` would use (null = SOL / not served). */
   quotePairFor?(symbol: string): QuotePair | null;
+  /** SOL its own `prepareCreate` check needs besides the SOL first buy (absent: CREATE_SOL_HEADROOM). */
+  readonly createSolNeed?: bigint;
 }
 
 export interface QuotePair {
@@ -138,9 +142,15 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
     }
     if (spec.kind === "create" && spec.quote && this.adapter.quotePairFor) {
       const pair = this.adapter.quotePairFor(spec.quote);
-      if (pair?.stockOnly) return { minSol: CREATE_SOL_HEADROOM, quote: { mint: pair.quoteMint, minUnits: spec.lamportsIn } };
+      if (pair?.stockOnly) return { minSol: this.createHeadroom(), quote: { mint: pair.quoteMint, minUnits: spec.lamportsIn } };
     }
     return null;
+  }
+
+  /** Vault SOL for a create besides its SOL first buy: the adapter's own check + margin. */
+  private createHeadroom(): bigint {
+    const need = this.adapter.createSolNeed;
+    return need !== undefined ? need + CREATE_SOL_MARGIN : CREATE_SOL_HEADROOM;
   }
 
   vaultRequest(spec: PumpSpec): VaultRequest {
@@ -149,7 +159,7 @@ export class VenueTradeExecutor implements JobExecutor<PumpSpec> {
         return { minSol: spec.lamportsIn + BUY_SOL_HEADROOM };
       case "create":
         // A4: + the SOL of the later first buy pinned to this vault (Bags), with its own headroom.
-        return { minSol: spec.lamportsIn + CREATE_SOL_HEADROOM + (spec.reserveLamports ? spec.reserveLamports + BUY_SOL_HEADROOM : 0n) };
+        return { minSol: spec.lamportsIn + this.createHeadroom() + (spec.reserveLamports ? spec.reserveLamports + BUY_SOL_HEADROOM : 0n) };
       case "fair_create":
         return { minSol: spec.lamportsIn + CREATE_SOL_HEADROOM };
       case "sell":
