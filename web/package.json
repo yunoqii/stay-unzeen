@@ -24,7 +24,7 @@
     "geist": "^1.7.2",
     "lightweight-charts": "^5.2.1",
     "motion": "^14.1.0",
-    "next": "16.4.0",
+    "next": "16.4.3",
     "qrcode.react": "^4.2.0",
     "radix-ui": "^1.8.0",
     "react": "19.3.0",
@@ -43,7 +43,7 @@
     "@types/react-dom": "^19",
     "@types/three": "^0.186.0",
     "eslint": "^9",
-    "eslint-config-next": "16.4.0",
+    "eslint-config-next": "16.4.3",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^5.0.4"
