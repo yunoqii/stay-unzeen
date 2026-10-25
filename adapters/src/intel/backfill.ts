@@ -316,6 +316,8 @@ export class TradeBackfill {
       if (budget <= 0) continue; // cursor untouched: read on a later pass
       const sides = poolSides(mint);
       const txs: RawTx[] = [];
+      // Newest signature whose body was read; the cursor (`until`) never moves past it (L6).
+      let cursor = sigs[0]!.signature;
       try {
         if (fresh.length >= PAGE_CREDITS && this.pageOk && budget >= PAGE_CREDITS) {
           rep.pageCalls++;
@@ -329,7 +331,12 @@ export class TradeBackfill {
             throw e;
           }
         } else {
-          for (const s of fresh.slice(0, budget)) {
+          // Over budget: read the OLDEST `budget` new signatures and set the cursor to the newest
+          // of those, so the newer rest comes back (after the cursor) on the next pass instead of
+          // being skipped forever.
+          const take = fresh.length > budget ? fresh.slice(fresh.length - budget) : fresh;
+          if (take.length < fresh.length) cursor = take[0]!.signature;
+          for (const s of take) {
             rep.txCalls++;
             rep.credits++;
             budget--;
@@ -347,7 +354,7 @@ export class TradeBackfill {
         const t = tradeFromRawTx(tx, mint, sides, started);
         if (t) out.push(t);
       }
-      mark(sigs[0]!.signature);
+      mark(cursor);
     }
     const ttl = this.o.cursorTtlMs ?? 6 * 3_600_000;
     for (const [m, s] of this.cursors) if (started - s.at > ttl) this.cursors.delete(m);

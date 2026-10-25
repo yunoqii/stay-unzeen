@@ -219,6 +219,49 @@ describe("TradeBackfill", () => {
     expect(bf.cursors.has(DAMM_MINT)).toBe(true);
     expect(bf.cursors.has(PUMP_MINT)).toBe(false);
   });
+
+  it("partial budget: reads the oldest new signatures, cursor only over those; the rest comes next pass", async () => {
+    const rpc = new FakeRpc();
+    const txs = FX[DAMM_MINT]!; // 8, newest first
+    rpc.load(DAMM_MINT, txs);
+    const sig = (i: number) => txs[i]!.transaction.signatures[0]!;
+    const bodies = () => rpc.calls.filter((c) => c.m === "tx").map((c) => c.a);
+    const bf = new TradeBackfill({ rpc, maxTxCredits: 3 });
+    const trades: string[] = [];
+    const read: string[] = [];
+
+    const r1 = await bf.run([DAMM_MINT]);
+    expect(r1.report).toMatchObject({ sigCalls: 1, txCalls: 3, pageCalls: 0 });
+    expect(bodies()).toEqual([sig(5), sig(6), sig(7)]);
+    expect(bf.cursors.get(DAMM_MINT)!.sig).toBe(sig(5));
+    read.push(...bodies());
+    trades.push(...r1.trades.map((t) => t.signature));
+
+    rpc.calls = [];
+    const r2 = await bf.run([DAMM_MINT]);
+    expect(rpc.calls[0]!.o).toMatchObject({ until: sig(5) });
+    expect(bodies()).toEqual([sig(2), sig(3), sig(4)]);
+    expect(bf.cursors.get(DAMM_MINT)!.sig).toBe(sig(2));
+    read.push(...bodies());
+    trades.push(...r2.trades.map((t) => t.signature));
+
+    rpc.calls = [];
+    const r3 = await bf.run([DAMM_MINT]); // the last two fit: cursor = newest
+    expect(bodies()).toEqual([sig(0), sig(1)]);
+    expect(bf.cursors.get(DAMM_MINT)!.sig).toBe(sig(0));
+    read.push(...bodies());
+    trades.push(...r3.trades.map((t) => t.signature));
+
+    rpc.calls = [];
+    expect((await bf.run([DAMM_MINT])).report).toMatchObject({ txCalls: 0, trades: 0 });
+
+    // Every signature read exactly once; together the passes give the same trades as one full pass.
+    expect([...read].sort()).toEqual(txs.map((t) => t.transaction.signatures[0]!).sort());
+    const once = new FakeRpc();
+    once.load(DAMM_MINT, txs);
+    const all = await new TradeBackfill({ rpc: once, maxTxCredits: 30 }).run([DAMM_MINT]);
+    expect([...trades].sort()).toEqual(all.trades.map((t) => t.signature).sort());
+  });
 });
 
 // ---------------------------------------------------------------------------
