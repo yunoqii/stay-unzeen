@@ -1,4 +1,5 @@
 import { curveJson } from "./curves";
+import { rebaseMediaUrl } from "../metadata";
 import type pg from "pg";
 import type { CreatorPubkeyFile } from "../keys";
 import type { CardCommit, IntelStore, MarketTradeRow, OffchainInfo, TickCommit, TokenCard, TokenSafety, WarmEntry } from "./types";
@@ -95,7 +96,9 @@ export class PgIntelStore implements IntelStore {
     );
     const x = r.rows[0];
     if (!x || (!x.socials && !x.image)) return null;
-    return { ...(x.socials ? { socials: x.socials } : {}), ...(x.image ? { image: x.image } : {}), fetchedAt: Number(x.as_of), ok: true };
+    // Cached URLs from before a domain change point at the old API host: serve them from the current one.
+    const image = x.image ? rebaseMediaUrl(x.image, process.env.UNZEEN_METADATA_BASE_URL) : null;
+    return { ...(x.socials ? { socials: x.socials } : {}), ...(image ? { image } : {}), fetchedAt: Number(x.as_of), ok: true };
   }
 
   private pricesWritable: Promise<boolean> | null = null;

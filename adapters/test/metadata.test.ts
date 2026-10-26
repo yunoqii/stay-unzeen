@@ -4,7 +4,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 import { AdapterError } from "../src/errors";
-import { LocalMetadataStore, PinataMetadataStore, metadataStoreFromEnv, parseImageDataUrl, publicMetadataUrlProblem, sanitizeImage } from "../src/metadata";
+import { LocalMetadataStore, PinataMetadataStore, metadataStoreFromEnv, parseImageDataUrl, publicMetadataUrlProblem, rebaseMediaUrl, sanitizeImage } from "../src/metadata";
 
 const MARK = "UNZEEN-SECRET-EXIF-MARK";
 
@@ -120,6 +120,16 @@ describe("metadata stores", () => {
     expect(r).toEqual({ uri: "https://gw.example/ipfs/bafy2", imageUrl: "https://gw.example/ipfs/bafy1" });
     expect(uploads.map((u) => [u.auth, u.type])).toEqual([["Bearer jwt-x", "image/jpeg"], ["Bearer jwt-x", "application/json"]]);
 
+    // Site copy: with a /media mirror tokens.image is ours (web CSP), the chain JSON keeps IPFS.
+    const mdir = fs.mkdtempSync(path.join(os.tmpdir(), "unz-mirror-"));
+    const mirrored = new PinataMetadataStore("jwt-x", "https://gw.example/ipfs", fakeFetch, new LocalMetadataStore(mdir, "https://api.example/media"));
+    const m = await mirrored.publish({ name: "A", symbol: "A", image: toDataUrl("image/jpeg", await dirtyJpeg()) });
+    expect(m.uri).toMatch(/^https:\/\/gw\.example\/ipfs\/bafy\d+$/);
+    expect(m.imageUrl).toMatch(/^https:\/\/api\.example\/media\/[0-9a-f]{40}\.jpg$/);
+    expect(fs.existsSync(path.join(mdir, path.basename(m.imageUrl!)))).toBe(true);
+    const env = { PINATA_JWT: "x", UNZEEN_METADATA_BASE_URL: "https://api.example/media", UNZEEN_METADATA_DIR: mdir };
+    expect((metadataStoreFromEnv(os.tmpdir(), env) as unknown as { displayMirror: unknown }).displayMirror).toBeInstanceOf(LocalMetadataStore);
+
     const failing = new PinataMetadataStore("j", undefined, (async () => new Response("no", { status: 401 })) as unknown as typeof fetch);
     await expect(failing.publish({ name: "A", symbol: "A" })).rejects.toMatchObject({ code: "venue_unavailable" });
   });
@@ -162,5 +172,17 @@ describe("GAP-5: mainnet never writes a local metadata URL on chain", () => {
   it("LocalMetadataStore itself refuses a local URL when built for mainnet", () => {
     expect(() => new LocalMetadataStore(os.tmpdir(), "https://localhost/m", { requirePublicHttps: true })).toThrow(/refused on mainnet/);
     expect(() => new LocalMetadataStore(os.tmpdir(), "http://127.0.0.1/m")).not.toThrow();
+  });
+});
+
+describe("rebaseMediaUrl: cached /media URLs follow a domain change", () => {
+  it("moves /media/<sha40> of any host to the current base, leaves the rest", () => {
+    const sha = "a".repeat(40);
+    const base = "https://api-mainnet.stayunzeen.live/media/";
+    expect(rebaseMediaUrl(`https://api-mainnet.169-58-209-71.sslip.io/media/${sha}.png`, base)).toBe(`https://api-mainnet.stayunzeen.live/media/${sha}.png`);
+    expect(rebaseMediaUrl(`http://127.0.0.1:8080/media/${sha}.jpg`, base)).toBe(`https://api-mainnet.stayunzeen.live/media/${sha}.jpg`);
+    expect(rebaseMediaUrl(`https://ipfs.io/ipfs/bafy1`, base)).toBe("https://ipfs.io/ipfs/bafy1");
+    expect(rebaseMediaUrl(`https://x.example/media/${sha}.png?x=1`, base)).toBe(`https://x.example/media/${sha}.png?x=1`);
+    expect(rebaseMediaUrl(`https://x.example/media/${sha}.png`, undefined)).toBe(`https://x.example/media/${sha}.png`);
   });
 });

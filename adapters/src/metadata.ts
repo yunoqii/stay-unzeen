@@ -114,6 +114,18 @@ export interface MetadataStore {
   publish(meta: { name: string; symbol: string; image?: string | null }): Promise<PublishedMetadata>;
 }
 
+/**
+ * A `/media/<sha40>.<ext>` URL of ANY host (an old API domain, 127.0.0.1 from a dev run) moved to the
+ * current media base, so cached URLs follow a domain change (the web CSP only allows the current API
+ * host). Other URLs and an unset base pass through unchanged.
+ */
+export function rebaseMediaUrl(url: string, base: string | undefined | null): string {
+  const b = base?.trim().replace(/\/+$/, "");
+  if (!b || !/^https?:\/\//.test(b)) return url;
+  const m = /^https?:\/\/[^/?#]+\/media\/([0-9a-f]{40}\.(?:png|jpg|jpeg|webp|json))$/.exec(url);
+  return m ? `${b}/${m[1]}` : url;
+}
+
 export function contentName(bytes: Uint8Array, ext: string): string {
   return `${createHash("sha256").update(bytes).digest("hex").slice(0, 40)}.${ext}`;
 }
@@ -121,18 +133,27 @@ export function contentName(bytes: Uint8Array, ext: string): string {
 /** Shared flow: sanitize -> put image -> put JSON. */
 abstract class BaseMetadataStore implements MetadataStore {
   protected abstract put(name: string, bytes: Buffer, mime: string): Promise<string>;
+  /**
+   * Where the image the SITE shows (`tokens.image`) lives, when it differs from the on-chain one
+   * (Pinata: the chain gets the IPFS URL, the web CSP only allows our own /media). Null = same URL.
+   */
+  protected displayMirror: { putMedia(name: string, bytes: Buffer): Promise<string> } | null = null;
 
   async publish(meta: { name: string; symbol: string; image?: string | null }): Promise<PublishedMetadata> {
     let imageUrl: string | null = null;
+    let displayUrl: string | null = null;
     if (meta.image) {
       const { mime, bytes } = parseImageDataUrl(meta.image);
       const img = await sanitizeImage(bytes, mime);
-      imageUrl = await this.put(contentName(img.bytes, img.ext), img.bytes, img.mime);
+      const name = contentName(img.bytes, img.ext);
+      imageUrl = await this.put(name, img.bytes, img.mime);
+      // A failed mirror only costs the site picture (the chain still has the IPFS one).
+      if (this.displayMirror) displayUrl = await this.displayMirror.putMedia(name, img.bytes).catch(() => null);
     }
     const json = metadataJson(meta.name, meta.symbol, imageUrl);
     const uri = await this.put(contentName(json, "json"), json, "application/json");
     if (Buffer.byteLength(uri) > 200) throw new AdapterError("internal", "metadata URI longer than 200 bytes");
-    return { uri, imageUrl };
+    return { uri, imageUrl: displayUrl ?? imageUrl };
   }
 }
 
@@ -177,8 +198,11 @@ export class PinataMetadataStore extends BaseMetadataStore {
     private readonly jwt: string,
     private readonly gateway = "https://ipfs.io/ipfs",
     private readonly fetchImpl: typeof fetch = fetch,
+    /** Our /media store for the site's copy of the image (`tokens.image`); see `displayMirror`. */
+    mirror: LocalMetadataStore | null = null,
   ) {
     super();
+    this.displayMirror = mirror;
   }
 
   protected async put(name: string, bytes: Buffer, mime: string): Promise<string> {
@@ -241,8 +265,14 @@ export function metadataStoreFromEnv(
   o: { cluster?: string; onRefuse?: (reason: string) => void } = {},
 ): MetadataStore | null {
   const jwt = env.PINATA_JWT?.trim();
-  if (jwt) return new PinataMetadataStore(jwt, env.PINATA_GATEWAY_URL?.trim() || undefined);
   const base = env.UNZEEN_METADATA_BASE_URL?.trim();
+  const dir = env.UNZEEN_METADATA_DIR?.trim() || defaultDir;
+  if (jwt) {
+    // The site shows tokens.image only from our own /media (CSP img-src): mirror the sanitized image
+    // there when a public base URL is configured; the chain keeps the IPFS URL.
+    const mirror = base && !publicMetadataUrlProblem(base) ? new LocalMetadataStore(dir, base) : null;
+    return new PinataMetadataStore(jwt, env.PINATA_GATEWAY_URL?.trim() || undefined, fetch, mirror);
+  }
   if (!base) return null;
   if (o.cluster === "mainnet-beta") {
     const why = publicMetadataUrlProblem(base);
@@ -251,6 +281,5 @@ export function metadataStoreFromEnv(
       return null;
     }
   }
-  const dir = env.UNZEEN_METADATA_DIR?.trim() || defaultDir;
   return new LocalMetadataStore(dir, base, { requirePublicHttps: o.cluster === "mainnet-beta" });
 }
