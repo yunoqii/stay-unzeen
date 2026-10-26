@@ -336,7 +336,15 @@ The header has a network switch. Each network has its own backend (scanner, API,
 
 ### Demo keys for judges (Devnet)
 
-<!-- DEMO-KEYS: the lead pastes 3–5 devnet demo anon keys (12 words each) here before the repo goes public. -->
+Open https://stayunzeen.live, switch to **Devnet**, then **Key → Restore with 12 words**. Each key was topped up with 0.015 TAZ through a real shielded deposit (about 0.17 devnet SOL of buying power; minimum action 0.001 TAZ).
+
+| # | 12 words (Devnet only) |
+|---|---|
+| 1 | `addict stick earth wheel tray rebuild essay demise result corn fine various` |
+| 2 | `kiwi flat pink salt vague rough merit visa cigar render sibling body` |
+| 3 | `spray path trend course outside miss amazing churn episode midnight blame anchor` |
+| 4 | `among fancy black scan icon ridge galaxy spoon card scan camp main` |
+| 5 | `pretty oil solution safe lawn film distance spoon punch trend volume please` |
 
 These keys hold testnet funds only. A demo key is shared: if two judges use the same key, each sees the other's trades.
 
