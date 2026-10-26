@@ -21,3 +21,6 @@ docs/screenshots/design-review/10-key-reveal.png
 skills-lock.json
 docs/design/zcash-research/shots/
 docs/design/x-research/
+
+# local-only files (demo keys etc.), never committed
+*.local.md
