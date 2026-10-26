@@ -13,7 +13,7 @@ import { EvmExecutor } from "../../src/evm/executor";
 import { EvmFeeCache } from "../../src/evm/fees";
 import { EvmKeyring } from "../../src/evm/keys";
 import { LifiClient, LIFI_DIAMOND_4663 } from "../../src/evm/lifi";
-import { HoodRelayer, type HoodRelayerEvent } from "../../src/evm/relayer/engine";
+import { ATTEST_NO_GAS_RETRY_MS, HoodRelayer, type HoodRelayerEvent } from "../../src/evm/relayer/engine";
 import { MemoryLaunchStore, MemorySentClock } from "../../src/evm/relayer/launches";
 import { writeTokenPrices } from "../../src/evm/relayer/pool-state";
 import type { HoodClaimedJob, HoodJobResult, HoodQueue } from "../../src/evm/relayer/queue";
@@ -232,4 +232,22 @@ describe("relayer:hood mainnet guard", () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/hood mainnet sends are disabled/);
   }, 70_000);
+});
+
+describe("attest without gas on the attestation key", () => {
+  it("waits ATTEST_NO_GAS_RETRY_MS (pool_liquidity), signs and sends nothing", async () => {
+    const asked: string[] = [];
+    const client = chain({
+      eth_getBalance: (p) => (asked.push(String((p as unknown[])[0]).toLowerCase()), "0x0"),
+    });
+    const job: HoodClaimedJob = { id: "9", spec: { kind: "attest", memo: "ab".repeat(32), purpose: "verify" }, notBefore: 0, claims: 1, sent: null, leaseId: "l" };
+    const before = Date.now();
+    const { relayer, results } = setup({ client, job });
+    await relayer.tick();
+    const r = results[0]!;
+    expect(r.status).toBe("retry");
+    expect(r.status === "retry" && r.code).toBe("pool_liquidity");
+    expect(r.status === "retry" && r.notBefore >= before + ATTEST_NO_GAS_RETRY_MS).toBe(true);
+    expect(asked).toEqual([kr.attest("verify").address.toLowerCase()]);
+  });
 });

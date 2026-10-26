@@ -67,6 +67,11 @@ export interface HoodRelayerOptions {
   onEvent?: (e: HoodRelayerEvent) => void;
 }
 
+/** Below this an attestation key can't pay one attest tx (~25k gas at a few gwei at most). */
+export const ATTEST_MIN_GAS_WEI = 10n ** 12n;
+/** Retry delay of an attest job while its key has no gas. */
+export const ATTEST_NO_GAS_RETRY_MS = 10 * 60_000;
+
 export class HoodRelayer {
   private readonly o: HoodRelayerOptions & Required<Pick<HoodRelayerOptions, "workerId" | "leaseMs" | "maxClaims" | "dropGraceMs" | "now" | "sleep">>;
   private readonly byAddress: Map<string, LocalAccount>;
@@ -242,6 +247,11 @@ export class HoodRelayer {
         };
       }
       case "attest": {
+        // The owner funds attestation keys (never a vault). Without gas the tx can't be paid: wait
+        // ATTEST_NO_GAS_RETRY_MS instead of signing one that never lands and re-resolving it every
+        // few seconds (hood 23-26.10: thousands of RPC calls per job). RPC error -> just try.
+        const gas = await this.o.executor.read.getBalance({ address: vault.address }).catch(() => null);
+        if (gas !== null && gas < ATTEST_MIN_GAS_WEI) return this.retry("pool_liquidity", "attestation key has no gas", ATTEST_NO_GAS_RETRY_MS);
         // Zero-value self-tx whose calldata is exactly the 32-byte root (EVM analogue of the SPL memo).
         const data = `0x${s.memo}` as Hex;
         const outSig = s.purpose === "verify" ? await vault.signMessage!({ message: { raw: data } }) : undefined;
