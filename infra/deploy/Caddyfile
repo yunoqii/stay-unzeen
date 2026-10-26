@@ -40,6 +40,8 @@
 			}
 		}
 	}
+	# Extra global options of other projects on this host: /etc/unzeen/caddy.d/*.global.
+	import /etc/caddy/sites/*.global
 }
 
 (no_client_headers) {
