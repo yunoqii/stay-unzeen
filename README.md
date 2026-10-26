@@ -4,27 +4,52 @@
 
 **Private trading for launchpads, paid with shielded ZEC.**
 
-You top up once from any Zcash wallet with shielded ZEC. From that balance you buy, sell and launch tokens on launchpads: **pump.fun** and **Meteora DBC** on Solana, **Pons** on Robinhood Chain, plus anything Jupiter routes on Solana mainnet. Shared pool vaults execute the trades. The public feed says *"unzeen bought 1.2M $PEPE for 0.4 SOL"*. It never says who.
+You top up once from any Zcash wallet with shielded ZEC. From that balance you buy, sell and launch tokens on launchpads: **pump.fun** on Solana (mainnet and devnet, including launches paired with ZEC), **Meteora DBC** on Solana devnet, anything **Jupiter** routes on Solana mainnet, and **Pons** on Robinhood Chain. Shared pool vaults execute the trades. The public feed says *"unzeen bought 1.2M $PEPE for 0.4 SOL"*. It never says who.
 
 - No wallet, no email, no sign-up. Your account is a 12-word **anon key**, generated and encrypted in your browser.
 - The price stays public, because the bonding curve and the trades are on chain. The participants stay private. That is the dark-pool idea behind the **Private Markets** track.
 - Built for **ZECATHON 2026**, track **Private Markets**.
 
-Demo: https://169-58-209-71.sslip.io (`TODO(lead): confirm the final demo URL`) · Video: `TODO` · X: "stay unzeen" `TODO`
+**Live demo: https://stayunzeen.live** (Devnet / Mainnet switch in the header) · **Video: https://youtu.be/N5riLT9ULwA** · X: [x.com/stayunzeen](https://x.com/stayunzeen)
+
+---
+
+## Try it
+
+- **Devnet (recommended for judges).** Open https://stayunzeen.live, keep the network switch on **Devnet** and import one of the pre-funded demo keys from [Demo keys for judges](#demo-keys-for-judges-devnet). Everything runs for real on Zcash testnet and Solana devnet: top-up, launch, buy, sell, orders, scenarios, chat, withdrawals and Verify.
+- **Mainnet.** Real ZEC and real venues. Minimum deposit 0.001 ZEC; minimum action 0.0001 ZEC on Solana (0.001 ZEC on Robinhood Chain). Read the [mainnet warning](#what-is-real-and-what-is-a-mock) first, or just watch the video.
+- **Public APIs** (read-only endpoints, no key needed): `GET /api/pool`, `/api/feed`, `/api/tokens`, `/api/verify`, `/api/stats` on
+  - Devnet: https://api-devnet.stayunzeen.live
+  - Mainnet (Solana): https://api-mainnet.stayunzeen.live
+  - Mainnet (Robinhood Chain): https://api-hood.stayunzeen.live
+
+### See it on chain (Solana mainnet, recorded for the demo video on October 25, 2026)
+
+Every transaction below is signed by a public pool vault. Nothing on chain points to the person who asked for it.
+
+| What | Transaction |
+|---|---|
+| Buy of a live third-party pump.fun token | [`52SfdCUw…kYpeU`](https://solscan.io/tx/52SfdCUwLerYLMgzTXmRnDQUinJ3nhbkAy1fgG9hkLxaRDL5Hqe4hd2AwA61U6vZwjEhzsfNDreTvEnzrspkYpeU) |
+| Sell of the same token | [`4Sr81byn…oUSqo`](https://solscan.io/tx/4Sr81bynVgrcEobJpBkUZDM6w45LF7b9M98ZzvWUeq7qfrnEbVibLJsnbj6t64J1jrCZXn7Tcc1gvX7qbzvoUSqo) |
+| Anonymous launch on pump.fun, paired with ZEC (ZEC SPL), creator = a fresh pool address | [`2xNgZkd6…3UNNa`](https://solscan.io/tx/2xNgZkd6pF1vj4DbspLPv3vEPZckQZ1McBByWPQh1Nk3Vq65i6YHLoFxvNJcNxSUV4U489G8VPry38m6oSS3UNNa) · token [`63xWF9YK…CsRDUr`](https://solscan.io/token/63xWF9YKmJ8WkTJGPcnmct1J2AW9bqKw1pmic1CsRDUr) · vault [`DsRGjrtq…7pcfd`](https://solscan.io/account/DsRGjrtqRaWrd7ZaikE7f8wdCZcxs4gAkQE9wRm7pcfd) |
+| Verify: daily snapshot anchored on chain | [`3WmTVqNW…GdXVb`](https://solscan.io/tx/3WmTVqNWZyn3sJ4TkPWpgWdzbMo75PoNv5wPmAUjWzTjkRPaZzxSZhebes1Z3SJ22Dd7qMox5EP9d8HuT3GGXdVb) |
+
+ZEC SPL mint used for the ZEC pair: [`A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS`](https://solscan.io/token/A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS).
 
 ---
 
 ## Contents
 
-1. [How it works](#how-it-works)
-2. [Features](#features)
-3. [Trust model](#trust-model)
-4. [Threat model: what is private and what is not](#threat-model-what-is-private-and-what-is-not)
-5. [What is real and what is a mock](#what-is-real-and-what-is-a-mock)
-6. [Running locally](#running-locally)
-7. [Built during ZECATHON](#built-during-zecathon)
-8. [Roadmap](#roadmap)
-9. [License](#license)
+1. [Try it](#try-it)
+2. [How it works](#how-it-works)
+3. [Features](#features)
+4. [Trust model](#trust-model)
+5. [Threat model: what is private and what is not](#threat-model-what-is-private-and-what-is-not)
+6. [What is real and what is a mock](#what-is-real-and-what-is-a-mock)
+7. [Running locally](#running-locally)
+8. [Built during ZECATHON](#built-during-zecathon)
+9. [Roadmap](#roadmap)
+10. [License](#license)
 
 ---
 
@@ -126,7 +151,7 @@ Status: tested end to end on Devnet (3 sealed bids, commitment root, reveal, one
 **Core**
 - Account on an anon key (12 words). No email, no wallet.
 - ZEC balance: top up once from ZODL with a ZIP-321 QR, then act instantly from the balance.
-- Buy and sell on pump.fun and Meteora DBC on Solana, and through Jupiter on Solana mainnet. Buy and sell on Pons on Robinhood Chain.
+- Buy and sell on pump.fun (Solana mainnet and devnet; SOL and ZEC SPL pairs on mainnet), Meteora DBC (Solana devnet) and through Jupiter (Solana mainnet). Launch, buy and sell on Pons on Robinhood Chain.
 - Anonymous token launch with a fresh creator address for every token.
 - Creator fee claims to your balance.
 - Withdraw ZEC to any shielded address. Withdraw tokens to a new address with gas, delay and an optional split.
@@ -183,10 +208,12 @@ Verify does **not** prove:
 
 Verify publishes one snapshot per day: the roots and their sums, the padded tree size and the vault list. It does **not** publish the number of users, anyone else's balance, or any viewing key.
 
-Operator attestation keys (Verify):
-- Devnet: `TODO(lead): base58 pubkey`
-- Solana mainnet: `TODO(lead): base58 pubkey`
-- Robinhood Chain: `TODO(lead): 0x address`
+Operator attestation keys (Verify), pinned in the public frontend build:
+- Devnet: `GLScqi2A3MD8djriaSRsgfxQFRtKXQqfVbbdryMv5PYZ`
+- Solana mainnet: `Dh7FXBKAfdipgRx1H2LsJeULfHJBfS4wDvQ155PDZm3`
+- Robinhood Chain: `0xE8B0508A914F7076022687F717Cfce2d16DC71E8`
+
+You can compare them with `operator.pubkey` in `GET /api/verify` of each network.
 
 ---
 
@@ -283,7 +310,8 @@ The header has a network switch. Each network has its own backend (scanner, API,
 |---|---|---|
 | Zcash | **Real** Zcash **testnet** (TAZ), public `testnet.zec.rocks` | **Real** Zcash mainnet, `zec.rocks` |
 | Trading chain | **Real** Solana **devnet** | **Real** Solana mainnet and Robinhood Chain mainnet |
-| Venues | pump.fun and Meteora DBC: launch, buy, sell, withdraw | pump.fun, Jupiter (Solana); Pons (Robinhood Chain) |
+| Venues | pump.fun and Meteora DBC: launch, buy, sell, withdraw | Solana: pump.fun (launch, buy, sell; SOL and ZEC SPL pairs) and Jupiter (buy, sell). Robinhood Chain: Pons (launch, buy, sell) |
+| Minimums | Deposit 0.001 TAZ, action 0.001 TAZ | Deposit 0.001 ZEC; action 0.0001 ZEC (Solana), 0.001 ZEC (Robinhood Chain) |
 | ZEC/SOL rate | **Fixed** rate (1Click has no testnet) | Live NEAR Intents 1Click quote |
 | Pool rebalancing (ZEC → SOL/ETH) | Dry run only | Real 1Click, triggered by the operator |
 | Transaction sending | Plain RPC send | Helius Sender with a uniform tip (Solana) |
@@ -293,11 +321,14 @@ The header has a network switch. Each network has its own backend (scanner, API,
 
 **Verified live.** On Devnet the whole flow was run end to end in the browser against the real backend: deposit, pump.fun and Meteora DBC launch, buy and sell, orders, scenarios, chat, creator fees, token and ZEC withdrawals, and Verify with an on-chain anchor.
 
-**Mainnet.** The mainnet demo shows a minimal path on real funds: ZEC top-up, a token launch, a buy of a live third-party token (with the safety panel), a sell, a token withdrawal, a ZEC withdrawal and Verify on Solana; and launch, buy, sell, ZEC withdrawal and Verify on Robinhood Chain. Meteora DBC, orders and scenarios are shown on Devnet only, to keep the mainnet budget small. `TODO(lead): confirm the mainnet run is done and add transaction links.`
+**Mainnet, Solana.** The demo video shows a minimal path on real funds: a shielded ZEC top-up, a buy and a sell of a live third-party pump.fun token (with the safety panel), an anonymous pump.fun launch paired with ZEC, and Verify with its on-chain anchor. The transactions are linked in [See it on chain](#see-it-on-chain-solana-mainnet-recorded-for-the-demo-video-on-october-25-2026). Withdrawals (ZEC and tokens), Meteora DBC, orders and scenarios were run on Devnet only, to keep the mainnet budget small. Jupiter is enabled on mainnet but did not route a trade in the recording.
 
-**Built, not shown live.** Adapters for Raydium LaunchLab (bonk.fun, stonk.fun) and Bags are in the code and tested, but they are not enabled in the demo. `TODO(lead): adjust if they are enabled on the mainnet instance.`
+<!-- TODO(lead): update this paragraph if live Pons trades / hood Verify anchors land before 28.10. -->
+**Mainnet, Robinhood Chain.** The Pons instance is deployed with its own Zcash pool wallet (`api-hood`) and publishes daily Verify snapshots. The Pons adapter is tested against a mainnet fork. No live user trade has run on it yet, and the operator signature and on-chain anchor of its recent Verify snapshots are still pending.
 
-**Off by default.** Dev history, sniper and bundle metrics, and the "whales" / "dev" trade filters are built but switched off, because they need a paid streaming RPC plan. The Discovery mode of the token list is also off.
+**Built, not shown live.** Adapters for Raydium LaunchLab (bonk.fun, stonk.fun) and Bags are in the code and tested, but they are not enabled on any deployed instance.
+
+**Network-dependent.** On Mainnet the full trade history of each token is on: whale, dev and sniper tags, the "whales" / "dev" filters and dev history, plus the Discovery list of fresh venue tokens. On Devnet these are off.
 
 **Mock.** The frontend contains an **in-browser mock API** (`NEXT_PUBLIC_API_MODE=mock`, the default for local development) used for UI work and tests. The public deployment runs against the real backends.
 
@@ -305,7 +336,7 @@ The header has a network switch. Each network has its own backend (scanner, API,
 
 ### Demo keys for judges (Devnet)
 
-`TODO(lead): 3–5 demo anon keys (12 words each) or where to find them.`
+<!-- DEMO-KEYS: the lead pastes 3–5 devnet demo anon keys (12 words each) here before the repo goes public. -->
 
 These keys hold testnet funds only. A demo key is shared: if two judges use the same key, each sees the other's trades.
 
@@ -379,7 +410,7 @@ The API must allow the web origin: set `API_CORS_ORIGINS` in `.env`. For a publi
 Download your proof file from `/verify`, then (Node.js 18+, no dependencies):
 
 ```bash
-node web/public/verify/verify-proof.mjs <proof.json> --operator <attestation pubkey>
+node web/public/verify/verify-proof.mjs <proof.json> --operator <attestation pubkey>   # keys: see Trust model
 ```
 
 ### Production
@@ -392,9 +423,9 @@ See `infra/README.md` and `infra/deploy/`: TLS on the same host, access logs off
 
 All code in this repository was written during the ZECATHON build window. The first commit is dated October 12, 2026; see the commit history. Nothing here is a fork of an existing launchpad, wallet or trading product. We use libraries and public APIs only.
 
-**Rust (`core/`):** librustzcash (`zcash_client_backend`, `zcash_client_sqlite`, `zcash_keys`, `zcash_primitives`, `zcash_protocol`, `zcash_address`, `zcash_proofs`, `zip32`, `zip321`, pre-release versions pinned for the current network upgrade), `orchard`, `sapling-crypto`, `tonic`, `prost`, `rustls`, `axum`, `tokio`, `tower-http`, `reqwest`, `tokio-postgres`, `deadpool-postgres`, `rusqlite`, `ed25519-dalek`, `sha2`, `hmac`, `age`, `bip0039`, `secrecy`, `zeroize`, `serde`, `clap`, `tracing`.
+**Rust (`core/`):** librustzcash (`zcash_client_backend`, `zcash_client_sqlite`, `zcash_keys`, `zcash_primitives`, `zcash_protocol`, `zcash_address`, `zcash_proofs`, `zip32`, `zip321`, pre-release versions pinned for the current network upgrade), `orchard`, `sapling-crypto`, `tonic`, `prost`, `rustls`, `axum`, `tokio`, `tower-http`, `reqwest`, `tokio-postgres`, `deadpool-postgres`, `rusqlite`, `ed25519-dalek`, `secp256k1`, `sha2`, `hmac`, `age`, `bip0039`, `secrecy`, `zeroize`, `serde`, `clap`, `tracing`.
 
-**TypeScript (`adapters/`):** `@pump-fun/pump-sdk`, `@meteora-ag/dynamic-bonding-curve-sdk`, `@solana/web3.js`, `@solana/spl-token`, `age-encryption`, `pg`, `sharp`, `vitest`.
+**TypeScript (`adapters/`):** `@pump-fun/pump-sdk`, `@meteora-ag/dynamic-bonding-curve-sdk`, `@meteora-ag/cp-amm-sdk`, `@raydium-io/raydium-sdk-v2`, `@solana/web3.js`, `@solana/spl-token`, `viem` (Robinhood Chain), `age-encryption`, `pg`, `sharp`, `vitest`.
 
 **Web (`web/`):** Next.js, React, Tailwind CSS, shadcn/ui (Radix), Motion, Phosphor Icons, Geist (self-hosted), `@noble/curves`, `@noble/hashes`, `@scure/bip39`, `lightweight-charts`, `qrcode.react`, `three`, `sonner`.
 
