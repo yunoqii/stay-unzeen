@@ -311,9 +311,13 @@ pub fn claimable_zat(lamports: u64, rate_buy_lamports_per_zec: u64) -> Option<u6
     u64::try_from(z).ok()
 }
 
-/// ZEC reserve as attested: rounded DOWN to 0.01 ZEC.
+/// ZEC reserve as attested: rounded DOWN to 0.001 ZEC, the granule of the ZEC liabilities tree
+/// (its sum is public at that precision anyway). 0.01 showed a 0.006 ZEC pool as 0 next to
+/// 0.005 ZEC of liabilities (mainnet 26.10).
+pub const RESERVE_GRANULE_ZAT: u64 = 100_000;
+
 pub fn reserve_floor(zat: u64) -> u64 {
-    zat - zat % 1_000_000
+    zat - zat % RESERVE_GRANULE_ZAT
 }
 
 #[cfg(test)]
@@ -364,7 +368,8 @@ mod tests {
         assert_eq!(round_up(1, 100_000), 100_000);
         assert_eq!(round_up(200_000, 100_000), 200_000);
         assert_eq!(round_up(0, 100_000), 0);
-        assert_eq!(reserve_floor(12_345_678), 12_000_000);
+        assert_eq!(reserve_floor(12_345_678), 12_300_000);
+        assert_eq!(reserve_floor(635_000), 600_000);
         // 0.05 SOL at 9.95 SOL/ZEC (buy side) → 0.00502513 ZEC, rounded up.
         assert_eq!(claimable_zat(50_000_000, 9_950_000_000), Some(502_513));
         assert_eq!(claimable_zat(1, 10_000_000_000), Some(1));

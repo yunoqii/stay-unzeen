@@ -2321,8 +2321,8 @@ mod verify_pl {
         assert_eq!(snap.headers["cache-control"], "public, max-age=300");
         let v = snap.body;
         assert_eq!((v["id"].as_i64(), v["leaves"].as_u64()), (Some(id as i64), Some(1024)));
-        // 1.23456789 sampled + 0.02 credited later + 0.01 in flight = 1.26456789 → 1.26.
-        assert_eq!(v["zecReserve"]["amountZat"], "126000000", "floored to 0.01 ZEC");
+        // 1.23456789 sampled + 0.02 credited later + 0.01 in flight = 1.26456789 → 1.264.
+        assert_eq!(v["zecReserve"]["amountZat"], "126400000", "floored to 0.001 ZEC");
         assert_eq!(v["zecReserve"]["attested"], true);
         assert_eq!(
             v["committedLamports"], "2000000",
@@ -2390,7 +2390,7 @@ mod verify_pl {
             leaves: 1024,
             solana_slot: 777,
             zcash_height: 3_000_000,
-            zec_reserve_zat: 126_000_000,
+            zec_reserve_zat: 126_400_000,
         };
         // v0.17: digest v2 also covers quoteAssets (absent = empty list).
         assert_eq!(v["digestVersion"], 2);

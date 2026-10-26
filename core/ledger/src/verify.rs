@@ -476,7 +476,7 @@ impl Ledger {
 
         // Reserve (attested by the scanner, K confirmations like crediting, E7) + deposits
         // credited after its sample (≥ K confirmations, in the wallet) + ZEC payouts in flight
-        // (still held as liabilities, already gone from the wallet, E8). Floored to 0.01 ZEC.
+        // (still held as liabilities, already gone from the wallet, E8). Floored to 0.001 ZEC.
         let sampled = meta_u64(&tx, "reserve_zat").await?;
         let sampled_credited = meta_u64(&tx, "reserve_credited_zat").await?;
         let credited_now = credited_total(&tx).await?;

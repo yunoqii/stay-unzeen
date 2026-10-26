@@ -954,7 +954,7 @@ interface VerifySnapshot extends VerifySnapshotSummary {
     counted: boolean;                     // true только у ZEC SPL: засчитывается в покрытие ZEC 1:1
     dustBelow: string;                    // баланс vault ниже — не засчитывается (базовые единицы)
   }[];
-  zecReserve: { amountZat: string; height: number; attested: true };   // округлено ВНИЗ до 0.01 ZEC; заявлено оператором, не доказано.
+  zecReserve: { amountZat: string; height: number; attested: true };   // округлено ВНИЗ до 0.001 ZEC (с 26.10, = гранула дерева ZEC; раньше 0.01); заявлено оператором, не доказано.
                                           // v0.10: ноты с ≥ K подтверждений + своя сдача + выплаты в полёте + депозиты, зачисленные после замера
 }
 
