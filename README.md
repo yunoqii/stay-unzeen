@@ -139,7 +139,7 @@ The bid count is shown only when there are at least 5 bids ("<5" otherwise). The
 
 Fair-launch libraries: `tlock_age` and `drand-verify` (Rust), `tlock-js` (browser). Only the server talks to drand quicknet relays.
 
-Fair-launch attestation key: `TODO(lead): pubkey`.
+Fair-launch attestation key (Solana mainnet): `C1tyxVEQ8hyF8WU4qeg32kwQnz7Z1xzBnxDhopULmQau`.
 
 Status: tested end to end on Devnet (3 sealed bids, commitment root, reveal, one create + buy). It was compiled out of the public frontend bundle and disabled on the server until October 28.
 <!-- FAIR-LAUNCH:END -->
@@ -323,7 +323,6 @@ The header has a network switch. Each network has its own backend (scanner, API,
 
 **Mainnet, Solana.** The demo video shows a minimal path on real funds: a shielded ZEC top-up, a buy and a sell of a live third-party pump.fun token (with the safety panel), an anonymous pump.fun launch paired with ZEC, and Verify with its on-chain anchor. The transactions are linked in [See it on chain](#see-it-on-chain-solana-mainnet-recorded-for-the-demo-video-on-october-25-2026). Withdrawals (ZEC and tokens), Meteora DBC, orders and scenarios were run on Devnet only, to keep the mainnet budget small. Jupiter is enabled on mainnet but did not route a trade in the recording.
 
-<!-- TODO(lead): update this paragraph if live Pons trades / hood Verify anchors land before 28.10. -->
 **Mainnet, Robinhood Chain.** The Pons instance is deployed with its own Zcash pool wallet (`api-hood`) and publishes daily Verify snapshots. The Pons adapter is tested against a mainnet fork. No live user trade has run on it yet, and the operator signature and on-chain anchor of its recent Verify snapshots are still pending.
 
 **Built, not shown live.** Adapters for Raydium LaunchLab (bonk.fun, stonk.fun) and Bags are in the code and tested, but they are not enabled on any deployed instance.
