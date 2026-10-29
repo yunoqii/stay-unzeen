@@ -1,8 +1,8 @@
 // Devnet <-> Mainnet (docs/FRONTEND.md, network section). Every network has its own API, explorer links,
 // unz1 chain id, and its own anon key + session. Default: devnet; mainnet when the build has no devnet.
 //
-// NEXT_PUBLIC_DEVNET=0 drops Devnet from the build: not listed, not selectable, a stored "devnet" choice
-// falls back to Mainnet. Unset = Devnet on (dev server, tests); production builds read web/.env.production.
+// Production builds are Mainnet-only: Devnet is not listed, not selectable, a stored "devnet" choice falls back
+// to Mainnet. NEXT_PUBLIC_DEVNET=1 brings Devnet back in a production build; =0 drops it in dev and tests too.
 //
 // API v0.18: a network is one origin = one (Zcash net, trading chain) pair. "hood" is Robinhood Chain mainnet
 // (EVM 4663, chainId 0111): only in builds with NEXT_PUBLIC_HOOD=1; otherwise it does not exist at all.
@@ -15,8 +15,9 @@ export type Chain = "solana" | "hood";
 /** Robinhood Chain is compiled in only with NEXT_PUBLIC_HOOD=1 (default off). */
 export const HOOD_BUILD = process.env.NEXT_PUBLIC_HOOD === "1";
 
-/** Devnet is compiled in unless NEXT_PUBLIC_DEVNET=0 (Mainnet-only site). */
-export const DEVNET_BUILD = process.env.NEXT_PUBLIC_DEVNET !== "0";
+/** Devnet is compiled in with NEXT_PUBLIC_DEVNET=1, or outside production builds unless it is 0. */
+export const DEVNET_BUILD =
+  process.env.NEXT_PUBLIC_DEVNET === "1" || (process.env.NEXT_PUBLIC_DEVNET !== "0" && process.env.NODE_ENV !== "production");
 
 export const NETWORKS: readonly Network[] = [
   ...(DEVNET_BUILD ? (["devnet"] as const) : []),

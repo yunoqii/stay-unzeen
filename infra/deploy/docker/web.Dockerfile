@@ -20,6 +20,8 @@ ARG NEXT_PUBLIC_ATTESTATION_PUBKEY_DEVNET=
 ARG NEXT_PUBLIC_ATTESTATION_PUBKEY_MAINNET=
 ARG NEXT_PUBLIC_ATTESTATION_PUBKEY_HOOD=
 ARG NEXT_PUBLIC_HOOD=1
+# Empty = Mainnet-only site; 1 brings Devnet back (web/lib/network.ts).
+ARG NEXT_PUBLIC_DEVNET=
 # Empty until 28.10 23:59 UTC: build:public fails if sealed-bid code is in the bundle.
 ARG NEXT_PUBLIC_FAIR_LAUNCH_BUILD=
 # build:public = strict bundle check (no fair-launch code). After the deadline: WEB_BUILD_SCRIPT=build.
