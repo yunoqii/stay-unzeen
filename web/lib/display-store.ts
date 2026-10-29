@@ -7,7 +7,7 @@
 import { useMemo, useSyncExternalStore } from "react";
 import { api, ApiError } from "@/lib/api/client";
 import { DEFAULT_DISPLAY, makeDisplay, parseRates, ratesFromPool, type Display, type DisplayPref, type DisplayRates } from "@/lib/display";
-import { getNetwork, subscribeNetwork, useNetwork, type Network } from "@/lib/network";
+import { DEFAULT_NETWORK, getNetwork, subscribeNetwork, useNetwork, type Network } from "@/lib/network";
 import { useNative } from "@/lib/chain";
 
 // ---- display pick ----
@@ -71,7 +71,7 @@ interface RatesState {
   loading: boolean;
 }
 
-const INITIAL: RatesState = { network: "devnet", rates: null, loading: true };
+const INITIAL: RatesState = { network: DEFAULT_NETWORK, rates: null, loading: true };
 let state: RatesState = INITIAL;
 const rateListeners = new Set<() => void>();
 let timer: ReturnType<typeof setInterval> | undefined;

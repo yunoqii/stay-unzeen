@@ -128,7 +128,7 @@ export const SECTIONS: DocSection[] = [
     body: (
       <>
         <p>
-          The anon key is your whole account. It is a standard 12-word recovery phrase; your browser derives a signing key from it, a separate one for Devnet and Mainnet. Every action you take
+          The anon key is your whole account. It is a standard 12-word recovery phrase; your browser derives a signing key from it, {process.env.NEXT_PUBLIC_DEVNET !== "0" ? "a separate one for Devnet and Mainnet" : "a separate one per network"}. Every action you take
           is a request signed by that key.
         </p>
         <List>
@@ -445,7 +445,10 @@ export const SECTIONS: DocSection[] = [
         <Faq q="What if I lose my 12 words?">If you also lose this browser, the balance is gone. There is no reset, because there is no account to reset.</Faq>
         <Faq q="Why did my trade take a minute?">Delayed mode waits for the next batch so your trade hides among others. Choose Now if speed matters more than timing privacy.</Faq>
         <Faq q="Why is the ZEC reserve only attested?">Proving a shielded balance would need a viewing key or revealing individual notes, and both would reveal deposits. A zero-knowledge proof is on the roadmap.</Faq>
-        <Faq q="Is this on mainnet?">Both. The header switches between Devnet (test funds) and Mainnet. Mainnet is an unaudited custodial pool: do not deposit more than you can lose.</Faq>
+        <Faq q="Is this on mainnet?">
+          {process.env.NEXT_PUBLIC_DEVNET !== "0" ? "Both. The header switches between Devnet (test funds) and Mainnet." : "Yes. This site runs on mainnet with real ZEC."} Mainnet is an unaudited custodial pool: do not deposit
+          more than you can lose.
+        </Faq>
       </div>
     ),
   },

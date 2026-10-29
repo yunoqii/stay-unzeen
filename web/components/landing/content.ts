@@ -27,8 +27,10 @@ export const VISIBILITY_LABEL: Record<Visibility, string> = {
 
 export const INTEGRATIONS: { name: string; role: string; status: "live" | "built"; note: string }[] = [
   { name: "Zcash", role: "Shielded deposits and payouts", status: "live", note: "One shielded top-up from ZODL or any shielded wallet. Payouts go out shielded, delayed and batched." },
-  { name: "pump.fun", role: "Launch, buy, sell", status: "live", note: "Bonding-curve tokens on Solana, devnet and mainnet." },
-  { name: "Meteora DBC", role: "Launch, buy, sell", status: "live", note: "Dynamic bonding curve on Solana devnet." },
+  { name: "pump.fun", role: "Launch, buy, sell", status: "live", note: process.env.NEXT_PUBLIC_DEVNET !== "0" ? "Bonding-curve tokens on Solana, devnet and mainnet." : "Bonding-curve tokens on Solana mainnet." },
+  process.env.NEXT_PUBLIC_DEVNET !== "0"
+    ? { name: "Meteora DBC", role: "Launch, buy, sell", status: "live", note: "Dynamic bonding curve on Solana devnet." }
+    : { name: "Meteora DBC", role: "Launch, buy, sell", status: "built", note: "Adapter written and tested on devnet; not switched on for mainnet yet." },
   { name: "Jupiter", role: "Graduated tokens", status: "live", note: "Routes on Solana mainnet, checked and simulated by our own pipeline." },
   { name: "NEAR Intents", role: "Pool liquidity", status: "live", note: "Converts the pool’s own ZEC to SOL in fixed lots. It never sees a user." },
   { name: "Raydium LaunchLab", role: "Launch, buy, sell", status: "built", note: "Adapter written and tested; not switched on in the demo." },

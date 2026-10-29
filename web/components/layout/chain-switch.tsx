@@ -24,7 +24,7 @@ export function ChainSwitch() {
     if (c === chain) return;
     const back = lastSolanaNetwork();
     setNetwork(c === "hood" ? "hood" : back);
-    if (c === "hood") toast("Robinhood Chain · Mainnet, real funds", { description: "Its anon key is separate from your Solana ones. Trades settle in ETH; you still pay in shielded ZEC." });
+    if (c === "hood") toast("Robinhood Chain · Mainnet", { description: "Its anon key is separate from your Solana ones. Trades settle in ETH; you still pay in shielded ZEC." });
     else toast(`Solana · ${back === "devnet" ? "Devnet" : "Mainnet"}`);
   };
 

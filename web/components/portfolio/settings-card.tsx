@@ -86,7 +86,7 @@ export function SettingsCard() {
       <NotificationSettings />
 
       <p className="mt-5 text-[11px] text-pretty text-faint-foreground">
-        Execution and presets are saved in this browser for {NETWORK_CONFIG[network].label} only, the price unit for both networks. Never sent to the server — the
+        Execution and presets are saved in this browser for {NETWORK_CONFIG[network].label} only, the price unit for every network. Never sent to the server — the
         pool only sees the orders you sign.
       </p>
     </section>

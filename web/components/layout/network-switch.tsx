@@ -8,21 +8,20 @@ import { cn } from "@/lib/utils";
 
 const SHORT: Record<Network, string> = { devnet: "Dev", mainnet: "Main", hood: "Main" };
 
-/** Devnet <-> Mainnet. Each side has its own API, explorer, pool and anon key. */
+/** Devnet <-> Mainnet. Each side has its own API, explorer, pool and anon key. Hidden in Mainnet-only builds (NEXT_PUBLIC_DEVNET=0). */
 export function NetworkSwitch() {
   const network = useNetwork();
   const pillId = useId();
   // Networks of the selected chain only (v0.18): Solana has Devnet + Mainnet, Robinhood Chain Mainnet only.
   const chain = chainOf(network);
   const list = NETWORKS.filter((n) => NETWORK_CONFIG[n].chain === chain);
-  // One network only (Robinhood Chain: Mainnet): nothing to switch; the banner says which money is at stake.
+  // One network only (Robinhood Chain, or a build without Devnet): nothing to switch.
   if (list.length < 2) return null;
 
   const choose = (n: Network) => {
     if (n === network) return;
     setNetwork(n);
-    if (NETWORK_CONFIG[n].realFunds) toast("Mainnet: real funds", { description: "Your Mainnet anon key is separate from Devnet." });
-    else toast("Devnet: test funds only");
+    if (!NETWORK_CONFIG[n].realFunds) toast("Devnet: test funds only");
   };
 
   return (

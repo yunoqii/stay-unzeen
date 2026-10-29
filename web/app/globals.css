@@ -98,10 +98,15 @@
   --skeleton: var(--surface-2);
 
   --header-h: 3.5rem;
-  --banner-h: 1.75rem;
+  /* Network banner height: 0 unless the Devnet banner is on the page (Mainnet shows none). */
+  --banner-h: 0px;
   --bottom-nav-h: 4rem;
 
   color-scheme: dark;
+}
+
+:root:has([data-network-banner]) {
+  --banner-h: 1.75rem;
 }
 
 @theme inline {

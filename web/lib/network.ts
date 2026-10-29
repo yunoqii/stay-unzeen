@@ -1,5 +1,8 @@
 // Devnet <-> Mainnet (docs/FRONTEND.md, network section). Every network has its own API, explorer links,
-// unz1 chain id, and its own anon key + session. Default: devnet.
+// unz1 chain id, and its own anon key + session. Default: devnet; mainnet when the build has no devnet.
+//
+// NEXT_PUBLIC_DEVNET=0 drops Devnet from the build: not listed, not selectable, a stored "devnet" choice
+// falls back to Mainnet. Unset = Devnet on (dev server, tests); production builds read web/.env.production.
 //
 // API v0.18: a network is one origin = one (Zcash net, trading chain) pair. "hood" is Robinhood Chain mainnet
 // (EVM 4663, chainId 0111): only in builds with NEXT_PUBLIC_HOOD=1; otherwise it does not exist at all.
@@ -12,8 +15,18 @@ export type Chain = "solana" | "hood";
 /** Robinhood Chain is compiled in only with NEXT_PUBLIC_HOOD=1 (default off). */
 export const HOOD_BUILD = process.env.NEXT_PUBLIC_HOOD === "1";
 
-export const NETWORKS: readonly Network[] = HOOD_BUILD ? ["devnet", "mainnet", "hood"] : ["devnet", "mainnet"];
-export const DEFAULT_NETWORK: Network = "devnet";
+/** Devnet is compiled in unless NEXT_PUBLIC_DEVNET=0 (Mainnet-only site). */
+export const DEVNET_BUILD = process.env.NEXT_PUBLIC_DEVNET !== "0";
+
+export const NETWORKS: readonly Network[] = [
+  ...(DEVNET_BUILD ? (["devnet"] as const) : []),
+  "mainnet",
+  ...(HOOD_BUILD ? (["hood"] as const) : []),
+];
+export const DEFAULT_NETWORK: Network = DEVNET_BUILD ? "devnet" : "mainnet";
+
+/** True when `v` is a network this build offers. */
+export const isNetwork = (v: unknown): v is Network => typeof v === "string" && (NETWORKS as readonly string[]).includes(v);
 
 export interface NativeCoin {
   symbol: "SOL" | "ETH";
@@ -113,7 +126,7 @@ function read(): Network {
   if (typeof window === "undefined") return DEFAULT_NETWORK;
   try {
     const v = window.localStorage.getItem(STORAGE_KEY);
-    return v === "mainnet" || v === "devnet" || (HOOD_BUILD && v === "hood") ? v : DEFAULT_NETWORK;
+    return isNetwork(v) ? v : DEFAULT_NETWORK;
   } catch {
     return DEFAULT_NETWORK;
   }
@@ -133,6 +146,7 @@ export function lastSolanaNetwork(): Network {
 }
 
 export function setNetwork(n: Network) {
+  if (!isNetwork(n)) n = DEFAULT_NETWORK;
   const prev = getNetwork();
   if (n === prev) return;
   if (NETWORK_CONFIG[prev].chain === "solana") lastSolana = prev;
