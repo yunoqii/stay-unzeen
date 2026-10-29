@@ -4,6 +4,7 @@ import Link from "next/link";
 import { motion } from "motion/react";
 import { ArrowDown, ArrowRight } from "@phosphor-icons/react";
 import { RedactionTape } from "@/components/motion/redaction-tape";
+import { ContractAddress } from "@/components/layout/contract-address";
 import { PhoneMock } from "./phone-mock";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
@@ -87,7 +88,8 @@ export function LandingHero() {
               <ArrowDown size={14} weight="regular" aria-hidden />
             </a>
           </div>
-          <ul className="mt-10 flex flex-wrap gap-x-6 gap-y-2 text-sm text-faint-foreground">
+          <ContractAddress variant="hero" className="mt-5" />
+          <ul className="mt-8 flex flex-wrap gap-x-6 gap-y-2 text-sm text-faint-foreground">
             <li>No wallet to connect</li>
             <li>No email, no sign-up</li>
             <li>Your key never leaves the browser</li>

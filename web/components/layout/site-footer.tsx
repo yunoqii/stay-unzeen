@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { RatesStrip } from "./rates-strip";
+import { ContractAddress } from "./contract-address";
 
 const LINKS = [
   { href: "/scenarios", label: "Scenarios" },
@@ -14,9 +15,12 @@ export function SiteFooter() {
     <footer className="mt-16 border-t border-border/60">
       <RatesStrip />
       <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 py-6 text-sm sm:px-6">
-        <p className="text-faint-foreground">
-          Launch anywhere. <span className="text-muted-foreground">Stay unzeen.</span>
-        </p>
+        <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-3">
+          <p className="text-faint-foreground">
+            Launch anywhere. <span className="text-muted-foreground">Stay unzeen.</span>
+          </p>
+          <ContractAddress />
+        </div>
         <nav aria-label="Footer">
           <ul className="flex flex-wrap gap-x-5 gap-y-2">
             {LINKS.map((l) => (

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ArrowRight, XLogo } from "@phosphor-icons/react/ssr";
+import { ContractAddress } from "@/components/layout/contract-address";
 import { X_URL } from "./content";
 
 const LINKS = [
@@ -45,6 +46,7 @@ export function FinalCta() {
             <p className="text-faint-foreground">
               Launch anywhere. <span className="text-muted-foreground">Stay unzeen.</span>
             </p>
+            <ContractAddress className="my-2" />
             <p className="max-w-[60ch] text-xs text-pretty text-faint-foreground">
               Built for ZECATHON 2026, Private Markets track. An unaudited custodial pool: mainnet is there to show it works with real venues, not to hold meaningful funds.
             </p>
