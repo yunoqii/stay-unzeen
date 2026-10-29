@@ -37,6 +37,9 @@ import { nextTickDelay, tickBoundary } from "./schedule";
  *
  * Limits: at most `max` candidates in the `windowMs` window (default 200 / 6 h),
  * admitted through a token bucket (smooth ~33/h, burst 10), newest first.
+ * Unlimited mode (burst 0, 29.10): every create is admitted; when `max` is
+ * reached the oldest candidate still low on its curve (< EVICT_BELOW_PCT, not
+ * graduated) leaves to make room, so `max` bounds the reads, not the admission.
  */
 
 export type DiscoveryVenue = "pumpfun" | "meteora-dbc" | "raydium-launchlab";
@@ -454,7 +457,7 @@ export interface DiscoveryOptions {
   max?: number;
   /** Window (INTEL_DISCOVERY_WINDOW_H, default 6 h). */
   windowMs?: number;
-  /** Admission bucket size (INTEL_DISCOVERY_BURST, default 10). */
+  /** Admission bucket size (INTEL_DISCOVERY_BURST, default 10). 0 = unlimited: every create, oldest low-progress evicted at `max`. */
   burst?: number;
   /** Fast pass period (INTEL_DISCOVERY_TICK_SECS, default 4 s), +-25 % jitter. */
   passMs?: number;
@@ -492,6 +495,8 @@ interface Tracked extends DiscoveryCandidate {
 }
 
 export const DISCOVERY_PASS_MS = 4_000;
+/** Unlimited mode: curve candidates below this progress (%) may be evicted for a newer create; graduated / higher ones never. */
+export const EVICT_BELOW_PCT = 50;
 
 /**
  * Two passes (24.10). Fast pass (`collect`, every ~4 s): drain the create
@@ -507,6 +512,10 @@ export class Discovery {
   private readonly windowMs: number;
   private readonly burst: number;
   private readonly passMs: number;
+  /** burst 0: no token bucket (every create), eviction at `max`. */
+  private readonly unlimited: boolean;
+  /** Evicted by the fast pass, not yet deleted from the store. */
+  private pendingRemoved: string[] = [];
   private allowance: number;
   private lastRefill: number;
   private readonly active = new Map<string, Tracked>();
@@ -524,7 +533,8 @@ export class Discovery {
     this.windowMs = o.windowMs ?? 6 * 3_600_000;
     this.burst = o.burst ?? 10;
     this.passMs = o.passMs ?? DISCOVERY_PASS_MS;
-    if (this.max < 1 || this.windowMs < 60_000 || this.burst < 1 || this.passMs < 1_000) throw new RangeError("bad discovery limits");
+    if (this.max < 1 || this.windowMs < 60_000 || this.burst < 0 || this.passMs < 1_000) throw new RangeError("bad discovery limits");
+    this.unlimited = this.burst === 0;
     this.allowance = this.burst;
     this.lastRefill = this.now();
   }
@@ -586,7 +596,13 @@ export class Discovery {
       fresh.sort((a, b) => (b.createdAt ?? started) - (a.createdAt ?? started));
       const admitted: Tracked[] = [];
       for (const c of fresh) {
-        if (this.allowance < 1 || this.active.size + admitted.length >= this.max) break;
+        if (!this.unlimited && this.allowance < 1) break;
+        if (this.active.size + admitted.length >= this.max) {
+          const out = this.unlimited ? this.evictOne(c.createdAt ?? started) : null;
+          if (!out) break;
+          this.pendingRemoved.push(out);
+          r.removed++;
+        }
         this.seen.set(c.signature, started);
         let full = c;
         if (!full.mint) {
@@ -603,7 +619,7 @@ export class Discovery {
         const mint = full.mint!;
         if (this.seen.has(mint) || this.active.has(mint)) continue;
         this.seen.set(mint, started);
-        this.allowance -= 1;
+        if (!this.unlimited) this.allowance -= 1;
         admitted.push({
           mint,
           venue: full.venue,
@@ -632,8 +648,14 @@ export class Discovery {
         r.errors += reads.errors;
         for (const m of reads.gone) this.active.delete(m);
         const ok = admitted.filter((a) => a.verified && this.active.has(a.mint));
+        if (ok.length > 0 || this.pendingRemoved.length > 0) {
+          const removed = this.takeRemoved();
+          await this.commit({ asOf, upserts: ok.map(publicRow), removed }).catch((e) => {
+            this.pendingRemoved.push(...removed); // retried by the next commit
+            throw e;
+          });
+        }
         if (ok.length > 0) {
-          await this.commit({ asOf, upserts: ok.map(publicRow), removed: [] });
           const t = this.now();
           const lags = ok.map((a) => Math.max(0, t - a.createdAt));
           r.lagMaxMs = Math.max(...lags);
@@ -659,7 +681,7 @@ export class Discovery {
       await this.load();
       // 1. Window: drop old candidates and old dedupe keys.
       const horizon = started - this.windowMs;
-      const removed: string[] = [];
+      const removed: string[] = this.takeRemoved();
       for (const [m, c] of this.active) {
         if (c.createdAt < horizon) {
           this.active.delete(m);
@@ -675,7 +697,10 @@ export class Discovery {
         if (this.active.delete(m)) removed.push(m);
       }
       // 3. One commit (verified rows only; an admitted candidate the fast pass could not read yet waits).
-      await this.commit({ asOf, upserts: [...this.active.values()].filter((c) => c.verified).map(publicRow), removed });
+      await this.commit({ asOf, upserts: [...this.active.values()].filter((c) => c.verified).map(publicRow), removed }).catch((e) => {
+        this.pendingRemoved.push(...removed); // retried by the next commit (else the row would outlive its candidate)
+        throw e;
+      });
       r.removed = removed.length;
     } catch {
       r.errors++;
@@ -731,13 +756,14 @@ export class Discovery {
         const t = setTimeout(resolve, Math.max(250, ms));
         signal.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
       });
-    const agg = { passes: 0, seen: 0, admitted: 0, reads: 0, errors: 0, ms: 0, lagSum: 0, lagN: 0, lagMax: 0 };
+    const agg = { passes: 0, seen: 0, admitted: 0, removed: 0, reads: 0, errors: 0, ms: 0, lagSum: 0, lagN: 0, lagMax: 0 };
     const fast = (async () => {
       while (!signal.aborted) {
         const p = await this.collect();
         agg.passes++;
         agg.seen += p.seen;
         agg.admitted += p.admitted;
+        agg.removed += p.removed;
         agg.reads += p.reads;
         agg.errors += p.errors;
         agg.ms = Math.max(agg.ms, p.ms);
@@ -757,17 +783,41 @@ export class Discovery {
           passes: agg.passes,
           seen: agg.seen,
           admitted: agg.admitted,
+          removed: m.removed + agg.removed,
           reads: m.reads + agg.reads,
           errors: m.errors + agg.errors,
           ms: Math.max(m.ms, agg.ms),
           ...(agg.lagN > 0 ? { lagAvgMs: Math.round(agg.lagSum / agg.lagN), lagMaxMs: agg.lagMax } : {}),
         });
-        Object.assign(agg, { passes: 0, seen: 0, admitted: 0, reads: 0, errors: 0, ms: 0, lagSum: 0, lagN: 0, lagMax: 0 });
+        Object.assign(agg, { passes: 0, seen: 0, admitted: 0, removed: 0, reads: 0, errors: 0, ms: 0, lagSum: 0, lagN: 0, lagMax: 0 });
         await sleep(m.nextInMs - m.ms);
       }
     })();
     await Promise.all([fast, slow]);
     for (const s of this.o.sources) s.stop?.();
+  }
+
+  /** Evicted mints for the next commit (a failed commit loses nothing: the metrics pass retries them). */
+  private takeRemoved(): string[] {
+    const out = this.pendingRemoved;
+    this.pendingRemoved = [];
+    return out;
+  }
+
+  /**
+   * Unlimited mode at `max`: drop the oldest candidate that is still low on its curve
+   * (status curve, progress < EVICT_BELOW_PCT or unknown) and older than the newcomer.
+   * Graduated and about-to-graduate candidates stay (Pulse columns). null = nothing to evict.
+   */
+  private evictOne(newcomerAt: number): string | null {
+    let pick: Tracked | null = null;
+    for (const c of this.active.values()) {
+      if (c.status !== "curve" || Number(c.progressPct ?? 0) >= EVICT_BELOW_PCT || c.createdAt > newcomerAt) continue;
+      if (!pick || c.createdAt < pick.createdAt) pick = c;
+    }
+    if (!pick) return null;
+    this.active.delete(pick.mint);
+    return pick.mint;
   }
 
   private refill(now: number): void {
@@ -1076,7 +1126,8 @@ export function loadDiscoveryConfig(cluster: "devnet" | "mainnet-beta", env: Nod
     enabled,
     max: num("INTEL_DISCOVERY_MAX", 200, 1, 2_000),
     windowMs: num("INTEL_DISCOVERY_WINDOW_H", 6, 0.25, 48) * 3_600_000,
-    burst: num("INTEL_DISCOVERY_BURST", 10, 1, 200),
+    // 0 = unlimited admission (every create; MAX then bounds the active set by evicting the oldest low-progress ones).
+    burst: num("INTEL_DISCOVERY_BURST", 10, 0, 200),
     pump,
     rpcUrl,
     rpcSource,

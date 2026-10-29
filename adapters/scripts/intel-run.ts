@@ -167,7 +167,7 @@ async function main(): Promise<void> {
       launchLabProgram: llDiscovery ? LAUNCHLAB_PROGRAM["mainnet-beta"] : null,
       ...(devIndex ? { onCreates: (c) => devIndex!.record(c) } : {}),
     });
-    log(`discovery ON rpc=${maskUrl(dcfg.rpcUrl)} (${dcfg.rpcSource}) pump=${dcfg.pump} dbc=${dcfg.dbcStreamUrl ? "stream" : "off"} launchlab=${llDiscovery ? "stream" : "off"} max=${dcfg.max}/${dcfg.windowMs / 3_600_000}h pass=${dcfg.passMs / 1000}s`);
+    log(`discovery ON rpc=${maskUrl(dcfg.rpcUrl)} (${dcfg.rpcSource}) pump=${dcfg.pump} dbc=${dcfg.dbcStreamUrl ? "stream" : "off"} launchlab=${llDiscovery ? "stream" : "off"} max=${dcfg.max}/${dcfg.windowMs / 3_600_000}h admission=${dcfg.burst === 0 ? "unlimited" : `bucket(burst ${dcfg.burst})`} pass=${dcfg.passMs / 1000}s`);
   }
   // Dev index without discovery: the same public create streams, drained every 60 s.
   let createFeed: CreateSource[] = [];

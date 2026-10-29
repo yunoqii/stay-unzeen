@@ -220,6 +220,63 @@ describe("Discovery tick", () => {
     expect(store.list().length).toBeLessThanOrEqual(12);
   });
 
+  it("unlimited (burst 0): every create is admitted; at max the oldest low-progress candidate leaves, graduated / >= 50 % stay", async () => {
+    const chain = new AnyCurveChain();
+    const src = new ListSource();
+    const store = new MemoryDiscoveryStore();
+    const now = T0 + 3_600_000;
+    const old = (i: number, status: "curve" | "graduated", progressPct: string | null) => ({
+      mint: Keypair.generate().publicKey.toBase58(), venue: "pumpfun" as const, createdAt: T0 + i, name: `O${i}`, symbol: null,
+      status, priceSol: "0.00000003", marketCapSol: "30", progressPct, asOf: T0,
+    });
+    const keep = [old(1, "graduated", null), old(2, "curve", "80.00"), old(3, "curve", "50.00")];
+    const low = [old(4, "curve", "5.00"), old(5, "curve", "10.00"), old(6, "curve", null)];
+    await store.commit({ asOf: T0, removed: [], upserts: [...keep, ...low] });
+    const d = new Discovery({ store, chain, sources: [src], rng: seededRng(1), now: () => now, max: 6, windowMs: 6 * 3_600_000, burst: 0 });
+    // 2 new creates, set full: the two oldest low-progress candidates leave (O4, O5), in the same commit.
+    src.queue = [fakeCreate(10, now), fakeCreate(11, now)];
+    let r = await d.collect();
+    expect(r.admitted).toBe(2);
+    expect(r.removed).toBe(2);
+    expect(store.list().map((c) => c.name).sort()).toEqual(["N10", "N11", "O1", "O2", "O3", "O6"]);
+    // A burst far above any bucket: all admitted while low-progress candidates remain; never above max.
+    src.queue = Array.from({ length: 40 }, (_, i) => fakeCreate(100 + i, now + 1_000));
+    r = await d.collect();
+    expect(store.list().length).toBeLessThanOrEqual(6);
+    // The newest 3 replace O6, N10, N11 (older low-progress); graduated / 50 %+ never leave, newer ones are not evicted for older.
+    expect(r.admitted).toBe(3);
+    expect(r.removed).toBe(3);
+    expect(store.list().map((c) => c.name).sort()).toEqual(["N137", "N138", "N139", "O1", "O2", "O3"]);
+    // Nothing evictable (all protected): admission stops at max instead of growing.
+    const s2 = new MemoryDiscoveryStore();
+    await s2.commit({ asOf: T0, removed: [], upserts: keep });
+    const d2 = new Discovery({ store: s2, chain, sources: [src], rng: seededRng(2), now: () => now, max: 3, windowMs: 6 * 3_600_000, burst: 0 });
+    src.queue = [fakeCreate(500, now)];
+    r = await d2.collect();
+    expect(r.admitted).toBe(0);
+    expect(s2.rows.size).toBe(3);
+  });
+
+  it("unlimited: an eviction whose commit fails is retried by the next commit (no orphan row)", async () => {
+    const chain = new AnyCurveChain();
+    const src = new ListSource();
+    const inner = new MemoryDiscoveryStore();
+    let fail = false;
+    const store = { load: () => inner.load(), commit: async (c: Parameters<MemoryDiscoveryStore["commit"]>[0]) => { if (fail) throw new Error("db down"); return inner.commit(c); } };
+    const now = T0 + 60_000;
+    const d = new Discovery({ store, chain, sources: [src], rng: seededRng(3), now: () => now, max: 1, windowMs: 6 * 3_600_000, burst: 0 });
+    src.queue = [fakeCreate(1, T0)];
+    await d.collect();
+    expect(inner.rows.size).toBe(1);
+    fail = true;
+    src.queue = [fakeCreate(2, now)];
+    const r = await d.collect();
+    expect(r.errors).toBeGreaterThan(0);
+    fail = false;
+    await d.refresh();
+    expect(inner.list().map((c) => c.name)).toEqual(["N2"]);
+  });
+
   it("window: candidates older than the window are removed; dedupe across ticks", async () => {
     const chain = new AnyCurveChain();
     const src = new ListSource();
@@ -536,5 +593,8 @@ describe("config", () => {
     expect(loadDiscoveryConfig("devnet", { SOLANA_RPC_URL_DEVNET: "https://devnet.helius-rpc.com/?api-key=abc" }).dbcStreamUrl).toBeNull();
     expect(() => loadDiscoveryConfig("devnet", { INTEL_DISCOVERY_PUMP: "x" })).toThrow();
     expect(() => loadDiscoveryConfig("devnet", { INTEL_DISCOVERY_MAX: "0" })).toThrow();
+    // BURST 0 = unlimited admission (29.10); negative stays invalid.
+    expect(loadDiscoveryConfig("mainnet-beta", { INTEL_DISCOVERY_BURST: "0" }).burst).toBe(0);
+    expect(() => loadDiscoveryConfig("mainnet-beta", { INTEL_DISCOVERY_BURST: "-1" })).toThrow();
   });
 });
